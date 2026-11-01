@@ -1,7 +1,6 @@
 use bincode::{deserialize, serialize};
 use fiber_store::backend::{BatchWriter, StorageBackend};
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 
 use crate::store::{FiberStore, Store};
 
@@ -19,6 +18,15 @@ pub trait TenantRegistryStore: Clone + Send + Sync + 'static {
     fn get_tenant(&self, tenant_id: &TenantId) -> Result<Option<HostedTenantRecord>, String>;
     fn put_tenant(&self, record: &HostedTenantRecord) -> Result<(), String>;
     fn list_tenants(&self) -> Result<Vec<HostedTenantRecord>, String>;
+    fn count_tenants(&self) -> Result<usize, String>;
+    fn tenant_id_by_tenant_pubkey(
+        &self,
+        tenant_pubkey: &crate::fiber_types::Pubkey,
+    ) -> Result<Option<TenantId>, String>;
+    fn tenant_id_by_root_signer_pubkey(
+        &self,
+        root_signer_pubkey: &crate::fiber_types::Pubkey,
+    ) -> Result<Option<TenantId>, String>;
     fn get_tenant_channel(
         &self,
         tenant_id: &TenantId,
@@ -58,6 +66,28 @@ fn public_key_index_key(prefix: &[u8], public_key: &crate::fiber_types::Pubkey) 
     [prefix, public_key.serialize().as_slice()].concat()
 }
 
+/// Write a tenant record with its key indexes, so finding a tenant by key is one read and not a
+/// decode of every record (about 30 ms with 10,000 tenants, on each channel start and registration).
+fn put_tenant_with_index<B: BatchWriter>(
+    batch: &mut B,
+    record: &HostedTenantRecord,
+) -> Result<(), String> {
+    let record_bytes = serialize(record).map_err(|error| error.to_string())?;
+    let tenant_id_bytes = serialize(&record.tenant_id).map_err(|error| error.to_string())?;
+    batch.put(tenant_key(&record.tenant_id), record_bytes);
+    if let Some(root_signer_pubkey) = &record.root_signer_pubkey {
+        batch.put(
+            public_key_index_key(ROOT_SIGNER_INDEX_PREFIX, root_signer_pubkey),
+            &tenant_id_bytes,
+        );
+    }
+    batch.put(
+        public_key_index_key(TENANT_PUBKEY_INDEX_PREFIX, &record.tenant_pubkey),
+        tenant_id_bytes,
+    );
+    Ok(())
+}
+
 fn registration_request_key(
     root_signer_pubkey: &crate::fiber_types::Pubkey,
     request_id: &[u8; 32],
@@ -90,8 +120,9 @@ impl TenantRegistryStore for Store {
     }
 
     fn put_tenant(&self, record: &HostedTenantRecord) -> Result<(), String> {
-        let bytes = serialize(record).map_err(|error| error.to_string())?;
-        self.put(tenant_key(&record.tenant_id), bytes);
+        let mut batch = self.batch();
+        put_tenant_with_index(&mut batch, record)?;
+        batch.commit();
         Ok(())
     }
 
@@ -100,6 +131,34 @@ impl TenantRegistryStore for Store {
             .into_iter()
             .map(|pair| deserialize(&pair.value).map_err(|error| error.to_string()))
             .collect()
+    }
+
+    fn count_tenants(&self) -> Result<usize, String> {
+        Ok(self.collect_by_prefix(TENANT_RECORD_PREFIX).len())
+    }
+
+    fn tenant_id_by_tenant_pubkey(
+        &self,
+        tenant_pubkey: &crate::fiber_types::Pubkey,
+    ) -> Result<Option<TenantId>, String> {
+        self.get(public_key_index_key(
+            TENANT_PUBKEY_INDEX_PREFIX,
+            tenant_pubkey,
+        ))
+        .map(|bytes| deserialize(&bytes).map_err(|error| error.to_string()))
+        .transpose()
+    }
+
+    fn tenant_id_by_root_signer_pubkey(
+        &self,
+        root_signer_pubkey: &crate::fiber_types::Pubkey,
+    ) -> Result<Option<TenantId>, String> {
+        self.get(public_key_index_key(
+            ROOT_SIGNER_INDEX_PREFIX,
+            root_signer_pubkey,
+        ))
+        .map(|bytes| deserialize(&bytes).map_err(|error| error.to_string()))
+        .transpose()
     }
 
     fn get_tenant_channel(
@@ -169,42 +228,11 @@ impl TenantRegistryStore for Store {
         if self.get(request_key.clone()).is_some() {
             return Err(REGISTRATION_REQUEST_CONSUMED.to_string());
         }
-        let record_bytes = serialize(record).map_err(|error| error.to_string())?;
-        let tenant_id_bytes = serialize(&record.tenant_id).map_err(|error| error.to_string())?;
         let mut batch = self.batch();
-        batch.put(tenant_key(&record.tenant_id), record_bytes);
-        batch.put(
-            public_key_index_key(ROOT_SIGNER_INDEX_PREFIX, root_signer_pubkey),
-            &tenant_id_bytes,
-        );
-        batch.put(
-            public_key_index_key(TENANT_PUBKEY_INDEX_PREFIX, &record.tenant_pubkey),
-            tenant_id_bytes,
-        );
+        put_tenant_with_index(&mut batch, record)?;
         batch.put(request_key, []);
         batch.commit();
         Ok(())
-    }
-}
-
-/// Tenants by protocol key and by RootSigner key, read from the store once and kept with each
-/// registration. Without it a lookup or a count deserialized every tenant record on the service
-/// actor: about 50 ms each with 10,000 tenants, and channels going online or offline look a tenant
-/// up by key.
-#[derive(Default)]
-struct TenantIndex {
-    by_tenant_pubkey: HashMap<crate::fiber_types::Pubkey, TenantId>,
-    by_root_signer_pubkey: HashMap<crate::fiber_types::Pubkey, TenantId>,
-}
-
-impl TenantIndex {
-    fn insert(&mut self, record: &HostedTenantRecord) {
-        self.by_tenant_pubkey
-            .insert(record.tenant_pubkey, record.tenant_id.clone());
-        if let Some(root) = record.root_signer_pubkey {
-            self.by_root_signer_pubkey
-                .insert(root, record.tenant_id.clone());
-        }
     }
 }
 
@@ -213,8 +241,6 @@ impl TenantIndex {
 pub struct TenantRegistry<S> {
     store: S,
     registration_lock: Arc<Mutex<()>>,
-    // Built on first use, so a store that cannot be read is an error there and not an empty index.
-    index: Arc<RwLock<Option<TenantIndex>>>,
 }
 
 impl<S: TenantRegistryStore> TenantRegistry<S> {
@@ -222,50 +248,12 @@ impl<S: TenantRegistryStore> TenantRegistry<S> {
         Self {
             store,
             registration_lock: Arc::new(Mutex::new(())),
-            index: Arc::new(RwLock::new(None)),
         }
     }
 
-    fn with_index<R>(&self, read: impl FnOnce(&TenantIndex) -> R) -> Result<R, String> {
-        {
-            let index = self
-                .index
-                .read()
-                .map_err(|_| "tenant index lock is poisoned".to_string())?;
-            if let Some(index) = index.as_ref() {
-                return Ok(read(index));
-            }
-        }
-        let mut index = self
-            .index
-            .write()
-            .map_err(|_| "tenant index lock is poisoned".to_string())?;
-        if index.is_none() {
-            let mut built = TenantIndex::default();
-            for record in self.store.list_tenants()? {
-                built.insert(&record);
-            }
-            *index = Some(built);
-        }
-        Ok(read(index.as_ref().expect("built above")))
-    }
-
-    fn index_insert(&self, record: &HostedTenantRecord) -> Result<(), String> {
-        // Building it reads the store, which holds the record already; inserting again is a no-op.
-        self.with_index(|_| ())?;
-        let mut index = self
-            .index
-            .write()
-            .map_err(|_| "tenant index lock is poisoned".to_string())?;
-        if let Some(index) = index.as_mut() {
-            index.insert(record);
-        }
-        Ok(())
-    }
-
-    /// How many tenants are registered, without reading their records.
+    /// How many tenants are registered, without decoding their records.
     pub fn count(&self) -> Result<usize, String> {
-        self.with_index(|index| index.by_tenant_pubkey.len())
+        self.store.count_tenants()
     }
 
     pub fn get(&self, tenant_id: &TenantId) -> Result<Option<HostedTenantRecord>, String> {
@@ -289,7 +277,6 @@ impl<S: TenantRegistryStore> TenantRegistry<S> {
             ));
         }
         self.store.put_tenant(&record)?;
-        self.index_insert(&record)?;
         Ok(record)
     }
 
@@ -340,7 +327,6 @@ impl<S: TenantRegistryStore> TenantRegistry<S> {
         }
         self.store
             .register_and_consume_request(&record, &request_id)?;
-        self.index_insert(&record)?;
         Ok(record)
     }
 
@@ -415,9 +401,7 @@ impl<S: TenantRegistryStore> TenantRegistry<S> {
         &self,
         tenant_pubkey: &crate::fiber_types::Pubkey,
     ) -> Result<Option<HostedTenantRecord>, String> {
-        let Some(tenant_id) =
-            self.with_index(|index| index.by_tenant_pubkey.get(tenant_pubkey).cloned())?
-        else {
+        let Some(tenant_id) = self.store.tenant_id_by_tenant_pubkey(tenant_pubkey)? else {
             return Ok(None);
         };
         Ok(self
@@ -429,8 +413,9 @@ impl<S: TenantRegistryStore> TenantRegistry<S> {
         &self,
         root_signer_pubkey: &crate::fiber_types::Pubkey,
     ) -> Result<Option<HostedTenantRecord>, String> {
-        let Some(tenant_id) =
-            self.with_index(|index| index.by_root_signer_pubkey.get(root_signer_pubkey).cloned())?
+        let Some(tenant_id) = self
+            .store
+            .tenant_id_by_root_signer_pubkey(root_signer_pubkey)?
         else {
             return Ok(None);
         };

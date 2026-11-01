@@ -133,19 +133,18 @@ fn tenant_registry_finds_by_key_after_a_reopen() {
     let config = lsp_config(root.path().join("lsp"));
     let store = open_lsp_store(&config);
     let registry = TenantRegistry::new(store.clone());
+    let root_signer = Privkey::from(&[13; 32]).pubkey();
     let records: Vec<_> = (1u8..=3)
         .map(|i| HostedTenantRecord {
             tenant_id: TenantId::new(format!("u{i}")).unwrap(),
-            root_signer_pubkey: None,
+            root_signer_pubkey: (i == 3).then_some(root_signer),
             tenant_pubkey: Privkey::from(&[i; 32]).pubkey(),
             created_at: i as u64,
         })
         .collect();
-    // The first two before the index is built, the third after a lookup built it.
-    registry.register(records[0].clone()).unwrap();
-    registry.register(records[1].clone()).unwrap();
-    assert_eq!(registry.count().unwrap(), 2);
-    registry.register(records[2].clone()).unwrap();
+    for record in &records {
+        registry.register(record.clone()).unwrap();
+    }
     assert_eq!(registry.count().unwrap(), 3);
     for record in &records {
         assert_eq!(
@@ -161,14 +160,29 @@ fn tenant_registry_finds_by_key_after_a_reopen() {
             .unwrap(),
         None
     );
+    assert_eq!(
+        registry.find_by_root_signer_pubkey(&root_signer).unwrap(),
+        Some(records[2].clone())
+    );
+    assert_eq!(
+        registry
+            .find_by_root_signer_pubkey(&records[0].tenant_pubkey)
+            .unwrap(),
+        None
+    );
 
-    // A registry opened on the same store finds them all, from the store alone.
+    // A registry made on the same store, as `is_internal_channel` does for each channel, finds
+    // them from the store alone.
     let reopened = TenantRegistry::new(store);
     assert_eq!(reopened.count().unwrap(), 3);
     assert_eq!(
         reopened
-            .find_by_tenant_pubkey(&records[2].tenant_pubkey)
+            .find_by_tenant_pubkey(&records[1].tenant_pubkey)
             .unwrap(),
+        Some(records[1].clone())
+    );
+    assert_eq!(
+        reopened.find_by_root_signer_pubkey(&root_signer).unwrap(),
         Some(records[2].clone())
     );
     let duplicate_key = HostedTenantRecord {
