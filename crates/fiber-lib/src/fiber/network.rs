@@ -3792,11 +3792,19 @@ where
                             .store
                             .get_tenant_channel_opening(&temp_id)
                             .or_else(|| {
+                                // AcceptChannel rekeys the opening to its final id. Locate
+                                // that record by signer identity before comparing intent;
+                                // changed parameters must not start another negotiation
+                                // with the same keys and opening nonces.
                                 state.store.list_tenant_channel_openings().into_iter().find(
                                     |opening| {
-                                        serde_json::to_value(&opening.command)
-                                            .map(|value| value == command_value)
-                                            .unwrap_or(false)
+                                        opening
+                                            .command
+                                            .external_channel_signer
+                                            .as_ref()
+                                            .is_some_and(|signer| {
+                                                signer.base_public_keys.tlc_base_key == key
+                                            })
                                     },
                                 )
                             });

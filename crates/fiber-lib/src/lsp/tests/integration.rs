@@ -663,10 +663,23 @@ async fn open_hosted_external_channel(
     );
     let mut conflicting = retry_request;
     conflicting.funding_amount += 1;
-    assert!(client
-        .request::<OpenTenantChannelResult, _>("open_tenant_channel", rpc_params![conflicting])
-        .await
-        .is_err());
+    // AcceptChannel has already replaced the temporary id with the final id.
+    // A changed intent must still be rejected for this signer, not start a
+    // second negotiation that merely times out waiting for Public T to accept.
+    let error = tokio::time::timeout(
+        Duration::from_secs(5),
+        client
+            .request::<OpenTenantChannelResult, _>("open_tenant_channel", rpc_params![conflicting]),
+    )
+    .await
+    .expect("conflicting opening must be rejected without peer cooperation")
+    .expect_err("reject a changed intent for the same channel signer");
+    assert!(
+        error
+            .to_string()
+            .contains("different channel opening for this signer"),
+        "{error}"
+    );
     let signed_tx = unsigned_tx
         .as_advanced_builder()
         .set_witnesses(vec![Bytes::default()])

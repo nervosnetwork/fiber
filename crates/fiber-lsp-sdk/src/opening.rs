@@ -427,6 +427,68 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn interrupted_opening_preserves_its_intent_after_restart() {
+        let store = MemoryStore::default();
+        let created = RootSigner::create_random(store.clone()).await.unwrap();
+        let key = created.root_key_backup.expose_secret();
+        let mut session =
+            HostedSession::new(created.root_signer).with_state(crate::HostedSessionState {
+                tenant_token: Some("tenant-token".into()),
+                ..Default::default()
+            });
+        session.allocate_pending_channel().await.unwrap();
+        let signer = session
+            .open_channel(session.pending_channel_key_id().unwrap())
+            .await
+            .unwrap();
+        let (request, result, network, inputs) = proposal(&signer).await;
+        let mut adapters = OpeningAdapters {
+            request: request.clone(),
+            result,
+            inputs,
+            failure: "rpc",
+            events: Default::default(),
+            saved: Default::default(),
+        };
+        assert!(session
+            .open_tenant_channel(request.clone(), &network, &adapters, &adapters, &adapters)
+            .await
+            .is_err());
+        let saved = adapters.saved.lock().unwrap().clone().unwrap();
+        let root = RootSigner::open(RootKey::import(key).unwrap(), store)
+            .await
+            .unwrap();
+        let mut session = HostedSession::new(root).with_state(saved.clone());
+
+        let mut changed_amount = request.clone();
+        changed_amount.funding_amount += 1;
+        let mut changed_asset = request.clone();
+        changed_asset.funding_udt_type_script = Some(Script::default().into());
+        for changed in [changed_amount, changed_asset] {
+            adapters.events.lock().unwrap().clear();
+            adapters.request = changed.clone();
+            assert!(session
+                .open_tenant_channel(changed, &network, &adapters, &adapters, &adapters)
+                .await
+                .is_err());
+            assert!(
+                adapters.events.lock().unwrap().is_empty(),
+                "conflicting intent must be rejected before persistence or RPC"
+            );
+            assert_eq!(session.state(), &saved);
+            assert_eq!(adapters.saved.lock().unwrap().as_ref(), Some(&saved));
+        }
+
+        adapters.request = request.clone();
+        adapters.failure = "";
+        session
+            .open_tenant_channel(request, &network, &adapters, &adapters, &adapters)
+            .await
+            .unwrap();
+        assert_eq!(session.state().bindings.len(), 1);
+    }
+
+    #[tokio::test]
     async fn tenant_opening_rejects_public_or_missing_signer_without_binding() {
         let created = RootSigner::in_memory().await.unwrap();
         let mut session = HostedSession::new(created.root_signer);

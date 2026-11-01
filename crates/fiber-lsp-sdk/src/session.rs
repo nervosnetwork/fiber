@@ -284,6 +284,26 @@ impl<S: SignerStore> HostedSession<S> {
         if self.state.opening_request.as_ref() == Some(&encoded) {
             return Ok(request);
         }
+        if let Some(previous) = self.state.opening_request.as_deref() {
+            let previous: fiber_json_types::OpenChannelWithExternalFundingParams =
+                serde_json::from_slice(previous)
+                    .map_err(|e| SessionError::Invalid(e.to_string()))?;
+            // The retained intent can belong to a completed channel. A fresh
+            // signer may start another opening, but a signer whose intent was
+            // already sent must not replace it, even after an RPC timeout.
+            if previous
+                .external_channel_signer
+                .as_ref()
+                .zip(request.external_channel_signer.as_ref())
+                .is_some_and(|(previous, current)| {
+                    previous.base_public_keys.tlc_base_key == current.base_public_keys.tlc_base_key
+                })
+            {
+                return Err(SessionError::Invalid(
+                    "cannot replace opening intent for the same signer".into(),
+                ));
+            }
+        }
         let (material, allocated_new) = if let Some(key_id) = self.state.pending {
             let signer = self.root.open_channel(key_id).await?;
             (signer.channel_open_material(false).await?, false)
