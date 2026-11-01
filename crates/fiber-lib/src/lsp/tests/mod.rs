@@ -128,6 +128,75 @@ fn tenant_registry_is_persistent_and_idempotent() {
 }
 
 #[test]
+fn tenant_registry_finds_by_key_after_a_reopen() {
+    let root = tempdir().expect("temporary directory");
+    let config = lsp_config(root.path().join("lsp"));
+    let store = open_lsp_store(&config);
+    let registry = TenantRegistry::new(store.clone());
+    let root_signer = Privkey::from(&[13; 32]).pubkey();
+    let records: Vec<_> = (1u8..=3)
+        .map(|i| HostedTenantRecord {
+            tenant_id: TenantId::new(format!("u{i}")).unwrap(),
+            root_signer_pubkey: (i == 3).then_some(root_signer),
+            tenant_pubkey: Privkey::from(&[i; 32]).pubkey(),
+            created_at: i as u64,
+        })
+        .collect();
+    for record in &records {
+        registry.register(record.clone()).unwrap();
+    }
+    assert_eq!(registry.count().unwrap(), 3);
+    for record in &records {
+        assert_eq!(
+            registry
+                .find_by_tenant_pubkey(&record.tenant_pubkey)
+                .unwrap(),
+            Some(record.clone())
+        );
+    }
+    assert_eq!(
+        registry
+            .find_by_tenant_pubkey(&Privkey::from(&[9; 32]).pubkey())
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        registry.find_by_root_signer_pubkey(&root_signer).unwrap(),
+        Some(records[2].clone())
+    );
+    assert_eq!(
+        registry
+            .find_by_root_signer_pubkey(&records[0].tenant_pubkey)
+            .unwrap(),
+        None
+    );
+
+    // A registry made on the same store, as `is_internal_channel` does for each channel, finds
+    // them from the store alone.
+    let reopened = TenantRegistry::new(store);
+    assert_eq!(reopened.count().unwrap(), 3);
+    assert_eq!(
+        reopened
+            .find_by_tenant_pubkey(&records[1].tenant_pubkey)
+            .unwrap(),
+        Some(records[1].clone())
+    );
+    assert_eq!(
+        reopened.find_by_root_signer_pubkey(&root_signer).unwrap(),
+        Some(records[2].clone())
+    );
+    let duplicate_key = HostedTenantRecord {
+        tenant_id: TenantId::new("u4").unwrap(),
+        tenant_pubkey: records[1].tenant_pubkey,
+        ..records[0].clone()
+    };
+    assert_eq!(
+        reopened.register(duplicate_key).unwrap_err(),
+        "protocol key is already registered to tenant u2"
+    );
+}
+
+#[test]
 fn tenant_registry_binds_multiple_channels_with_assets() {
     let root = tempdir().expect("temporary directory");
     let config = lsp_config(root.path().join("lsp"));

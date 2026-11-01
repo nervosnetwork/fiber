@@ -409,7 +409,7 @@ impl Actor for LspService {
                 let _ = reply.send(result);
             }
             LspServiceMessage::GetStatus(reply) => {
-                let registered_tenants = state.registry.list().map_or(0, |tenants| tenants.len());
+                let registered_tenants = state.registry.count().unwrap_or(0);
                 let _ = reply.send(LspServiceStatus {
                     public_node_id: state.public_node_id,
                     tenant_store_root: state.config.tenant_store_root(),

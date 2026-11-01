@@ -18,6 +18,15 @@ pub trait TenantRegistryStore: Clone + Send + Sync + 'static {
     fn get_tenant(&self, tenant_id: &TenantId) -> Result<Option<HostedTenantRecord>, String>;
     fn put_tenant(&self, record: &HostedTenantRecord) -> Result<(), String>;
     fn list_tenants(&self) -> Result<Vec<HostedTenantRecord>, String>;
+    fn count_tenants(&self) -> Result<usize, String>;
+    fn tenant_id_by_tenant_pubkey(
+        &self,
+        tenant_pubkey: &crate::fiber_types::Pubkey,
+    ) -> Result<Option<TenantId>, String>;
+    fn tenant_id_by_root_signer_pubkey(
+        &self,
+        root_signer_pubkey: &crate::fiber_types::Pubkey,
+    ) -> Result<Option<TenantId>, String>;
     fn get_tenant_channel(
         &self,
         tenant_id: &TenantId,
@@ -57,6 +66,28 @@ fn public_key_index_key(prefix: &[u8], public_key: &crate::fiber_types::Pubkey) 
     [prefix, public_key.serialize().as_slice()].concat()
 }
 
+/// Write a tenant record with its key indexes, so finding a tenant by key is one read and not a
+/// decode of every record (about 30 ms with 10,000 tenants, on each channel start and registration).
+fn put_tenant_with_index<B: BatchWriter>(
+    batch: &mut B,
+    record: &HostedTenantRecord,
+) -> Result<(), String> {
+    let record_bytes = serialize(record).map_err(|error| error.to_string())?;
+    let tenant_id_bytes = serialize(&record.tenant_id).map_err(|error| error.to_string())?;
+    batch.put(tenant_key(&record.tenant_id), record_bytes);
+    if let Some(root_signer_pubkey) = &record.root_signer_pubkey {
+        batch.put(
+            public_key_index_key(ROOT_SIGNER_INDEX_PREFIX, root_signer_pubkey),
+            &tenant_id_bytes,
+        );
+    }
+    batch.put(
+        public_key_index_key(TENANT_PUBKEY_INDEX_PREFIX, &record.tenant_pubkey),
+        tenant_id_bytes,
+    );
+    Ok(())
+}
+
 fn registration_request_key(
     root_signer_pubkey: &crate::fiber_types::Pubkey,
     request_id: &[u8; 32],
@@ -89,8 +120,9 @@ impl TenantRegistryStore for Store {
     }
 
     fn put_tenant(&self, record: &HostedTenantRecord) -> Result<(), String> {
-        let bytes = serialize(record).map_err(|error| error.to_string())?;
-        self.put(tenant_key(&record.tenant_id), bytes);
+        let mut batch = self.batch();
+        put_tenant_with_index(&mut batch, record)?;
+        batch.commit();
         Ok(())
     }
 
@@ -99,6 +131,34 @@ impl TenantRegistryStore for Store {
             .into_iter()
             .map(|pair| deserialize(&pair.value).map_err(|error| error.to_string()))
             .collect()
+    }
+
+    fn count_tenants(&self) -> Result<usize, String> {
+        Ok(self.collect_by_prefix(TENANT_RECORD_PREFIX).len())
+    }
+
+    fn tenant_id_by_tenant_pubkey(
+        &self,
+        tenant_pubkey: &crate::fiber_types::Pubkey,
+    ) -> Result<Option<TenantId>, String> {
+        self.get(public_key_index_key(
+            TENANT_PUBKEY_INDEX_PREFIX,
+            tenant_pubkey,
+        ))
+        .map(|bytes| deserialize(&bytes).map_err(|error| error.to_string()))
+        .transpose()
+    }
+
+    fn tenant_id_by_root_signer_pubkey(
+        &self,
+        root_signer_pubkey: &crate::fiber_types::Pubkey,
+    ) -> Result<Option<TenantId>, String> {
+        self.get(public_key_index_key(
+            ROOT_SIGNER_INDEX_PREFIX,
+            root_signer_pubkey,
+        ))
+        .map(|bytes| deserialize(&bytes).map_err(|error| error.to_string()))
+        .transpose()
     }
 
     fn get_tenant_channel(
@@ -168,18 +228,8 @@ impl TenantRegistryStore for Store {
         if self.get(request_key.clone()).is_some() {
             return Err(REGISTRATION_REQUEST_CONSUMED.to_string());
         }
-        let record_bytes = serialize(record).map_err(|error| error.to_string())?;
-        let tenant_id_bytes = serialize(&record.tenant_id).map_err(|error| error.to_string())?;
         let mut batch = self.batch();
-        batch.put(tenant_key(&record.tenant_id), record_bytes);
-        batch.put(
-            public_key_index_key(ROOT_SIGNER_INDEX_PREFIX, root_signer_pubkey),
-            &tenant_id_bytes,
-        );
-        batch.put(
-            public_key_index_key(TENANT_PUBKEY_INDEX_PREFIX, &record.tenant_pubkey),
-            tenant_id_bytes,
-        );
+        put_tenant_with_index(&mut batch, record)?;
         batch.put(request_key, []);
         batch.commit();
         Ok(())
@@ -199,6 +249,11 @@ impl<S: TenantRegistryStore> TenantRegistry<S> {
             store,
             registration_lock: Arc::new(Mutex::new(())),
         }
+    }
+
+    /// How many tenants are registered, without decoding their records.
+    pub fn count(&self) -> Result<usize, String> {
+        self.store.count_tenants()
     }
 
     pub fn get(&self, tenant_id: &TenantId) -> Result<Option<HostedTenantRecord>, String> {
@@ -346,19 +401,26 @@ impl<S: TenantRegistryStore> TenantRegistry<S> {
         &self,
         tenant_pubkey: &crate::fiber_types::Pubkey,
     ) -> Result<Option<HostedTenantRecord>, String> {
+        let Some(tenant_id) = self.store.tenant_id_by_tenant_pubkey(tenant_pubkey)? else {
+            return Ok(None);
+        };
         Ok(self
-            .list()?
-            .into_iter()
-            .find(|record| &record.tenant_pubkey == tenant_pubkey))
+            .get(&tenant_id)?
+            .filter(|record| &record.tenant_pubkey == tenant_pubkey))
     }
 
     pub fn find_by_root_signer_pubkey(
         &self,
         root_signer_pubkey: &crate::fiber_types::Pubkey,
     ) -> Result<Option<HostedTenantRecord>, String> {
+        let Some(tenant_id) = self
+            .store
+            .tenant_id_by_root_signer_pubkey(root_signer_pubkey)?
+        else {
+            return Ok(None);
+        };
         Ok(self
-            .list()?
-            .into_iter()
-            .find(|record| record.root_signer_pubkey.as_ref() == Some(root_signer_pubkey)))
+            .get(&tenant_id)?
+            .filter(|record| record.root_signer_pubkey.as_ref() == Some(root_signer_pubkey)))
     }
 }
