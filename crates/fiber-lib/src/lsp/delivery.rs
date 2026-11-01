@@ -164,6 +164,12 @@ impl LspPaymentDelivery {
     pub fn key(&self) -> LspPaymentDeliveryKey {
         LspPaymentDeliveryKey::from_request(&self.request)
     }
+
+    pub(crate) fn can_reselect_channel(&self) -> bool {
+        // Deferred can also follow a timed-out dispatch. Only the initial
+        // buffering phase proves that no downstream execution needs recovery.
+        self.status == LspPaymentDeliveryStatus::Deferred && self.attempt_count == 0
+    }
 }
 
 /// Persistence interface for hosted payment delivery records.
@@ -354,6 +360,49 @@ impl<S: LspPaymentDeliveryStore> LspPaymentDeliveryManager<S> {
             .any(|delivery| &delivery.tenant_id == tenant_id))
     }
 
+    /// Recognize an upstream replay independently of the channel's current readiness.
+    pub(crate) fn existing_request(
+        &self,
+        tenant: &super::HostedTenantRecord,
+        request: &TrampolineForwardingRequest,
+    ) -> Result<Option<LspPaymentDelivery>, String> {
+        let Some(existing) = self.get(&LspPaymentDeliveryKey::from_request(request))? else {
+            return Ok(None);
+        };
+        let mut request = request.clone();
+        request.next_node_id = tenant.tenant_pubkey;
+        if existing.tenant_id != tenant.tenant_id || existing.request != request {
+            return Err("hosted payment execution already exists with different data".to_string());
+        }
+        Ok(Some(existing))
+    }
+
+    /// Persist a replacement channel only before the first dispatch is attempted.
+    pub(crate) fn reselect_channel(
+        &self,
+        key: &LspPaymentDeliveryKey,
+        channel: &TenantChannelRecord,
+        now: u64,
+    ) -> Result<LspPaymentDelivery, String> {
+        let mut delivery = self
+            .get(key)?
+            .ok_or_else(|| format!("hosted payment delivery {key:?} not found"))?;
+        if !delivery.can_reselect_channel() {
+            return Err(
+                "cannot reselect a hosted channel after dispatch was attempted".to_string(),
+            );
+        }
+        if channel.funding_udt_type_script != delivery.request.udt_type_script {
+            return Err("selected hosted channel asset does not match delivery asset".to_string());
+        }
+        if delivery.private_channel_id != channel.channel_id {
+            delivery.private_channel_id = channel.channel_id;
+            delivery.updated_at = now;
+            self.store.put_lsp_payment_delivery(&delivery)?;
+        }
+        Ok(delivery)
+    }
+
     pub fn begin_dispatch(
         &self,
         key: &LspPaymentDeliveryKey,
@@ -434,15 +483,8 @@ impl<S: LspPaymentDeliveryStore> LspPaymentDeliveryManager<S> {
         if registration.invoice.udt_type_script() != request.udt_type_script.as_ref() {
             return Err("delivery asset does not match hosted invoice".to_string());
         }
-        let key = LspPaymentDeliveryKey::from_request(&request);
-        if let Some(existing) = self.get(&key)? {
-            if existing.tenant_id == registration.tenant_id
-                && existing.private_channel_id == private_channel_id
-                && existing.request == request
-            {
-                return Ok(existing);
-            }
-            return Err("hosted payment execution already exists with different data".to_string());
+        if let Some(existing) = self.existing_request(tenant, &request)? {
+            return Ok(existing);
         }
         if let Some(existing) = self.get_active_by_payment_hash(&request.payment_hash)? {
             return Err(format!(

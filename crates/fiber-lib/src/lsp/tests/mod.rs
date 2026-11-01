@@ -1955,6 +1955,286 @@ async fn wait_for_delivery_status(
     .expect("delivery reached expected status");
 }
 
+struct BufferedDeliveryTest {
+    _root: tempfile::TempDir,
+    config: LspConfig,
+    store: Store,
+    manager: LspPaymentDeliveryManager<Store>,
+    service: ActorRef<LspServiceMessage>,
+    tenant: HostedTenantRecord,
+    request: TrampolineForwardingRequest,
+    dispatches: Arc<AtomicUsize>,
+}
+
+impl BufferedDeliveryTest {
+    fn channel_a() -> Hash256 {
+        Hash256::from([23; 32])
+    }
+
+    fn channel_b() -> Hash256 {
+        Hash256::from([24; 32])
+    }
+
+    async fn new() -> Self {
+        let root = tempdir().expect("temporary directory");
+        let config = lsp_config(root.path().join("lsp"));
+        let store = open_lsp_store(&config);
+        let manager = LspPaymentDeliveryManager::new(store.clone());
+        let dispatches = Arc::new(AtomicUsize::new(0));
+        let lsp_key = Privkey::from(&[9; 32]);
+        let tenant_key = Privkey::from(&[1; 32]);
+        let service = start_test_lsp_service(
+            store.clone(),
+            config.clone(),
+            Arc::new(FakeRuntimeFactory::new(Arc::new(AtomicUsize::new(0)))),
+            lsp_key.clone(),
+            dispatches.clone(),
+            Arc::new(AtomicUsize::new(0)),
+        )
+        .await;
+        let tenant_id =
+            register_authenticated_test_tenant(&service, &lsp_key, &test_root_signer()).await;
+        let payment_hash = Hash256::from([93; 32]);
+        register_test_invoice(&service, tenant_id.clone(), &tenant_key, payment_hash).await;
+        let tenant = HostedTenantRecord {
+            tenant_id,
+            root_signer_pubkey: None,
+            tenant_pubkey: tenant_key.pubkey(),
+            created_at: 42,
+        };
+        let request =
+            hosted_forwarding_request(&tenant, payment_hash, crate::now_timestamp_as_millis_u64());
+        let test = Self {
+            _root: root,
+            config,
+            store,
+            manager,
+            service,
+            tenant,
+            request,
+            dispatches,
+        };
+        test.bind_channel(Self::channel_a(), None);
+        test
+    }
+
+    fn bind_channel(&self, channel_id: Hash256, asset: Option<Script>) {
+        use crate::fiber::channel::{ChannelActorState, ChannelActorStateStore};
+        use crate::store::sample::StoreSample;
+
+        TenantRegistry::new(self.store.clone())
+            .bind_channel(&self.tenant.tenant_id, channel_id, asset.clone())
+            .unwrap();
+        let mut channel = ChannelActorState::samples(42).remove(0);
+        channel.id = channel_id;
+        channel.remote_pubkey = self.tenant.tenant_pubkey;
+        channel.remote_channel_public_keys = Some(channel.local_channel_public_keys.clone());
+        channel.funding_udt_type_script = asset;
+        self.store.insert_channel_actor_state(channel.clone());
+        self.store
+            .namespaced(NodeNamespace::hosted_tenant(self.tenant.tenant_id.as_str()))
+            .insert_channel_actor_state(channel);
+    }
+
+    fn set_channel_state(&self, channel_id: Hash256, status: crate::fiber_types::ChannelState) {
+        use crate::fiber::channel::ChannelActorStateStore;
+
+        let mut channel = self.store.get_channel_actor_state(&channel_id).unwrap();
+        channel.state = status;
+        self.store.insert_channel_actor_state(channel);
+    }
+
+    async fn accept(&self) -> crate::lsp::LspPaymentDelivery {
+        assert_eq!(
+            ractor::call!(self.service, |reply| {
+                LspServiceMessage::AcceptTrampolineDelivery(self.request.clone(), reply)
+            })
+            .unwrap()
+            .unwrap(),
+            LspDeliveryDecision::Buffered,
+        );
+        self.manager
+            .get_by_payment_hash(&self.request.payment_hash)
+            .unwrap()
+            .unwrap()
+    }
+
+    async fn online(&self, channel_id: Hash256) {
+        self.service
+            .send_message(LspServiceMessage::TenantChannelOnline(
+                self.tenant.tenant_pubkey,
+                channel_id,
+            ))
+            .unwrap();
+        ractor::call!(self.service, LspServiceMessage::GetStatus).unwrap();
+    }
+
+    async fn resume(&self, key: crate::lsp::LspPaymentDeliveryKey) {
+        self.service
+            .send_message(LspServiceMessage::ResumeDelivery(key))
+            .unwrap();
+        // Wait for the explicit retry without depending on a wall-clock timer.
+        ractor::call!(self.service, LspServiceMessage::GetStatus).unwrap();
+    }
+
+    async fn restart(&mut self) {
+        self.service.stop_and_wait(None, None).await.unwrap();
+        self.service = start_test_lsp_service(
+            self.store.clone(),
+            self.config.clone(),
+            Arc::new(FakeRuntimeFactory::new(Arc::new(AtomicUsize::new(0)))),
+            Privkey::from(&[9; 32]),
+            self.dispatches.clone(),
+            Arc::new(AtomicUsize::new(0)),
+        )
+        .await;
+        ractor::call!(self.service, LspServiceMessage::GetStatus).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn buffered_delivery_reselects_online_same_asset_channel() {
+    let test = BufferedDeliveryTest::new().await;
+    test.bind_channel(BufferedDeliveryTest::channel_b(), None);
+    let original = test.accept().await;
+    assert_eq!(
+        original.private_channel_id,
+        BufferedDeliveryTest::channel_a()
+    );
+    test.online(BufferedDeliveryTest::channel_b()).await;
+    test.resume(original.key()).await;
+
+    let delivery = test.manager.get(&original.key()).unwrap().unwrap();
+    assert_eq!(
+        delivery.private_channel_id,
+        BufferedDeliveryTest::channel_b()
+    );
+    assert_eq!(delivery.status, LspPaymentDeliveryStatus::InFlight);
+    assert_eq!(delivery.request, original.request);
+    assert_eq!(delivery.buffer_deadline, original.buffer_deadline);
+    assert_eq!(delivery.attempt_count, 1);
+    assert_eq!(test.dispatches.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn buffered_delivery_does_not_reselect_another_asset() {
+    let test = BufferedDeliveryTest::new().await;
+    test.bind_channel(BufferedDeliveryTest::channel_b(), Some(Script::default()));
+    let original = test.accept().await;
+    test.online(BufferedDeliveryTest::channel_b()).await;
+    test.resume(original.key()).await;
+
+    let delivery = test.manager.get(&original.key()).unwrap().unwrap();
+    assert_eq!(
+        delivery.private_channel_id,
+        BufferedDeliveryTest::channel_a()
+    );
+    assert_eq!(delivery.status, LspPaymentDeliveryStatus::Deferred);
+    assert_eq!(test.dispatches.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn buffered_delivery_keeps_channel_after_dispatch_starts() {
+    for status in [
+        LspPaymentDeliveryStatus::Deferred,
+        LspPaymentDeliveryStatus::Dispatching,
+        LspPaymentDeliveryStatus::InFlight,
+    ] {
+        let test = BufferedDeliveryTest::new().await;
+        test.bind_channel(BufferedDeliveryTest::channel_b(), None);
+        let original = test.accept().await;
+        test.manager
+            .begin_dispatch(&original.key(), original.updated_at)
+            .unwrap();
+        test.manager
+            .transition(&original.key(), status.clone(), original.updated_at)
+            .unwrap();
+        test.online(BufferedDeliveryTest::channel_b()).await;
+        test.resume(original.key()).await;
+
+        let delivery = test.manager.get(&original.key()).unwrap().unwrap();
+        assert_eq!(
+            delivery.private_channel_id,
+            BufferedDeliveryTest::channel_a()
+        );
+        assert_eq!(delivery.status, status);
+        assert_eq!(delivery.attempt_count, 1);
+        assert_eq!(test.dispatches.load(Ordering::Relaxed), 0);
+    }
+}
+
+#[tokio::test]
+async fn buffered_delivery_reselection_survives_service_restart() {
+    let mut test = BufferedDeliveryTest::new().await;
+    test.bind_channel(BufferedDeliveryTest::channel_b(), None);
+    let original = test.accept().await;
+    test.online(BufferedDeliveryTest::channel_b()).await;
+    test.resume(original.key()).await;
+    let reselected = test.manager.get(&original.key()).unwrap().unwrap();
+    assert_eq!(
+        reselected.private_channel_id,
+        BufferedDeliveryTest::channel_b()
+    );
+
+    test.restart().await;
+    test.online(BufferedDeliveryTest::channel_b()).await;
+    test.resume(original.key()).await;
+    assert_eq!(
+        test.manager.get(&original.key()).unwrap().unwrap(),
+        reselected
+    );
+    assert_eq!(test.dispatches.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn buffered_delivery_replay_preserves_existing_execution_without_eligible_channels() {
+    use crate::fiber_types::{ChannelState, CloseFlags};
+
+    let test = BufferedDeliveryTest::new().await;
+    test.bind_channel(BufferedDeliveryTest::channel_b(), None);
+    test.online(BufferedDeliveryTest::channel_b()).await;
+    let original = test.accept().await;
+    test.resume(original.key()).await;
+    let dispatched = test.manager.get(&original.key()).unwrap().unwrap();
+    assert_eq!(
+        dispatched.private_channel_id,
+        BufferedDeliveryTest::channel_b()
+    );
+
+    // A becomes the selector's preferred channel, but is not a new execution identity.
+    test.online(BufferedDeliveryTest::channel_a()).await;
+    assert_eq!(test.accept().await, dispatched);
+    for channel_id in [
+        BufferedDeliveryTest::channel_a(),
+        BufferedDeliveryTest::channel_b(),
+    ] {
+        test.set_channel_state(channel_id, ChannelState::Closed(CloseFlags::empty()));
+    }
+    assert_eq!(test.accept().await, dispatched);
+    assert_eq!(test.dispatches.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn buffered_delivery_skips_closed_and_shutting_down_channels() {
+    use crate::fiber_types::{ChannelState, CloseFlags, ShuttingDownFlags};
+
+    for status in [
+        ChannelState::Closed(CloseFlags::empty()),
+        ChannelState::ShuttingDown(ShuttingDownFlags::empty()),
+    ] {
+        let test = BufferedDeliveryTest::new().await;
+        test.bind_channel(BufferedDeliveryTest::channel_b(), None);
+        test.set_channel_state(BufferedDeliveryTest::channel_a(), status);
+        test.online(BufferedDeliveryTest::channel_a()).await;
+        test.online(BufferedDeliveryTest::channel_b()).await;
+        let delivery = test.accept().await;
+        assert_eq!(
+            delivery.private_channel_id,
+            BufferedDeliveryTest::channel_b()
+        );
+    }
+}
+
 #[tokio::test]
 async fn cold_tenant_delivery_dispatches_only_after_channel_online() {
     let root = tempdir().expect("temporary directory");
