@@ -295,7 +295,8 @@ tokens that call any method outside that allowlist:
 - watchtower preimages and watches: `create_preimage`, `remove_preimage`,
   `create_watch_channel`, and `remove_watch_channel`
 - tenant invoice and payment data plane: `new_invoice`, `get_invoice`,
-  `settle_invoice`, `send_payment`, `get_payment`, and `list_payments`
+  `cancel_invoice`, `settle_invoice`, `send_payment`, `get_payment`, and
+  `list_payments`
 - isolated channel reads: `list_channels`
 
 The middleware puts the verified tenant identity in the request extensions; it

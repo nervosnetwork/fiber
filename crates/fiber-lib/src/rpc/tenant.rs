@@ -59,6 +59,7 @@ pub(crate) enum RpcMethodScope {
 /// This is the security-critical list. Everything not listed here is rejected
 /// for tenant tokens, including methods that are not classified at all.
 pub(crate) const TENANT_SCOPED_METHODS: &[&str] = &[
+    "cancel_invoice",
     "check_channel_shutdown",
     "create_preimage",
     "create_watch_channel",
@@ -93,7 +94,6 @@ pub(crate) const OPERATOR_ONLY_METHODS: &[&str] = &[
     "add_tlc",
     "backup",
     "build_router",
-    "cancel_invoice",
     "commitment_signed",
     "connect_peer",
     "disconnect_peer",
@@ -146,10 +146,6 @@ pub(crate) const TENANT_ROUTING_OPERATOR_METHODS: &[(&str, &str)] = &[
         "build_router",
         "routes tenant requests, but tenant payments route implicitly through `send_payment`, \
          so building routers stays operator-only by design",
-    ),
-    (
-        "cancel_invoice",
-        "routes tenant requests, but tenants are not allowed to cancel invoices today",
     ),
     (
         "open_channel",

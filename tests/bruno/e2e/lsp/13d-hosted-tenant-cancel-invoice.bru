@@ -1,0 +1,51 @@
+meta {
+  name: hosted tenant cancels its own invoice through standard RPC
+  type: http
+  seq: 13.7
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+  Authorization: Bearer {{LSP_TENANT_TOKEN}}
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "cancel_invoice",
+    "params": [
+      {
+        "payment_hash": "{{LSP_CANCEL_PAYMENT_HASH}}"
+      }
+    ]
+  }
+}
+
+script:pre-request {
+  const body = req.getBody();
+  body.params[0].payment_hash = bru.getVar("LSP_CANCEL_PAYMENT_HASH");
+  req.setBody(body);
+  const token = bru.getVar("LSP_TENANT_TOKEN");
+  if (token) {
+    req.setHeader("Authorization", `Bearer ${token}`);
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+  res.body.result.status: eq "Cancelled"
+}
+
+script:post-response {
+  if (res.body.error) {
+    console.log("Step 13.7 ERROR:", JSON.stringify(res.body.error));
+  }
+}
