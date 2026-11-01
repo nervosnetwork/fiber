@@ -18,7 +18,9 @@ pub(crate) use funding::{
 };
 pub use funding::{FundingRequest, FundingTx};
 pub use signer::LocalSigner;
-pub(crate) use tx_tracing_actor::is_permanent_send_tx_error;
+pub(crate) use tx_tracing_actor::{
+    is_permanent_send_tx_error, is_pool_conflict, is_pool_conflict_code,
+};
 pub use tx_tracing_actor::{CkbTxTracer, CkbTxTracingMask, CkbTxTracingResult};
 
 #[cfg(test)]

@@ -41,6 +41,11 @@ approval or bind RPC. The transport calls the standard
 `open_channel_with_external_funding` method with the tenant token; tenant
 responses include the required `opening_context`, which the SDK validates.
 
+A session can bind multiple channels. Allocate a fresh pending channel signer
+with `allocate_pending_channel` for each additional opening and supply that
+signer's public material. Retry an interrupted opening with its original intent;
+changing amount or asset while reusing the same signer is rejected before RPC.
+
 For registration or credential refresh, call `HostedSession::begin_registration`
 with the trusted LSP node ID, a fresh random 32-byte request ID and the current
 Unix time in milliseconds, then send the returned parameters to

@@ -5610,7 +5610,7 @@ impl PendingMessages {
 }
 
 fn is_empty_or_placeholder_witness(witness: &Bytes) -> bool {
-    witness.is_empty() || is_secp_sighash_placeholder_witness(witness.as_slice())
+    witness.is_empty() || is_secp_sighash_placeholder_witness(&witness.raw_data())
 }
 
 pub(crate) fn merge_external_funding_witnesses(
@@ -7178,7 +7178,7 @@ impl ChannelActorState {
     ///   `-- forwarding
     ///         |-- waiting_forward_tlc_tasks --------> wait for AddTlc result
     ///         |-- forwarding_tlc = Some(...) -------> wait for downstream RemoveTlc
-    ///         `-- retryable RemoveTlc --------------> preserve the selected failure
+    ///         `-- retryable RemoveTlcFail ---------> preserve the selected failure
     /// ```
     pub(crate) fn can_auto_fulfill_received_tlc(&self, tlc: &TlcInfo) -> bool {
         tlc.is_received()
@@ -7186,7 +7186,17 @@ impl ChannelActorState {
             && tlc.forwarding_tlc.is_none()
             && !self.is_waiting_forward_result_for_received_tlc(tlc.tlc_id)
             && !self.retryable_tlc_operations.iter().any(|operation| {
-                matches!(operation, RetryableTlcOperation::RemoveTlc(tlc_id, _) if *tlc_id == tlc.tlc_id)
+                // A queued fail must win over a local preimage: it is the outcome this
+                // forwarding attempt already selected. A queued fulfill is the same settlement
+                // being replayed, so it must not hide the TLC from the hold-set settlement
+                // command that rebuilds its contexts.
+                matches!(
+                    operation,
+                    RetryableTlcOperation::RemoveTlc(
+                        tlc_id,
+                        RemoveTlcReason::RemoveTlcFail(_)
+                    ) if *tlc_id == tlc.tlc_id
+                )
             })
     }
 
@@ -12051,7 +12061,7 @@ pub trait ChannelActorStateStore {
     }
 }
 
-/// Durable single-channel opening slot in a tenant's namespaced store.
+/// Durable per-channel opening record in a tenant's namespaced store.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct TenantChannelOpening {
     pub command: super::network::OpenChannelWithExternalFundingCommand,
@@ -12062,10 +12072,14 @@ pub struct TenantChannelOpening {
 
 /// Store trait for persisting and querying outbound channel-opening records.
 pub trait ChannelOpenRecordStore {
-    /// Read the authenticated tenant's durable opening slot.
-    fn get_tenant_channel_opening(&self) -> Option<TenantChannelOpening>;
-    /// Persist a slot before starting negotiation; clear only after confirmed termination.
-    fn put_tenant_channel_opening(&self, opening: Option<TenantChannelOpening>);
+    /// Read a durable opening by its (temporary or final) channel id.
+    fn get_tenant_channel_opening(&self, channel_id: &Hash256) -> Option<TenantChannelOpening>;
+    /// List all durable openings in the current tenant namespace.
+    fn list_tenant_channel_openings(&self) -> Vec<TenantChannelOpening>;
+    /// Persist an opening before starting negotiation.
+    fn put_tenant_channel_opening(&self, opening: TenantChannelOpening);
+    /// Delete an opening once the channel is ready or the opening is abandoned.
+    fn delete_tenant_channel_opening(&self, channel_id: &Hash256);
 
     /// Return all stored channel-opening records.
     fn get_channel_open_records(&self) -> Vec<ChannelOpenRecord>;

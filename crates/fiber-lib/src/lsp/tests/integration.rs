@@ -298,7 +298,8 @@ async fn wait_for_tenant_channel(client: &HttpClient, tenant_id: &TenantId, expe
             .await
             .expect("list hosted tenants");
         result.tenants.iter().any(|tenant| {
-            tenant.tenant_id == tenant_id.as_str() && tenant.channel_online == expected_online
+            tenant.tenant_id == tenant_id.as_str()
+                && tenant.channels.iter().any(|channel| channel.online) == expected_online
         })
     })
     .await;
@@ -659,13 +660,121 @@ async fn open_hosted_external_channel(
     );
     let mut conflicting = retry_request;
     conflicting.funding_amount += 1;
-    assert!(client
-        .request::<OpenChannelWithExternalFundingResult, _>(
+    // AcceptChannel has already replaced the temporary id with the final id.
+    // A changed intent must still be rejected for this signer, not start a
+    // second negotiation that merely times out waiting for Public T to accept.
+    let error = tokio::time::timeout(
+        Duration::from_secs(5),
+        client.request::<OpenChannelWithExternalFundingResult, _>(
             "open_channel_with_external_funding",
-            rpc_params![conflicting]
+            rpc_params![conflicting],
+        ),
+    )
+    .await
+    .expect("conflicting opening must be rejected without peer cooperation")
+    .expect_err("reject a changed intent for the same channel signer");
+    assert!(
+        error
+            .to_string()
+            .contains("different channel opening for this signer"),
+        "{error}"
+    );
+    let signed_tx = unsigned_tx
+        .as_advanced_builder()
+        .set_witnesses(vec![Bytes::default()])
+        .build()
+        .data();
+    let _: SubmitSignedFundingTxResult = client
+        .request(
+            "submit_signed_funding_tx",
+            rpc_params![SubmitSignedFundingTxParams {
+                channel_id: channel_id.into(),
+                signed_funding_tx: signed_tx.into(),
+            }],
         )
         .await
-        .is_err());
+        .expect("submit hosted external funding transaction");
+    channel_id
+}
+
+async fn open_hosted_external_channel_direct(
+    client: &HttpClient,
+    tenant_node_id: crate::fiber_types::Pubkey,
+    public_node: &mut NetworkNode,
+    signer: &ChannelSigner<MemoryStore>,
+) -> crate::fiber_types::Hash256 {
+    let material = signer
+        .channel_open_material(false)
+        .await
+        .expect("external channel open material");
+    let request = OpenChannelWithExternalFundingParams {
+        pubkey: public_node.private_key.pubkey().into(),
+        public: Some(false),
+        funding_amount: HUGE_CKB_AMOUNT,
+        funding_udt_type_script: None,
+        shutdown_script: Script::default().into(),
+        funding_lock_script: Script::default().into(),
+        funding_lock_script_cell_deps: None,
+        commitment_delay_epoch: Some(
+            ckb_types::core::EpochNumberWithFraction::new(1, 0, 1)
+                .full_value()
+                .into(),
+        ),
+        commitment_fee_rate: Some(1000),
+        funding_fee_rate: None,
+        tlc_expiry_delta: None,
+        tlc_min_value: None,
+        tlc_fee_proportional_millionths: None,
+        max_tlc_value_in_flight: None,
+        max_tlc_number_in_flight: None,
+        external_channel_signer: Some(to_rpc_channel_open_signer_material(&material)),
+    };
+    let open_client = client.clone();
+    let open_task = tokio::spawn(async move {
+        open_client
+            .request::<OpenChannelWithExternalFundingResult, _>(
+                "open_channel_with_external_funding",
+                rpc_params![request],
+            )
+            .await
+            .expect("open hosted external channel")
+    });
+    let temporary_channel_id = public_node
+        .expect_to_process_event(|event| match event {
+            NetworkServiceEvent::ChannelPendingToBeAccepted(pubkey, channel_id)
+                if pubkey == &tenant_node_id =>
+            {
+                Some(*channel_id)
+            }
+            _ => None,
+        })
+        .await;
+    ractor::call!(public_node.network_actor, |reply| {
+        NetworkActorMessage::new_command(FiberActorCommand::AcceptChannel(
+            AcceptChannelCommand {
+                temp_channel_id: temporary_channel_id,
+                funding_amount: HUGE_CKB_AMOUNT,
+                shutdown_script: None,
+                max_tlc_number_in_flight: None,
+                max_tlc_value_in_flight: None,
+                min_tlc_value: None,
+                tlc_fee_proportional_millionths: None,
+                tlc_expiry_delta: None,
+            },
+            reply,
+        ))
+    })
+    .expect("Public T accepts hosted external channel")
+    .expect("accept hosted external channel");
+    let open = open_task
+        .await
+        .expect("join hosted external channel open request");
+    assert!(
+        open.opening_context.is_some(),
+        "tenant opening response must include opening_context"
+    );
+    let channel_id: crate::fiber_types::Hash256 = open.channel_id.into();
+    let unsigned_tx: Transaction = open.unsigned_funding_tx.into();
     let signed_tx = unsigned_tx
         .as_advanced_builder()
         .set_witnesses(vec![Bytes::default()])
@@ -721,6 +830,77 @@ async fn submit_hosted_signature(
 fn persisted_signer_state(node: &NetworkNode, channel_id: crate::fiber_types::Hash256) -> Vec<u8> {
     bincode::serialize(&node.get_channel_actor_state(channel_id).signing_context)
         .expect("serialize persisted signer state")
+}
+
+#[tokio::test]
+async fn hosted_tenant_can_open_multiple_channels() {
+    init_tracing();
+
+    let mut network = create_lsp_test_network_inner(
+        &[((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT), true)],
+        2,
+        &[((0, TENANT_ID), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT))],
+        false,
+    )
+    .await;
+    let client = network.tenant(0, TENANT_ID).client.clone();
+    let tenant_node_id = network.tenant(0, TENANT_ID).node.pubkey;
+    let (_, first_signer) = RestartableExternalSigner::create().await;
+    let (_, second_signer) = RestartableExternalSigner::create().await;
+
+    let first_channel = open_hosted_external_channel_direct(
+        &client,
+        tenant_node_id,
+        &mut network.nodes[0],
+        &first_signer,
+    )
+    .await;
+    let second_channel = open_hosted_external_channel_direct(
+        &client,
+        tenant_node_id,
+        &mut network.nodes[0],
+        &second_signer,
+    )
+    .await;
+    assert_ne!(first_channel, second_channel);
+
+    wait_until_async_timeout(|| {
+        let client = client.clone();
+        async move {
+            let channels: fiber_json_types::ListChannelsResult = client
+                .request(
+                    "list_channels",
+                    rpc_params![fiber_json_types::ListChannelsParams {
+                        pubkey: None,
+                        include_closed: None,
+                        only_pending: None,
+                    }],
+                )
+                .await
+                .expect("list tenant channels");
+            channels.channels.len() >= 2
+        }
+    })
+    .await;
+
+    let channels: fiber_json_types::ListChannelsResult = client
+        .request(
+            "list_channels",
+            rpc_params![fiber_json_types::ListChannelsParams {
+                pubkey: None,
+                include_closed: None,
+                only_pending: None,
+            }],
+        )
+        .await
+        .expect("list tenant channels");
+    let channel_ids: std::collections::HashSet<_> = channels
+        .channels
+        .iter()
+        .map(|channel| channel.channel_id)
+        .collect();
+    assert!(channel_ids.contains(&first_channel.into()));
+    assert!(channel_ids.contains(&second_channel.into()));
 }
 
 #[tokio::test]
@@ -956,7 +1136,6 @@ pub(super) async fn create_lsp_test_network_inner(
             tenant_id: tenant_id.clone(),
             root_signer_pubkey: Some(root_signer.pubkey()),
             tenant_pubkey: tenant.pubkey,
-            private_channel_id: None,
             created_at: crate::now_timestamp_as_millis_u64(),
         };
         runtimes_by_lsp.entry(*lsp_node_index).or_default().insert(
@@ -1844,7 +2023,6 @@ async fn hosted_payment_buffers_offline_private_channel_and_resumes_via_rpc() {
         tenant_id: tenant_id.clone(),
         root_signer_pubkey: Some(root_signer.pubkey()),
         tenant_pubkey: tenant.pubkey,
-        private_channel_id: None,
         created_at: crate::now_timestamp_as_millis_u64(),
     };
     let runtime_factory = Arc::new(ExistingRuntimeFactory::single(
@@ -1925,12 +2103,12 @@ async fn hosted_payment_buffers_offline_private_channel_and_resumes_via_rpc() {
         .expect("list registered hosted tenant");
     let registered = registered.tenants.first().expect("registered tenant");
     assert_eq!(registered.invoice_pubkey, tenant.pubkey.into());
-    assert_eq!(registered.private_channel_id, None);
+    assert!(registered.channels.is_empty());
     assert!(matches!(
         registered.runtime_status,
         LspTenantRuntimeStatus::Cold
     ));
-    assert!(!registered.channel_online);
+    assert!(registered.channels.iter().all(|channel| !channel.online));
 
     establish_channel_between_nodes(
         &mut payer,
@@ -1961,8 +2139,8 @@ async fn hosted_payment_buffers_offline_private_channel_and_resumes_via_rpc() {
         .await
         .expect("list hosted tenant after channel binding");
     assert_eq!(
-        tenants.tenants[0].private_channel_id,
-        Some(private_channel_id.into())
+        tenants.tenants[0].channels[0].channel_id,
+        private_channel_id.into()
     );
 
     let amount = 1_000;
@@ -2055,7 +2233,10 @@ async fn hosted_payment_buffers_offline_private_channel_and_resumes_via_rpc() {
         tenants.tenants[0].runtime_status,
         LspTenantRuntimeStatus::Active
     ));
-    assert!(!tenants.tenants[0].channel_online);
+    assert!(tenants.tenants[0]
+        .channels
+        .iter()
+        .all(|channel| !channel.online));
 
     connect_in_process(&public_t, &tenant).await;
     public_t

@@ -289,47 +289,41 @@ needed by the new representation.
 
 ## Tenant Registry integration
 
-### Current and target records
+### Tenant identity and channel records
 
-The current registry persists one record per tenant:
-
-```rust
-struct HostedTenantRecord {
-    tenant_id: TenantId,
-    tenant_pubkey: Pubkey,
-    private_channel_id: Option<Hash256>,
-    created_at: u64,
-}
-```
-
-The integration adds the RootSigner identity public key:
+The registry persists one identity record per tenant:
 
 ```rust
 struct HostedTenantRecord {
     tenant_id: TenantId,
-    root_signer_pubkey: Pubkey,
+    root_signer_pubkey: Option<Pubkey>,
     tenant_pubkey: Pubkey,
-    private_channel_id: Option<Hash256>,
     created_at: u64,
 }
 ```
 
-The target record answers four questions:
+Authenticated registration always sets `root_signer_pubkey`; the optional form
+also represents legacy operator-provisioned identities. Channel bindings are
+stored independently, with multiple records allowed per tenant:
 
-1. Does the tenant exist?
-2. Which RootSigner identity deterministically owns it?
-3. Which Fiber protocol identity belongs to it?
-4. Which private U-T channel is its hosted channel?
+```rust
+struct TenantChannelRecord {
+    channel_id: Hash256,
+    funding_udt_type_script: Option<Script>,
+    bound_at: u64,
+}
+```
 
-Runtime liveness is deliberately absent and remains owned by
-`TenantSupervisor`.
+One channel carries one asset. `None` identifies CKB; a script identifies a UDT.
+The same tenant can therefore open CKB and UDT channels with independent signer
+keys. RPC status exposes these bindings as `channels[]`, including per-channel
+online state. Runtime liveness remains owned by `TenantSupervisor`.
 
-Authenticated registration atomically writes the tenant record, consumes its
-one-time request ID, and writes reverse RootSigner and tenant-public-key indexes in
-one Store batch. Registry lookup still scans records in some paths, and
-`bind_private_channel` prevents one tenant from being rebound to a different
-channel but does not maintain a durable reverse channel index. Multi-channel
-tenants and a complete atomic channel-binding index remain outside the MVP.
+Authenticated registration atomically writes the tenant identity, consumes its
+one-time request ID, and writes reverse RootSigner and tenant-public-key indexes
+in one Store batch. Credential refresh consumes a new proof without replacing
+identity or channel bindings. `bind_channel` maintains the separate tenant
+channel records; a complete global reverse channel index remains future work.
 
 ### Decided identity model
 
@@ -641,10 +635,7 @@ questions are:
 
 1. Does tenant node-key rotation preserve the same tenant namespace, and how
    are existing U-T channels closed or recovered?
-2. Should `private_channel_id` remain in `HostedTenantRecord`, or become a
-   separate channel-binding registry if multiple private channels are later
-   supported?
-3. What terminal-state checks are required before disabling or deleting a
+2. What terminal-state checks are required before disabling or deleting a
    tenant, and is deletion ever preferable to an immutable disabled record?
 
 ## Security boundary

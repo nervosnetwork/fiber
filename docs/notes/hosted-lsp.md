@@ -22,8 +22,9 @@ One Fiber process hosts:
 
 Public T is the only public, gossip-routable node identity. Each tenant keeps
 the cryptographic key required by the existing invoice and channel state
-machines, but that key is not announced as another network node. A private
-channel connects each tenant directly to Public T. The existing Fiber channel
+machines, but that key is not announced as another network node. Private
+channels connect each tenant directly to Public T. A tenant can bind multiple
+channels, including separate CKB and UDT channels. The existing Fiber channel
 messages and state transitions remain unchanged; messages on these co-located
 channels are delivered directly between actors, without Tentacle encoding,
 socket I/O, peer discovery, or gossip synchronization. A shared tenant message
@@ -53,9 +54,9 @@ flowchart TB
         D -. "delivery state and scheduling" .-> U1
         D -. "delivery state and scheduling" .-> U2
         D -. "delivery state and scheduling" .-> U3
-        U1 <-->|"private channel U1-T<br/>in-process Fiber messages"| T
-        U2 <-->|"private channel U2-T<br/>in-process Fiber messages"| T
-        U3 <-->|"private channel U3-T<br/>in-process Fiber messages"| T
+        U1 <-->|"private channels U1-T<br/>in-process Fiber messages"| T
+        U2 <-->|"private channels U2-T<br/>in-process Fiber messages"| T
+        U3 <-->|"private channels U3-T<br/>in-process Fiber messages"| T
     end
 
     T <-->|"P2P / gossip"| N["Fiber network"]
@@ -69,6 +70,14 @@ created. A tenant may later push a preimage with `create_preimage` if it
 needs an on-chain TLC claim. Tenant tokens carry `write("watchtower")`
 but middleware and the watchtower RPC bind every call to the token's
 `node(...)` fact, so they cannot touch Public T or another tenant.
+
+Channel bindings are stored separately from tenant identity. Incoming deliveries
+select a channel with the requested asset, preferring an online channel and using
+channel ID order as the deterministic fallback. Closed and shutting-down channels
+are excluded. An initially buffered delivery may select a newly available channel
+only while `Deferred` with `attempt_count == 0`; after a dispatch attempt, recovery
+retains the selected channel so an ambiguous result cannot trigger a second
+execution on another channel.
 
 ## Invoice registration and payer hint
 
@@ -250,6 +259,18 @@ may omit it or name themselves, but cannot select another tenant. Operators may
 select a tenant when they have both the ordinary query permission and
 `read("lsp")`. Omitting it retains the public-node namespace for operator calls.
 
+Tenant status returned by registration, ensure, eviction and listing contains
+`channels[]`, with each entry carrying `channel_id`, `funding_udt_type_script`
+(`null` for CKB), and `online`. This replaces the singleton `private_channel_id`
+and tenant-level `channel_online` fields. `list_channels` still uses the standard
+RPC and returns the authenticated tenant's channels.
+
+Tenant openings use `open_channel_with_external_funding` with client-owned signer
+material. Independent signers can create additional channels; retries using the
+same signer must preserve the original intent. Pending openings, frozen results
+and reply waiters are tracked per channel and survive temporary-to-final channel
+ID changes.
+
 Hosted tenant data-plane requests reuse a restricted subset of the standard
 Fiber RPC method names.
 The authority block of the Biscuit token contains `tenant("<tenant_id>")` plus
@@ -274,8 +295,9 @@ tokens that call any method outside that allowlist:
 - isolated channel reads: `list_channels`
 
 The middleware puts the verified tenant identity in the request extensions; it
-is not accepted as a JSON-RPC parameter. Allowlisted channel, invoice, and
-payment handlers then resolve that tenant's active actor and Store namespace
+cannot be replaced by a JSON-RPC parameter. An explicit `tenant_id` on invoice
+and payment queries is only a separately authorized query target. Allowlisted
+channel, invoice, and payment handlers then resolve that tenant's active actor and Store namespace
 through `TenantSupervisor`. Tokens without a tenant fact continue to address
 Public T and are not constrained by the tenant method allowlist.
 

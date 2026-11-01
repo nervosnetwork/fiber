@@ -46,7 +46,7 @@ struct Args {
     #[arg(long, env = "FIBER_LSP_SDK_AGENT_STATUS_FILE")]
     status_file: Option<PathBuf>,
 
-    /// Test-only HTTP address exposing GET /status, POST /open-channel, POST /authorize, and POST /shutdown.
+    /// Test-only HTTP address exposing GET /status, POST /prepare-channel, POST /open-channel, POST /authorize, and POST /shutdown.
     #[arg(long, env = "FIBER_LSP_SDK_AGENT_CONTROL_ADDR")]
     control_addr: Option<String>,
 
@@ -71,6 +71,7 @@ struct OpenChannelRequest {
 enum ControlCommand {
     Open(Box<OpenChannelRequest>),
     Authorize(fiber_lsp_sdk_agent::FixtureAuthorization),
+    Prepare,
 }
 type ControlRequest = (ControlCommand, oneshot::Sender<Result<serde_json::Value>>);
 
@@ -153,6 +154,12 @@ async fn main() -> Result<()> {
                     ControlCommand::Open(request) => open_request(&mut agent, *request, &args.contracts_dir, &args.ckb_rpc)
                         .await.and_then(|result| Ok(serde_json::to_value(result)?)),
                     ControlCommand::Authorize(request) => agent.authorize(request).await.map(|()| serde_json::json!({"authorized":true})),
+                    ControlCommand::Prepare => agent
+                        .prepare_channel()
+                        .await
+                        .map(|material| serde_json::json!({
+                            "channel_open_signer_material": fiber_lsp_sdk::json::open_material_to_rpc(&material)
+                        })),
                 };
                 let _ = reply.send(result);
             }
@@ -282,6 +289,8 @@ async fn handle_control_connection(
         }
     } else if request.starts_with("POST /open-channel ")
         || request.starts_with("POST /open-channel\r\n")
+        || request.starts_with("POST /prepare-channel ")
+        || request.starts_with("POST /prepare-channel\r\n")
         || request.starts_with("POST /authorize ")
     {
         let payload = if request.starts_with("POST /authorize ") {
@@ -292,6 +301,8 @@ async fn handle_control_connection(
             serde_json::from_str(body)
                 .map(ControlCommand::Authorize)
                 .context("decode local authorization")
+        } else if request.starts_with("POST /prepare-channel ") {
+            Ok(ControlCommand::Prepare)
         } else {
             open_body(&request).map(|request| ControlCommand::Open(Box::new(request)))
         };

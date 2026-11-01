@@ -1,0 +1,30 @@
+meta {
+  name: connect payer to Public T
+  type: http
+  seq: 7.5
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {"id":"42","jsonrpc":"2.0","method":"connect_peer","params":[{"address":"{{NODE2_ADDR}}"}]}
+}
+
+assert {
+  res.body.error: isUndefined
+  res.body.result: isNull
+}
+
+script:post-response {
+  if (res.body.error) throw new Error(JSON.stringify(res.body.error));
+  await new Promise(r => setTimeout(r, 1000));
+  bru.setNextRequest("open payer CKB channel");
+}
