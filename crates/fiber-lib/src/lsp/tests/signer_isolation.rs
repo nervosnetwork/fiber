@@ -1393,3 +1393,186 @@ async fn hosted_signing_subscription_recovers_pending_without_waking_cold_tenant
     replay.unsubscribe().await.unwrap();
     other.unsubscribe().await.unwrap();
 }
+
+/// A tenant token may register watch channels and preimages and remove its own,
+/// but every one of those writes stays in the calling tenant's watchtower
+/// namespace: another tenant's identical calls cannot read, overwrite or delete
+/// the owner's rows.
+#[tokio::test]
+async fn tenant_watchtower_writes_stay_in_the_tenant_namespace() {
+    use crate::rpc::watchtower::{
+        CreatePreimageParams, RemovePreimageParams, RemoveWatchChannelParams,
+    };
+    use crate::watchtower::WatchtowerStore;
+    use fiber_json_types::{ListPaymentsParams, ListPaymentsResult};
+    use fiber_types::HashAlgorithm;
+
+    let fixture = TestLspFixture::new("isolation-watchtower-namespace").await;
+    let (_, other_pubkey, _, other) = fixture.register_tenant(1).await;
+    let (_, owner_pubkey, _, owner) = fixture.register_tenant(2).await;
+    let owner_node = crate::lsp::tenant_watchtower_node_id(&owner_pubkey);
+    let other_node = crate::lsp::tenant_watchtower_node_id(&other_pubkey);
+
+    let channel_id = Hash256::from([0x5a; 32]);
+    let key = Privkey::from([11; 32]);
+    let params = CreateWatchChannelParams {
+        commitment_contract_features: fiber_types::CommitmentContractFeatures::LEGACY.into(),
+        channel_id: channel_id.into(),
+        funding_udt_type_script: None,
+        local_settlement_key: None,
+        local_settlement_key_pubkey: Some(key.pubkey().into()),
+        remote_settlement_key: key.pubkey().into(),
+        local_funding_pubkey: key.pubkey().into(),
+        remote_funding_pubkey: key.pubkey().into(),
+        settlement_data: fiber_json_types::SettlementData {
+            local_amount: 1000,
+            remote_amount: 1000,
+            tlcs: vec![],
+        },
+    };
+    owner
+        .request::<(), _>("create_watch_channel", rpc_params![params.clone()])
+        .await
+        .expect("owner registers its watch channel");
+    other
+        .request::<(), _>("create_watch_channel", rpc_params![params])
+        .await
+        .expect("other tenant registers the same channel id in its own namespace");
+    assert!(fixture
+        .public_t
+        .store
+        .get_watch_channel(&owner_node, &channel_id)
+        .is_some());
+
+    other
+        .request::<(), _>(
+            "remove_watch_channel",
+            rpc_params![RemoveWatchChannelParams {
+                channel_id: channel_id.into(),
+            }],
+        )
+        .await
+        .expect("other tenant removes its own row");
+    assert!(
+        fixture
+            .public_t
+            .store
+            .get_watch_channel(&owner_node, &channel_id)
+            .is_some(),
+        "another tenant must not delete the owner's watch channel"
+    );
+    assert!(fixture
+        .public_t
+        .store
+        .get_watch_channel(&other_node, &channel_id)
+        .is_none());
+
+    // Preimages: the RPC still validates the hash, and rows are per tenant.
+    let preimage = Hash256::from([0x2b; 32]);
+    let payment_hash: Hash256 = HashAlgorithm::Sha256.hash(preimage).into();
+    let wrong_preimage = Hash256::from([0x2c; 32]);
+    let error = owner
+        .request::<(), _>(
+            "create_preimage",
+            rpc_params![CreatePreimageParams {
+                payment_hash: payment_hash.into(),
+                preimage: wrong_preimage.into(),
+            }],
+        )
+        .await
+        .expect_err("a preimage that does not match its hash is rejected");
+    assert!(error.to_string().contains("Wrong preimage"), "{error}");
+
+    owner
+        .request::<(), _>(
+            "create_preimage",
+            rpc_params![CreatePreimageParams {
+                payment_hash: payment_hash.into(),
+                preimage: preimage.into(),
+            }],
+        )
+        .await
+        .expect("owner registers its preimage");
+    let other_preimage = Hash256::from([0x2d; 32]);
+    let other_payment_hash: Hash256 = HashAlgorithm::Sha256.hash(other_preimage).into();
+    other
+        .request::<(), _>(
+            "create_preimage",
+            rpc_params![CreatePreimageParams {
+                payment_hash: other_payment_hash.into(),
+                preimage: other_preimage.into(),
+            }],
+        )
+        .await
+        .expect("other tenant registers its own preimage");
+    assert_eq!(
+        fixture
+            .public_t
+            .store
+            .get_watch_preimage(&owner_node, &payment_hash),
+        Some(preimage)
+    );
+    assert_eq!(
+        fixture
+            .public_t
+            .store
+            .get_watch_preimage(&other_node, &other_payment_hash),
+        Some(other_preimage)
+    );
+
+    // Another tenant naming the owner's hash removes nothing.
+    other
+        .request::<(), _>(
+            "remove_preimage",
+            rpc_params![RemovePreimageParams {
+                payment_hash: payment_hash.into(),
+            }],
+        )
+        .await
+        .expect("removing a preimage the tenant does not own is a no-op");
+    assert_eq!(
+        fixture
+            .public_t
+            .store
+            .get_watch_preimage(&owner_node, &payment_hash),
+        Some(preimage)
+    );
+
+    owner
+        .request::<(), _>(
+            "remove_preimage",
+            rpc_params![RemovePreimageParams {
+                payment_hash: payment_hash.into(),
+            }],
+        )
+        .await
+        .expect("owner removes its preimage");
+    assert_eq!(
+        fixture
+            .public_t
+            .store
+            .get_watch_preimage(&owner_node, &payment_hash),
+        None
+    );
+    assert_eq!(
+        fixture
+            .public_t
+            .store
+            .get_watch_preimage(&other_node, &other_payment_hash),
+        Some(other_preimage)
+    );
+
+    // Read-only tenant RPCs answer from the tenant's own namespace.
+    let payments: ListPaymentsResult = owner
+        .request(
+            "list_payments",
+            rpc_params![ListPaymentsParams {
+                status: None,
+                limit: None,
+                after: None,
+            }],
+        )
+        .await
+        .expect("owner lists its own payments");
+    assert!(payments.payments.is_empty());
+}

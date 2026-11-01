@@ -273,6 +273,10 @@ ID changes.
 
 Hosted tenant data-plane requests reuse a restricted subset of the standard
 Fiber RPC method names.
+This list is `TENANT_SCOPED_METHODS` in `crates/fiber-lib/src/rpc/tenant.rs`, where
+every wire method is declared tenant-scoped or operator-only and a test fails when a
+method is added without being classified.
+
 The authority block of the Biscuit token contains `tenant("<tenant_id>")` plus
 the capabilities needed for the tenant allowlist (`read`/`write("channels")`,
 `read`/`write("invoices")`, `read`/`write("payments")`, and
@@ -281,8 +285,8 @@ After Biscuit capability checks, the authentication middleware rejects tenant
 tokens that call any method outside that allowlist:
 
 - external channel funding and lifecycle: `open_channel_with_external_funding`,
-  `submit_signed_funding_tx`, `submit_commitment_transaction`,
-  `shutdown_channel`, `check_channel_shutdown`, and `update_channel`
+  `submit_signed_funding_tx`, `shutdown_channel`, `check_channel_shutdown`,
+  and `update_channel`
 - signing: `get_channel_signing_status`, `submit_channel_signature`,
   `get_watchtower_signing_status`, and `submit_watchtower_signature`
 - subscriptions: `subscribe` and `unsubscribe` on the dedicated
@@ -291,7 +295,7 @@ tokens that call any method outside that allowlist:
 - watchtower preimages and watches: `create_preimage`, `remove_preimage`,
   `create_watch_channel`, and `remove_watch_channel`
 - tenant invoice and payment data plane: `new_invoice`, `get_invoice`,
-  `send_payment`, `get_payment`, and `list_payments`
+  `settle_invoice`, `send_payment`, `get_payment`, and `list_payments`
 - isolated channel reads: `list_channels`
 
 The middleware puts the verified tenant identity in the request extensions; it
@@ -324,8 +328,12 @@ external-signer channels use the restricted
   in-process endpoint preserves the existing Fiber message structures and
   routes them by tenant/channel ownership. Runtime and endpoint registration
   are single-owner and refuse replacement by another live actor.
-- Private channels may use the existing internal signer path or the external
-  funding/signer workflow. External channel and watchtower requests are
+- Private channels open through the external funding/signer workflow: the tenant
+  calls `open_channel_with_external_funding`, signs the funding transaction on its
+  own side, and submits it with `submit_signed_funding_tx`. The internal signer
+  path (`open_channel`) is not exposed to tenant tokens, because a hosted tenant
+  has no wallet to fund a channel from; that restriction is recorded in
+  `TENANT_ROUTING_OPERATOR_METHODS`. External channel and watchtower requests are
   persisted, streamed through tenant-authenticated subscriptions, verified by the Node,
   and resumed idempotently after submission.
 - The current remote signer transport provides pending-state recovery over
