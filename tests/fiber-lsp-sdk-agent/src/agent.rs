@@ -24,13 +24,14 @@ struct RpcOpening<'a, R>(&'a R);
 
 #[async_trait::async_trait]
 impl<R: FiberRpc> fiber_lsp_sdk::TenantOpeningRpc for RpcOpening<'_, R> {
-    async fn open_tenant_channel(
+    async fn open_channel_with_external_funding(
         &self,
         token: &str,
         request: fiber_json_types::OpenChannelWithExternalFundingParams,
-    ) -> Result<fiber_json_types::OpenTenantChannelResult, fiber_lsp_sdk::SessionError> {
+    ) -> Result<fiber_json_types::OpenChannelWithExternalFundingResult, fiber_lsp_sdk::SessionError>
+    {
         self.0
-            .open_tenant_channel(token, request)
+            .open_channel_with_external_funding(token, request)
             .await
             .map_err(session_error)
     }
@@ -75,7 +76,7 @@ impl FundingWallet<'_> {
     async fn verify(
         &self,
         request: &fiber_json_types::OpenChannelWithExternalFundingParams,
-        result: &fiber_json_types::OpenTenantChannelResult,
+        result: &fiber_json_types::OpenChannelWithExternalFundingResult,
     ) -> Result<Vec<ckb_types::packed::OutPoint>> {
         let client = reqwest::Client::builder().no_proxy().build()?;
         let mut inputs = Vec::new();
@@ -144,7 +145,13 @@ impl FundingWallet<'_> {
             );
         }
         let contribution = if request.funding_udt_type_script.is_some() {
-            u128::from(result.opening_context.local_reserved_ckb_amount)
+            u128::from(
+                result
+                    .opening_context
+                    .as_ref()
+                    .context("opening response is missing opening_context")?
+                    .local_reserved_ckb_amount,
+            )
         } else {
             request.funding_amount
         };
@@ -167,7 +174,7 @@ impl fiber_lsp_sdk::FundingVerifier for FundingWallet<'_> {
     async fn verify_funding(
         &self,
         request: &fiber_json_types::OpenChannelWithExternalFundingParams,
-        result: &fiber_json_types::OpenTenantChannelResult,
+        result: &fiber_json_types::OpenChannelWithExternalFundingResult,
     ) -> Result<Vec<ckb_types::packed::OutPoint>, fiber_lsp_sdk::SessionError> {
         self.verify(request, result).await.map_err(session_error)
     }
@@ -287,6 +294,8 @@ pub struct AgentStatus {
 pub struct AgentConfig {
     pub store_dir: PathBuf,
     pub status_file: Option<PathBuf>,
+    /// Trusted public Fiber node identity of the hosted LSP.
+    pub lsp_node_id: fiber_types::Pubkey,
 }
 
 /// Auto-approving test client backed by [`fiber_lsp_sdk::HostedSession`].
@@ -394,15 +403,11 @@ impl<R: FiberRpc, S: SignerStore> Agent<R, S> {
         if self.session.tenant_token().is_some() {
             return Ok(());
         }
-        let identity: fiber_types::Pubkey = self.session.identity_public_key().into();
-        let nonce = self
-            .rpc
-            .get_tenant_registry_nonce(identity.into())
-            .await
-            .context("request tenant registration nonce")?;
+        let request_id = Hash256::from(rand::random::<[u8; 32]>());
+        let signed_at = now_ms();
         let params = self
             .session
-            .begin_registration(nonce)
+            .begin_registration(self.config.lsp_node_id, request_id, signed_at)
             .map_err(|error| anyhow!("begin registration: {error}"))?;
         let registered = self
             .rpc
@@ -422,7 +427,7 @@ impl<R: FiberRpc, S: SignerStore> Agent<R, S> {
         request: fiber_json_types::OpenChannelWithExternalFundingParams,
         network: &fiber_lsp_sdk::OpeningNetwork,
         ckb_rpc_url: &str,
-    ) -> Result<fiber_json_types::OpenTenantChannelResult> {
+    ) -> Result<fiber_json_types::OpenChannelWithExternalFundingResult> {
         let result = self
             .session
             .open_tenant_channel(
@@ -1024,15 +1029,14 @@ fn write_root_key(path: &Path, secret: &[u8; 32]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use ckb_types::prelude::*;
     use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
     use fiber_json_types::SubmitWatchtowerSignatureResult;
     use fiber_json_types::{
-        ChannelSigningStatus, GetChannelSigningStatusResult, GetLspTenantRegistryNonceResult,
-        Hash256 as JsonHash256, LspTenantRuntimeStatus, LspTenantStatus, RegisterLspTenantParams,
-        RegisterLspTenantResult, SubmitChannelSignatureParams,
+        ChannelSigningStatus, GetChannelSigningStatusResult, Hash256 as JsonHash256,
+        LspTenantRuntimeStatus, LspTenantStatus, RegisterLspTenantParams, RegisterLspTenantResult,
+        SubmitChannelSignatureParams,
     };
     use fiber_lsp_sdk::{MemoryStore, RootKey, RootSigner, SignerStore};
     use fiber_types::{Privkey, TenantId, TenantRegistryPayload, TenantRegistrySignature};
@@ -1048,9 +1052,9 @@ mod tests {
 
     #[derive(Default)]
     struct FakeNodeState {
-        nonce_calls: usize,
         preimage_releases: usize,
         register_calls: usize,
+        registration_request_ids: Vec<JsonHash256>,
         statuses: HashMap<JsonHash256, ChannelSigningStatus>,
         submissions: Vec<SubmitChannelSignatureParams>,
         watchtower_statuses: HashMap<JsonHash256, WatchtowerSigningStatus>,
@@ -1065,6 +1069,10 @@ mod tests {
                 lsp_key: Privkey::from(&[9u8; 32]),
             }
         }
+    }
+
+    fn lsp_node_id() -> fiber_types::Pubkey {
+        Privkey::from(&[9u8; 32]).pubkey()
     }
 
     impl FakeNode {
@@ -1098,33 +1106,35 @@ mod tests {
             Ok(())
         }
 
-        async fn get_tenant_registry_nonce(
-            &self,
-            root_signer_pubkey: fiber_json_types::Pubkey,
-        ) -> Result<GetLspTenantRegistryNonceResult> {
-            self.state().nonce_calls += 1;
-            Ok(GetLspTenantRegistryNonceResult {
-                lsp_node_id: self.lsp_key.pubkey().into(),
-                root_signer_pubkey,
-                nonce: JsonHash256([5u8; 32]),
-            })
-        }
-
         async fn register_tenant(
             &self,
             params: RegisterLspTenantParams,
         ) -> Result<RegisterLspTenantResult> {
             let root_signer_pubkey = fiber_types::Pubkey::try_from(params.root_signer_pubkey)
                 .map_err(|error| anyhow!(error))?;
-            let nonce: Hash256 = params.nonce.into();
-            let payload =
-                TenantRegistryPayload::new(self.lsp_key.pubkey(), root_signer_pubkey, nonce.into());
+            let request_id: fiber_types::Hash256 = params.request_id.into();
+            let payload = TenantRegistryPayload::new(
+                self.lsp_key.pubkey(),
+                root_signer_pubkey,
+                request_id.into(),
+                params.signed_at,
+            );
             let signature = TenantRegistrySignature::from_slice(&hex::decode(params.signature)?)?;
             payload
                 .verify_signature(&signature)
                 .map_err(|error| anyhow!(error))?;
+            payload
+                .validate_signed_at(now_ms())
+                .map_err(|error| anyhow!(error))?;
             let tenant_id = TenantId::from_root_signer_pubkey(&root_signer_pubkey);
-            self.state().register_calls += 1;
+            let mut state = self.state();
+            anyhow::ensure!(
+                !state.registration_request_ids.contains(&params.request_id),
+                "tenant registration request was already consumed"
+            );
+            state.registration_request_ids.push(params.request_id);
+            state.register_calls += 1;
+            drop(state);
             Ok(RegisterLspTenantResult {
                 tenant: LspTenantStatus {
                     tenant_id: tenant_id.as_str().to_string(),
@@ -1264,10 +1274,10 @@ mod tests {
             epoch_duration_ms: 2000,
             minimum_shutdown_fee: 100_000_000,
         };
-        let result = fiber_json_types::OpenTenantChannelResult {
+        let result = fiber_json_types::OpenChannelWithExternalFundingResult {
             channel_id: channel_id.into(),
             unsigned_funding_tx: tx.clone().into(),
-            opening_context: fiber_json_types::TenantChannelOpeningContext {
+            opening_context: Some(fiber_json_types::TenantChannelOpeningContext {
                 remote_funding_key: terms.remote_funding_key.into(),
                 remote_settlement_key: terms.remote_settlement_key.into(),
                 remote_shutdown_script: terms.remote_shutdown_script.into(),
@@ -1277,20 +1287,22 @@ mod tests {
                 remote_amount: terms.remote_amount,
                 local_reserved_ckb_amount: terms.local_reserved_ckb_amount,
                 remote_reserved_ckb_amount: terms.remote_reserved_ckb_amount,
-            },
+            }),
         };
         struct Proposal(
-            fiber_json_types::OpenTenantChannelResult,
+            fiber_json_types::OpenChannelWithExternalFundingResult,
             Vec<ckb_types::packed::OutPoint>,
         );
         #[async_trait::async_trait]
         impl fiber_lsp_sdk::TenantOpeningRpc for Proposal {
-            async fn open_tenant_channel(
+            async fn open_channel_with_external_funding(
                 &self,
                 _token: &str,
                 _request: fiber_json_types::OpenChannelWithExternalFundingParams,
-            ) -> Result<fiber_json_types::OpenTenantChannelResult, fiber_lsp_sdk::SessionError>
-            {
+            ) -> Result<
+                fiber_json_types::OpenChannelWithExternalFundingResult,
+                fiber_lsp_sdk::SessionError,
+            > {
                 Ok(self.0.clone())
             }
         }
@@ -1299,7 +1311,7 @@ mod tests {
             async fn verify_funding(
                 &self,
                 _request: &fiber_json_types::OpenChannelWithExternalFundingParams,
-                _result: &fiber_json_types::OpenTenantChannelResult,
+                _result: &fiber_json_types::OpenChannelWithExternalFundingResult,
             ) -> Result<Vec<ckb_types::packed::OutPoint>, fiber_lsp_sdk::SessionError> {
                 Ok(self.1.clone())
             }
@@ -1342,6 +1354,7 @@ mod tests {
             AgentConfig {
                 store_dir: dir.to_path_buf(),
                 status_file: Some(dir.join("status.json")),
+                lsp_node_id: lsp_node_id(),
             },
             PersistedAgent {
                 tenant_token: Some("tenant-token".to_string()),
@@ -1361,6 +1374,7 @@ mod tests {
             AgentConfig {
                 store_dir: dir.path().to_path_buf(),
                 status_file: Some(status_path.clone()),
+                lsp_node_id: lsp_node_id(),
             },
         )
         .await
@@ -1369,8 +1383,8 @@ mod tests {
         agent.initialize().await.expect("initialize");
 
         let state = node.state();
-        assert_eq!(state.nonce_calls, 1);
         assert_eq!(state.register_calls, 1);
+        assert_eq!(state.registration_request_ids.len(), 1);
         drop(state);
         let status: AgentStatus =
             serde_json::from_slice(&fs::read(status_path).expect("read status")).expect("status");
@@ -1386,6 +1400,7 @@ mod tests {
         let config = || AgentConfig {
             store_dir: dir.path().to_path_buf(),
             status_file: Some(dir.path().join("status.json")),
+            lsp_node_id: lsp_node_id(),
         };
         let mut first = Agent::open(node.clone(), config())
             .await
@@ -1400,7 +1415,6 @@ mod tests {
 
         assert_eq!(reopened.tenant_id(), tenant_id);
         assert_eq!(reopened.pending_channel_key_id(), pending);
-        assert_eq!(node.state().nonce_calls, 1);
         assert_eq!(node.state().register_calls, 1);
     }
 
@@ -1463,6 +1477,7 @@ mod tests {
             AgentConfig {
                 store_dir: dir.path().to_path_buf(),
                 status_file: None,
+                lsp_node_id: lsp_node_id(),
             },
         )
         .await
@@ -1504,6 +1519,7 @@ mod tests {
             AgentConfig {
                 store_dir: dir.path().into(),
                 status_file: None,
+                lsp_node_id: lsp_node_id(),
             },
         )
         .await
@@ -1577,6 +1593,7 @@ mod tests {
             AgentConfig {
                 store_dir: dir.path().into(),
                 status_file: None,
+                lsp_node_id: lsp_node_id(),
             },
         )
         .await
@@ -1673,6 +1690,7 @@ mod tests {
         let config = || AgentConfig {
             store_dir: dir.path().to_path_buf(),
             status_file: Some(dir.path().join("status.json")),
+            lsp_node_id: lsp_node_id(),
         };
         let mut first = Agent::open(node.clone(), config())
             .await

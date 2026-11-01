@@ -2954,10 +2954,10 @@ async fn test_tenant_channel_opening_persists_before_and_after_final_id() {
             .get_tenant_channel_opening()
             .is_none());
     }
-    let result = fiber_json_types::OpenTenantChannelResult {
+    let result = fiber_json_types::OpenChannelWithExternalFundingResult {
         channel_id: final_id.into(),
         unsigned_funding_tx: Transaction::default().into(),
-        opening_context: fiber_json_types::TenantChannelOpeningContext {
+        opening_context: Some(fiber_json_types::TenantChannelOpeningContext {
             remote_funding_key: material.base_public_keys.funding_pubkey.into(),
             remote_settlement_key: material.base_public_keys.tlc_base_key.into(),
             remote_shutdown_script: Script::default().into(),
@@ -2967,7 +2967,7 @@ async fn test_tenant_channel_opening_persists_before_and_after_final_id() {
             remote_amount: 50_000_000_000,
             local_reserved_ckb_amount: 9_900_000_000,
             remote_reserved_ckb_amount: 9_900_000_000,
-        },
+        }),
     };
     {
         let store = open_store(&path)

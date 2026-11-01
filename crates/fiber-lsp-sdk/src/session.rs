@@ -6,9 +6,9 @@
 use std::collections::HashMap;
 
 use fiber_json_types::{
-    ChannelSigningStatus, CreateWatchChannelParams, GetLspTenantRegistryNonceResult,
-    RegisterLspTenantParams, RegisterLspTenantResult, SubmitChannelSignatureParams,
-    SubmitWatchtowerSignatureParams, WatchtowerSigningStatus,
+    ChannelSigningStatus, CreateWatchChannelParams, RegisterLspTenantParams,
+    RegisterLspTenantResult, SubmitChannelSignatureParams, SubmitWatchtowerSignatureParams,
+    WatchtowerSigningStatus,
 };
 use fiber_types::{Hash256, TenantId, TenantRegistryPayload};
 use serde::{Deserialize, Serialize};
@@ -175,30 +175,26 @@ impl<S: SignerStore> HostedSession<S> {
         Ok(self.root.open_channel(key_id).await?)
     }
 
-    /// Build a registration or credential refresh request from a fresh LSP nonce.
+    /// Build a registration or credential refresh request for a client-generated request.
     /// The caller sends it through the registration RPC in either case.
     pub fn begin_registration(
         &self,
-        nonce: GetLspTenantRegistryNonceResult,
+        trusted_lsp_node_id: fiber_types::Pubkey,
+        request_id: Hash256,
+        signed_at: u64,
     ) -> Result<RegisterLspTenantParams, SessionError> {
         let root_signer_pubkey: fiber_types::Pubkey = self.root.identity_public_key().into();
-        let returned_root = fiber_types::Pubkey::try_from(nonce.root_signer_pubkey)
-            .map_err(SessionError::Invalid)?;
-        if returned_root != root_signer_pubkey {
-            return Err(SessionError::Invalid(
-                "LSP returned a nonce for another RootSigner".to_string(),
-            ));
-        }
-        let nonce_hash: Hash256 = nonce.nonce.into();
         let payload = TenantRegistryPayload::new(
-            fiber_types::Pubkey::try_from(nonce.lsp_node_id).map_err(SessionError::Invalid)?,
+            trusted_lsp_node_id,
             root_signer_pubkey,
-            nonce_hash.into(),
+            request_id.into(),
+            signed_at,
         );
         let signature = self.root.sign_tenant_registry_payload(&payload)?;
         Ok(RegisterLspTenantParams {
             root_signer_pubkey: root_signer_pubkey.into(),
-            nonce: nonce_hash.into(),
+            request_id: request_id.into(),
+            signed_at,
             signature: hex::encode(signature.serialize()),
         })
     }
@@ -235,8 +231,10 @@ impl<S: SignerStore> HostedSession<S> {
     }
 
     /// Open a tenant channel and return only after wallet/context verification and persistence.
-    /// The original intent is persisted before the RPC. Retry the identical request
-    /// after interruption; the existing pending signer and intent are reused.
+    /// The transport call is the generic `open_channel_with_external_funding` RPC, and the
+    /// response must include `opening_context`. The original intent is persisted before the
+    /// RPC. Retry the identical request after interruption; the existing pending signer and
+    /// intent are reused.
     pub async fn open_tenant_channel<R, V, P>(
         &mut self,
         request: fiber_json_types::OpenChannelWithExternalFundingParams,
@@ -244,7 +242,7 @@ impl<S: SignerStore> HostedSession<S> {
         rpc: &R,
         wallet: &V,
         persistence: &P,
-    ) -> Result<fiber_json_types::OpenTenantChannelResult, SessionError>
+    ) -> Result<fiber_json_types::OpenChannelWithExternalFundingResult, SessionError>
     where
         R: crate::TenantOpeningRpc,
         V: crate::FundingVerifier,
@@ -257,7 +255,9 @@ impl<S: SignerStore> HostedSession<S> {
             .ok_or(SessionError::NotRegistered)?;
         let request = self.begin_channel_opening(request).await?;
         persistence.save_session(&self.state).await?;
-        let result = rpc.open_tenant_channel(&token, request.clone()).await?;
+        let result = rpc
+            .open_channel_with_external_funding(&token, request.clone())
+            .await?;
         let inputs = wallet.verify_funding(&request, &result).await?;
         self.finish_channel_opening(&result, network, &inputs)
             .await?;
@@ -265,8 +265,9 @@ impl<S: SignerStore> HostedSession<S> {
         Ok(result)
     }
 
-    /// Persist the original client request before sending `open_tenant_channel`.
-    /// The caller must persist `state()` before performing network I/O.
+    /// Persist the original client request before sending
+    /// `open_channel_with_external_funding`. The caller must persist `state()`
+    /// before performing network I/O.
     pub(crate) async fn begin_channel_opening(
         &mut self,
         request: fiber_json_types::OpenChannelWithExternalFundingParams,
@@ -323,7 +324,7 @@ impl<S: SignerStore> HostedSession<S> {
     /// debit and fee, and its selected inputs. Network constants come from trusted config.
     pub(crate) async fn finish_channel_opening(
         &mut self,
-        result: &fiber_json_types::OpenTenantChannelResult,
+        result: &fiber_json_types::OpenChannelWithExternalFundingResult,
         network: &crate::OpeningNetwork,
         expected_inputs: &[ckb_types::packed::OutPoint],
     ) -> Result<(), SessionError> {
@@ -727,8 +728,7 @@ impl<S: SignerStore> HostedSession<S> {
 mod tests {
     use ckb_types::prelude::*;
     use fiber_json_types::{
-        ChannelSigningTransition, GetLspTenantRegistryNonceResult, LspTenantRuntimeStatus,
-        LspTenantStatus, RegisterLspTenantResult,
+        ChannelSigningTransition, LspTenantRuntimeStatus, LspTenantStatus, RegisterLspTenantResult,
     };
     use fiber_types::Privkey;
 
@@ -750,13 +750,8 @@ mod tests {
         HostedSession::new(created)
     }
 
-    fn nonce_for(session: &HostedSession<MemoryStore>) -> GetLspTenantRegistryNonceResult {
-        GetLspTenantRegistryNonceResult {
-            lsp_node_id: lsp_pubkey().into(),
-            root_signer_pubkey: fiber_types::Pubkey::from(session.root.identity_public_key())
-                .into(),
-            nonce: Hash256::from([3; 32]).into(),
-        }
+    fn registration_request() -> (fiber_types::Pubkey, Hash256, u64) {
+        (lsp_pubkey(), Hash256::from([3; 32]), 1_700_000_000_123)
     }
 
     #[tokio::test]
@@ -766,21 +761,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn registration_rejects_a_nonce_for_another_root() {
+    async fn registration_binds_trusted_lsp_and_client_request() {
         let session = session().await;
-        let mut nonce = nonce_for(&session);
-        nonce.root_signer_pubkey = lsp_pubkey().into();
-        assert!(matches!(
-            session.begin_registration(nonce),
-            Err(SessionError::Invalid(_))
-        ));
+        let (lsp_node_id, request_id, signed_at) = registration_request();
+        let params = session
+            .begin_registration(lsp_node_id, request_id, signed_at)
+            .expect("begin");
+        assert_eq!(params.request_id, request_id.into());
+        assert_eq!(params.signed_at, signed_at);
+        let root_signer_pubkey: fiber_types::Pubkey = session.identity_public_key().into();
+        assert_eq!(params.root_signer_pubkey, root_signer_pubkey.into());
+
+        let payload = TenantRegistryPayload::new(
+            lsp_node_id,
+            session.identity_public_key().into(),
+            request_id.into(),
+            signed_at,
+        );
+        let signature = fiber_types::TenantRegistrySignature::from_slice(
+            &hex::decode(&params.signature).expect("signature hex"),
+        )
+        .expect("signature");
+        payload
+            .verify_signature(&signature)
+            .expect("registration signature");
     }
 
     #[tokio::test]
     async fn registration_round_trip_stores_the_token() {
         let mut session = session().await;
+        let (lsp_node_id, request_id, signed_at) = registration_request();
         let params = session
-            .begin_registration(nonce_for(&session))
+            .begin_registration(lsp_node_id, request_id, signed_at)
             .expect("begin");
         session
             .finish_registration(RegisterLspTenantResult {

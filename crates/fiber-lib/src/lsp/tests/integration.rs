@@ -53,14 +53,13 @@ use crate::{
         channel::{
             to_rpc_channel_open_signer_material, GetChannelSigningStatusParams,
             GetChannelSigningStatusResult, OpenChannelWithExternalFundingParams,
-            OpenTenantChannelResult, SubmitChannelSignatureParams, SubmitChannelSignatureResult,
-            SubmitSignedFundingTxParams, SubmitSignedFundingTxResult,
+            OpenChannelWithExternalFundingResult, SubmitChannelSignatureParams,
+            SubmitChannelSignatureResult, SubmitSignedFundingTxParams, SubmitSignedFundingTxResult,
         },
         lsp::{
-            GetLspTenantRegistryNonceParams, GetLspTenantRegistryNonceResult, ListLspTenantsResult,
-            LspPaymentDelivery, LspPaymentDeliveryStatus, LspPaymentHashParams, LspServiceStatus,
-            LspTenantParams, LspTenantRuntimeStatus, RegisterLspTenantParams,
-            RegisterLspTenantResult,
+            ListLspTenantsResult, LspPaymentDelivery, LspPaymentDeliveryStatus,
+            LspPaymentHashParams, LspServiceStatus, LspTenantParams, LspTenantRuntimeStatus,
+            RegisterLspTenantParams, RegisterLspTenantResult,
         },
         payment::{GetPaymentCommandResult, SendPaymentCommandParams},
         server::start_rpc,
@@ -79,7 +78,7 @@ use fiber_lsp_sdk::{ChannelKeyId, ChannelSigner, MemoryStore, RootKey, RootSigne
 const TENANT_ID: &str = "u1";
 const BUFFER_DURATION_MS: u64 = 120_000;
 
-fn authenticated_client(rpc_addr: std::net::SocketAddr, token: &str) -> HttpClient {
+pub(super) fn authenticated_client(rpc_addr: std::net::SocketAddr, token: &str) -> HttpClient {
     let mut headers = HeaderMap::new();
     headers.insert(
         AUTHORIZATION,
@@ -93,24 +92,17 @@ fn authenticated_client(rpc_addr: std::net::SocketAddr, token: &str) -> HttpClie
 
 async fn register_root_signer_tenant(
     client: &HttpClient,
+    lsp_node_id: crate::fiber_types::Pubkey,
     root_signer_key: &crate::fiber_types::Privkey,
 ) -> Result<RegisterLspTenantResult, jsonrpsee::core::ClientError> {
     let root_signer_pubkey = root_signer_key.pubkey();
-    let challenge: GetLspTenantRegistryNonceResult = client
-        .request(
-            "lsp_get_tenant_registry_nonce",
-            rpc_params![GetLspTenantRegistryNonceParams {
-                root_signer_pubkey: root_signer_pubkey.into(),
-            }],
-        )
-        .await
-        .expect("issue tenant registration nonce");
-    let lsp_node_id = crate::fiber_types::Pubkey::from_slice(&challenge.lsp_node_id.0)
-        .expect("valid LSP node id");
+    let request_id = crate::gen_rand_sha256_hash();
+    let signed_at = crate::now_timestamp_as_millis_u64();
     let payload = crate::fiber_types::TenantRegistryPayload::new(
         lsp_node_id,
         root_signer_pubkey,
-        challenge.nonce.0,
+        request_id.into(),
+        signed_at,
     );
     let signature = SECP256K1.sign_ecdsa(
         &secp256k1::Message::from_digest(payload.digest()),
@@ -121,7 +113,8 @@ async fn register_root_signer_tenant(
             "lsp_register_tenant",
             rpc_params![RegisterLspTenantParams {
                 root_signer_pubkey: root_signer_pubkey.into(),
-                nonce: challenge.nonce,
+                request_id: request_id.into(),
+                signed_at,
                 signature: hex::encode(signature.serialize_compact()),
             }],
         )
@@ -134,15 +127,12 @@ async fn register_authenticated_network_tenant(
     root_signer_key: &Privkey,
 ) -> (TenantId, String) {
     let root_signer_pubkey = root_signer_key.pubkey();
-    let nonce = ractor::call!(
-        actor,
-        LspServiceMessage::IssueTenantRegistryNonce,
-        root_signer_pubkey
-    )
-    .expect("issue tenant registry nonce")
-    .expect("nonce");
-    let payload =
-        crate::fiber_types::TenantRegistryPayload::new(lsp_node_id, root_signer_pubkey, nonce);
+    let payload = crate::fiber_types::TenantRegistryPayload::new(
+        lsp_node_id,
+        root_signer_pubkey,
+        crate::gen_rand_sha256_hash().into(),
+        crate::now_timestamp_as_millis_u64(),
+    );
     let signature = crate::fiber_types::TenantRegistrySignature(
         SECP256K1
             .sign_ecdsa(
@@ -341,47 +331,48 @@ async fn wait_for_delivery_status(
     .expect("delivery reached expected status")
 }
 
-struct HostedTenantTestNode {
-    name: String,
-    tenant_id: TenantId,
-    lsp_node_index: usize,
-    node: NetworkNode,
-    private_channel_id: crate::fiber_types::Hash256,
-    client: HttpClient,
+pub(super) struct HostedTenantTestNode {
+    pub(super) name: String,
+    pub(super) tenant_id: TenantId,
+    pub(super) lsp_node_index: usize,
+    pub(super) node: NetworkNode,
+    pub(super) private_channel_id: crate::fiber_types::Hash256,
+    pub(super) client: HttpClient,
 }
 
-struct LspTestService {
-    node_index: usize,
-    client: HttpClient,
-    rpc_handle: ServerHandle,
-    actor: ActorRef<LspServiceMessage>,
-    rpc_addr: std::net::SocketAddr,
+pub(super) struct LspTestService {
+    pub(super) node_index: usize,
+    pub(super) client: HttpClient,
+    pub(super) rpc_handle: ServerHandle,
+    pub(super) actor: ActorRef<LspServiceMessage>,
+    pub(super) rpc_addr: std::net::SocketAddr,
+    pub(super) biscuit_private_key: String,
 }
 
-struct LspTestNetwork {
-    nodes: Vec<NetworkNode>,
-    channel_ids: Vec<crate::fiber_types::Hash256>,
-    tenants: Vec<HostedTenantTestNode>,
-    lsp_services: Vec<LspTestService>,
-    _root: TempDir,
+pub(super) struct LspTestNetwork {
+    pub(super) nodes: Vec<NetworkNode>,
+    pub(super) channel_ids: Vec<crate::fiber_types::Hash256>,
+    pub(super) tenants: Vec<HostedTenantTestNode>,
+    pub(super) lsp_services: Vec<LspTestService>,
+    pub(super) _root: TempDir,
 }
 
 impl LspTestNetwork {
-    fn lsp(&self, node_index: usize) -> &LspTestService {
+    pub(super) fn lsp(&self, node_index: usize) -> &LspTestService {
         self.lsp_services
             .iter()
             .find(|lsp| lsp.node_index == node_index)
             .unwrap_or_else(|| panic!("network node {node_index} is not an LSP"))
     }
 
-    fn tenant(&self, lsp_node_index: usize, name: &str) -> &HostedTenantTestNode {
+    pub(super) fn tenant(&self, lsp_node_index: usize, name: &str) -> &HostedTenantTestNode {
         self.tenants
             .iter()
             .find(|tenant| tenant.lsp_node_index == lsp_node_index && tenant.name == name)
             .unwrap_or_else(|| panic!("unknown hosted tenant {name} on LSP node {lsp_node_index}"))
     }
 
-    fn tenant_lsp(&self, lsp_node_index: usize, tenant_id: &str) -> &LspTestService {
+    pub(super) fn tenant_lsp(&self, lsp_node_index: usize, tenant_id: &str) -> &LspTestService {
         self.lsp(self.tenant(lsp_node_index, tenant_id).lsp_node_index)
     }
 
@@ -428,7 +419,7 @@ impl LspTestNetwork {
             .await
     }
 
-    async fn stop(self) {
+    pub(super) async fn stop(self) {
         for lsp in self.lsp_services {
             lsp.rpc_handle.stop().expect("stop LSP RPC server");
             lsp.rpc_handle.stopped().await;
@@ -553,7 +544,10 @@ async fn open_hosted_external_channel(
         ),
     ] {
         let error = client
-            .request::<OpenTenantChannelResult, _>("open_tenant_channel", rpc_params![bad])
+            .request::<OpenChannelWithExternalFundingResult, _>(
+                "open_channel_with_external_funding",
+                rpc_params![bad],
+            )
             .await
             .unwrap_err();
         assert!(error.to_string().contains(message), "{error}");
@@ -618,8 +612,8 @@ async fn open_hosted_external_channel(
     let concurrent_request = retry_request.clone();
     let concurrent_open = tokio::spawn(async move {
         concurrent_client
-            .request::<OpenTenantChannelResult, _>(
-                "open_tenant_channel",
+            .request::<OpenChannelWithExternalFundingResult, _>(
+                "open_channel_with_external_funding",
                 rpc_params![concurrent_request],
             )
             .await
@@ -652,8 +646,11 @@ async fn open_hosted_external_channel(
     );
     let channel_id: crate::fiber_types::Hash256 = open.channel_id.into();
     let unsigned_tx: Transaction = open.unsigned_funding_tx.clone().into();
-    let repeated: OpenTenantChannelResult = client
-        .request("open_tenant_channel", rpc_params![retry_request.clone()])
+    let repeated: OpenChannelWithExternalFundingResult = client
+        .request(
+            "open_channel_with_external_funding",
+            rpc_params![retry_request.clone()],
+        )
         .await
         .expect("idempotent retry");
     assert_eq!(
@@ -663,7 +660,10 @@ async fn open_hosted_external_channel(
     let mut conflicting = retry_request;
     conflicting.funding_amount += 1;
     assert!(client
-        .request::<OpenTenantChannelResult, _>("open_tenant_channel", rpc_params![conflicting])
+        .request::<OpenChannelWithExternalFundingResult, _>(
+            "open_channel_with_external_funding",
+            rpc_params![conflicting]
+        )
         .await
         .is_err());
     let signed_tx = unsigned_tx
@@ -907,7 +907,7 @@ async fn create_lsp_test_network(
 }
 
 #[allow(clippy::type_complexity)]
-async fn create_lsp_test_network_inner(
+pub(super) async fn create_lsp_test_network_inner(
     network_channels: &[((usize, usize), (u128, u128), bool)],
     node_count: usize,
     tenant_channels: &[((usize, &str), (u128, u128))],
@@ -1078,6 +1078,7 @@ async fn create_lsp_test_network_inner(
             rpc_handle,
             actor: lsp_actor,
             rpc_addr,
+            biscuit_private_key: biscuit_root.private().to_prefixed_string(),
         });
     }
 
@@ -1551,16 +1552,19 @@ async fn biscuit_tenant_context_routes_standard_rpc_to_hosted_runtime() {
     let public_client = authenticated_client(rpc_addr, &public_invoice_token);
 
     assert!(public_client
-        .request::<GetLspTenantRegistryNonceResult, _>(
-            "lsp_get_tenant_registry_nonce",
-            rpc_params![GetLspTenantRegistryNonceParams {
+        .request::<RegisterLspTenantResult, _>(
+            "lsp_register_tenant",
+            rpc_params![RegisterLspTenantParams {
                 root_signer_pubkey: root_signer_key.pubkey().into(),
+                request_id: fiber_json_types::Hash256([9; 32]),
+                signed_at: crate::now_timestamp_as_millis_u64(),
+                signature: String::new(),
             }],
         )
         .await
         .is_err());
 
-    let registered = register_root_signer_tenant(&admin_client, &root_signer_key)
+    let registered = register_root_signer_tenant(&admin_client, public_t.pubkey, &root_signer_key)
         .await
         .expect("register RootSigner tenant");
     assert_eq!(registered.tenant.tenant_id, tenant_id.as_str());
@@ -1572,9 +1576,9 @@ async fn biscuit_tenant_context_routes_standard_rpc_to_hosted_runtime() {
         registered.tenant.runtime_status,
         LspTenantRuntimeStatus::Cold
     ));
-    // The helper obtains a fresh challenge and proof, so it must refresh the
-    // existing tenant credential rather than be treated as a replay.
-    let refreshed = register_root_signer_tenant(&admin_client, &root_signer_key)
+    // A new client-generated request refreshes the existing tenant rather than
+    // being treated as a replay.
+    let refreshed = register_root_signer_tenant(&admin_client, public_t.pubkey, &root_signer_key)
         .await
         .expect("refresh RootSigner tenant credentials through RPC");
     assert_eq!(refreshed.tenant.tenant_id, registered.tenant.tenant_id);

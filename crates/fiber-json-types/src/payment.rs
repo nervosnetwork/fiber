@@ -31,6 +31,10 @@ pub enum PaymentStatus {
 pub struct GetPaymentCommandParams {
     /// The payment hash of the payment to retrieve
     pub payment_hash: Hash256,
+    /// Hosted tenant whose payment store should be queried. Tenant tokens may
+    /// only omit this field or repeat their own tenant id. Operator tokens need
+    /// the additional `read("lsp")` capability to select a tenant explicitly.
+    pub tenant_id: Option<String>,
 }
 
 /// The node and channel information in a payment route hop.

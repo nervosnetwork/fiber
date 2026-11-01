@@ -234,12 +234,21 @@ methods are:
 - `lsp_get_status`
 - `lsp_register_tenant`, `lsp_ensure_tenant`, `lsp_evict_tenant`, and
   `lsp_list_tenants`
-- `lsp_get_invoice` and `lsp_get_payment`
 - `lsp_get_payment_delivery`
 
 With Biscuit authentication enabled, reads require `read("lsp")` and mutations
 require `write("lsp")`. These are operator/SDK APIs and should not be exposed to
 untrusted clients without authentication.
+
+Registration uses `lsp_register_tenant` with a RootSigner signature binding the
+LSP identity, a client-generated 32-byte `request_id`, and `signed_at` in Unix
+milliseconds. Proofs expire after five minutes, allow thirty seconds of future
+clock skew, and are consumed durably; obtaining a server nonce is unnecessary.
+
+`get_invoice` and `get_payment` accept an optional `tenant_id`. Tenant tokens
+may omit it or name themselves, but cannot select another tenant. Operators may
+select a tenant when they have both the ordinary query permission and
+`read("lsp")`. Omitting it retains the public-node namespace for operator calls.
 
 Hosted tenant data-plane requests reuse a restricted subset of the standard
 Fiber RPC method names.

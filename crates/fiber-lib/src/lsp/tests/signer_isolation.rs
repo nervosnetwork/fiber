@@ -50,8 +50,7 @@ use crate::{
             SubmitSignedFundingTxParams, SubmitSignedFundingTxResult,
         },
         lsp::{
-            GetLspTenantRegistryNonceParams, GetLspTenantRegistryNonceResult, LspServiceStatus,
-            LspTenantParams, LspTenantRuntimeStatus, RegisterLspTenantParams,
+            LspServiceStatus, LspTenantParams, LspTenantRuntimeStatus, RegisterLspTenantParams,
             RegisterLspTenantResult,
         },
         server::start_rpc,
@@ -83,24 +82,17 @@ fn authenticated_client(rpc_addr: std::net::SocketAddr, token: &str) -> HttpClie
 
 async fn register_root_signer_tenant(
     client: &HttpClient,
+    lsp_node_id: crate::fiber_types::Pubkey,
     root_signer_key: &Privkey,
 ) -> Result<RegisterLspTenantResult, jsonrpsee::core::ClientError> {
     let root_signer_pubkey = root_signer_key.pubkey();
-    let challenge: GetLspTenantRegistryNonceResult = client
-        .request(
-            "lsp_get_tenant_registry_nonce",
-            rpc_params![GetLspTenantRegistryNonceParams {
-                root_signer_pubkey: root_signer_pubkey.into(),
-            }],
-        )
-        .await
-        .expect("issue tenant registration nonce");
-    let lsp_node_id = crate::fiber_types::Pubkey::from_slice(&challenge.lsp_node_id.0)
-        .expect("valid LSP node id");
+    let request_id = crate::gen_rand_sha256_hash();
+    let signed_at = crate::now_timestamp_as_millis_u64();
     let payload = crate::fiber_types::TenantRegistryPayload::new(
         lsp_node_id,
         root_signer_pubkey,
-        challenge.nonce.0,
+        request_id.into(),
+        signed_at,
     );
     let signature = SECP256K1.sign_ecdsa(
         &secp256k1::Message::from_digest(payload.digest()),
@@ -111,7 +103,8 @@ async fn register_root_signer_tenant(
             "lsp_register_tenant",
             rpc_params![RegisterLspTenantParams {
                 root_signer_pubkey: root_signer_pubkey.into(),
-                nonce: challenge.nonce,
+                request_id: request_id.into(),
+                signed_at,
                 signature: hex::encode(signature.serialize_compact()),
             }],
         )
@@ -276,7 +269,7 @@ impl TestLspFixture {
     ) -> (TenantId, crate::fiber_types::Pubkey, String, HttpClient) {
         let key = Privkey::from(&[secret_byte; 32]);
         let tenant_id = TenantId::from_root_signer_pubkey(&key.pubkey());
-        let reg = register_root_signer_tenant(&self.admin_client, &key)
+        let reg = register_root_signer_tenant(&self.admin_client, self.public_t.pubkey, &key)
             .await
             .expect("register tenant");
         let client = authenticated_client(self.rpc_addr, &reg.access_token);

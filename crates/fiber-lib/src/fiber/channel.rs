@@ -5970,15 +5970,15 @@ impl ChannelActorState {
     pub(crate) fn tenant_opening_result(
         &self,
         funding_tx: Transaction,
-    ) -> fiber_json_types::OpenTenantChannelResult {
+    ) -> fiber_json_types::OpenChannelWithExternalFundingResult {
         let channel = self;
         let channel_id = self.get_id();
         let remote = channel.get_remote_channel_public_keys();
         let ckb = channel.funding_udt_type_script.is_none();
-        return fiber_json_types::OpenTenantChannelResult {
+        return fiber_json_types::OpenChannelWithExternalFundingResult {
             channel_id: channel_id.into(),
             unsigned_funding_tx: funding_tx.into(),
-            opening_context: fiber_json_types::TenantChannelOpeningContext {
+            opening_context: Some(fiber_json_types::TenantChannelOpeningContext {
                 remote_funding_key: remote.funding_pubkey.into(),
                 remote_settlement_key: remote.tlc_base_key.into(),
                 remote_shutdown_script: channel.get_remote_shutdown_script().into(),
@@ -5998,7 +5998,7 @@ impl ChannelActorState {
                     },
                 local_reserved_ckb_amount: channel.local_reserved_ckb_amount,
                 remote_reserved_ckb_amount: channel.remote_reserved_ckb_amount,
-            },
+            }),
         };
     }
 
@@ -12056,7 +12056,7 @@ pub trait ChannelActorStateStore {
 pub struct TenantChannelOpening {
     pub command: super::network::OpenChannelWithExternalFundingCommand,
     pub channel_id: Hash256,
-    pub result: Option<fiber_json_types::OpenTenantChannelResult>,
+    pub result: Option<fiber_json_types::OpenChannelWithExternalFundingResult>,
     pub terminated: bool,
 }
 

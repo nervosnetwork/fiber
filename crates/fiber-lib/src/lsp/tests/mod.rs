@@ -35,6 +35,8 @@ use crate::store::{open_store, NodeNamespace, Store};
 #[cfg(not(target_arch = "wasm32"))]
 mod integration;
 #[cfg(not(target_arch = "wasm32"))]
+mod query_rpc;
+#[cfg(not(target_arch = "wasm32"))]
 mod signer_isolation;
 
 fn test_token_issuer() -> BiscuitTokenIssuer {
@@ -170,24 +172,13 @@ fn ensure_hosted_watch_skips_an_existing_row() {
 }
 
 #[test]
-fn authenticated_tenant_registry_replaces_consumes_and_persists_nonces() {
+fn authenticated_tenant_registry_consumes_and_persists_request_ids() {
     let root = tempdir().expect("temporary directory");
     let config = lsp_config(root.path().join("lsp"));
     let store = open_lsp_store(&config);
     let registry = TenantRegistry::new(store.clone());
     let root_signer_pubkey = Privkey::from(&[7; 32]).pubkey();
     let tenant_id = TenantId::from_root_signer_pubkey(&root_signer_pubkey);
-    let first = registry
-        .issue_registration_nonce(&root_signer_pubkey)
-        .unwrap();
-    let second = registry
-        .issue_registration_nonce(&root_signer_pubkey)
-        .unwrap();
-    assert_ne!(first, second);
-    assert_eq!(
-        registry.registration_nonce(&root_signer_pubkey).unwrap(),
-        Some(second)
-    );
     let record = HostedTenantRecord {
         tenant_id: tenant_id.clone(),
         root_signer_pubkey: Some(root_signer_pubkey),
@@ -195,27 +186,93 @@ fn authenticated_tenant_registry_replaces_consumes_and_persists_nonces() {
         private_channel_id: None,
         created_at: 42,
     };
-    assert!(registry
-        .register_authenticated(record.clone(), first)
-        .unwrap_err()
-        .contains("missing, replaced, or consumed"));
+    let first = [1; 32];
+    let second = [2; 32];
     assert_eq!(
         registry
-            .register_authenticated(record.clone(), second)
+            .register_authenticated(record.clone(), first)
             .unwrap(),
         record
     );
+    assert!(registry
+        .register_authenticated(record.clone(), first)
+        .unwrap_err()
+        .contains("already consumed"));
     assert_eq!(
-        registry.registration_nonce(&root_signer_pubkey).unwrap(),
-        None
+        registry
+            .refresh_authenticated(root_signer_pubkey, second)
+            .unwrap(),
+        record
     );
+    assert!(registry
+        .refresh_authenticated(root_signer_pubkey, second)
+        .unwrap_err()
+        .contains("already consumed"));
 
-    let reopened = TenantRegistry::new(store);
+    let reopened = TenantRegistry::new(store.clone());
     assert_eq!(reopened.get(&tenant_id).unwrap(), Some(record.clone()));
     assert!(reopened
-        .register_authenticated(record, second)
+        .refresh_authenticated(root_signer_pubkey, second)
+        .unwrap_err()
+        .contains("already consumed"));
+    assert_eq!(
+        reopened
+            .refresh_authenticated(root_signer_pubkey, [3; 32])
+            .unwrap(),
+        record
+    );
+    assert!(reopened
+        .register_authenticated(record.clone(), [4; 32])
         .unwrap_err()
         .contains("already registered"));
+
+    // Request ids are consumed per RootSigner, so another identity may reuse one.
+    let other_root = Privkey::from(&[9; 32]).pubkey();
+    let other_record = HostedTenantRecord {
+        tenant_id: TenantId::from_root_signer_pubkey(&other_root),
+        root_signer_pubkey: Some(other_root),
+        tenant_pubkey: Privkey::from(&[10; 32]).pubkey(),
+        private_channel_id: None,
+        created_at: 43,
+    };
+    assert_eq!(
+        reopened
+            .register_authenticated(other_record.clone(), first)
+            .unwrap(),
+        other_record
+    );
+
+    // Concurrent refreshes must mint credentials for this request at most once.
+    let barrier = Arc::new(std::sync::Barrier::new(4));
+    let handles: Vec<_> = (0..4)
+        .map(|_| {
+            let registry = reopened.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                registry.refresh_authenticated(root_signer_pubkey, [5; 32])
+            })
+        })
+        .collect();
+    let outcomes: Vec<_> = handles
+        .into_iter()
+        .map(|handle| handle.join().unwrap())
+        .collect();
+    assert_eq!(outcomes.iter().filter(|outcome| outcome.is_ok()).count(), 1);
+    for error in outcomes.into_iter().filter_map(Result::err) {
+        assert!(error.contains("already consumed"), "{error}");
+    }
+
+    // Close the physical database, not just the registry wrapper, before reopening.
+    drop(reopened);
+    drop(registry);
+    drop(store);
+    let reopened = TenantRegistry::new(open_lsp_store(&config));
+    assert_eq!(reopened.get(&tenant_id).unwrap(), Some(record));
+    assert!(reopened
+        .refresh_authenticated(root_signer_pubkey, [5; 32])
+        .unwrap_err()
+        .contains("already consumed"));
 }
 
 struct NoopNetworkActor;
@@ -1333,20 +1390,39 @@ fn test_protocol_key(secret: u8) -> Privkey {
     Privkey::from(&[secret; 32])
 }
 
+fn fresh_registration_request_id() -> [u8; 32] {
+    static NEXT: AtomicUsize = AtomicUsize::new(1);
+    let sequence = NEXT.fetch_add(1, Ordering::Relaxed) as u64;
+    let mut request_id = [0u8; 32];
+    request_id[..8].copy_from_slice(&sequence.to_be_bytes());
+    request_id
+}
+
+fn registration_payload(
+    lsp_key: &Privkey,
+    root_signer_key: &Privkey,
+    request_id: [u8; 32],
+    signed_at: u64,
+) -> TenantRegistryPayload {
+    TenantRegistryPayload::new(
+        lsp_key.pubkey(),
+        root_signer_key.pubkey(),
+        request_id,
+        signed_at,
+    )
+}
+
 async fn register_authenticated_test_tenant(
     service: &ActorRef<LspServiceMessage>,
     lsp_key: &Privkey,
     root_signer_key: &Privkey,
 ) -> TenantId {
-    let root_signer_pubkey = root_signer_key.pubkey();
-    let nonce = ractor::call!(
-        service,
-        LspServiceMessage::IssueTenantRegistryNonce,
-        root_signer_pubkey
-    )
-    .unwrap()
-    .unwrap();
-    let payload = TenantRegistryPayload::new(lsp_key.pubkey(), root_signer_pubkey, nonce);
+    let payload = registration_payload(
+        lsp_key,
+        root_signer_key,
+        fresh_registration_request_id(),
+        crate::now_timestamp_as_millis_u64(),
+    );
     let registration = ractor::call!(service, |reply| {
         LspServiceMessage::RegisterAuthenticatedTenant {
             signature: sign_tenant_registry_payload(root_signer_key, &payload),
@@ -1371,7 +1447,7 @@ fn sign_tenant_registry_payload(
 }
 
 #[tokio::test]
-async fn service_registers_only_valid_root_signer_proofs_and_consumes_nonce() {
+async fn service_registers_only_valid_root_signer_proofs_and_consumes_requests() {
     let root = tempdir().expect("temporary directory");
     let config = lsp_config(root.path().join("lsp"));
     let store = open_lsp_store(&config);
@@ -1389,36 +1465,15 @@ async fn service_registers_only_valid_root_signer_proofs_and_consumes_nonce() {
     .await;
     let root_signer_key = Privkey::from(&[7; 32]);
     let root_signer_pubkey = root_signer_key.pubkey();
-    let replaced_nonce = ractor::call!(
-        service,
-        LspServiceMessage::IssueTenantRegistryNonce,
-        root_signer_pubkey
-    )
-    .unwrap()
-    .unwrap();
-    let nonce = ractor::call!(
-        service,
-        LspServiceMessage::IssueTenantRegistryNonce,
-        root_signer_pubkey
-    )
-    .unwrap()
-    .unwrap();
+    let now = crate::now_timestamp_as_millis_u64();
+    let request_id = [5; 32];
 
-    let old_payload =
-        TenantRegistryPayload::new(lsp_key.pubkey(), root_signer_pubkey, replaced_nonce);
-    let old_result = ractor::call!(service, |reply| {
-        LspServiceMessage::RegisterAuthenticatedTenant {
-            signature: sign_tenant_registry_payload(&root_signer_key, &old_payload),
-            payload: old_payload,
-            reply,
-        }
-    })
-    .unwrap()
-    .unwrap_err();
-    assert!(old_result.contains("missing, replaced, or consumed"));
-
-    let wrong_lsp_payload =
-        TenantRegistryPayload::new(Privkey::from(&[6; 32]).pubkey(), root_signer_pubkey, nonce);
+    let wrong_lsp_payload = TenantRegistryPayload::new(
+        Privkey::from(&[6; 32]).pubkey(),
+        root_signer_pubkey,
+        request_id,
+        now,
+    );
     let wrong_lsp_result = ractor::call!(service, |reply| {
         LspServiceMessage::RegisterAuthenticatedTenant {
             signature: sign_tenant_registry_payload(&root_signer_key, &wrong_lsp_payload),
@@ -1430,8 +1485,8 @@ async fn service_registers_only_valid_root_signer_proofs_and_consumes_nonce() {
     .unwrap_err();
     assert!(wrong_lsp_result.contains("another LSP node"));
 
-    let payload = TenantRegistryPayload::new(lsp_key.pubkey(), root_signer_pubkey, nonce);
-    let wrong_signature = sign_tenant_registry_payload(&Privkey::from(&[5; 32]), &payload);
+    let payload = registration_payload(&lsp_key, &root_signer_key, request_id, now);
+    let wrong_signature = sign_tenant_registry_payload(&Privkey::from(&[8; 32]), &payload);
     let wrong_signature_result = ractor::call!(service, |reply| {
         LspServiceMessage::RegisterAuthenticatedTenant {
             payload: payload.clone(),
@@ -1442,6 +1497,69 @@ async fn service_registers_only_valid_root_signer_proofs_and_consumes_nonce() {
     .unwrap()
     .unwrap_err();
     assert!(wrong_signature_result.contains("invalid RootSigner registration proof"));
+
+    let mut tampered_timestamp = payload.clone();
+    tampered_timestamp.signed_at = now.saturating_add(1);
+    let tampered_timestamp_result = ractor::call!(service, |reply| {
+        LspServiceMessage::RegisterAuthenticatedTenant {
+            payload: tampered_timestamp,
+            signature: sign_tenant_registry_payload(&root_signer_key, &payload),
+            reply,
+        }
+    })
+    .unwrap()
+    .unwrap_err();
+    assert!(tampered_timestamp_result.contains("invalid RootSigner registration proof"));
+
+    let mut tampered_request_id = payload.clone();
+    tampered_request_id.request_id = [6; 32];
+    let tampered_request_id_result = ractor::call!(service, |reply| {
+        LspServiceMessage::RegisterAuthenticatedTenant {
+            payload: tampered_request_id,
+            signature: sign_tenant_registry_payload(&root_signer_key, &payload),
+            reply,
+        }
+    })
+    .unwrap()
+    .unwrap_err();
+    assert!(tampered_request_id_result.contains("invalid RootSigner registration proof"));
+
+    let expired_payload = registration_payload(
+        &lsp_key,
+        &root_signer_key,
+        [7; 32],
+        now.saturating_sub(crate::fiber_types::TENANT_REGISTRY_MAX_SIGNED_AT_AGE_MS + 1),
+    );
+    let expired_result = ractor::call!(service, |reply| {
+        LspServiceMessage::RegisterAuthenticatedTenant {
+            signature: sign_tenant_registry_payload(&root_signer_key, &expired_payload),
+            payload: expired_payload,
+            reply,
+        }
+    })
+    .unwrap()
+    .unwrap_err();
+    assert!(expired_result.contains("too old"));
+
+    let future_payload = registration_payload(
+        &lsp_key,
+        &root_signer_key,
+        [8; 32],
+        now.saturating_add(
+            crate::fiber_types::TENANT_REGISTRY_MAX_SIGNED_AT_FUTURE_SKEW_MS + 60_000,
+        ),
+    );
+    let future_result = ractor::call!(service, |reply| {
+        LspServiceMessage::RegisterAuthenticatedTenant {
+            signature: sign_tenant_registry_payload(&root_signer_key, &future_payload),
+            payload: future_payload,
+            reply,
+        }
+    })
+    .unwrap()
+    .unwrap_err();
+    assert!(future_result.contains("too far in the future"));
+    assert!(registry.list().unwrap().is_empty());
 
     let registration = ractor::call!(service, |reply| {
         LspServiceMessage::RegisterAuthenticatedTenant {
@@ -1458,22 +1576,40 @@ async fn service_registers_only_valid_root_signer_proofs_and_consumes_nonce() {
         registration.status.record.root_signer_pubkey,
         Some(root_signer_pubkey)
     );
-    assert_eq!(
-        registry.registration_nonce(&root_signer_pubkey).unwrap(),
-        None
-    );
     assert!(!registration.access_token.is_empty());
+    assert_eq!(
+        registry.list().unwrap(),
+        vec![registration.status.record.clone()]
+    );
 
     let replay_result = ractor::call!(service, |reply| {
         LspServiceMessage::RegisterAuthenticatedTenant {
             signature: sign_tenant_registry_payload(&root_signer_key, &payload),
-            payload,
+            payload: payload.clone(),
             reply,
         }
     })
     .unwrap()
     .unwrap_err();
-    assert!(replay_result.contains("missing, replaced, or consumed"));
+    assert!(replay_result.contains("already consumed"));
+
+    let resigned_replay = registration_payload(
+        &lsp_key,
+        &root_signer_key,
+        request_id,
+        crate::now_timestamp_as_millis_u64(),
+    );
+    let resigned_replay_result = ractor::call!(service, |reply| {
+        LspServiceMessage::RegisterAuthenticatedTenant {
+            signature: sign_tenant_registry_payload(&root_signer_key, &resigned_replay),
+            payload: resigned_replay,
+            reply,
+        }
+    })
+    .unwrap()
+    .unwrap_err();
+    assert!(resigned_replay_result.contains("already consumed"));
+    assert_eq!(registry.list().unwrap(), vec![registration.status.record]);
 }
 
 #[tokio::test]
@@ -1514,14 +1650,12 @@ async fn authenticated_registration_issues_tenant_token_through_issuer() {
     .0;
 
     let root_signer_key = test_root_signer();
-    let nonce = ractor::call!(
-        service,
-        LspServiceMessage::IssueTenantRegistryNonce,
-        root_signer_key.pubkey()
-    )
-    .unwrap()
-    .unwrap();
-    let payload = TenantRegistryPayload::new(lsp_key.pubkey(), root_signer_key.pubkey(), nonce);
+    let payload = registration_payload(
+        &lsp_key,
+        &root_signer_key,
+        fresh_registration_request_id(),
+        crate::now_timestamp_as_millis_u64(),
+    );
     let issued = ractor::call!(service, |reply| {
         LspServiceMessage::RegisterAuthenticatedTenant {
             signature: sign_tenant_registry_payload(&root_signer_key, &payload),
@@ -1598,20 +1732,18 @@ async fn authenticated_registration_refreshes_token_after_lost_reply_and_restart
     let (service, handle) = Actor::spawn(None, LspService, args()).await.unwrap();
     let root_key = test_root_signer();
     let tenant_id = TenantId::from_root_signer_pubkey(&root_key.pubkey());
-    let nonce = ractor::call!(
-        service,
-        LspServiceMessage::IssueTenantRegistryNonce,
-        root_key.pubkey()
-    )
-    .unwrap()
-    .unwrap();
-    let payload = TenantRegistryPayload::new(lsp_key.pubkey(), root_key.pubkey(), nonce);
+    let first_payload = registration_payload(
+        &lsp_key,
+        &root_key,
+        fresh_registration_request_id(),
+        crate::now_timestamp_as_millis_u64(),
+    );
     let (send, receive) = tokio::sync::oneshot::channel();
     drop(receive); // The registration response cannot reach the client.
     service
         .send_message(LspServiceMessage::RegisterAuthenticatedTenant {
-            signature: sign_tenant_registry_payload(&root_key, &payload),
-            payload,
+            signature: sign_tenant_registry_payload(&root_key, &first_payload),
+            payload: first_payload.clone(),
             reply: send.into(),
         })
         .unwrap();
@@ -1624,31 +1756,24 @@ async fn authenticated_registration_refreshes_token_after_lost_reply_and_restart
     handle.await.unwrap();
     let (service, handle) = Actor::spawn(None, LspService, args()).await.unwrap();
 
-    let replaced = ractor::call!(
-        service,
-        LspServiceMessage::IssueTenantRegistryNonce,
-        root_key.pubkey()
-    )
-    .unwrap()
-    .unwrap();
-    let nonce = ractor::call!(
-        service,
-        LspServiceMessage::IssueTenantRegistryNonce,
-        root_key.pubkey()
-    )
-    .unwrap()
-    .unwrap();
-    let old_payload = TenantRegistryPayload::new(lsp_key.pubkey(), root_key.pubkey(), replaced);
-    let _stale = ractor::call!(service, |reply| {
+    let replay_after_restart = ractor::call!(service, |reply| {
         LspServiceMessage::RegisterAuthenticatedTenant {
-            signature: sign_tenant_registry_payload(&root_key, &old_payload),
-            payload: old_payload,
+            signature: sign_tenant_registry_payload(&root_key, &first_payload),
+            payload: first_payload,
             reply,
         }
     })
     .unwrap()
     .unwrap_err();
-    let payload = TenantRegistryPayload::new(lsp_key.pubkey(), root_key.pubkey(), nonce);
+    assert!(replay_after_restart.contains("already consumed"));
+    assert_eq!(registry.get(&tenant_id).unwrap(), Some(original.clone()));
+
+    let payload = registration_payload(
+        &lsp_key,
+        &root_key,
+        fresh_registration_request_id(),
+        crate::now_timestamp_as_millis_u64(),
+    );
     let invalid = ractor::call!(service, |reply| {
         LspServiceMessage::RegisterAuthenticatedTenant {
             signature: sign_tenant_registry_payload(&Privkey::from(&[5; 32]), &payload),
@@ -1659,10 +1784,7 @@ async fn authenticated_registration_refreshes_token_after_lost_reply_and_restart
     .unwrap()
     .unwrap_err();
     assert!(invalid.contains("invalid RootSigner registration proof"));
-    assert_eq!(
-        registry.registration_nonce(&root_key.pubkey()).unwrap(),
-        Some(nonce)
-    );
+    assert_eq!(registry.get(&tenant_id).unwrap(), Some(original.clone()));
 
     let refreshed = ractor::call!(service, |reply| {
         LspServiceMessage::RegisterAuthenticatedTenant {
@@ -1676,10 +1798,6 @@ async fn authenticated_registration_refreshes_token_after_lost_reply_and_restart
     assert!(!refreshed.created);
     assert_eq!(refreshed.status.record, original);
     assert_eq!(registry.list().unwrap(), vec![original.clone()]);
-    assert_eq!(
-        registry.registration_nonce(&root_key.pubkey()).unwrap(),
-        None
-    );
     let auth = BiscuitAuth::from_pubkey(biscuit_root.public().to_string()).unwrap();
     let (biscuit, _) = auth
         .check_permission("get_invoice", &refreshed.access_token)
@@ -1698,14 +1816,36 @@ async fn authenticated_registration_refreshes_token_after_lost_reply_and_restart
     let replay = ractor::call!(service, |reply| {
         LspServiceMessage::RegisterAuthenticatedTenant {
             signature: sign_tenant_registry_payload(&root_key, &payload),
-            payload,
+            payload: payload.clone(),
             reply,
         }
     })
     .unwrap()
     .unwrap_err();
-    assert!(replay.contains("missing, replaced, or consumed"));
-    assert_eq!(registry.list().unwrap(), vec![original]);
+    assert!(replay.contains("already consumed"));
+    assert_eq!(registry.list().unwrap(), vec![original.clone()]);
+
+    let fresh_payload = registration_payload(
+        &lsp_key,
+        &root_key,
+        fresh_registration_request_id(),
+        crate::now_timestamp_as_millis_u64(),
+    );
+    let refreshed_again = ractor::call!(service, |reply| {
+        LspServiceMessage::RegisterAuthenticatedTenant {
+            signature: sign_tenant_registry_payload(&root_key, &fresh_payload),
+            payload: fresh_payload,
+            reply,
+        }
+    })
+    .unwrap()
+    .unwrap();
+    assert!(!refreshed_again.created);
+    assert_eq!(refreshed_again.status.record, original);
+    assert_eq!(
+        refreshed_again.status.record.private_channel_id,
+        Some(channel_id)
+    );
     service.stop(None);
     handle.await.unwrap();
     public_network_actor.stop(None);

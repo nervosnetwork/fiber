@@ -4,10 +4,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 
-use crate::{
-    schema_helpers::schema_as_uint_hex, serde_utils::U64Hex, GetPaymentCommandParams, Hash256,
-    Pubkey,
-};
+use crate::{schema_helpers::schema_as_uint_hex, serde_utils::U64Hex, Hash256, Pubkey};
 
 /// Parameters that identify a hosted tenant.
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
@@ -16,51 +13,20 @@ pub struct LspTenantParams {
     pub tenant_id: String,
 }
 
-/// Parameters for issuing a one-time hosted tenant registration nonce.
-#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
-pub struct GetLspTenantRegistryNonceParams {
-    /// RootSigner identity that will sign the registration payload.
-    pub root_signer_pubkey: Pubkey,
-}
-
-/// One-time challenge and LSP identity used to build `TenantRegistryPayload`.
-#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
-pub struct GetLspTenantRegistryNonceResult {
-    /// Public Fiber identity of the hosted LSP.
-    pub lsp_node_id: Pubkey,
-    /// RootSigner identity associated with this nonce.
-    pub root_signer_pubkey: Pubkey,
-    /// Cryptographically random, single-use 32-byte nonce.
-    pub nonce: Hash256,
-}
-
 /// RootSigner-authenticated hosted tenant registration request.
+#[serde_as]
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 pub struct RegisterLspTenantParams {
     /// RootSigner identity that deterministically derives the tenant ID.
     pub root_signer_pubkey: Pubkey,
-    /// Most recent nonce issued for this RootSigner by this LSP.
-    pub nonce: Hash256,
+    /// Client-generated, single-use 32-byte registration request identifier.
+    pub request_id: Hash256,
+    /// Client-generated Unix timestamp in milliseconds when the proof was signed.
+    #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub signed_at: u64,
     /// Compact ECDSA signature over the canonical `TenantRegistryPayload`, as hex.
     pub signature: String,
-}
-
-/// Parameters for retrieving a hosted tenant's outgoing payment session.
-#[derive(Debug, Deserialize, JsonSchema, Serialize)]
-pub struct GetLspPaymentParams {
-    /// Hosted tenant that owns the outgoing payment session.
-    pub tenant_id: String,
-    /// Standard Fiber payment lookup parameters.
-    pub payment: GetPaymentCommandParams,
-}
-
-/// Parameters for retrieving an invoice from a hosted tenant's store.
-#[derive(Debug, Deserialize, JsonSchema, Serialize)]
-pub struct GetLspInvoiceParams {
-    /// Hosted tenant that owns the invoice.
-    pub tenant_id: String,
-    /// Payment hash of the invoice to retrieve.
-    pub payment_hash: Hash256,
 }
 
 /// Parameters that identify a hosted invoice or payment delivery.

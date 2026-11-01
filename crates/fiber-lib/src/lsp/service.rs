@@ -77,7 +77,6 @@ pub enum LspDeliveryDecision {
 /// Commands accepted by the LSP service container.
 pub enum LspServiceMessage {
     GetStatus(RpcReplyPort<LspServiceStatus>),
-    IssueTenantRegistryNonce(Pubkey, RpcReplyPort<Result<[u8; 32], String>>),
     RegisterAuthenticatedTenant {
         payload: TenantRegistryPayload,
         signature: TenantRegistrySignature,
@@ -381,10 +380,6 @@ impl Actor for LspService {
                     active_tenants: state.supervisor.active_count(),
                 });
             }
-            LspServiceMessage::IssueTenantRegistryNonce(root_signer_pubkey, reply) => {
-                let result = state.registry.issue_registration_nonce(&root_signer_pubkey);
-                let _ = reply.send(result);
-            }
             LspServiceMessage::RegisterAuthenticatedTenant {
                 payload,
                 signature,
@@ -399,14 +394,20 @@ impl Actor for LspService {
                     payload.verify_signature(&signature).map_err(|error| {
                         format!("invalid RootSigner registration proof: {error}")
                     })?;
+                    payload
+                        .validate_signed_at(crate::now_timestamp_as_millis_u64())
+                        .map_err(|error| {
+                            format!("invalid RootSigner registration proof: {error}")
+                        })?;
                     let tenant_id = TenantId::from_root_signer_pubkey(&payload.root_signer_pubkey);
                     let (record, created) = if state.registry.get(&tenant_id)?.is_some() {
                         // Reauthentication uses a new proof, and preserves all existing
                         // tenant state instead of provisioning a new protocol identity.
                         (
-                            state
-                                .registry
-                                .refresh_authenticated(payload.root_signer_pubkey, payload.nonce)?,
+                            state.registry.refresh_authenticated(
+                                payload.root_signer_pubkey,
+                                payload.request_id,
+                            )?,
                             false,
                         )
                     } else {
@@ -415,7 +416,7 @@ impl Actor for LspService {
                         (
                             state
                                 .registry
-                                .register_authenticated(record, payload.nonce)?,
+                                .register_authenticated(record, payload.request_id)?,
                             true,
                         )
                     };

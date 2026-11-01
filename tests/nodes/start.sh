@@ -234,6 +234,11 @@ if [ "${#start_node_ids[@]}" = 0 ]; then
             exit 1
         fi
         node2_rpc_url="http://${node2_rpc_addr}"
+        lsp_node_id="$(sed -n 's/^  NODE2_PUBKEY: //p' "$bruno_dir/test.bru")"
+        if [[ -z "$lsp_node_id" ]]; then
+            echo "failed to read trusted NODE2_PUBKEY from $bruno_dir/test.bru" >&2
+            exit 1
+        fi
         echo "starting fiber-lsp-sdk-agent --rpc ${node2_rpc_url} --control-addr ${lsp_sdk_agent_control_addr}"
         run_lsp_sdk_agent() {
             while true; do
@@ -244,6 +249,7 @@ if [ "${#start_node_ids[@]}" = 0 ]; then
                         --status-file "$agent_status" \
                         --control-addr "$lsp_sdk_agent_control_addr" \
                         --operator-token "$operator_token" \
+                        --lsp-node-id "$lsp_node_id" \
                         2>&1 | tee -a lsp-sdk-agent.log; then
                     echo "fiber-lsp-sdk-agent failed; retrying persisted signer"
                 fi

@@ -4,7 +4,9 @@ use ckb_types::{
     packed::{CellDep, CellInput, CellOutput, Script},
     prelude::*,
 };
-use fiber_json_types::{OpenChannelWithExternalFundingParams, OpenTenantChannelResult};
+use fiber_json_types::{
+    OpenChannelWithExternalFundingParams, OpenChannelWithExternalFundingResult,
+};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 
@@ -33,11 +35,11 @@ pub struct OpeningNetwork {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 pub trait TenantOpeningRpc: Sync {
     /// Send the saved opening intent using the tenant's credentials.
-    async fn open_tenant_channel(
+    async fn open_channel_with_external_funding(
         &self,
         token: &str,
         request: OpenChannelWithExternalFundingParams,
-    ) -> Result<OpenTenantChannelResult, crate::SessionError>;
+    ) -> Result<OpenChannelWithExternalFundingResult, crate::SessionError>;
 }
 
 /// Independent wallet validation of the complete funding transaction.
@@ -50,7 +52,7 @@ pub trait FundingVerifier: Sync {
     async fn verify_funding(
         &self,
         request: &OpenChannelWithExternalFundingParams,
-        result: &OpenTenantChannelResult,
+        result: &OpenChannelWithExternalFundingResult,
     ) -> Result<Vec<ckb_types::packed::OutPoint>, crate::SessionError>;
 }
 
@@ -72,7 +74,7 @@ impl<S: crate::SignerStore> crate::ChannelSigner<S> {
     pub(crate) async fn verify_and_record_opening(
         &self,
         request: &OpenChannelWithExternalFundingParams,
-        result: &OpenTenantChannelResult,
+        result: &OpenChannelWithExternalFundingResult,
         network: &OpeningNetwork,
         expected_inputs: &[ckb_types::packed::OutPoint],
     ) -> Result<(), SignerError> {
@@ -125,10 +127,13 @@ fn reserve(
 
 pub(crate) fn validate_opening(
     request: &OpenChannelWithExternalFundingParams,
-    result: &OpenTenantChannelResult,
+    result: &OpenChannelWithExternalFundingResult,
     network: &OpeningNetwork,
 ) -> Result<CommitmentParameters, SignerError> {
-    let context = &result.opening_context;
+    let context = result
+        .opening_context
+        .as_ref()
+        .ok_or_else(|| invalid("opening response is missing opening_context"))?;
     if !network.funding_lock.args().is_empty() || !network.commitment_lock.args().is_empty() {
         return Err(invalid("network contract scripts must have empty args"));
     }
@@ -238,7 +243,7 @@ pub(crate) mod tests {
 
     struct OpeningAdapters {
         request: OpenChannelWithExternalFundingParams,
-        result: OpenTenantChannelResult,
+        result: OpenChannelWithExternalFundingResult,
         inputs: Vec<ckb_types::packed::OutPoint>,
         failure: &'static str,
         events: std::sync::Mutex<Vec<&'static str>>,
@@ -247,11 +252,11 @@ pub(crate) mod tests {
 
     #[async_trait::async_trait]
     impl TenantOpeningRpc for OpeningAdapters {
-        async fn open_tenant_channel(
+        async fn open_channel_with_external_funding(
             &self,
             token: &str,
             request: OpenChannelWithExternalFundingParams,
-        ) -> Result<OpenTenantChannelResult, crate::SessionError> {
+        ) -> Result<OpenChannelWithExternalFundingResult, crate::SessionError> {
             assert_eq!(token, "tenant-token");
             assert_eq!(
                 serde_json::to_value(request).unwrap(),
@@ -277,7 +282,7 @@ pub(crate) mod tests {
         async fn verify_funding(
             &self,
             _request: &OpenChannelWithExternalFundingParams,
-            _result: &OpenTenantChannelResult,
+            _result: &OpenChannelWithExternalFundingResult,
         ) -> Result<Vec<ckb_types::packed::OutPoint>, crate::SessionError> {
             self.events.lock().unwrap().push("wallet");
             if self.failure == "wallet" {
@@ -388,7 +393,12 @@ pub(crate) mod tests {
                 saved: Default::default(),
             };
             if failure == "context" {
-                adapters.result.opening_context.local_amount += 1;
+                adapters
+                    .result
+                    .opening_context
+                    .as_mut()
+                    .unwrap()
+                    .local_amount += 1;
             }
             if failure == "inputs" {
                 adapters.inputs.clear();
@@ -471,7 +481,7 @@ pub(crate) mod tests {
         signer: &ChannelSigner<MemoryStore>,
     ) -> (
         OpenChannelWithExternalFundingParams,
-        OpenTenantChannelResult,
+        OpenChannelWithExternalFundingResult,
         OpeningNetwork,
         Vec<ckb_types::packed::OutPoint>,
     ) {
@@ -524,10 +534,10 @@ pub(crate) mod tests {
             .output_data(ckb_types::packed::Bytes::default())
             .build()
             .data();
-        let result = OpenTenantChannelResult {
+        let result = OpenChannelWithExternalFundingResult {
             channel_id: id.into(),
             unsigned_funding_tx: tx.into(),
-            opening_context: fiber_json_types::TenantChannelOpeningContext {
+            opening_context: Some(fiber_json_types::TenantChannelOpeningContext {
                 remote_funding_key: remote.funding_key.pubkey().into(),
                 remote_settlement_key: remote.tlc_base_key.pubkey().into(),
                 remote_shutdown_script: script.clone().into(),
@@ -537,7 +547,7 @@ pub(crate) mod tests {
                 remote_amount: 50_000_000_000,
                 local_reserved_ckb_amount: reserve(script.clone(), None, &network).unwrap(),
                 remote_reserved_ckb_amount: reserve(script, None, &network).unwrap(),
-            },
+            }),
         };
         (request, result, network, inputs)
     }
@@ -569,13 +579,27 @@ pub(crate) mod tests {
         )
         .unwrap();
         let remote = reserve(
-            result.opening_context.remote_shutdown_script.clone().into(),
+            result
+                .opening_context
+                .as_ref()
+                .unwrap()
+                .remote_shutdown_script
+                .clone()
+                .into(),
             Some(asset.clone()),
             &network,
         )
         .unwrap();
-        result.opening_context.local_reserved_ckb_amount = local;
-        result.opening_context.remote_reserved_ckb_amount = remote;
+        result
+            .opening_context
+            .as_mut()
+            .unwrap()
+            .local_reserved_ckb_amount = local;
+        result
+            .opening_context
+            .as_mut()
+            .unwrap()
+            .remote_reserved_ckb_amount = remote;
         result.unsigned_funding_tx.outputs[0].capacity = (local + remote).into();
         result.unsigned_funding_tx.outputs[0].type_ = Some(asset.into());
         result.unsigned_funding_tx.outputs_data[0] =
@@ -648,35 +672,45 @@ pub(crate) mod tests {
             "funding_key",
             "settlement_key",
             "shutdown",
+            "missing_context",
         ] {
             let mut bad = result.clone();
             match field {
                 "balance" => {
-                    bad.opening_context.local_amount -= 1;
-                    bad.opening_context.remote_amount += 1;
+                    bad.opening_context.as_mut().unwrap().local_amount -= 1;
+                    bad.opening_context.as_mut().unwrap().remote_amount += 1;
                 }
-                "reserve" => bad.opening_context.local_reserved_ckb_amount += 1,
-                "fee" => bad.opening_context.commitment_fee_rate += 1,
-                "delay" => bad.opening_context.commitment_delay_epoch = 2.into(),
+                "reserve" => {
+                    bad.opening_context
+                        .as_mut()
+                        .unwrap()
+                        .local_reserved_ckb_amount += 1
+                }
+                "fee" => bad.opening_context.as_mut().unwrap().commitment_fee_rate += 1,
+                "delay" => bad.opening_context.as_mut().unwrap().commitment_delay_epoch = 2.into(),
                 "channel_id" => bad.channel_id = fiber_types::Hash256::from([8; 32]).into(),
                 "funding_key" => {
-                    bad.opening_context.remote_funding_key = signer
+                    bad.opening_context.as_mut().unwrap().remote_funding_key = signer
                         .public_material()
                         .base_public_keys
                         .funding_pubkey
                         .into()
                 }
                 "settlement_key" => {
-                    bad.opening_context.remote_settlement_key = signer
+                    bad.opening_context.as_mut().unwrap().remote_settlement_key = signer
                         .public_material()
                         .base_public_keys
                         .tlc_base_key
                         .into()
                 }
                 "shutdown" => {
-                    bad.opening_context.remote_shutdown_script.args =
-                        ckb_jsonrpc_types::JsonBytes::from_vec(vec![1; 100]);
+                    bad.opening_context
+                        .as_mut()
+                        .unwrap()
+                        .remote_shutdown_script
+                        .args = ckb_jsonrpc_types::JsonBytes::from_vec(vec![1; 100]);
                 }
+                "missing_context" => bad.opening_context = None,
                 _ => unreachable!(),
             }
             assert!(

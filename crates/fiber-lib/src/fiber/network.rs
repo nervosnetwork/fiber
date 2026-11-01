@@ -1309,7 +1309,7 @@ pub enum FiberActorCommand {
     /// Tenant-only opening, serialized by the tenant's Fiber actor.
     OpenTenantChannel {
         command: OpenChannelWithExternalFundingCommand,
-        reply: RpcReplyPort<Result<fiber_json_types::OpenTenantChannelResult, String>>,
+        reply: RpcReplyPort<Result<fiber_json_types::OpenChannelWithExternalFundingResult, String>>,
     },
     OpenChannelWithExternalFunding(
         OpenChannelWithExternalFundingCommand,
@@ -6569,7 +6569,7 @@ pub struct FiberActorState<S, C> {
     // until the peer accepts the channel and we build the unsigned funding tx.
     // All callers of the tenant's single pending opening share its frozen result.
     pending_tenant_opening_replies:
-        Vec<RpcReplyPort<Result<fiber_json_types::OpenTenantChannelResult, String>>>,
+        Vec<RpcReplyPort<Result<fiber_json_types::OpenChannelWithExternalFundingResult, String>>>,
     pending_external_funding_replies:
         HashMap<Hash256, RpcReplyPort<Result<OpenChannelWithExternalFundingResponse, String>>>,
 
@@ -8501,7 +8501,7 @@ where
     fn reply_tenant_opening(
         &mut self,
         channel_id: Hash256,
-        result: Result<fiber_json_types::OpenTenantChannelResult, String>,
+        result: Result<fiber_json_types::OpenChannelWithExternalFundingResult, String>,
     ) {
         if self
             .store

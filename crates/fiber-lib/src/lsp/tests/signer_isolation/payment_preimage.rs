@@ -69,7 +69,8 @@ async fn test_hosted_payment_preimage_available_before_removal_signature() {
                 .request(
                     "get_payment",
                     rpc_params![GetPaymentCommandParams {
-                        payment_hash: payment_hash.into()
+                        payment_hash: payment_hash.into(),
+                        tenant_id: None
                     }],
                 )
                 .await

@@ -38,6 +38,10 @@ struct Args {
     #[arg(long, env = "FIBER_LSP_SDK_AGENT_OPERATOR_TOKEN")]
     operator_token: String,
 
+    /// Trusted public Fiber node identity of the hosted LSP.
+    #[arg(long, env = "FIBER_LSP_SDK_AGENT_LSP_NODE_ID")]
+    lsp_node_id: String,
+
     /// Write tenant identity, token, and open material for the E2E driver.
     #[arg(long, env = "FIBER_LSP_SDK_AGENT_STATUS_FILE")]
     status_file: Option<PathBuf>,
@@ -83,11 +87,13 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     let rpc = HttpFiberRpc::new(&args.rpc, args.operator_token)?;
     let status_file = args.status_file.clone();
+    let lsp_node_id = parse_pubkey(&args.lsp_node_id)?;
     let mut agent = Agent::open(
         rpc.clone(),
         AgentConfig {
             store_dir: args.store,
             status_file: args.status_file,
+            lsp_node_id,
         },
     )
     .await?;
@@ -166,6 +172,11 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+fn parse_pubkey(value: &str) -> Result<fiber_types::Pubkey> {
+    let bytes = hex::decode(value.trim_start_matches("0x")).context("decode public key")?;
+    fiber_types::Pubkey::from_slice(&bytes).context("parse public key")
+}
+
 async fn initialize_with_retry<R, S>(
     agent: &mut Agent<R, S>,
     shutdown_rx: &mut Option<oneshot::Receiver<()>>,
@@ -193,7 +204,7 @@ async fn open_request<R, S>(
     request: OpenChannelRequest,
     contracts: &std::path::Path,
     ckb_rpc: &str,
-) -> Result<fiber_json_types::OpenTenantChannelResult>
+) -> Result<fiber_json_types::OpenChannelWithExternalFundingResult>
 where
     R: fiber_lsp_sdk_agent::FiberRpc,
     S: fiber_lsp_sdk::SignerStore,
