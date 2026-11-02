@@ -1578,3 +1578,48 @@ async fn tenant_watchtower_writes_stay_in_the_tenant_namespace() {
         .expect("owner lists its own payments");
     assert!(payments.payments.is_empty());
 }
+
+/// A tenant token must reach the tenant runtime, not the public node.
+///
+/// `new_invoice` is the cheapest observable routing signal: hosted invoices must be
+/// locked to a client-owned secret (`require_client_payment_lock`), which only the
+/// tenant backend sets. The same request without a tenant token and without a
+/// `payment_hash` succeeds on the public node because it may generate its own
+/// preimage. So: tenant + no hash = error, operator + no hash = invoice.
+#[tokio::test]
+async fn a_tenant_request_reaches_the_tenant_backend_and_not_the_public_node() {
+    let fixture = TestLspFixture::new("isolation-invoice-routing").await;
+    let (_, _, _, tenant) = fixture.register_tenant(1).await;
+
+    let params = fiber_json_types::NewInvoiceParams {
+        amount: 1_000_000,
+        currency: fiber_json_types::Currency::Fibd,
+        description: None,
+        payment_preimage: None,
+        payment_hash: None,
+        expiry: None,
+        fallback_address: None,
+        hash_algorithm: None,
+        udt_type_script: None,
+        allow_mpp: None,
+        allow_trampoline_routing: None,
+        final_expiry_delta: None,
+    };
+
+    let tenant_error = tenant
+        .request::<fiber_json_types::InvoiceResult, _>("new_invoice", rpc_params![params.clone()])
+        .await
+        .expect_err("a hosted invoice must require a client-owned payment hash");
+    assert!(
+        tenant_error
+            .to_string()
+            .contains("hosted invoices require payment_hash or payment_preimage"),
+        "the request reached the tenant backend: {tenant_error}"
+    );
+
+    fixture
+        .admin_client
+        .request::<fiber_json_types::InvoiceResult, _>("new_invoice", rpc_params![params])
+        .await
+        .expect("the public node still generates its own preimage");
+}
