@@ -1449,8 +1449,9 @@ impl NetworkGraphStateStore for Store {
             .into_iter()
             .filter_map(|kv| {
                 let session: PaymentSession = deserialize_from(kv.value.as_ref(), "PaymentSession");
+                let session = session.init_attempts(self);
                 if session.status == status {
-                    Some(session.init_attempts(self))
+                    Some(session)
                 } else {
                     None
                 }
@@ -1473,9 +1474,10 @@ impl NetworkGraphStateStore for Store {
 
         iter.filter_map(|(_key, value)| {
             let session: PaymentSession = deserialize_from(&value, "PaymentSession");
+            let session = session.init_attempts(self);
             match status {
                 Some(ref s) if session.status != *s => None,
-                _ => Some(session.init_attempts(self)),
+                _ => Some(session),
             }
         })
         .take(limit)

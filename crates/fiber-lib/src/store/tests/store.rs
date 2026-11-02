@@ -1715,6 +1715,150 @@ fn test_store_payment_sessions_with_status() {
     let res = store.get_payment_sessions_with_status(PaymentStatus::Failed);
     assert_eq!(res.len(), 0);
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_payment_status_queries_filter_hydrated_attempts_before_pagination() {
+    let (store, _dir) = generate_store();
+    let source = gen_rand_fiber_public_key();
+    let target = gen_rand_fiber_public_key();
+    let cases = [
+        (
+            PaymentStatus::Created,
+            AttemptStatus::Inflight,
+            PaymentStatus::Inflight,
+        ),
+        (
+            PaymentStatus::Inflight,
+            AttemptStatus::Created,
+            PaymentStatus::Created,
+        ),
+        (
+            PaymentStatus::Created,
+            AttemptStatus::Success,
+            PaymentStatus::Success,
+        ),
+        (
+            PaymentStatus::Created,
+            AttemptStatus::Failed,
+            PaymentStatus::Failed,
+        ),
+        (
+            PaymentStatus::Success,
+            AttemptStatus::Inflight,
+            PaymentStatus::Success,
+        ),
+        (
+            PaymentStatus::Failed,
+            AttemptStatus::Inflight,
+            PaymentStatus::Failed,
+        ),
+        (
+            PaymentStatus::Created,
+            AttemptStatus::Inflight,
+            PaymentStatus::Inflight,
+        ),
+        (
+            PaymentStatus::Created,
+            AttemptStatus::Inflight,
+            PaymentStatus::Inflight,
+        ),
+    ];
+    for (index, &(persisted, attempt_status, effective)) in cases.iter().enumerate() {
+        let hash = Hash256::from([index as u8 + 1; 32]);
+        let request = SendPaymentDataBuilder::new(target, 100, hash)
+            .max_fee_amount(Some(1000))
+            .build()
+            .unwrap();
+        let mut session = PaymentSession::new_session(&store, request, 1);
+        session.status = persisted;
+        store.insert_payment_session(session.clone());
+        let mut attempt = session.new_attempt(
+            1,
+            source,
+            target,
+            vec![PaymentHopData {
+                amount: 100,
+                expiry: DEFAULT_TLC_EXPIRY_DELTA,
+                ..Default::default()
+            }],
+        );
+        attempt.status = attempt_status;
+        store.insert_attempt(attempt);
+        assert_eq!(store.get_payment_session(hash).unwrap().status, effective);
+    }
+    for status in [
+        PaymentStatus::Created,
+        PaymentStatus::Inflight,
+        PaymentStatus::Success,
+        PaymentStatus::Failed,
+    ] {
+        let expected: Vec<_> = cases
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, _, effective))| *effective == status)
+            .map(|(index, _)| Hash256::from([index as u8 + 1; 32]))
+            .collect();
+        for sessions in [
+            store.get_payment_sessions_with_status(status),
+            store.get_payment_sessions_with_limit(100, None, Some(status)),
+        ] {
+            assert!(
+                sessions.iter().all(|session| session.status == status),
+                "filter must match returned status: {status:?}"
+            );
+            assert_eq!(
+                sessions
+                    .iter()
+                    .map(|session| session.payment_hash())
+                    .collect::<Vec<_>>(),
+                expected
+            );
+        }
+    }
+    for (limit, after, expected) in [
+        (2, 1, vec![7, 8]),
+        (1, 3, vec![7]),
+        (1, 7, vec![8]),
+        (1, 8, vec![]),
+        (0, 0, vec![]),
+    ] {
+        let page = store.get_payment_sessions_with_limit(
+            limit,
+            Some([after; 32].into()),
+            Some(PaymentStatus::Inflight),
+        );
+        assert_eq!(
+            page.iter()
+                .map(|session| session.payment_hash())
+                .collect::<Vec<_>>(),
+            expected
+                .into_iter()
+                .map(|tag| Hash256::from([tag; 32]))
+                .collect::<Vec<_>>()
+        );
+    }
+    let unfiltered = store.get_payment_sessions_with_limit(3, Some([1; 32].into()), None);
+    assert_eq!(
+        unfiltered
+            .iter()
+            .map(|session| session.status)
+            .collect::<Vec<_>>(),
+        vec![
+            PaymentStatus::Created,
+            PaymentStatus::Success,
+            PaymentStatus::Failed
+        ]
+    );
+    for (index, &(persisted, _, _)) in cases.iter().enumerate() {
+        assert_eq!(
+            store.get_persisted_payment_status([index as u8 + 1; 32].into()),
+            Some(persisted),
+            "queries must not rewrite durable aggregate status"
+        );
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
