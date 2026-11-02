@@ -514,6 +514,43 @@ pub enum StoreChange {
     },
 }
 
+/// Delivers each store change to every subscriber, in the order the store made them.
+///
+/// ractor's `OutputPort` holds at most 16 messages between a sender and each subscriber's
+/// forwarding task, and drops a subscriber for good once its task falls further behind. The
+/// store can send more changes than that in a row (#1717), so this port hands each change
+/// straight to the subscriber's mailbox instead, keeping no queue of its own. A subscriber
+/// that has stopped is removed.
+#[derive(Default)]
+pub struct StoreChangePort {
+    subscribers: parking_lot::Mutex<Vec<StoreChangeDelivery>>,
+}
+
+/// Hands a change to one subscriber; false once the subscriber has stopped.
+type StoreChangeDelivery = Box<dyn Fn(StoreChange) -> bool + Send>;
+
+impl StoreChangePort {
+    pub fn subscribe<M>(&self, receiver: ractor::ActorRef<M>)
+    where
+        M: ractor::Message + From<StoreChange>,
+    {
+        self.subscribers.lock().push(Box::new(move |change| {
+            receiver.cast(M::from(change)).is_ok()
+        }));
+    }
+
+    pub fn send(&self, change: StoreChange) {
+        self.subscribers
+            .lock()
+            .retain(|deliver| deliver(change.clone()));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn subscriber_count(&self) -> usize {
+        self.subscribers.lock().len()
+    }
+}
+
 pub trait StoreKeyValue {
     fn key(&self) -> Vec<u8>;
     fn value(&self) -> Vec<u8>;
