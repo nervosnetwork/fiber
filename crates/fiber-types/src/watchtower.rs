@@ -136,11 +136,12 @@ impl SettlementKey {
         matches!(self, Self::External(_))
     }
 
-    /// Interpret the persisted secret/public pair.
+    /// Interpret the persisted secret/public pair, rejecting a contradiction.
     ///
-    /// Returns `Ok(None)` when neither half is present, which is the only state
-    /// that carries no key material. A secret and a public key that disagree are
-    /// rejected instead of silently picking one.
+    /// Meant for request boundaries that receive both halves from a caller (the
+    /// `create_watch_channel` RPC). Readers of already-stored rows use
+    /// [`ChannelData::settlement_key`], which treats the secret as authoritative
+    /// instead of failing.
     pub fn from_parts(
         secret: Option<Privkey>,
         pubkey: Option<Pubkey>,
@@ -281,33 +282,24 @@ pub struct LastAppliedWatchtowerSignature {
 impl ChannelData {
     /// Local settlement key material as persisted, or `None` when the row holds
     /// no settlement key at all.
+    ///
+    /// The secret is authoritative: signatures are produced with it, so a stored
+    /// public key that disagrees with it is ignored rather than used to verify
+    /// signatures the secret cannot produce. Writers go through
+    /// [`SettlementKey::to_parts`], so a disagreeing row should not exist.
     pub fn settlement_key(&self) -> Option<SettlementKey> {
-        let secret = self.local_settlement_key.clone();
-        let pubkey = self.local_settlement_key_pubkey;
-        SettlementKey::from_parts(secret, pubkey).ok().flatten()
-    }
-
-    /// Column-form of [`Self::settlement_key`] for callers that only need the
-    /// public half.
-    fn stored_settlement_pubkey(&self) -> Option<Pubkey> {
-        self.local_settlement_key_pubkey
-            .or_else(|| self.local_settlement_key.as_ref().map(Privkey::pubkey))
+        match (&self.local_settlement_key, self.local_settlement_key_pubkey) {
+            (Some(secret), _) => Some(SettlementKey::Local(secret.clone())),
+            (None, Some(pubkey)) => Some(SettlementKey::External(pubkey)),
+            (None, None) => None,
+        }
     }
 
     /// Return the public key committed to the local settlement path.
     pub fn local_settlement_pubkey(&self) -> Pubkey {
-        self.stored_settlement_pubkey()
+        self.settlement_key()
+            .map(|key| key.pubkey())
             .expect("watch channel must contain a local settlement public or private key")
-    }
-
-    /// Key material of this row, named as in [`WatchChannelKeys`].
-    pub fn watch_channel_keys(&self) -> Option<WatchChannelKeys> {
-        Some(WatchChannelKeys {
-            local_settlement: self.settlement_key()?,
-            remote_settlement: self.remote_settlement_key,
-            local_funding: self.local_funding_pubkey,
-            remote_funding: self.remote_funding_pubkey,
-        })
     }
 
     /// Return the expected public key for an on-chain signing request.
@@ -320,7 +312,8 @@ impl ChannelData {
     ) -> Result<Pubkey, String> {
         match purpose {
             crate::channel_signer::OnchainKeyPurpose::Settlement => self
-                .stored_settlement_pubkey()
+                .settlement_key()
+                .map(|key| key.pubkey())
                 .ok_or_else(|| "settlement signing public key is missing".to_string()),
             crate::channel_signer::OnchainKeyPurpose::Tlc { commitment_number } => {
                 let mut expected = None;
@@ -639,5 +632,114 @@ mod tests {
             remote,
             None
         ));
+    }
+}
+
+#[cfg(test)]
+mod key_material_tests {
+    use super::*;
+
+    fn key(byte: u8) -> Privkey {
+        Privkey::from(&[byte; 32])
+    }
+
+    fn settlement_data() -> SettlementData {
+        SettlementData {
+            local_amount: 0,
+            remote_amount: 0,
+            tlcs: Vec::new(),
+        }
+    }
+
+    fn channel_data(local_key: Option<Privkey>, local_pubkey: Option<Pubkey>) -> ChannelData {
+        ChannelData {
+            channel_id: Hash256::from([7; 32]),
+            funding_udt_type_script: None,
+            local_settlement_key: local_key,
+            local_settlement_key_pubkey: local_pubkey,
+            remote_settlement_key: key(2).pubkey(),
+            local_funding_pubkey: key(3).pubkey(),
+            remote_funding_pubkey: key(4).pubkey(),
+            remote_settlement_data: settlement_data(),
+            pending_remote_settlement_data: settlement_data(),
+            local_settlement_data: settlement_data(),
+            revocation_data: None,
+            commitment_contract_features: CommitmentContractFeatures::LEGACY,
+        }
+    }
+
+    #[test]
+    fn from_parts_rejects_a_contradicting_pair() {
+        let error = SettlementKey::from_parts(Some(key(1)), Some(key(9).pubkey()))
+            .expect_err("a public key that does not match the secret must be rejected");
+        assert!(error.contains("does not match"), "{error}");
+    }
+
+    #[test]
+    fn from_parts_round_trips_through_the_persisted_pair() {
+        let local = SettlementKey::from_parts(Some(key(1)), Some(key(1).pubkey()))
+            .unwrap()
+            .expect("local key material");
+        assert_eq!(local.secret(), Some(&key(1)));
+        assert!(!local.is_external());
+        assert_eq!(
+            local.to_parts(),
+            (Some(key(1)), Some(key(1).pubkey())),
+            "writers persist a pair the readers can trust"
+        );
+
+        let external = SettlementKey::from_parts(None, Some(key(2).pubkey()))
+            .unwrap()
+            .expect("public-only key material");
+        assert_eq!(external.secret(), None);
+        assert!(external.is_external());
+        assert_eq!(external.to_parts(), (None, Some(key(2).pubkey())));
+
+        assert_eq!(SettlementKey::from_parts(None, None), Ok(None));
+    }
+
+    #[test]
+    fn stored_rows_trust_the_secret_over_a_contradicting_public_key() {
+        let data = channel_data(Some(key(1)), Some(key(9).pubkey()));
+        assert_eq!(data.settlement_key(), Some(SettlementKey::Local(key(1))));
+        assert_eq!(
+            data.local_settlement_pubkey(),
+            key(1).pubkey(),
+            "signatures come from the secret, so a contradicting stored key is ignored"
+        );
+        assert_eq!(
+            data.expected_onchain_pubkey(&crate::channel_signer::OnchainKeyPurpose::Settlement),
+            Ok(key(1).pubkey())
+        );
+
+        let external = channel_data(None, Some(key(2).pubkey()));
+        assert_eq!(
+            external.settlement_key(),
+            Some(SettlementKey::External(key(2).pubkey()))
+        );
+        assert_eq!(
+            channel_data(None, None).settlement_key(),
+            None,
+            "a row with no key material has no settlement key"
+        );
+    }
+
+    #[test]
+    fn inverted_keys_swap_sides_and_drop_the_secret() {
+        let keys = WatchChannelKeys {
+            local_settlement: SettlementKey::Local(key(1)),
+            remote_settlement: key(2).pubkey(),
+            local_funding: key(3).pubkey(),
+            remote_funding: key(4).pubkey(),
+        };
+        let mirrored = keys.inverted();
+        assert_eq!(
+            mirrored.local_settlement,
+            SettlementKey::External(key(2).pubkey()),
+            "the mirrored row can only verify the original owner's signatures"
+        );
+        assert_eq!(mirrored.remote_settlement, key(1).pubkey());
+        assert_eq!(mirrored.local_funding, key(4).pubkey());
+        assert_eq!(mirrored.remote_funding, key(3).pubkey());
     }
 }

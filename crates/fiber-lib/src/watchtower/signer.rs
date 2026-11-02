@@ -49,9 +49,16 @@ impl WatchtowerSigner {
     }
 
     /// Bind from persisted watch-channel data.
+    ///
+    /// The stored secret/public pair is interpreted by
+    /// [`ChannelData::settlement_key`], so this is the only place that turns a
+    /// watch row into a signer.
     pub fn from_channel_data(data: &ChannelData) -> Self {
-        match data.local_settlement_key.clone() {
-            Some(key) => Self::Local(key),
+        match data
+            .settlement_key()
+            .and_then(|material| material.secret().cloned())
+        {
+            Some(secret) => Self::Local(secret),
             None => Self::External,
         }
     }

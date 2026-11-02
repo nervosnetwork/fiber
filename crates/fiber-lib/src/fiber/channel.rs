@@ -129,8 +129,8 @@ use tracing::{debug, error, info, trace, warn};
 // - `signature`: 64 bytes, aggregated signature
 pub const FUNDING_CELL_WITNESS_LEN: usize = 16 + 32 + 64;
 
-#[cfg(all(not(target_arch = "wasm32"), feature = "watchtower"))]
 /// Everything needed to create the host watchtower row for a hosted channel.
+#[cfg(all(not(target_arch = "wasm32"), feature = "watchtower"))]
 pub(crate) struct HostedWatchChannelSnapshot {
     pub keys: WatchChannelKeys,
     pub commitment_contract_features: CommitmentContractFeatures,
@@ -8800,12 +8800,11 @@ impl ChannelActorState {
         ))
     }
 
-    // We are using tlc base key for settlement keys, since settlement
-    // process is only unlocked once for each party, it is safe to always use tlc base key.
     /// Key material for this channel's watchtower row.
     ///
-    /// A channel signed on this node reports the settlement secret; an
-    /// external-signer channel reports the public key only.
+    /// Settlement uses the TLC base key: settlement is only unlocked once per
+    /// party, so reusing the base key is safe. A channel signed on this node
+    /// reports the secret; an external-signer channel reports the public key only.
     pub(crate) fn watch_channel_keys(&self) -> WatchChannelKeys {
         let local_settlement = match self.channel_signer.local_material() {
             Some(signer) => SettlementKey::Local(signer.tlc_base_key.clone()),

@@ -247,9 +247,14 @@ where
             .rpc_err()?;
         let local_settlement =
             SettlementKey::from_parts(local_settlement_key, supplied_local_settlement_pubkey)
-                .map_err(rpc_error)?
+                .map_err(|_| {
+                    rpc_error("local_settlement_key_pubkey does not match local_settlement_key")
+                })?
                 .ok_or_else(|| {
-                    rpc_error("local_settlement_key or local_settlement_key_pubkey is required")
+                    rpc_error(
+                        "local_settlement_key_pubkey is required when \
+                         local_settlement_key is omitted",
+                    )
                 })?;
         let remote_settlement_key = Pubkey::try_from(params.remote_settlement_key).rpc_err()?;
         let local_funding_pubkey = Pubkey::try_from(params.local_funding_pubkey).rpc_err()?;
