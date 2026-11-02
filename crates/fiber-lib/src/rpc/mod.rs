@@ -21,7 +21,6 @@ pub mod peer;
 pub mod prof;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod pubsub;
-pub(crate) mod scoped;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod subscription;
 pub mod tenant;
@@ -52,7 +51,6 @@ pub mod server {
     use crate::rpc::peer::{PeerRpcServer, PeerRpcServerImpl};
     #[cfg(all(feature = "pprof", not(target_arch = "wasm32")))]
     use crate::rpc::prof::{ProfRpcServer, ProfRpcServerImpl};
-    use crate::rpc::scoped::RpcBackendStore;
     use crate::{
         cch::CchMessage,
         fiber::{
@@ -361,7 +359,9 @@ pub mod server {
 
     #[allow(clippy::type_complexity)]
     #[allow(clippy::too_many_arguments)]
-    pub async fn start_rpc<S: RpcServerStore + RpcBackendStore + Clone + Send + Sync + 'static>(
+    pub async fn start_rpc<
+        S: RpcServerStore + crate::rpc_scope::RpcBackendStore + Clone + Send + Sync + 'static,
+    >(
         config: RpcConfig,
         ckb_config: Option<CkbConfig>,
         fiber_config: Option<FiberConfig>,

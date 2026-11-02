@@ -5,8 +5,8 @@ use crate::fiber::{
     channel::ChannelActorStateStore, payment::SendPaymentCommand, FiberActorCommand,
     FiberActorMessage, FiberActorRef, NetworkActorMessage,
 };
-use crate::rpc::scoped::{BackendResolver, RpcBackendStore, ScopedBackend};
 use crate::rpc::utils::{rpc_error, RpcResultExt};
+use crate::rpc_scope::{BackendResolver, RpcBackendStore, ScopedBackend};
 use crate::{handle_actor_call, log_and_error};
 #[cfg(debug_assertions)]
 use fiber_json_types::SessionRoute as JsonSessionRoute;

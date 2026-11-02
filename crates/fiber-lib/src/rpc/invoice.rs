@@ -157,18 +157,18 @@ impl<S> InvoiceBackend<S> {
 /// key material) is built from the request's scope, so a handler cannot reach the
 /// public node's invoice keys without resolving the caller first.
 pub struct InvoiceRpcServerImpl<S> {
-    backend: crate::rpc::scoped::BackendResolver<S>,
+    backend: crate::rpc_scope::BackendResolver<S>,
     config: Option<FiberConfig>,
 }
 
-impl<S: crate::rpc::scoped::RpcBackendStore> InvoiceRpcServerImpl<S> {
+impl<S: crate::rpc_scope::RpcBackendStore> InvoiceRpcServerImpl<S> {
     pub fn new(
         store: S,
         network_actor: Option<ActorRef<NetworkActorMessage>>,
         config: Option<FiberConfig>,
     ) -> Self {
         Self {
-            backend: crate::rpc::scoped::BackendResolver::new(
+            backend: crate::rpc_scope::BackendResolver::new(
                 network_actor.map(|actor| FiberActorRef::from_network(&actor)),
                 store,
                 None,
@@ -208,7 +208,7 @@ impl<S: crate::rpc::scoped::RpcBackendStore> InvoiceRpcServerImpl<S> {
     }
 
     /// Build the invoice backend for a resolved scope.
-    fn for_scope(&self, scope: &crate::rpc::scoped::ScopedBackend<S>) -> InvoiceBackend<S> {
+    fn for_scope(&self, scope: &crate::rpc_scope::ScopedBackend<S>) -> InvoiceBackend<S> {
         let config = scope
             .tenant()
             .map(|tenant| tenant.config.clone())
@@ -243,7 +243,7 @@ impl<S: crate::rpc::scoped::RpcBackendStore> InvoiceRpcServerImpl<S> {
 #[async_trait::async_trait]
 impl<S> InvoiceRpcServer for InvoiceRpcServerImpl<S>
 where
-    S: InvoiceStore + crate::rpc::scoped::RpcBackendStore + Send + Sync + 'static,
+    S: InvoiceStore + crate::rpc_scope::RpcBackendStore + Send + Sync + 'static,
 {
     /// Generates a new invoice.
     async fn new_invoice(
