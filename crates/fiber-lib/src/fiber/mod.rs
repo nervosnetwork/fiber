@@ -1,6 +1,7 @@
 pub mod channel;
 pub mod channel_signer;
 pub mod config;
+pub mod delivery;
 pub mod gossip;
 pub mod graph;
 pub mod history;

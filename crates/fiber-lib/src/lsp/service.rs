@@ -8,6 +8,10 @@ use ractor::{Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
 
 use crate::fiber::{
     channel::{ChannelActorState, ChannelActorStateStore},
+    delivery::{
+        DeliveryDecision, DeliveryDispatchError, PaymentOutcomeDecision, PaymentOutcomeRequest,
+        SettledPaymentOutcome, TrampolineForwardingRequest,
+    },
     network::{BufferedTrampolineUpstreamStatus, FiberActorCommand, NetworkActorMessage},
 };
 use crate::fiber_types::{
@@ -22,9 +26,8 @@ use super::{
     BiscuitTokenIssuer, HostedTenantChannelStatus, HostedTenantRpcContext, HostedTenantStatus,
     LspConfig, LspInvoiceRegistration, LspInvoiceRegistry, LspPaymentDelivery,
     LspPaymentDeliveryKey, LspPaymentDeliveryLimits, LspPaymentDeliveryManager,
-    LspPaymentDeliveryStatus, LspPaymentDispatchError, LspPaymentOutcomeDecision,
-    TenantChannelRecord, TenantId, TenantRegistry, TenantRuntimeFactory, TenantRuntimeStatus,
-    TenantSupervisor, TrampolineForwardingRequest,
+    LspPaymentDeliveryStatus, TenantChannelRecord, TenantId, TenantRegistry, TenantRuntimeFactory,
+    TenantRuntimeStatus, TenantSupervisor,
 };
 
 /// Runtime dependencies of the LSP service container.
@@ -72,13 +75,6 @@ pub struct TenantSubscriptionContext {
     pub node_id: fiber_types::NodeId,
 }
 
-/// Result of consulting the hosted invoice registry for an incoming trampoline TLC.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum LspDeliveryDecision {
-    NotHosted,
-    Buffered,
-}
-
 /// Commands accepted by the LSP service container.
 pub enum LspServiceMessage {
     GetStatus(RpcReplyPort<LspServiceStatus>),
@@ -118,24 +114,17 @@ pub enum LspServiceMessage {
     ),
     AcceptTrampolineDelivery(
         TrampolineForwardingRequest,
-        RpcReplyPort<Result<LspDeliveryDecision, String>>,
+        RpcReplyPort<Result<DeliveryDecision, String>>,
     ),
     ResumeDelivery(LspPaymentDeliveryKey),
     ExpireDelivery(LspPaymentDeliveryKey),
     TenantChannelOnline(Pubkey, Hash256),
     TenantChannelOffline(Pubkey, Hash256),
-    PaymentOutcomeReady {
-        payment_hash: Hash256,
-        payment_status: PaymentStatus,
-        failure: Option<String>,
-        failure_code: Option<TlcErrorCode>,
-        reply: RpcReplyPort<Result<LspPaymentOutcomeDecision, String>>,
-    },
-    PaymentOutcomeSettled {
-        payment_hash: Hash256,
-        payment_status: PaymentStatus,
-        failure: Option<String>,
-    },
+    PaymentOutcomeReady(
+        PaymentOutcomeRequest,
+        RpcReplyPort<Result<PaymentOutcomeDecision, String>>,
+    ),
+    PaymentOutcomeSettled(SettledPaymentOutcome),
 }
 
 /// Top-level container for the multi-tenant LSP subsystem.
@@ -266,7 +255,7 @@ impl LspServiceState {
         status: PaymentStatus,
         failure: Option<String>,
         failure_code: Option<TlcErrorCode>,
-    ) -> Result<LspPaymentOutcomeDecision, String> {
+    ) -> Result<PaymentOutcomeDecision, String> {
         let delivery = self
             .delivery_manager
             .get(key)?
@@ -276,7 +265,7 @@ impl LspServiceState {
             // temporary failure code. Re-reading that session must not restart delivery or
             // replace the decision just because its error description differs.
             if payment_status == status {
-                return Ok(LspPaymentOutcomeDecision::SettleUpstream);
+                return Ok(PaymentOutcomeDecision::SettleUpstream);
             }
         }
         let error = failure.clone().map(|reason| (reason, failure_code));
@@ -289,7 +278,7 @@ impl LspServiceState {
                 error,
                 crate::now_timestamp_as_millis_u64(),
             )?;
-            return Ok(LspPaymentOutcomeDecision::RetryDelivery);
+            return Ok(PaymentOutcomeDecision::RetryDelivery);
         }
         let delivery_status = match status {
             PaymentStatus::Created | PaymentStatus::Inflight => LspPaymentDeliveryStatus::InFlight,
@@ -306,7 +295,7 @@ impl LspServiceState {
             error,
             crate::now_timestamp_as_millis_u64(),
         )?;
-        Ok(LspPaymentOutcomeDecision::SettleUpstream)
+        Ok(PaymentOutcomeDecision::SettleUpstream)
     }
 
     fn finish_upstream_settlement(
@@ -556,10 +545,10 @@ impl Actor for LspService {
             }
             LspServiceMessage::AcceptTrampolineDelivery(request, reply) => {
                 let result = match state.invoice_registry.get(&request.payment_hash) {
-                    Ok(None) => Ok(LspDeliveryDecision::NotHosted),
+                    Ok(None) => Ok(DeliveryDecision::NotHosted),
                     Ok(Some(registration)) => match state.registry.get(&registration.tenant_id) {
                         Ok(Some(_)) if registration.hint.payload.buffer_duration_ms == 0 => {
-                            Ok(LspDeliveryDecision::NotHosted)
+                            Ok(DeliveryDecision::NotHosted)
                         }
                         Ok(Some(tenant)) => (|| {
                             if let Some(existing) =
@@ -590,7 +579,7 @@ impl Actor for LspService {
                                 delivery.buffer_deadline,
                             );
                             let _ = myself.send_message(LspServiceMessage::ResumeDelivery(key));
-                            LspDeliveryDecision::Buffered
+                            DeliveryDecision::Buffered
                         }),
                         Ok(None) => Err(format!(
                             "tenant {} is not registered",
@@ -676,13 +665,13 @@ impl Actor for LspService {
                     }
                 }
             }
-            LspServiceMessage::PaymentOutcomeReady {
-                payment_hash,
-                payment_status,
-                failure,
-                failure_code,
-                reply,
-            } => {
+            LspServiceMessage::PaymentOutcomeReady(request, reply) => {
+                let PaymentOutcomeRequest {
+                    payment_hash,
+                    payment_status,
+                    failure,
+                    failure_code,
+                } = request;
                 let result = match state
                     .delivery_manager
                     .get_active_by_payment_hash(&payment_hash)
@@ -696,15 +685,15 @@ impl Actor for LspService {
                             failure,
                             failure_code,
                         );
-                        if let Ok(LspPaymentOutcomeDecision::RetryDelivery) = decision {
+                        if let Ok(PaymentOutcomeDecision::RetryDelivery) = decision {
                             LspServiceState::schedule_delivery_retry(&myself, key, deadline);
                         }
                         decision
                     }
-                    Ok(_) => Ok(LspPaymentOutcomeDecision::SettleUpstream),
+                    Ok(_) => Ok(PaymentOutcomeDecision::SettleUpstream),
                     Err(error) => Err(error),
                 };
-                if matches!(&result, Ok(LspPaymentOutcomeDecision::SettleUpstream))
+                if matches!(&result, Ok(PaymentOutcomeDecision::SettleUpstream))
                     && payment_status.is_final()
                 {
                     if let Ok(Some(delivery)) = state
@@ -716,11 +705,12 @@ impl Actor for LspService {
                 }
                 let _ = reply.send(result);
             }
-            LspServiceMessage::PaymentOutcomeSettled {
-                payment_hash,
-                payment_status,
-                failure,
-            } => {
+            LspServiceMessage::PaymentOutcomeSettled(outcome) => {
+                let SettledPaymentOutcome {
+                    payment_hash,
+                    payment_status,
+                    failure,
+                } = outcome;
                 if let Some(delivery) = state
                     .delivery_manager
                     .get_active_by_payment_hash(&payment_hash)?
@@ -870,7 +860,7 @@ impl LspService {
                         payment.failed_error.clone(),
                         payment.failed_error_code,
                     )?;
-                    if decision == LspPaymentOutcomeDecision::RetryDelivery {
+                    if decision == PaymentOutcomeDecision::RetryDelivery {
                         LspServiceState::schedule_delivery_retry(
                             &myself,
                             key,
@@ -1009,7 +999,7 @@ impl LspService {
             10_000
         ) {
             Ok(result) => result,
-            Err(error) => Err(LspPaymentDispatchError::Temporary {
+            Err(error) => Err(DeliveryDispatchError::Temporary {
                 reason: format!("failed to call Public T for hosted payment dispatch: {error}"),
             }),
         };
@@ -1021,7 +1011,7 @@ impl LspService {
                     crate::now_timestamp_as_millis_u64(),
                 )?;
             }
-            Err(LspPaymentDispatchError::Temporary { reason }) => {
+            Err(DeliveryDispatchError::Temporary { reason }) => {
                 state.delivery_manager.transition_with_error(
                     &key,
                     LspPaymentDeliveryStatus::Deferred,
@@ -1037,7 +1027,7 @@ impl LspService {
                 );
                 LspServiceState::schedule_delivery_retry(&myself, key, delivery.buffer_deadline);
             }
-            Err(LspPaymentDispatchError::Permanent { reason, error_code }) => {
+            Err(DeliveryDispatchError::Permanent { reason, error_code }) => {
                 let delivery = state.delivery_manager.transition_with_error(
                     &key,
                     LspPaymentDeliveryStatus::SettlingUpstream {

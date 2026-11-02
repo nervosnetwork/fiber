@@ -1204,7 +1204,9 @@ pub(super) async fn create_lsp_test_network_inner(
         nodes[lsp_node_index]
             .network_actor
             .send_message(NetworkActorMessage::new_command(
-                PublicNetworkCommand::SetLspService(lsp_actor.clone()),
+                PublicNetworkCommand::SetDeliveryPort(crate::lsp::LspDeliveryPort::new(
+                    lsp_actor.clone(),
+                )),
             ))
             .expect("attach LSP service to public node");
 
@@ -2054,7 +2056,9 @@ async fn hosted_payment_buffers_offline_private_channel_and_resumes_via_rpc() {
     public_t
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            PublicNetworkCommand::SetLspService(lsp_actor.clone()),
+            PublicNetworkCommand::SetDeliveryPort(crate::lsp::LspDeliveryPort::new(
+                lsp_actor.clone(),
+            )),
         ))
         .expect("attach LSP service to Public T");
 

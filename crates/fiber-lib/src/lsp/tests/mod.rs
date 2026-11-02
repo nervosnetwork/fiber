@@ -22,15 +22,18 @@ use crate::fiber_types::{
     TenantRegistryPayload, TenantRegistrySignature, TlcErrorCode, WatchChannelKeys,
 };
 use crate::invoice::{Currency, InvoiceBuilder};
-use crate::lsp::TrampolineForwardingRequest;
+
+use crate::fiber::delivery::{
+    DeliveryDecision, DeliveryDispatchError, PaymentOutcomeDecision, PaymentOutcomeRequest,
+    SettledPaymentOutcome, TrampolineForwardingRequest,
+};
 use crate::lsp::{
     is_permanent_hosted_payment_failure, select_tenant_channel, BiscuitTokenIssuer,
-    HostedTenantRecord, HostedTenantRuntime, LspConfig, LspDeliveryDecision, LspInvoiceRegistry,
-    LspPaymentDeliveryLimits, LspPaymentDeliveryManager, LspPaymentDeliveryStatus,
-    LspPaymentDispatchError, LspPaymentOutcomeDecision, LspService, LspServiceArgs,
-    LspServiceMessage, TenantChannelRecord, TenantId, TenantRegistry, TenantRuntimeFactory,
-    TenantSupervisor, DEFAULT_LSP_BUFFER_DURATION_MS, LSP_DELIVERY_SAFETY_MARGIN_MS,
-    MAX_LSP_BUFFER_DURATION_MS,
+    HostedTenantRecord, HostedTenantRuntime, LspConfig, LspInvoiceRegistry,
+    LspPaymentDeliveryLimits, LspPaymentDeliveryManager, LspPaymentDeliveryStatus, LspService,
+    LspServiceArgs, LspServiceMessage, TenantChannelRecord, TenantId, TenantRegistry,
+    TenantRuntimeFactory, TenantSupervisor, DEFAULT_LSP_BUFFER_DURATION_MS,
+    LSP_DELIVERY_SAFETY_MARGIN_MS, MAX_LSP_BUFFER_DURATION_MS,
 };
 use crate::store::{open_store, NodeNamespace, Store};
 
@@ -1491,12 +1494,12 @@ impl Actor for MockPublicNetworkActor {
                     })
                     .is_ok();
                 let _ = if should_fail_permanently {
-                    reply.send(Err(LspPaymentDispatchError::Permanent {
+                    reply.send(Err(DeliveryDispatchError::Permanent {
                         reason: "invoice is cancelled".to_string(),
                         error_code: TlcErrorCode::InvoiceCancelled,
                     }))
                 } else if should_fail {
-                    reply.send(Err(LspPaymentDispatchError::Temporary {
+                    reply.send(Err(DeliveryDispatchError::Temporary {
                         reason: "temporary dispatch failure".to_string(),
                     }))
                 } else {
@@ -2278,7 +2281,7 @@ impl BufferedDeliveryTest {
             })
             .unwrap()
             .unwrap(),
-            LspDeliveryDecision::Buffered,
+            DeliveryDecision::Buffered,
         );
         self.manager
             .get_by_payment_hash(&self.request.payment_hash)
@@ -2518,7 +2521,7 @@ async fn cold_tenant_delivery_dispatches_only_after_channel_online() {
         })
         .unwrap()
         .unwrap(),
-        crate::lsp::LspDeliveryDecision::Buffered
+        DeliveryDecision::Buffered
     );
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(dispatches.load(Ordering::Relaxed), 0);
@@ -2975,7 +2978,7 @@ async fn zero_buffer_hint_keeps_immediate_trampoline_behavior() {
         })
         .unwrap()
         .unwrap(),
-        LspDeliveryDecision::NotHosted
+        DeliveryDecision::NotHosted
     );
     assert_eq!(manager.get_by_payment_hash(&payment_hash).unwrap(), None);
     assert_eq!(starts.load(Ordering::Relaxed), 0);
@@ -3225,16 +3228,18 @@ async fn transient_payment_outcome_retries_delivery_before_deadline() {
     wait_for_delivery_status(&manager, payment_hash, LspPaymentDeliveryStatus::InFlight).await;
 
     assert_eq!(
-        ractor::call!(service, |reply| LspServiceMessage::PaymentOutcomeReady {
-            payment_hash,
-            payment_status: PaymentStatus::Failed,
-            failure: Some("peer is offline".to_string()),
-            failure_code: Some(TlcErrorCode::TemporaryNodeFailure),
+        ractor::call!(service, |reply| LspServiceMessage::PaymentOutcomeReady(
+            PaymentOutcomeRequest {
+                payment_hash,
+                payment_status: PaymentStatus::Failed,
+                failure: Some("peer is offline".to_string()),
+                failure_code: Some(TlcErrorCode::TemporaryNodeFailure),
+            },
             reply,
-        })
+        ))
         .unwrap()
         .unwrap(),
-        LspPaymentOutcomeDecision::RetryDelivery
+        PaymentOutcomeDecision::RetryDelivery
     );
     let deferred = manager.get_by_payment_hash(&payment_hash).unwrap().unwrap();
     assert_eq!(deferred.status, LspPaymentDeliveryStatus::Deferred);
@@ -3319,29 +3324,33 @@ async fn permanent_payment_outcomes_settle_upstream_without_redispatch() {
         wait_for_delivery_status(&manager, payment_hash, LspPaymentDeliveryStatus::InFlight).await;
 
         assert_eq!(
-            ractor::call!(service, |reply| LspServiceMessage::PaymentOutcomeReady {
-                payment_hash,
-                payment_status: PaymentStatus::Failed,
-                failure: Some(reason.to_string()),
-                failure_code: Some(error_code),
+            ractor::call!(service, |reply| LspServiceMessage::PaymentOutcomeReady(
+                PaymentOutcomeRequest {
+                    payment_hash,
+                    payment_status: PaymentStatus::Failed,
+                    failure: Some(reason.to_string()),
+                    failure_code: Some(error_code),
+                },
                 reply,
-            })
+            ))
             .unwrap()
             .unwrap(),
-            LspPaymentOutcomeDecision::SettleUpstream,
+            PaymentOutcomeDecision::SettleUpstream,
             "{error_code:?} must not be retried"
         );
         assert_eq!(
-            ractor::call!(service, |reply| LspServiceMessage::PaymentOutcomeReady {
-                payment_hash,
-                payment_status: PaymentStatus::Failed,
-                failure: Some(format!("reworded: {reason}")),
-                failure_code: Some(TlcErrorCode::TemporaryNodeFailure),
+            ractor::call!(service, |reply| LspServiceMessage::PaymentOutcomeReady(
+                PaymentOutcomeRequest {
+                    payment_hash,
+                    payment_status: PaymentStatus::Failed,
+                    failure: Some(format!("reworded: {reason}")),
+                    failure_code: Some(TlcErrorCode::TemporaryNodeFailure),
+                },
                 reply,
-            })
+            ))
             .unwrap()
             .unwrap(),
-            LspPaymentOutcomeDecision::SettleUpstream,
+            PaymentOutcomeDecision::SettleUpstream,
         );
         let settling = manager.get_by_payment_hash(&payment_hash).unwrap().unwrap();
         assert_eq!(
@@ -3356,11 +3365,13 @@ async fn permanent_payment_outcomes_settle_upstream_without_redispatch() {
         assert_eq!(settling.last_error_code, Some(error_code));
 
         service
-            .send_message(LspServiceMessage::PaymentOutcomeSettled {
-                payment_hash,
-                payment_status: PaymentStatus::Failed,
-                failure: Some(reason.to_string()),
-            })
+            .send_message(LspServiceMessage::PaymentOutcomeSettled(
+                SettledPaymentOutcome {
+                    payment_hash,
+                    payment_status: PaymentStatus::Failed,
+                    failure: Some(reason.to_string()),
+                },
+            ))
             .unwrap();
         wait_for_delivery_status(
             &manager,
@@ -3448,16 +3459,18 @@ async fn downstream_outcome_is_persisted_before_upstream_settlement() {
 
     for _ in 0..2 {
         assert_eq!(
-            ractor::call!(service, |reply| LspServiceMessage::PaymentOutcomeReady {
-                payment_hash,
-                payment_status: PaymentStatus::Success,
-                failure: None,
-                failure_code: None,
+            ractor::call!(service, |reply| LspServiceMessage::PaymentOutcomeReady(
+                PaymentOutcomeRequest {
+                    payment_hash,
+                    payment_status: PaymentStatus::Success,
+                    failure: None,
+                    failure_code: None,
+                },
                 reply,
-            })
+            ))
             .unwrap()
             .unwrap(),
-            LspPaymentOutcomeDecision::SettleUpstream
+            PaymentOutcomeDecision::SettleUpstream
         );
     }
     let settling = manager.get_by_payment_hash(&payment_hash).unwrap().unwrap();
@@ -3475,11 +3488,13 @@ async fn downstream_outcome_is_persisted_before_upstream_settlement() {
     );
 
     service
-        .send_message(LspServiceMessage::PaymentOutcomeSettled {
-            payment_hash,
-            payment_status: PaymentStatus::Success,
-            failure: None,
-        })
+        .send_message(LspServiceMessage::PaymentOutcomeSettled(
+            SettledPaymentOutcome {
+                payment_hash,
+                payment_status: PaymentStatus::Success,
+                failure: None,
+            },
+        ))
         .unwrap();
     wait_for_delivery_status(&reopened, payment_hash, LspPaymentDeliveryStatus::Succeeded).await;
 }
@@ -3668,11 +3683,8 @@ impl Actor for QueryingOutcomeActor {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            LspServiceMessage::PaymentOutcomeReady {
-                payment_hash,
-                reply,
-                ..
-            } => {
+            LspServiceMessage::PaymentOutcomeReady(request, reply) => {
+                let payment_hash = request.payment_hash;
                 // Deterministically exercise the reverse call while NetworkActor awaits our decision.
                 let result = ractor::call_t!(
                     state.0,
@@ -3685,9 +3697,9 @@ impl Actor for QueryingOutcomeActor {
                 if !matches!(result, Ok(Ok(_))) {
                     let _ = state.1.take().unwrap().send(false);
                 }
-                let _ = reply.send(Ok(LspPaymentOutcomeDecision::SettleUpstream));
+                let _ = reply.send(Ok(PaymentOutcomeDecision::SettleUpstream));
             }
-            LspServiceMessage::PaymentOutcomeSettled { .. } => {
+            LspServiceMessage::PaymentOutcomeSettled(..) => {
                 if let Some(done) = state.1.take() {
                     let _ = done.send(true);
                 }
@@ -3732,7 +3744,9 @@ async fn payment_outcome_notification_allows_network_queries_before_settlement()
     .unwrap();
     node.network_actor
         .send_message(NetworkActorMessage::new_command(
-            PublicNetworkCommand::SetLspService(service.clone()),
+            PublicNetworkCommand::SetDeliveryPort(crate::lsp::LspDeliveryPort::new(
+                service.clone(),
+            )),
         ))
         .unwrap();
     node.network_actor
@@ -3808,7 +3822,9 @@ async fn delayed_payment_outcome_does_not_settle_replacement_execution() {
     .unwrap();
     node.network_actor
         .send_message(NetworkActorMessage::new_command(
-            PublicNetworkCommand::SetLspService(service.clone()),
+            PublicNetworkCommand::SetDeliveryPort(crate::lsp::LspDeliveryPort::new(
+                service.clone(),
+            )),
         ))
         .unwrap();
     node.network_actor

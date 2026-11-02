@@ -532,7 +532,9 @@ async fn run_node(
             .0;
             public_network_actor
                 .send_message(NetworkActorMessage::new_command(
-                    PublicNetworkCommand::SetLspService(lsp_actor.clone()),
+                    PublicNetworkCommand::SetDeliveryPort(fnn::lsp::LspDeliveryPort::new(
+                        lsp_actor.clone(),
+                    )),
                 ))
                 .map_err(|error| {
                     ExitMessage(format!("failed to attach LSP service to Public T: {error}"))

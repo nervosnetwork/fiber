@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 use crate::fiber_types::{Hash256, PaymentStatus, TlcErrorCode};
 use crate::store::{FiberStore, Store};
 
-use super::{LspInvoiceRegistration, TenantChannelRecord, TenantId, TrampolineForwardingRequest};
+use crate::fiber::delivery::TrampolineForwardingRequest;
+
+use super::{LspInvoiceRegistration, TenantChannelRecord, TenantId};
 
 const PAYMENT_DELIVERY_PREFIX: &[u8] = b"\xf2lsp/delivery/";
 const PAYMENT_DELIVERY_HASH_INDEX_PREFIX: &[u8] = b"\xf2lsp/delivery-by-hash/";

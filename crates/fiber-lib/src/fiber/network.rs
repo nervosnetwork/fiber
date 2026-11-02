@@ -89,6 +89,12 @@ use crate::fiber::channel::{
     MAX_TLC_NUMBER_IN_FLIGHT,
 };
 use crate::fiber::config::{DEFAULT_COMMITMENT_DELAY_EPOCHS, MIN_TLC_EXPIRY_DELTA};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::fiber::delivery::{
+    DeliveryDecision, HostedDeliveryPort, PaymentOutcomeDecision, PaymentOutcomeRequest,
+    SettledPaymentOutcome,
+};
+use crate::fiber::delivery::{DeliveryDispatchError, TrampolineForwardingRequest};
 use crate::fiber::fee::{check_open_channel_parameters, check_tlc_delta_with_epochs};
 use crate::fiber::gossip::{GossipConfig, GossipService, SubscribableGossipMessageStore};
 use crate::fiber::onchain_tlc_reconcile::{
@@ -117,9 +123,6 @@ use crate::invoice::{
     CancelInvoiceError, CkbInvoice, CkbInvoiceStatus, Currency, InvoiceError, InvoiceStore,
     PreimageStore, SettleInvoiceError,
 };
-#[cfg(not(target_arch = "wasm32"))]
-use crate::lsp::{LspDeliveryDecision, LspPaymentOutcomeDecision, LspServiceMessage};
-use crate::lsp::{LspPaymentDispatchError, TrampolineForwardingRequest};
 use crate::utils::actor::ActorHandleLogGuard;
 use crate::{now_timestamp_as_millis_u64, Error};
 use fiber_types::protocol::AnnouncedNodeName;
@@ -1106,7 +1109,7 @@ pub enum PublicNetworkCommand {
     NodeInfo((), RpcReplyPort<Result<NodeInfoResponse, String>>),
     ListPeers((), RpcReplyPort<Result<Vec<PeerInfo>, String>>),
     #[cfg(not(target_arch = "wasm32"))]
-    SetLspService(ActorRef<LspServiceMessage>),
+    SetDeliveryPort(Arc<dyn HostedDeliveryPort>),
     #[cfg(any(debug_assertions, feature = "bench"))]
     UpdateFeatures(FeatureVector),
 }
@@ -1257,7 +1260,7 @@ pub enum FiberActorCommand {
     #[cfg(not(target_arch = "wasm32"))]
     DispatchBufferedTrampoline {
         request: TrampolineForwardingRequest,
-        reply: RpcReplyPort<Result<(), LspPaymentDispatchError>>,
+        reply: RpcReplyPort<Result<(), DeliveryDispatchError>>,
     },
     #[cfg(not(target_arch = "wasm32"))]
     ReconcileBufferedTrampolineSettlement {
@@ -2013,7 +2016,7 @@ where
             pending_remove_tlcs: Default::default(),
             inflight_tracers: Default::default(),
             #[cfg(not(target_arch = "wasm32"))]
-            lsp_service: None,
+            delivery_port: None,
             #[cfg(test)]
             test_fiber_message_hold: None,
             #[cfg(test)]
@@ -3672,9 +3675,9 @@ where
                 error_code,
                 reply,
             } => {
-                let lsp_service = state.lsp_service.clone();
+                let delivery_port = state.delivery_port.clone();
                 let result = self
-                    .fail_buffered_trampoline(state, lsp_service, request, reason, error_code)
+                    .fail_buffered_trampoline(state, delivery_port, request, reason, error_code)
                     .await;
                 let _ = reply.send(result);
             }
@@ -5281,9 +5284,9 @@ where
         request: TrampolineForwardingRequest,
     ) -> Result<(), TlcErr> {
         #[cfg(not(target_arch = "wasm32"))]
-        if let Some(lsp_service) = state.lsp_service.clone() {
+        if let Some(port) = state.delivery_port.clone() {
             return self
-                .accept_or_dispatch_lsp_trampoline(state, lsp_service, request)
+                .accept_or_dispatch_hosted_trampoline(state, port, request)
                 .await;
         }
 
@@ -5307,10 +5310,10 @@ where
         &self,
         state: &mut FiberActorState<S, C>,
         request: TrampolineForwardingRequest,
-    ) -> Result<(), LspPaymentDispatchError> {
+    ) -> Result<(), DeliveryDispatchError> {
         let payment_hash = request.payment_hash;
         let payment_data = request.into_send_payment_data().map_err(|reason| {
-            LspPaymentDispatchError::Permanent {
+            DeliveryDispatchError::Permanent {
                 reason: format!("invalid hosted payment request: {reason}"),
                 error_code: TlcErrorCode::InvalidOnionPayload,
             }
@@ -5328,38 +5331,29 @@ where
             .await
         {
             Ok(()) => Ok(()),
-            Err(error) => Err(LspPaymentDispatchError::Temporary {
+            Err(error) => Err(DeliveryDispatchError::Temporary {
                 reason: format!("failed to start hosted payment: {error}"),
             }),
         }
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    async fn accept_or_dispatch_lsp_trampoline(
+    async fn accept_or_dispatch_hosted_trampoline(
         &self,
         state: &mut FiberActorState<S, C>,
-        lsp_service: ActorRef<LspServiceMessage>,
+        port: Arc<dyn HostedDeliveryPort>,
         request: TrampolineForwardingRequest,
     ) -> Result<(), TlcErr> {
-        let decision = ractor::call_t!(
-            lsp_service,
-            |reply| LspServiceMessage::AcceptTrampolineDelivery(request.clone(), reply),
-            5_000
-        );
-        match decision {
-            Ok(Ok(LspDeliveryDecision::NotHosted)) => {
+        match port.accept_trampoline_delivery(request.clone()).await {
+            Ok(DeliveryDecision::NotHosted) => {
                 self.dispatch_trampoline_payment(state, request).await
             }
-            Ok(Ok(LspDeliveryDecision::Buffered)) => Ok(()),
-            Ok(Err(error)) => {
-                warn!("Hosted trampoline delivery rejected: {error}");
-                Err(TlcErr::new_node_fail(
-                    TlcErrorCode::TemporaryNodeFailure,
-                    state.get_public_key(),
-                ))
-            }
+            Ok(DeliveryDecision::Buffered) => Ok(()),
             Err(error) => {
-                error!("Failed to consult LSP delivery service: {error}");
+                // The port reports both "the service rejected this delivery" and
+                // "the service is unreachable"; either way the TLC cannot be
+                // forwarded now.
+                warn!("Hosted trampoline delivery unavailable: {error}");
                 Err(TlcErr::new_node_fail(
                     TlcErrorCode::TemporaryNodeFailure,
                     state.get_public_key(),
@@ -5372,7 +5366,7 @@ where
     async fn fail_buffered_trampoline(
         &self,
         state: &mut FiberActorState<S, C>,
-        lsp_service: Option<ActorRef<LspServiceMessage>>,
+        delivery_port: Option<Arc<dyn HostedDeliveryPort>>,
         request: TrampolineForwardingRequest,
         reason: String,
         error_code: TlcErrorCode,
@@ -5400,8 +5394,8 @@ where
         state.store.insert_payment_session(session.clone());
         let settlement = state.settle_trampoline_payment(&session, None, None).await;
         if settlement.is_ok() {
-            if let Some(lsp_service) = lsp_service {
-                let _ = lsp_service.send_message(LspServiceMessage::PaymentOutcomeSettled {
+            if let Some(port) = delivery_port {
+                port.report_settled_payment(SettledPaymentOutcome {
                     payment_hash,
                     payment_status: PaymentStatus::Failed,
                     failure: session.last_error.clone(),
@@ -6439,8 +6433,8 @@ where
                 Ok(())
             }
             #[cfg(not(target_arch = "wasm32"))]
-            PublicNetworkCommand::SetLspService(lsp_service) => {
-                state.fiber.lsp_service = Some(lsp_service);
+            PublicNetworkCommand::SetDeliveryPort(port) => {
+                state.fiber.delivery_port = Some(port);
                 Ok(())
             }
             #[cfg(any(debug_assertions, feature = "bench"))]
@@ -6616,7 +6610,7 @@ pub struct FiberActorState<S, C> {
     // Optional trampoline-delivery policy. This is data-plane behavior rather than
     // public P2P runtime state, and is absent for ordinary nodes and hosted tenants.
     #[cfg(not(target_arch = "wasm32"))]
-    lsp_service: Option<ActorRef<LspServiceMessage>>,
+    delivery_port: Option<Arc<dyn HostedDeliveryPort>>,
     #[cfg(test)]
     test_fiber_message_hold: Option<TestFiberMessageHold>,
     #[cfg(test)]
@@ -8779,23 +8773,19 @@ where
 
         #[cfg(not(target_arch = "wasm32"))]
         if session.status.is_final() {
-            if let Some(lsp_service) = self.lsp_service.clone() {
-                // LspService itself calls NetworkActor during recovery and tenant activation.
-                // Await its decision outside this handler so those calls can be served.
+            if let Some(port) = self.delivery_port.clone() {
+                // The delivery service itself calls NetworkActor during recovery and
+                // tenant activation. Await its decision outside this handler so those
+                // calls can be served.
+                let request = PaymentOutcomeRequest {
+                    payment_hash,
+                    payment_status: session.status,
+                    failure: session.last_error.clone(),
+                    failure_code: session.last_error_code,
+                };
                 crate::tasks::spawn(async move {
-                    let ready = ractor::call_t!(
-                        lsp_service,
-                        |reply| LspServiceMessage::PaymentOutcomeReady {
-                            payment_hash,
-                            payment_status: session.status,
-                            failure: session.last_error.clone(),
-                            failure_code: session.last_error_code,
-                            reply,
-                        },
-                        5_000
-                    );
-                    match ready {
-                        Ok(Ok(LspPaymentOutcomeDecision::SettleUpstream)) => {
+                    match port.decide_payment_outcome(request).await {
+                        Ok(PaymentOutcomeDecision::SettleUpstream) => {
                             let _ = _myself.send_message(FiberActorMessage::new_command(
                                 FiberActorCommand::SettleLspPaymentOutcome {
                                     session: Box::new(session),
@@ -8803,11 +8793,11 @@ where
                                 },
                             ));
                         }
-                        Ok(Ok(LspPaymentOutcomeDecision::RetryDelivery)) => {}
-                        ready => {
+                        Ok(PaymentOutcomeDecision::RetryDelivery) => {}
+                        Err(error) => {
                             warn!(
                                 %payment_hash,
-                                ?ready,
+                                %error,
                                 "Failed to persist hosted payment outcome before upstream settlement"
                             );
                         }
@@ -8834,8 +8824,8 @@ where
         }
         #[cfg(not(target_arch = "wasm32"))]
         if session.status.is_final() && settlement.is_ok() {
-            if let Some(lsp_service) = self.lsp_service.as_ref() {
-                let _ = lsp_service.send_message(LspServiceMessage::PaymentOutcomeSettled {
+            if let Some(port) = self.delivery_port.as_ref() {
+                port.report_settled_payment(SettledPaymentOutcome {
                     payment_hash,
                     payment_status: session.status,
                     failure: session.last_error.clone(),
@@ -9694,18 +9684,14 @@ where
             }
             NetworkActorMessage::Fiber(FiberActorMessage::Notification(event)) => {
                 #[cfg(not(target_arch = "wasm32"))]
-                if let Some(lsp_service) = state.fiber.lsp_service.as_ref() {
+                if let Some(port) = state.fiber.delivery_port.as_ref() {
                     match &event {
                         NetworkServiceEvent::ChannelReady(pubkey, channel_id, ..)
                         | NetworkServiceEvent::ChannelOnline(pubkey, channel_id, ..) => {
-                            let _ = lsp_service.send_message(
-                                LspServiceMessage::TenantChannelOnline(*pubkey, *channel_id),
-                            );
+                            port.report_tenant_channel(*pubkey, *channel_id, true);
                         }
                         NetworkServiceEvent::ChannelOffline(pubkey, channel_id, ..) => {
-                            let _ = lsp_service.send_message(
-                                LspServiceMessage::TenantChannelOffline(*pubkey, *channel_id),
-                            );
+                            port.report_tenant_channel(*pubkey, *channel_id, false);
                         }
                         _ => {}
                     }

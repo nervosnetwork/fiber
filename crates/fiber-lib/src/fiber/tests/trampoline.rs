@@ -3,6 +3,7 @@ use crate::fiber::channel::{ChannelActorStateStore, ChannelCommand, ChannelComma
 use crate::fiber::config::{
     DEFAULT_FINAL_TLC_EXPIRY_DELTA, DEFAULT_TLC_EXPIRY_DELTA, MIN_TLC_EXPIRY_DELTA,
 };
+use crate::fiber::delivery::TrampolineForwardingRequest;
 use crate::fiber::graph::*;
 use crate::fiber::network::{
     DebugEvent, FiberActorCommand, NetworkActorMessage, SendOnionPacketCommand,
@@ -13,7 +14,6 @@ use crate::fiber::{FeatureVector, PaymentStatus, Privkey, Pubkey};
 use crate::gen_rand_fiber_public_key;
 use crate::gen_rand_secp256k1_keypair_tuple;
 use crate::invoice::{Currency, InvoiceBuilder, InvoiceStore, PreimageStore};
-use crate::lsp::TrampolineForwardingRequest;
 use crate::tests::test_utils::*;
 use crate::{
     create_channel_with_nodes, gen_rand_fiber_private_key, gen_rand_sha256_hash,
