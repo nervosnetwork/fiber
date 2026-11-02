@@ -5,7 +5,7 @@ use biscuit_auth::{
     KeyPair,
 };
 use fiber_json_types::{SubscriptionEvent, SubscriptionTopic};
-use fiber_types::Hash256;
+use fiber_types::{Hash256, SettlementKey, WatchChannelKeys};
 use hyper::{
     header::{HeaderValue, AUTHORIZATION},
     HeaderMap,
@@ -355,11 +355,12 @@ async fn subscription_watchtower_uses_the_authorized_node_even_for_shared_channe
             node.clone(),
             channel,
             None,
-            None,
-            Privkey::from(&[1; 32]).pubkey(),
-            Privkey::from(&[2; 32]).pubkey(),
-            Privkey::from(&[3; 32]).pubkey(),
-            Privkey::from(&[4; 32]).pubkey(),
+            WatchChannelKeys {
+                local_settlement: SettlementKey::external(Privkey::from(&[1; 32]).pubkey()),
+                remote_settlement: Privkey::from(&[2; 32]).pubkey(),
+                local_funding: Privkey::from(&[3; 32]).pubkey(),
+                remote_funding: Privkey::from(&[4; 32]).pubkey(),
+            },
             SettlementData {
                 local_amount: 100,
                 remote_amount: 200,

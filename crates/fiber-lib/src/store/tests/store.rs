@@ -58,7 +58,8 @@ use fiber_types::CloseFlags;
 #[cfg(not(target_arch = "wasm32"))]
 use fiber_types::{
     AddTlcCommand, AppliedFlags, CommitmentContractFeatures, CommitmentNumbers, OutboundTlcStatus,
-    RetryableTlcOperation, SettlementTlc, TLCId, TlcInfo, TlcStatus,
+    RetryableTlcOperation, SettlementKey, SettlementTlc, TLCId, TlcInfo, TlcStatus,
+    WatchChannelKeys,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use fiber_types::{Attempt, AttemptStatus, HashAlgorithm, PaymentHopData, RouterHop, SessionRoute};
@@ -169,11 +170,12 @@ fn test_local_watch_channel_resolves_hosted_tenant_namespace() {
             node_id,
             channel_id,
             None,
-            Some(local_key.clone()),
-            local_key.pubkey(),
-            Privkey::from(&[2; 32]).pubkey(),
-            Privkey::from(&[3; 32]).pubkey(),
-            Privkey::from(&[4; 32]).pubkey(),
+            WatchChannelKeys {
+                local_settlement: SettlementKey::local(local_key.clone()),
+                remote_settlement: Privkey::from(&[2; 32]).pubkey(),
+                local_funding: Privkey::from(&[3; 32]).pubkey(),
+                remote_funding: Privkey::from(&[4; 32]).pubkey(),
+            },
             SettlementData {
                 local_amount,
                 remote_amount: 100,
@@ -584,11 +586,12 @@ fn test_store_watchtower() {
         node_id.clone(),
         channel_id,
         None,
-        Some(local_settlement_key.clone()),
-        local_settlement_key.pubkey(),
-        remote_settlement_key,
-        local_funding_pubkey,
-        remote_funding_pubkey,
+        WatchChannelKeys {
+            local_settlement: SettlementKey::local(local_settlement_key.clone()),
+            remote_settlement: remote_settlement_key,
+            local_funding: local_funding_pubkey,
+            remote_funding: remote_funding_pubkey,
+        },
         settlement_data.clone(),
     );
     assert_eq!(
@@ -672,11 +675,12 @@ fn test_store_external_watch_channel_contains_no_private_keys() {
         node_id.clone(),
         channel_id,
         None,
-        None,
-        local_settlement_pubkey,
-        Privkey::from(&[2; 32]).pubkey(),
-        Privkey::from(&[3; 32]).pubkey(),
-        Privkey::from(&[4; 32]).pubkey(),
+        WatchChannelKeys {
+            local_settlement: SettlementKey::external(local_settlement_pubkey),
+            remote_settlement: Privkey::from(&[2; 32]).pubkey(),
+            local_funding: Privkey::from(&[3; 32]).pubkey(),
+            remote_funding: Privkey::from(&[4; 32]).pubkey(),
+        },
         settlement_data,
     );
 
@@ -716,11 +720,12 @@ fn test_store_watchtower_v1_registration_round_trip() {
         node_id,
         channel_id,
         None,
-        Some(Privkey::from(&[1; 32])),
-        Privkey::from(&[1; 32]).pubkey(),
-        Privkey::from(&[2; 32]).pubkey(),
-        Privkey::from(&[3; 32]).pubkey(),
-        Privkey::from(&[4; 32]).pubkey(),
+        WatchChannelKeys {
+            local_settlement: SettlementKey::local(Privkey::from(&[1; 32])),
+            remote_settlement: Privkey::from(&[2; 32]).pubkey(),
+            local_funding: Privkey::from(&[3; 32]).pubkey(),
+            remote_funding: Privkey::from(&[4; 32]).pubkey(),
+        },
         settlement_data,
         CommitmentContractFeatures::ONCHAIN_FULL_PAYMENT_HASH,
     );
@@ -841,11 +846,12 @@ fn test_store_watchtower_preimage_gc_waits_for_watched_tlc() {
         node_id.clone(),
         channel_id,
         None,
-        Some(local_settlement_key.clone()),
-        local_settlement_key.pubkey(),
-        remote_settlement_key,
-        local_funding_pubkey,
-        remote_funding_pubkey,
+        WatchChannelKeys {
+            local_settlement: SettlementKey::local(local_settlement_key.clone()),
+            remote_settlement: remote_settlement_key,
+            local_funding: local_funding_pubkey,
+            remote_funding: remote_funding_pubkey,
+        },
         settlement_data,
     );
     store.insert_watch_preimage(node_id.clone(), payment_hash, preimage);
@@ -915,11 +921,12 @@ fn test_store_watchtower_preimage_gc_waits_for_same_hash_sibling_tlc() {
         node_id.clone(),
         channel_id,
         None,
-        Some(local_settlement_key.clone()),
-        local_settlement_key.pubkey(),
-        remote_settlement_key,
-        local_funding_pubkey,
-        remote_funding_pubkey,
+        WatchChannelKeys {
+            local_settlement: SettlementKey::local(local_settlement_key.clone()),
+            remote_settlement: remote_settlement_key,
+            local_funding: local_funding_pubkey,
+            remote_funding: remote_funding_pubkey,
+        },
         settlement_data,
     );
     store.insert_watch_preimage(node_id.clone(), payment_hash, preimage);
@@ -977,11 +984,12 @@ fn test_store_watchtower_preimage_gc_isolated_between_tenants() {
             node_id.clone(),
             channel_id,
             None,
-            Some(Privkey::from(&[1; 32])),
-            Privkey::from(&[1; 32]).pubkey(),
-            Privkey::from(&[2; 32]).pubkey(),
-            Privkey::from(&[3; 32]).pubkey(),
-            Privkey::from(&[4; 32]).pubkey(),
+            WatchChannelKeys {
+                local_settlement: SettlementKey::local(Privkey::from(&[1; 32])),
+                remote_settlement: Privkey::from(&[2; 32]).pubkey(),
+                local_funding: Privkey::from(&[3; 32]).pubkey(),
+                remote_funding: Privkey::from(&[4; 32]).pubkey(),
+            },
             settlement_data.clone(),
         );
         store.insert_watch_preimage(node_id.clone(), payment_hash, preimage);
@@ -1041,11 +1049,12 @@ fn test_store_watchtower_preimage_gc_ignores_ambiguous_legacy_settlement() {
         node_id.clone(),
         channel_id,
         None,
-        Some(Privkey::from(&[1; 32])),
-        Privkey::from(&[1; 32]).pubkey(),
-        Privkey::from(&[2; 32]).pubkey(),
-        Privkey::from(&[3; 32]).pubkey(),
-        Privkey::from(&[4; 32]).pubkey(),
+        WatchChannelKeys {
+            local_settlement: SettlementKey::local(Privkey::from(&[1; 32])),
+            remote_settlement: Privkey::from(&[2; 32]).pubkey(),
+            local_funding: Privkey::from(&[3; 32]).pubkey(),
+            remote_funding: Privkey::from(&[4; 32]).pubkey(),
+        },
         settlement_data,
     );
     store.insert_watch_preimage(node_id.clone(), payment_hash, preimage);
@@ -1714,11 +1723,12 @@ fn test_store_watchtower_with_wrong_node_id() {
         node_id.clone(),
         channel_id,
         None,
-        Some(local_settlement_key.clone()),
-        local_settlement_key.pubkey(),
-        remote_settlement_key,
-        local_funding_pubkey,
-        remote_funding_pubkey,
+        WatchChannelKeys {
+            local_settlement: SettlementKey::local(local_settlement_key.clone()),
+            remote_settlement: remote_settlement_key,
+            local_funding: local_funding_pubkey,
+            remote_funding: remote_funding_pubkey,
+        },
         settlement_data.clone(),
     );
     let expected_value = vec![ChannelData {

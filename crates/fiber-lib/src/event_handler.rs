@@ -42,24 +42,22 @@ pub async fn forward_event_to_client<T: WatchtowerRpcClient + Sync>(
             _peer_id,
             channel_id,
             funding_udt_type_script,
-            local_settlement_key,
-            local_settlement_key_pubkey,
-            remote_settlement_key,
-            local_funding_pubkey,
-            remote_funding_pubkey,
+            keys,
             settlement_data,
             commitment_contract_features,
         ) => {
+            let (local_settlement_key, local_settlement_key_pubkey) =
+                keys.local_settlement.to_parts();
             watchtower_client
                 .create_watch_channel(CreateWatchChannelParams {
                     channel_id: channel_id.into(),
                     funding_udt_type_script: funding_udt_type_script.map(Into::into),
                     local_settlement_key: local_settlement_key
                         .map(|key| key.0.secret_bytes().into()),
-                    local_settlement_key_pubkey: Some(local_settlement_key_pubkey.into()),
-                    remote_settlement_key: remote_settlement_key.into(),
-                    local_funding_pubkey: local_funding_pubkey.into(),
-                    remote_funding_pubkey: remote_funding_pubkey.into(),
+                    local_settlement_key_pubkey: local_settlement_key_pubkey.map(Into::into),
+                    remote_settlement_key: keys.remote_settlement.into(),
+                    local_funding_pubkey: keys.local_funding.into(),
+                    remote_funding_pubkey: keys.remote_funding.into(),
                     settlement_data: settlement_data.into(),
                     commitment_contract_features: commitment_contract_features.into(),
                 })
@@ -165,11 +163,7 @@ pub fn forward_event_to_watchtower_store<S: crate::watchtower::WatchtowerStore>(
             _peer_id,
             channel_id,
             funding_udt_type_script,
-            local_settlement_key,
-            local_settlement_key_pubkey,
-            remote_settlement_key,
-            local_funding_pubkey,
-            remote_funding_pubkey,
+            keys,
             settlement_data,
             commitment_contract_features,
         ) => {
@@ -179,11 +173,7 @@ pub fn forward_event_to_watchtower_store<S: crate::watchtower::WatchtowerStore>(
                 node_id,
                 channel_id,
                 funding_udt_type_script,
-                local_settlement_key,
-                local_settlement_key_pubkey,
-                remote_settlement_key,
-                local_funding_pubkey,
-                remote_funding_pubkey,
+                keys,
                 settlement_data,
                 commitment_contract_features,
             );
@@ -258,11 +248,12 @@ mod tests {
                 Privkey::from(&[9; 32]).pubkey(),
                 channel_id,
                 None,
-                None,
-                local_settlement_pubkey,
-                Privkey::from(&[2; 32]).pubkey(),
-                Privkey::from(&[3; 32]).pubkey(),
-                Privkey::from(&[4; 32]).pubkey(),
+                fiber_types::WatchChannelKeys {
+                    local_settlement: fiber_types::SettlementKey::external(local_settlement_pubkey),
+                    remote_settlement: Privkey::from(&[2; 32]).pubkey(),
+                    local_funding: Privkey::from(&[3; 32]).pubkey(),
+                    remote_funding: Privkey::from(&[4; 32]).pubkey(),
+                },
                 SettlementData {
                     local_amount: 1,
                     remote_amount: 1,

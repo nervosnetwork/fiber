@@ -20,8 +20,8 @@ use fiber_types::{
     AppliedFlags, ChannelBasePublicKeys, ChannelData, ChannelState, CloseFlags,
     CommitmentContractFeatures, CommitmentNumbers, Hash256, HashAlgorithm, InboundTlcStatus,
     OutboundTlcStatus, Privkey, Pubkey, RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation,
-    RevocationData, SettlementData, SettlementTlc, ShutdownSettlementRecord, TLCId, TlcErr,
-    TlcErrPacket, TlcErrorCode, TlcInfo, TlcStatus,
+    RevocationData, SettlementData, SettlementKey, SettlementTlc, ShutdownSettlementRecord, TLCId,
+    TlcErr, TlcErrPacket, TlcErrorCode, TlcInfo, TlcStatus, WatchChannelKeys,
 };
 use musig2::{secp::Point, CompactSignature, KeyAggContext};
 use ractor::Actor;
@@ -2614,11 +2614,12 @@ async fn assert_confirmed_snapshot_recovery(wrong_direction: bool, revoked: bool
         NodeId::local(),
         channel_id,
         None,
-        Some(local_settlement_privkey.clone()),
-        local_settlement_privkey.pubkey(),
-        remote_settlement_pubkey,
-        local_privkey.pubkey(),
-        remote_privkey.pubkey(),
+        WatchChannelKeys {
+            local_settlement: SettlementKey::local(local_settlement_privkey.clone()),
+            remote_settlement: remote_settlement_pubkey,
+            local_funding: local_privkey.pubkey(),
+            remote_funding: remote_privkey.pubkey(),
+        },
         pending_settlement.clone(),
     );
     store.update_revocation(
@@ -2721,11 +2722,12 @@ async fn test_scenario_b_transient_rpc_failure_retries_and_recovers_under_confir
         NodeId::local(),
         channel_id,
         None,
-        Some(local_settlement_privkey.clone()),
-        local_settlement_privkey.pubkey(),
-        remote_settlement_pubkey,
-        local_privkey.pubkey(),
-        remote_privkey.pubkey(),
+        WatchChannelKeys {
+            local_settlement: SettlementKey::local(local_settlement_privkey.clone()),
+            remote_settlement: remote_settlement_pubkey,
+            local_funding: local_privkey.pubkey(),
+            remote_funding: remote_privkey.pubkey(),
+        },
         settlement.clone(),
     );
 
@@ -2842,11 +2844,12 @@ async fn test_scenario_c_cell_dep_pending_tx_recovers_snapshot_and_blocks_until_
         NodeId::local(),
         channel_id,
         None,
-        Some(local_settlement_privkey.clone()),
-        local_settlement_privkey.pubkey(),
-        remote_settlement_pubkey,
-        local_privkey.pubkey(),
-        remote_privkey.pubkey(),
+        WatchChannelKeys {
+            local_settlement: SettlementKey::local(local_settlement_privkey.clone()),
+            remote_settlement: remote_settlement_pubkey,
+            local_funding: local_privkey.pubkey(),
+            remote_funding: remote_privkey.pubkey(),
+        },
         pending_settlement.clone(),
     );
 
@@ -2965,11 +2968,12 @@ fn test_scenario_d_multi_tenant_watchtower_store_isolation() {
         foreign_node,
         channel_id,
         None,
-        Some(local_priv.clone()),
-        local_priv.pubkey(),
-        remote_pub,
-        local_funding,
-        remote_funding,
+        WatchChannelKeys {
+            local_settlement: SettlementKey::local(local_priv.clone()),
+            remote_settlement: remote_pub,
+            local_funding,
+            remote_funding,
+        },
         foreign_settlement,
     );
 
@@ -2984,11 +2988,12 @@ fn test_scenario_d_multi_tenant_watchtower_store_isolation() {
         local_node,
         channel_id,
         None,
-        Some(local_priv.clone()),
-        local_priv.pubkey(),
-        remote_pub,
-        local_funding,
-        remote_funding,
+        WatchChannelKeys {
+            local_settlement: SettlementKey::local(local_priv.clone()),
+            remote_settlement: remote_pub,
+            local_funding,
+            remote_funding,
+        },
         local_settlement,
     );
 
@@ -3338,11 +3343,12 @@ async fn test_scenario_g_malformed_script_wrong_funding_and_direction_mismatch_s
         NodeId::local(),
         channel_id,
         None,
-        Some(local_settlement_privkey.clone()),
-        local_settlement_privkey.pubkey(),
-        remote_settlement_pubkey,
-        local_privkey.pubkey(),
-        remote_privkey.pubkey(),
+        WatchChannelKeys {
+            local_settlement: SettlementKey::local(local_settlement_privkey.clone()),
+            remote_settlement: remote_settlement_pubkey,
+            local_funding: local_privkey.pubkey(),
+            remote_funding: remote_privkey.pubkey(),
+        },
         settlement.clone(),
     );
 
@@ -4344,11 +4350,12 @@ async fn assert_excluded_payer_with_unclaimed_balance(
         NodeId::local(),
         channel_id,
         None,
-        Some(settlement_key.clone()),
-        settlement_key.pubkey(),
-        remote_settlement_key,
-        local_key.pubkey(),
-        remote_key.pubkey(),
+        WatchChannelKeys {
+            local_settlement: SettlementKey::local(settlement_key.clone()),
+            remote_settlement: remote_settlement_key,
+            local_funding: local_key.pubkey(),
+            remote_funding: remote_key.pubkey(),
+        },
         snapshot.clone(),
     );
     let lock = create_test_commitment_lock_with_keys(

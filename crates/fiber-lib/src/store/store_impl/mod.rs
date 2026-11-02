@@ -46,7 +46,7 @@ use fiber_types::{
 #[cfg(not(target_arch = "wasm32"))]
 use fiber_types::{CchOrder, CchReceiveBtcOrderCreation, CchSendBtcOrderCreation};
 #[cfg(feature = "watchtower")]
-use fiber_types::{NodeId, Privkey, RevocationData, WatchtowerSignerState};
+use fiber_types::{NodeId, RevocationData, WatchChannelKeys, WatchtowerSignerState};
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -1917,22 +1917,14 @@ impl WatchtowerStore for Store {
         node_id: NodeId,
         channel_id: Hash256,
         funding_udt_type_script: Option<Script>,
-        local_settlement_key: Option<Privkey>,
-        local_settlement_key_pubkey: Pubkey,
-        remote_settlement_key: Pubkey,
-        local_funding_pubkey: Pubkey,
-        remote_funding_pubkey: Pubkey,
+        keys: WatchChannelKeys,
         settlement_data: SettlementData,
     ) {
         self.insert_watch_channel_with_features(
             node_id,
             channel_id,
             funding_udt_type_script,
-            local_settlement_key,
-            local_settlement_key_pubkey,
-            remote_settlement_key,
-            local_funding_pubkey,
-            remote_funding_pubkey,
+            keys,
             settlement_data,
             CommitmentContractFeatures::LEGACY,
         );
@@ -1943,11 +1935,7 @@ impl WatchtowerStore for Store {
         node_id: NodeId,
         channel_id: Hash256,
         funding_udt_type_script: Option<Script>,
-        local_settlement_key: Option<Privkey>,
-        local_settlement_key_pubkey: Pubkey,
-        remote_settlement_key: Pubkey,
-        local_funding_pubkey: Pubkey,
-        remote_funding_pubkey: Pubkey,
+        keys: WatchChannelKeys,
         settlement_data: SettlementData,
         commitment_contract_features: CommitmentContractFeatures,
     ) {
@@ -1959,16 +1947,17 @@ impl WatchtowerStore for Store {
             channel_id.as_ref(),
         ]
         .concat();
-        let external = local_settlement_key.is_none();
+        let external = keys.local_settlement.is_external();
+        let (local_settlement_key, local_settlement_key_pubkey) = keys.local_settlement.to_parts();
         let value = serialize_to_vec(
             &ChannelData {
                 channel_id,
                 funding_udt_type_script,
                 local_settlement_key,
-                local_settlement_key_pubkey: Some(local_settlement_key_pubkey),
-                remote_settlement_key,
-                local_funding_pubkey,
-                remote_funding_pubkey,
+                local_settlement_key_pubkey,
+                remote_settlement_key: keys.remote_settlement,
+                local_funding_pubkey: keys.local_funding,
+                remote_funding_pubkey: keys.remote_funding,
                 pending_remote_settlement_data: settlement_data.clone(),
                 remote_settlement_data: settlement_data.clone(),
                 local_settlement_data: settlement_data.clone(),

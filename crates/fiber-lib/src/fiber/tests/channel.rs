@@ -7198,21 +7198,9 @@ async fn test_revoke_old_commitment_transaction() {
 
     let x_only_aggregated_pubkey = node_b
         .expect_to_process_event(|event| match event {
-            NetworkServiceEvent::RemoteTxComplete(
-                _,
-                _,
-                _,
-                _,
-                _,
-                _,
-                local_funding_pubkey,
-                remote_funding_pubkey,
-                _,
-                _,
-            ) => {
-                let key_agg_ctx =
-                    KeyAggContext::new(vec![remote_funding_pubkey, local_funding_pubkey])
-                        .expect("Valid pubkeys");
+            NetworkServiceEvent::RemoteTxComplete(_, _, _, keys, _, _) => {
+                let key_agg_ctx = KeyAggContext::new(vec![keys.remote_funding, keys.local_funding])
+                    .expect("Valid pubkeys");
                 Some(key_agg_ctx.aggregated_pubkey::<Point>().serialize_xonly())
             }
             _ => None,

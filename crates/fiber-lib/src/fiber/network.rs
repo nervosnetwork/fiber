@@ -134,7 +134,7 @@ use fiber_types::{
     PaymentStatus, PeeledPaymentOnionPacket, PersistentNetworkActorState, PrevTlcInfo, Privkey,
     Pubkey, PublicChannelInfo, RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation,
     RevocationData, RouterHop, SettlementData, ShutdownSettlementRecord, ShuttingDownFlags, TLCId,
-    TlcErr, TlcErrPacket, TlcErrorCode, UdtCfgInfos, NO_SHARED_SECRET,
+    TlcErr, TlcErrPacket, TlcErrorCode, UdtCfgInfos, WatchChannelKeys, NO_SHARED_SECRET,
 };
 
 pub const FIBER_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
@@ -1470,11 +1470,7 @@ pub enum NetworkServiceEvent {
         Pubkey,
         Hash256,
         Option<Script>,
-        Option<Privkey>,
-        Pubkey,
-        Pubkey,
-        Pubkey,
-        Pubkey,
+        WatchChannelKeys,
         SettlementData,
         CommitmentContractFeatures,
     ),

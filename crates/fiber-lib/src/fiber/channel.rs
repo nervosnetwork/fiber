@@ -80,10 +80,10 @@ use fiber_types::{
     NegotiatingFundingFlags, NextChannelSignerMaterial, NoncePurpose, NonceSlot, OutboundTlcStatus,
     PaymentCustomRecords, PeeledPaymentOnionPacket, PendingNotifySettleTlc, PrevTlcInfo, Privkey,
     Pubkey, PublicChannelInfo, RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation,
-    RevocationData, RevokeAndAck, SettlementData, SettlementTlc, ShutdownInfo,
+    RevocationData, RevokeAndAck, SettlementData, SettlementKey, SettlementTlc, ShutdownInfo,
     ShutdownSettlementRecord, ShuttingDownFlags, SignatureRequestId, SigningCommitmentFlags, TLCId,
-    TlcErr, TlcErrPacket, TlcErrorCode, TlcInfo, TlcStatus, INITIAL_COMMITMENT_NUMBER,
-    NO_SHARED_SECRET,
+    TlcErr, TlcErrPacket, TlcErrorCode, TlcInfo, TlcStatus, WatchChannelKeys,
+    INITIAL_COMMITMENT_NUMBER, NO_SHARED_SECRET,
 };
 pub use fiber_types::{
     settlement_data_to_witness, settlement_tlc_local_pubkey_hash, settlement_tlc_to_witness,
@@ -130,14 +130,11 @@ use tracing::{debug, error, info, trace, warn};
 pub const FUNDING_CELL_WITNESS_LEN: usize = 16 + 32 + 64;
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "watchtower"))]
-pub(crate) struct HostedWatchChannelParams {
+/// Everything needed to create the host watchtower row for a hosted channel.
+pub(crate) struct HostedWatchChannelSnapshot {
+    pub keys: WatchChannelKeys,
     pub commitment_contract_features: CommitmentContractFeatures,
     pub funding_udt_type_script: Option<Script>,
-    pub local_settlement_key: Option<Privkey>,
-    pub local_settlement_key_pubkey: Pubkey,
-    pub remote_settlement_key: Pubkey,
-    pub local_funding_pubkey: Pubkey,
-    pub remote_funding_pubkey: Pubkey,
     pub settlement_data: SettlementData,
 }
 
@@ -8805,20 +8802,20 @@ impl ChannelActorState {
 
     // We are using tlc base key for settlement keys, since settlement
     // process is only unlocked once for each party, it is safe to always use tlc base key.
-    fn get_settlement_keys(&self) -> (Option<Privkey>, Pubkey, Pubkey) {
-        let remote_key = self.get_remote_channel_public_keys().tlc_base_key;
-        if let Some(signer) = self.channel_signer.local_material() {
-            (
-                Some(signer.tlc_base_key.clone()),
-                signer.tlc_base_key.pubkey(),
-                remote_key,
-            )
-        } else {
-            (
-                None,
-                self.get_local_channel_public_keys().tlc_base_key,
-                remote_key,
-            )
+    /// Key material for this channel's watchtower row.
+    ///
+    /// A channel signed on this node reports the settlement secret; an
+    /// external-signer channel reports the public key only.
+    pub(crate) fn watch_channel_keys(&self) -> WatchChannelKeys {
+        let local_settlement = match self.channel_signer.local_material() {
+            Some(signer) => SettlementKey::Local(signer.tlc_base_key.clone()),
+            None => SettlementKey::External(self.get_local_channel_public_keys().tlc_base_key),
+        };
+        WatchChannelKeys {
+            local_settlement,
+            remote_settlement: self.get_remote_channel_public_keys().tlc_base_key,
+            local_funding: *self.get_local_funding_pubkey(),
+            remote_funding: *self.get_remote_funding_pubkey(),
         }
     }
 
@@ -9701,8 +9698,7 @@ impl ChannelActorState {
             TxCollaborationMsg::TxComplete(tx_complete) => {
                 self.check_tx_complete_preconditions()?;
 
-                let (local_settlement_key, local_settlement_key_pubkey, remote_settlement_key) =
-                    self.get_settlement_keys();
+                let keys = self.watch_channel_keys();
                 let settlement_data = self.build_settlement_data(false)?;
 
                 network
@@ -9711,11 +9707,7 @@ impl ChannelActorState {
                             self.get_remote_pubkey(),
                             self.get_id(),
                             self.funding_udt_type_script.clone(),
-                            local_settlement_key,
-                            local_settlement_key_pubkey,
-                            remote_settlement_key,
-                            *self.get_local_funding_pubkey(),
-                            *self.get_remote_funding_pubkey(),
+                            keys,
                             settlement_data,
                             self.commitment_contract_features,
                         ),
@@ -11709,20 +11701,16 @@ impl ChannelActorState {
 
     /// Snapshot used to register a hosted tenant watchtower row.
     #[cfg(all(not(target_arch = "wasm32"), feature = "watchtower"))]
-    pub(crate) fn hosted_watch_channel_params(&self) -> Result<HostedWatchChannelParams, String> {
-        let (local_settlement_key, local_settlement_key_pubkey, remote_settlement_key) =
-            self.get_settlement_keys();
+    pub(crate) fn hosted_watch_channel_snapshot(
+        &self,
+    ) -> Result<HostedWatchChannelSnapshot, String> {
         let settlement_data = self
             .build_settlement_data(false)
             .map_err(|error| error.to_string())?;
-        Ok(HostedWatchChannelParams {
+        Ok(HostedWatchChannelSnapshot {
+            keys: self.watch_channel_keys(),
             commitment_contract_features: self.commitment_contract_features,
             funding_udt_type_script: self.funding_udt_type_script.clone(),
-            local_settlement_key,
-            local_settlement_key_pubkey,
-            remote_settlement_key,
-            local_funding_pubkey: *self.get_local_funding_pubkey(),
-            remote_funding_pubkey: *self.get_remote_funding_pubkey(),
             settlement_data,
         })
     }

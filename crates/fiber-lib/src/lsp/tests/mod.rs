@@ -18,8 +18,8 @@ use crate::fiber::network::{
     FiberActorCommand, FiberActorMessage, HostedTenantActivity, NetworkActorMessage,
 };
 use crate::fiber_types::{
-    Hash256, HashAlgorithm, PaymentStatus, PrevTlcInfo, Privkey, TenantRegistryPayload,
-    TenantRegistrySignature, TlcErrorCode,
+    Hash256, HashAlgorithm, PaymentStatus, PrevTlcInfo, Privkey, SettlementKey,
+    TenantRegistryPayload, TenantRegistrySignature, TlcErrorCode, WatchChannelKeys,
 };
 use crate::invoice::{Currency, InvoiceBuilder};
 use crate::lsp::TrampolineForwardingRequest;
@@ -303,11 +303,12 @@ fn ensure_hosted_watch_skips_an_existing_row() {
         node_id.clone(),
         channel_id,
         None,
-        None,
-        record.tenant_pubkey,
-        Privkey::from(&[2; 32]).pubkey(),
-        record.tenant_pubkey,
-        Privkey::from(&[3; 32]).pubkey(),
+        WatchChannelKeys {
+            local_settlement: SettlementKey::external(record.tenant_pubkey),
+            remote_settlement: Privkey::from(&[2; 32]).pubkey(),
+            local_funding: record.tenant_pubkey,
+            remote_funding: Privkey::from(&[3; 32]).pubkey(),
+        },
         SettlementData {
             local_amount: 11,
             remote_amount: 22,

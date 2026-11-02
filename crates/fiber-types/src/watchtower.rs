@@ -89,6 +89,111 @@ impl SettlementTlc {
     }
 }
 
+/// Settlement key material for one side of a watched channel.
+///
+/// The watchtower persists the local settlement key as a secret/public pair
+/// (`local_settlement_key` / `local_settlement_key_pubkey`), where either half may
+/// be absent. Re-deriving "does this node hold the secret, or does an external
+/// signer?" at every call site is what produced three spellings of the same
+/// state, so producers and consumers of that pair state the intent once, here.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SettlementKey {
+    /// This process holds the secret and signs locally.
+    Local(Privkey),
+    /// Only the public key is known; the client's signer produces signatures.
+    External(Pubkey),
+}
+
+impl SettlementKey {
+    /// Key material for a channel this node signs for.
+    pub fn local(secret: Privkey) -> Self {
+        Self::Local(secret)
+    }
+
+    /// Key material for a channel signed by the client's signer.
+    pub fn external(pubkey: Pubkey) -> Self {
+        Self::External(pubkey)
+    }
+
+    /// Public key committed to by this key material.
+    pub fn pubkey(&self) -> Pubkey {
+        match self {
+            Self::Local(key) => key.pubkey(),
+            Self::External(pubkey) => *pubkey,
+        }
+    }
+
+    /// The secret, when this node signs locally.
+    pub fn secret(&self) -> Option<&Privkey> {
+        match self {
+            Self::Local(key) => Some(key),
+            Self::External(_) => None,
+        }
+    }
+
+    /// Whether signatures must come from an external signer.
+    pub fn is_external(&self) -> bool {
+        matches!(self, Self::External(_))
+    }
+
+    /// Interpret the persisted secret/public pair.
+    ///
+    /// Returns `Ok(None)` when neither half is present, which is the only state
+    /// that carries no key material. A secret and a public key that disagree are
+    /// rejected instead of silently picking one.
+    pub fn from_parts(
+        secret: Option<Privkey>,
+        pubkey: Option<Pubkey>,
+    ) -> Result<Option<Self>, String> {
+        match (secret, pubkey) {
+            (Some(secret), Some(pubkey)) if secret.pubkey() != pubkey => Err(
+                "local settlement public key does not match the local settlement secret"
+                    .to_string(),
+            ),
+            (Some(secret), _) => Ok(Some(Self::Local(secret))),
+            (None, Some(pubkey)) => Ok(Some(Self::External(pubkey))),
+            (None, None) => Ok(None),
+        }
+    }
+
+    /// The persisted `(secret, public)` pair.
+    pub fn to_parts(&self) -> (Option<Privkey>, Option<Pubkey>) {
+        match self {
+            Self::Local(key) => (Some(key.clone()), Some(key.pubkey())),
+            Self::External(pubkey) => (None, Some(*pubkey)),
+        }
+    }
+}
+
+/// Key material of one watched channel, named so that local and remote cannot be
+/// swapped by argument position.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WatchChannelKeys {
+    /// The local party's settlement key material (secret or public only).
+    pub local_settlement: SettlementKey,
+    /// The remote party's settlement public key.
+    pub remote_settlement: Pubkey,
+    /// The local party's funding public key.
+    pub local_funding: Pubkey,
+    /// The remote party's funding public key.
+    pub remote_funding: Pubkey,
+}
+
+impl WatchChannelKeys {
+    /// The same channel seen from the other party.
+    ///
+    /// Settlement and funding keys swap sides and the settlement secret stays
+    /// with its owner, so the mirrored row can only verify signatures.
+    pub fn inverted(&self) -> Self {
+        Self {
+            local_settlement: SettlementKey::External(self.remote_settlement),
+            remote_settlement: self.local_settlement.pubkey(),
+            local_funding: self.remote_funding,
+            remote_funding: self.local_funding,
+        }
+    }
+}
+
 /// The data of a channel that the watchtower is monitoring.
 #[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -174,11 +279,35 @@ pub struct LastAppliedWatchtowerSignature {
 }
 
 impl ChannelData {
-    /// Return the public key committed to the local settlement path.
-    pub fn local_settlement_pubkey(&self) -> Pubkey {
+    /// Local settlement key material as persisted, or `None` when the row holds
+    /// no settlement key at all.
+    pub fn settlement_key(&self) -> Option<SettlementKey> {
+        let secret = self.local_settlement_key.clone();
+        let pubkey = self.local_settlement_key_pubkey;
+        SettlementKey::from_parts(secret, pubkey).ok().flatten()
+    }
+
+    /// Column-form of [`Self::settlement_key`] for callers that only need the
+    /// public half.
+    fn stored_settlement_pubkey(&self) -> Option<Pubkey> {
         self.local_settlement_key_pubkey
             .or_else(|| self.local_settlement_key.as_ref().map(Privkey::pubkey))
+    }
+
+    /// Return the public key committed to the local settlement path.
+    pub fn local_settlement_pubkey(&self) -> Pubkey {
+        self.stored_settlement_pubkey()
             .expect("watch channel must contain a local settlement public or private key")
+    }
+
+    /// Key material of this row, named as in [`WatchChannelKeys`].
+    pub fn watch_channel_keys(&self) -> Option<WatchChannelKeys> {
+        Some(WatchChannelKeys {
+            local_settlement: self.settlement_key()?,
+            remote_settlement: self.remote_settlement_key,
+            local_funding: self.local_funding_pubkey,
+            remote_funding: self.remote_funding_pubkey,
+        })
     }
 
     /// Return the expected public key for an on-chain signing request.
@@ -191,8 +320,7 @@ impl ChannelData {
     ) -> Result<Pubkey, String> {
         match purpose {
             crate::channel_signer::OnchainKeyPurpose::Settlement => self
-                .local_settlement_key_pubkey
-                .or_else(|| self.local_settlement_key.as_ref().map(Privkey::pubkey))
+                .stored_settlement_pubkey()
                 .ok_or_else(|| "settlement signing public key is missing".to_string()),
             crate::channel_signer::OnchainKeyPurpose::Tlc { commitment_number } => {
                 let mut expected = None;

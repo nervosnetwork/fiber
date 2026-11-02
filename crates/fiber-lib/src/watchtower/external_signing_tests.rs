@@ -1,7 +1,8 @@
 use ckb_sdk::traits::{CellCollectorError, LiveCell};
 use ckb_types::packed::Byte32;
 use fiber_types::{
-    OnchainKeyPurpose, OnchainSigningContent, SettlementTlc, TLCId, WatchtowerSignerState,
+    OnchainKeyPurpose, OnchainSigningContent, SettlementKey, SettlementTlc, TLCId,
+    WatchChannelKeys, WatchtowerSignerState,
 };
 use tempfile::TempDir;
 
@@ -130,11 +131,16 @@ impl Fixture {
             node_id.clone(),
             channel_id,
             None,
-            local_keys.then(|| base_key.clone()),
-            base_key.pubkey(),
-            Privkey::from([10; 32]).pubkey(),
-            Privkey::from([11; 32]).pubkey(),
-            Privkey::from([12; 32]).pubkey(),
+            WatchChannelKeys {
+                local_settlement: if local_keys {
+                    SettlementKey::local(base_key.clone())
+                } else {
+                    SettlementKey::external(base_key.pubkey())
+                },
+                remote_settlement: Privkey::from([10; 32]).pubkey(),
+                local_funding: Privkey::from([11; 32]).pubkey(),
+                remote_funding: Privkey::from([12; 32]).pubkey(),
+            },
             settlement,
             features,
         );

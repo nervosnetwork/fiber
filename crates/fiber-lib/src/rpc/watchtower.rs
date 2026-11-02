@@ -10,7 +10,7 @@ use crate::watchtower::WatchtowerStore;
 #[cfg(feature = "watchtower")]
 pub use fiber_json_types::RpcContext;
 #[cfg(feature = "watchtower")]
-use fiber_types::{NodeId, Pubkey};
+use fiber_types::{NodeId, Pubkey, SettlementKey, WatchChannelKeys};
 
 #[cfg(feature = "watchtower")]
 fn validate_commitment_contract_features(
@@ -245,25 +245,12 @@ where
             .map(Pubkey::try_from)
             .transpose()
             .rpc_err()?;
-        let local_settlement_key_pubkey = supplied_local_settlement_pubkey
-            .or_else(|| {
-                local_settlement_key
-                    .as_ref()
-                    .map(fiber_types::Privkey::pubkey)
-            })
-            .ok_or_else(|| {
-                rpc_error(
-                    "local_settlement_key_pubkey is required when local_settlement_key is omitted",
-                )
-            })?;
-        if local_settlement_key
-            .as_ref()
-            .is_some_and(|key| key.pubkey() != local_settlement_key_pubkey)
-        {
-            return Err(rpc_error(
-                "local_settlement_key_pubkey does not match local_settlement_key",
-            ));
-        }
+        let local_settlement =
+            SettlementKey::from_parts(local_settlement_key, supplied_local_settlement_pubkey)
+                .map_err(rpc_error)?
+                .ok_or_else(|| {
+                    rpc_error("local_settlement_key or local_settlement_key_pubkey is required")
+                })?;
         let remote_settlement_key = Pubkey::try_from(params.remote_settlement_key).rpc_err()?;
         let local_funding_pubkey = Pubkey::try_from(params.local_funding_pubkey).rpc_err()?;
         let remote_funding_pubkey = Pubkey::try_from(params.remote_funding_pubkey).rpc_err()?;
@@ -281,11 +268,12 @@ where
             node_id,
             channel_id,
             funding_udt_type_script.map(Into::into),
-            local_settlement_key,
-            local_settlement_key_pubkey,
-            remote_settlement_key,
-            local_funding_pubkey,
-            remote_funding_pubkey,
+            WatchChannelKeys {
+                local_settlement,
+                remote_settlement: remote_settlement_key,
+                local_funding: local_funding_pubkey,
+                remote_funding: remote_funding_pubkey,
+            },
             settlement_data,
             commitment_contract_features,
         );

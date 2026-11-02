@@ -692,11 +692,7 @@ fn forward_event_to_actor(
             _peer_id,
             channel_id,
             funding_udt_type_script,
-            local_settlement_key,
-            local_settlement_key_pubkey,
-            remote_settlement_key,
-            local_funding_pubkey,
-            remote_funding_pubkey,
+            keys,
             remote_settlement_data,
             commitment_contract_features,
         ) => {
@@ -704,11 +700,7 @@ fn forward_event_to_actor(
                 .send_message(WatchtowerMessage::CreateChannel(
                     channel_id,
                     funding_udt_type_script,
-                    local_settlement_key,
-                    local_settlement_key_pubkey,
-                    remote_settlement_key,
-                    local_funding_pubkey,
-                    remote_funding_pubkey,
+                    keys,
                     remote_settlement_data,
                     commitment_contract_features,
                 ))

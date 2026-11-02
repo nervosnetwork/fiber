@@ -55,7 +55,7 @@ use crate::{
 };
 use fiber_types::{
     ChannelData, CommitmentContractFeatures, Hash256, HashAlgorithm, NodeId, Privkey, Pubkey,
-    RevocationData, SettlementData, SettlementTlc,
+    RevocationData, SettlementData, SettlementTlc, WatchChannelKeys,
 };
 
 use super::{WatchtowerSignOutcome, WatchtowerSigner, WatchtowerStore};
@@ -118,11 +118,7 @@ pub enum WatchtowerMessage {
     CreateChannel(
         Hash256,
         Option<Script>,
-        Option<Privkey>,
-        Pubkey,
-        Pubkey,
-        Pubkey,
-        Pubkey,
+        WatchChannelKeys,
         SettlementData,
         CommitmentContractFeatures,
     ),
@@ -181,11 +177,7 @@ where
             WatchtowerMessage::CreateChannel(
                 channel_id,
                 funding_udt_type_script,
-                local_settlement_key,
-                local_settlement_key_pubkey,
-                remote_settlement_key,
-                local_funding_pubkey,
-                remote_funding_pubkey,
+                keys,
                 settlement_data,
                 commitment_contract_features,
             ) => {
@@ -195,11 +187,7 @@ where
                     NodeId::local(),
                     channel_id,
                     funding_udt_type_script,
-                    local_settlement_key,
-                    local_settlement_key_pubkey,
-                    remote_settlement_key,
-                    local_funding_pubkey,
-                    remote_funding_pubkey,
+                    keys,
                     settlement_data,
                     commitment_contract_features,
                 );
@@ -2625,6 +2613,8 @@ fn mul(
 mod tests {
     use std::sync::Mutex;
 
+    use fiber_types::SettlementKey;
+
     use ckb_types::{core::ScriptHashType, packed::Byte32, prelude::*};
     use fiber_types::TLCId;
     use secp256k1::SecretKey;
@@ -2670,11 +2660,7 @@ mod tests {
             _node_id: NodeId,
             _channel_id: Hash256,
             _funding_udt_type_script: Option<Script>,
-            _local_settlement_key: Option<Privkey>,
-            _local_settlement_key_pubkey: Pubkey,
-            _remote_settlement_key: Pubkey,
-            _local_funding_pubkey: Pubkey,
-            _remote_funding_pubkey: Pubkey,
+            _keys: WatchChannelKeys,
             _settlement_data: SettlementData,
         ) {
             self.registered_features
@@ -2688,11 +2674,7 @@ mod tests {
             _node_id: NodeId,
             _channel_id: Hash256,
             _funding_udt_type_script: Option<Script>,
-            _local_settlement_key: Option<Privkey>,
-            _local_settlement_key_pubkey: Pubkey,
-            _remote_settlement_key: Pubkey,
-            _local_funding_pubkey: Pubkey,
-            _remote_funding_pubkey: Pubkey,
+            _keys: WatchChannelKeys,
             _settlement_data: SettlementData,
             commitment_contract_features: CommitmentContractFeatures,
         ) {
@@ -3250,11 +3232,12 @@ mod tests {
             NodeId::local(),
             [1u8; 32].into(),
             None,
-            Some(Privkey::from(&[1u8; 32])),
-            Privkey::from(&[1u8; 32]).pubkey(),
-            Privkey::from(&[2u8; 32]).pubkey(),
-            Privkey::from(&[3u8; 32]).pubkey(),
-            Privkey::from(&[4u8; 32]).pubkey(),
+            WatchChannelKeys {
+                local_settlement: SettlementKey::local(Privkey::from(&[1u8; 32])),
+                remote_settlement: Privkey::from(&[2u8; 32]).pubkey(),
+                local_funding: Privkey::from(&[3u8; 32]).pubkey(),
+                remote_funding: Privkey::from(&[4u8; 32]).pubkey(),
+            },
             settlement_data,
             CommitmentContractFeatures::ONCHAIN_FULL_PAYMENT_HASH,
         );

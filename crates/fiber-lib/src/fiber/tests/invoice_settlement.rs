@@ -22,7 +22,7 @@ use ckb_sdk::core::TransactionBuilder;
 use ckb_types::{core::tx_pool::TxStatus, packed::OutPoint};
 use fiber_types::{
     ChannelState, CloseFlags, Hash256, HashAlgorithm, NodeId, Privkey, SettlementData,
-    SettlementTlc, ShuttingDownFlags, TLCId,
+    SettlementKey, SettlementTlc, ShuttingDownFlags, TLCId, WatchChannelKeys,
 };
 use ractor::{call, ActorProcessingErr, ActorRef};
 use secp256k1::SECP256K1;
@@ -159,11 +159,12 @@ fn insert_watch_channel_with_pending_tlc(
         NodeId::local(),
         channel_id,
         None,
-        Some(local_settlement_key.clone()),
-        local_settlement_key.pubkey(),
-        remote_settlement_key,
-        local_funding_pubkey,
-        remote_funding_pubkey,
+        WatchChannelKeys {
+            local_settlement: SettlementKey::local(local_settlement_key.clone()),
+            remote_settlement: remote_settlement_key,
+            local_funding: local_funding_pubkey,
+            remote_funding: remote_funding_pubkey,
+        },
         settlement_data,
     );
 }
