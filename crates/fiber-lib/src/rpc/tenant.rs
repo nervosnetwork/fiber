@@ -382,7 +382,7 @@ async fn resolve_tenant_rpc_context_for(
         .rpc_err()
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
