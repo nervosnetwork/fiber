@@ -75,8 +75,17 @@ impl LspRpcServerImpl {
     pub fn new(actor: ActorRef<LspServiceMessage>) -> Self {
         Self { actor }
     }
+}
 
-    async fn register_tenant(
+#[async_trait::async_trait]
+impl LspRpcServer for LspRpcServerImpl {
+    async fn lsp_get_status(&self) -> Result<LspServiceStatus, ErrorObjectOwned> {
+        call!(self.actor, LspServiceMessage::GetStatus)
+            .rpc_err()
+            .map(Into::into)
+    }
+
+    async fn lsp_register_tenant(
         &self,
         params: RegisterLspTenantParams,
     ) -> Result<RegisterLspTenantResult, ErrorObjectOwned> {
@@ -108,7 +117,7 @@ impl LspRpcServerImpl {
         })
     }
 
-    async fn ensure_tenant(
+    async fn lsp_ensure_tenant(
         &self,
         params: LspTenantParams,
     ) -> Result<LspTenantStatus, ErrorObjectOwned> {
@@ -119,7 +128,7 @@ impl LspRpcServerImpl {
             .map(Into::into)
     }
 
-    async fn evict_tenant(
+    async fn lsp_evict_tenant(
         &self,
         params: LspTenantParams,
     ) -> Result<LspTenantStatus, ErrorObjectOwned> {
@@ -128,52 +137,6 @@ impl LspRpcServerImpl {
             .rpc_err()?
             .rpc_err()
             .map(Into::into)
-    }
-
-    async fn get_payment_delivery(
-        &self,
-        params: LspPaymentHashParams,
-    ) -> Result<LspPaymentDelivery, ErrorObjectOwned> {
-        let payment_hash = params.payment_hash.into();
-        call!(
-            self.actor,
-            LspServiceMessage::GetPaymentDelivery,
-            payment_hash
-        )
-        .rpc_err()?
-        .rpc_err()?
-        .map(Into::into)
-        .ok_or_else(|| rpc_error("hosted payment delivery not found"))
-    }
-}
-
-#[async_trait::async_trait]
-impl LspRpcServer for LspRpcServerImpl {
-    async fn lsp_get_status(&self) -> Result<LspServiceStatus, ErrorObjectOwned> {
-        call!(self.actor, LspServiceMessage::GetStatus)
-            .rpc_err()
-            .map(Into::into)
-    }
-
-    async fn lsp_register_tenant(
-        &self,
-        params: RegisterLspTenantParams,
-    ) -> Result<RegisterLspTenantResult, ErrorObjectOwned> {
-        self.register_tenant(params).await
-    }
-
-    async fn lsp_ensure_tenant(
-        &self,
-        params: LspTenantParams,
-    ) -> Result<LspTenantStatus, ErrorObjectOwned> {
-        self.ensure_tenant(params).await
-    }
-
-    async fn lsp_evict_tenant(
-        &self,
-        params: LspTenantParams,
-    ) -> Result<LspTenantStatus, ErrorObjectOwned> {
-        self.evict_tenant(params).await
     }
 
     async fn lsp_list_tenants(&self) -> Result<ListLspTenantsResult, ErrorObjectOwned> {
@@ -189,7 +152,16 @@ impl LspRpcServer for LspRpcServerImpl {
         &self,
         params: LspPaymentHashParams,
     ) -> Result<LspPaymentDelivery, ErrorObjectOwned> {
-        self.get_payment_delivery(params).await
+        let payment_hash = params.payment_hash.into();
+        call!(
+            self.actor,
+            LspServiceMessage::GetPaymentDelivery,
+            payment_hash
+        )
+        .rpc_err()?
+        .rpc_err()?
+        .map(Into::into)
+        .ok_or_else(|| rpc_error("hosted payment delivery not found"))
     }
 }
 
