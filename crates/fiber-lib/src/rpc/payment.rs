@@ -101,14 +101,52 @@ impl<S: RpcBackendStore> PaymentRpcServerImpl<S> {
         self
     }
 
+    /// Resolve the caller's tenant and wrap it for the handler bodies.
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn backend_for(
+        &self,
+        extensions: &Extensions,
+    ) -> Result<PaymentBackend<S>, ErrorObjectOwned> {
+        Ok(PaymentBackend(self.backend.resolve(extensions).await?))
+    }
+
+    /// Resolve a query target that may name a tenant explicitly.
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn backend_for_query(
+        &self,
+        extensions: &Extensions,
+        requested_tenant: Option<&str>,
+    ) -> Result<PaymentBackend<S>, ErrorObjectOwned> {
+        Ok(PaymentBackend(
+            self.backend
+                .resolve_query(extensions, requested_tenant)
+                .await?,
+        ))
+    }
+
     /// The public backend, for callers that hold no request (wasm bindings).
     ///
     /// Not available to handlers: they must resolve the request's tenant first.
     #[cfg(any(test, target_arch = "wasm32"))]
-    pub fn public_scope(&self) -> ScopedBackend<S> {
-        self.backend.public_scope()
+    pub fn public_handler(&self) -> PaymentBackend<S> {
+        PaymentBackend(self.backend.public_scope())
     }
 }
+
+/// Everything a payment handler runs against.
+///
+/// A thin view over the resolved [`ScopedBackend`]; the bodies live here, so the
+/// registered RPC type holds no actor at all.
+#[doc(hidden)]
+pub struct PaymentBackend<S>(ScopedBackend<S>);
+
+impl<S> std::ops::Deref for PaymentBackend<S> {
+    type Target = ScopedBackend<S>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[async_trait::async_trait]
 impl<S> PaymentRpcServer for PaymentRpcServerImpl<S>
@@ -121,8 +159,7 @@ where
         extensions: &Extensions,
         params: SendPaymentCommandParams,
     ) -> Result<GetPaymentCommandResult, ErrorObjectOwned> {
-        self.backend
-            .resolve(extensions)
+        self.backend_for(extensions)
             .await?
             .send_payment(params)
             .await
@@ -135,8 +172,7 @@ where
         params: GetPaymentCommandParams,
     ) -> Result<GetPaymentCommandResult, ErrorObjectOwned> {
         let backend = self
-            .backend
-            .resolve_query(extensions, params.tenant_id.as_deref())
+            .backend_for_query(extensions, params.tenant_id.as_deref())
             .await?;
         let params = GetPaymentCommandParams {
             payment_hash: params.payment_hash,
@@ -151,8 +187,7 @@ where
         extensions: &Extensions,
         params: BuildRouterParams,
     ) -> Result<BuildPaymentRouterResult, ErrorObjectOwned> {
-        self.backend
-            .resolve(extensions)
+        self.backend_for(extensions)
             .await?
             .build_router(params)
             .await
@@ -166,8 +201,7 @@ where
         extensions: &Extensions,
         params: SendPaymentWithRouterParams,
     ) -> Result<GetPaymentCommandResult, ErrorObjectOwned> {
-        self.backend
-            .resolve(extensions)
+        self.backend_for(extensions)
             .await?
             .send_payment_with_router(params)
             .await
@@ -179,8 +213,7 @@ where
         extensions: &Extensions,
         params: ListPaymentsParams,
     ) -> Result<ListPaymentsResult, ErrorObjectOwned> {
-        self.backend
-            .resolve(extensions)
+        self.backend_for(extensions)
             .await?
             .list_payments(params)
             .await
@@ -214,7 +247,7 @@ fn send_payment_response_to_json(
     }
 }
 
-impl<S> ScopedBackend<S>
+impl<S> PaymentBackend<S>
 where
     S: ChannelActorStateStore + NetworkGraphStateStore + Send + Sync + 'static,
 {

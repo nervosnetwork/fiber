@@ -183,6 +183,30 @@ impl<S: crate::rpc::scoped::RpcBackendStore> InvoiceRpcServerImpl<S> {
         self
     }
 
+    /// Resolve the caller's tenant and build the invoice backend for it.
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn backend_for(
+        &self,
+        extensions: &Extensions,
+    ) -> Result<InvoiceBackend<S>, ErrorObjectOwned> {
+        Ok(self.for_scope(&self.backend.resolve(extensions).await?))
+    }
+
+    /// Resolve a query target that may name a tenant explicitly.
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn backend_for_query(
+        &self,
+        extensions: &Extensions,
+        requested_tenant: Option<&str>,
+    ) -> Result<InvoiceBackend<S>, ErrorObjectOwned> {
+        Ok(self.for_scope(
+            &self
+                .backend
+                .resolve_query(extensions, requested_tenant)
+                .await?,
+        ))
+    }
+
     /// Build the invoice backend for a resolved scope.
     fn for_scope(&self, scope: &crate::rpc::scoped::ScopedBackend<S>) -> InvoiceBackend<S> {
         let config = scope
@@ -282,11 +306,9 @@ where
         extensions: &Extensions,
         params: GetInvoiceParams,
     ) -> Result<GetInvoiceResult, ErrorObjectOwned> {
-        let scope = self
-            .backend
-            .resolve_query(extensions, params.tenant_id.as_deref())
+        let backend = self
+            .backend_for_query(extensions, params.tenant_id.as_deref())
             .await?;
-        let backend = self.for_scope(&scope);
         let params = InvoiceParams {
             payment_hash: params.payment_hash,
         };
@@ -299,7 +321,8 @@ where
         extensions: &Extensions,
         payment_hash: InvoiceParams,
     ) -> Result<GetInvoiceResult, ErrorObjectOwned> {
-        self.for_scope(&self.backend.resolve(extensions).await?)
+        self.backend_for(extensions)
+            .await?
             .cancel_invoice(payment_hash)
             .await
     }
@@ -310,7 +333,8 @@ where
         extensions: &Extensions,
         settle_invoice: SettleInvoiceParams,
     ) -> Result<SettleInvoiceResult, ErrorObjectOwned> {
-        self.for_scope(&self.backend.resolve(extensions).await?)
+        self.backend_for(extensions)
+            .await?
             .settle_invoice(settle_invoice)
             .await
     }

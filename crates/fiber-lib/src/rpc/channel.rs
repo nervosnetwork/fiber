@@ -197,12 +197,35 @@ impl<S: RpcBackendStore> ChannelRpcServerImpl<S> {
         self
     }
 
+    /// Resolve the caller's tenant and wrap it for the handler bodies.
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn backend_for(
+        &self,
+        extensions: &Extensions,
+    ) -> Result<ChannelBackend<S>, ErrorObjectOwned> {
+        Ok(ChannelBackend(self.backend.resolve(extensions).await?))
+    }
+
     /// The public backend, for callers that hold no request (wasm bindings).
     ///
     /// Not available to handlers: they must resolve the request's tenant first.
     #[cfg(any(test, target_arch = "wasm32"))]
-    pub fn public_scope(&self) -> ScopedBackend<S> {
-        self.backend.public_scope()
+    pub fn public_handler(&self) -> ChannelBackend<S> {
+        ChannelBackend(self.backend.public_scope())
+    }
+}
+
+/// Everything a channel handler runs against.
+///
+/// A thin view over the resolved [`ScopedBackend`]; the bodies live here, so the
+/// registered RPC type holds no actor at all.
+#[doc(hidden)]
+pub struct ChannelBackend<S>(ScopedBackend<S>);
+
+impl<S> std::ops::Deref for ChannelBackend<S> {
+    type Target = ScopedBackend<S>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
 }
 
@@ -218,7 +241,7 @@ where
         extensions: &Extensions,
         params: OpenChannelParams,
     ) -> Result<OpenChannelResult, ErrorObjectOwned> {
-        let backend = self.backend.resolve(extensions).await?;
+        let backend = self.backend_for(extensions).await?;
         if let Some(tenant) = backend.tenant() {
             let pubkey = Pubkey::try_from(params.pubkey).rpc_err()?;
             if pubkey != tenant.public_node_id {
@@ -239,8 +262,7 @@ where
         extensions: &Extensions,
         params: AcceptChannelParams,
     ) -> Result<AcceptChannelResult, ErrorObjectOwned> {
-        self.backend
-            .resolve(extensions)
+        self.backend_for(extensions)
             .await?
             .accept_channel(params)
             .await
@@ -253,8 +275,7 @@ where
         extensions: &Extensions,
         params: AbandonChannelParams,
     ) -> Result<(), ErrorObjectOwned> {
-        self.backend
-            .resolve(extensions)
+        self.backend_for(extensions)
             .await?
             .abandon_channel(params)
             .await
@@ -266,8 +287,7 @@ where
         extensions: &Extensions,
         params: ListChannelsParams,
     ) -> Result<ListChannelsResult, ErrorObjectOwned> {
-        self.backend
-            .resolve(extensions)
+        self.backend_for(extensions)
             .await?
             .list_channels(params)
             .await
@@ -279,8 +299,7 @@ where
         extensions: &Extensions,
         params: ShutdownChannelParams,
     ) -> Result<(), ErrorObjectOwned> {
-        self.backend
-            .resolve(extensions)
+        self.backend_for(extensions)
             .await?
             .shutdown_channel(params)
             .await
@@ -292,8 +311,7 @@ where
         extensions: &Extensions,
         params: UpdateChannelParams,
     ) -> Result<(), ErrorObjectOwned> {
-        self.backend
-            .resolve(extensions)
+        self.backend_for(extensions)
             .await?
             .update_channel(params)
             .await
@@ -305,7 +323,7 @@ where
         extensions: &Extensions,
         params: OpenChannelWithExternalFundingParams,
     ) -> Result<OpenChannelWithExternalFundingResult, ErrorObjectOwned> {
-        let backend = self.backend.resolve(extensions).await?;
+        let backend = self.backend_for(extensions).await?;
         if let Some(tenant) = backend.tenant() {
             validate_tenant_opening_params(&params, tenant.public_node_id.into())?;
             let command = external_funding_command(&params)?;
@@ -337,8 +355,7 @@ where
         extensions: &Extensions,
         params: SubmitSignedFundingTxParams,
     ) -> Result<SubmitSignedFundingTxResult, ErrorObjectOwned> {
-        self.backend
-            .resolve(extensions)
+        self.backend_for(extensions)
             .await?
             .submit_signed_funding_tx(params)
             .await
@@ -373,8 +390,7 @@ where
                 status: to_rpc_channel_signing_status(&state).rpc_err()?,
             });
         }
-        self.backend
-            .resolve(extensions)
+        self.backend_for(extensions)
             .await?
             .get_channel_signing_status(params)
             .await
@@ -385,14 +401,13 @@ where
         extensions: &Extensions,
         params: SubmitChannelSignatureParams,
     ) -> Result<SubmitChannelSignatureResult, ErrorObjectOwned> {
-        self.backend
-            .resolve(extensions)
+        self.backend_for(extensions)
             .await?
             .submit_channel_signature(params)
             .await
     }
 }
-impl<S> ScopedBackend<S>
+impl<S> ChannelBackend<S>
 where
     S: ChannelActorStateStore + ChannelOpenRecordStore + Send + Sync + 'static,
 {
