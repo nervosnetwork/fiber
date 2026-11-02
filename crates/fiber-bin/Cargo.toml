@@ -12,7 +12,7 @@ path = "src/main.rs"
 default = ["fnn/rocksdb", "watchtower", "lsp"]
 debug-add-tlc = ["fnn/debug-add-tlc"]
 metrics = ["fnn/metrics"]
-sqlite = ["fnn/sqlite"]
+sqlite = ["fnn/sqlite", "watchtower"]
 lsp = ["fnn/lsp"]
 watchtower = ["fnn/watchtower"]
 

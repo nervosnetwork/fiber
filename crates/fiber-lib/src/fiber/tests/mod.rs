@@ -13,6 +13,7 @@ mod hash_algorithm;
 mod history;
 mod in_flight_ckb_tx_actor_tests;
 #[cfg(not(target_arch = "wasm32"))]
+#[cfg(feature = "watchtower")]
 mod invoice_settlement;
 #[cfg(not(target_arch = "wasm32"))]
 mod mpp;
