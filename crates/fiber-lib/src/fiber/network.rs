@@ -4146,7 +4146,10 @@ where
 
         // Keep waiting while any TLC outcome is still unknown. Once the settlement was confirmed
         // and every TLC is terminal, clear the close flags and drop the funding-script cache entry.
-        if !payer_effects_applied || has_unresolved_onchain_tlcs(actor_state, &self.store) {
+        if !payer_effects_applied
+            || has_unresolved_onchain_tlcs(actor_state, &self.store)
+            || actor_state.has_pending_tlc_delivery()
+        {
             if mark_settlement_confirmed {
                 info!(
                     "Channel {channel_id:?} on-chain reconciliation incomplete; CheckChannels will retry"
@@ -7372,11 +7375,8 @@ where
                         .await
                     {
                         Ok(_) => {
-                            let should_restore_onchain_settlement_actor = matches!(
-                                state.state,
-                                ChannelState::Closed(flags)
-                                    if flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT)
-                            );
+                            let should_restore_onchain_settlement_actor =
+                                state.can_restore_offline_actor();
                             self.store.insert_channel_actor_state(state);
                             if should_restore_onchain_settlement_actor {
                                 if let Err(err) =

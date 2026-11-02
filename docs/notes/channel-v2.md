@@ -101,9 +101,11 @@ uses the current handshake's nonce when its next-round number matches, rather
 than rolling back to an advertisement that repeated reconnects may have retired.
 
 During opening, an already-advertised Ready keeps its exact number and nonce
-until opening completes. Reconnection must not replace it with a normal handshake
-nonce. A submitted external-funding initiator waiting for Ready can replay its
-saved witness response to a matching TxSignatures retry, followed by its saved
+until opening completes. Its sent flag and nonce are committed together before
+publication. Reconnection must not replace it with a normal handshake nonce, and
+replays the saved Ready even if both Ready flags were committed before the local
+opening transition completed. A submitted external-funding initiator waiting for
+Ready can replay its saved witness response to a matching TxSignatures retry, followed by its saved
 Ready if already advertised. This replay does not mutate funding/signing state
 or bypass the commitment-exchange phase check.
 
@@ -177,8 +179,11 @@ forwarded Adds report permanent channel failure, or re-link to an existing durab
 owner, and remain queued until the upstream actor durably accepts the result.
 Unavailable handoffs retry through chain maintenance, not the 100ms TLC retry loop.
 Closed watch-chain actors also finish this handoff after restart and cannot exit
-while it is pending. Locally originated queued Adds use the normal payment result
-path. Fulfill Removes retain their already-persisted preimages and existing TLCs
+while it is pending. Removal-result outboxes are unfinished local work too: even
+a fully closed channel is restored to deliver them, and chain completion retains
+its snapshot until the last result is durably received. A drained closed actor
+exits after committing the final receipt. Locally originated queued Adds use the
+normal payment result path. Fulfill Removes retain their already-persisted preimages and existing TLCs
 remain subject to chain reconciliation; queue retirement does not apply off-chain
 balances or pretend an RAA arrived. The historical `waiting_ack` flag and signing
 counters are left unchanged so closed snapshots still validate on restore.
@@ -198,8 +203,10 @@ on actor start. An already-created downstream TLC carries its upstream link in
 and `previous_tlc` preserved but no outgoing TLC id assigned yet. Recovery matches
 the payment hash and exact upstream channel/TLC identity in either representation,
 and retains the waiting guard for a queued Add until its execution reports a
-result. Only when neither durable representation exists may recovery fail the
-incoming TLC back for retry. Before a queued Add is published, its upstream TLC
+result. An already-applied downstream TLC retains its upstream link in the
+removal-result outbox, which is also indexed as a durable owner even after channel
+close. Only when no durable representation exists may recovery fail the incoming
+TLC back for retry. Before a queued Add is published, its upstream TLC
 must still exist, match the payment hash and hash algorithm, and have neither a
 selected/queued removal nor an existing downstream link. Trampoline forwards are different:
 their durable owner is the payment session's `TrampolineContext.previous_tlcs`,

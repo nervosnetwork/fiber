@@ -3010,7 +3010,9 @@ where
         myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
     ) {
-        if !state.is_closed() || state.retryable_tlc_operations.is_empty() {
+        if !matches!(state.state, ChannelState::Closed(_))
+            || state.retryable_tlc_operations.is_empty()
+        {
             return;
         }
         // Publish the terminal owner first; its queued Adds must not index as executable work.
@@ -3131,7 +3133,7 @@ where
                 )),
             );
         }
-        if state.retryable_tlc_operations.is_empty() && !state.is_waiting_onchain_settlement() {
+        if !state.has_pending_tlc_delivery() && !state.is_waiting_onchain_settlement() {
             myself.stop(Some(format!("ChannelStopped: {:?}", StopReason::Closed)));
         }
     }
@@ -3188,7 +3190,13 @@ where
             let Some(channel) = self.store.get_channel_actor_state(&channel_id) else {
                 continue;
             };
-            for tlc in channel.tlc_state.offered_tlcs.tlcs.iter() {
+            // Applied TLCs leave the active list before their result is durably received upstream.
+            for tlc in channel.tlc_state.offered_tlcs.tlcs.iter().chain(
+                channel
+                    .session_v2
+                    .iter()
+                    .flat_map(|session| session.remove_effects.iter().map(|(tlc, _)| tlc)),
+            ) {
                 if let Some((prev_channel_id, prev_tlc_id)) = tlc.forwarding_tlc {
                     // A created TLC takes precedence over any duplicate queued command.
                     index.insert(
@@ -4144,9 +4152,7 @@ where
         state.update_state(ChannelState::Closed(flags));
         self.store.insert_channel_actor_state(state.clone());
         let now = now_timestamp_as_millis_u64();
-        if self.reconcile_onchain_tlcs(state, now).await
-            && state.retryable_tlc_operations.is_empty()
-        {
+        if self.reconcile_onchain_tlcs(state, now).await && !state.has_pending_tlc_delivery() {
             flags.remove(
                 CloseFlags::WAITING_ONCHAIN_SETTLEMENT | CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED,
             );
@@ -4399,6 +4405,8 @@ where
                 };
                 state.funding_tx_confirmed_at = Some((block_hash, tx_index, timestamp));
                 let ready = state.ready_wire_message()?;
+                let flags = flags | AwaitingChannelReadyFlags::OUR_CHANNEL_READY;
+                state.update_state(ChannelState::AwaitingChannelReady(flags));
                 self.store.insert_channel_actor_state(state.clone());
                 self.network
                     .send_message(NetworkActorMessage::new_command(
@@ -4408,8 +4416,6 @@ where
                         )),
                     ))
                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-                let flags = flags | AwaitingChannelReadyFlags::OUR_CHANNEL_READY;
-                state.update_state(ChannelState::AwaitingChannelReady(flags));
                 state.maybe_channel_is_ready(myself);
             }
             ChannelEvent::PeerDisconnected => {
@@ -4487,7 +4493,7 @@ where
                 self.finalize_closed_retryable_tlc_operations(myself, state)
                     .await;
                 debug_event!(self.network, "ChannelClosed");
-                if state.retryable_tlc_operations.is_empty()
+                if !state.has_pending_tlc_delivery()
                     && matches!(
                         state.state,
                         ChannelState::Closed(flags)
@@ -4600,6 +4606,11 @@ where
                         {
                             self.store.insert_channel_actor_state(state.clone());
                             self.remove_preimage(hash);
+                        }
+                        if state.is_waiting_onchain_settlement()
+                            && state.is_onchain_settlement_confirmed()
+                        {
+                            self.finalize_onchain_settlement(myself, state).await?;
                         }
                         return Ok(());
                     }
@@ -5209,7 +5220,11 @@ where
                     // Watchtower/payment protection cannot depend on the peer
                     // being online after a process crash. These are durable local
                     // effects, not protocol traffic gated by the handshake.
-                    self.replay_effects_v2(&channel);
+                    if !matches!(channel.state, ChannelState::Closed(_))
+                        || channel.is_waiting_onchain_settlement()
+                    {
+                        self.replay_effects_v2(&channel);
+                    }
                     self.replay_remove_effects_v2(&channel);
                 }
 
@@ -5468,6 +5483,12 @@ where
             state.persist_external_funding_state();
         }
         self.persist_state_and_publish_pending_effects(state);
+        if matches!(state.state, ChannelState::Closed(_))
+            && !state.is_waiting_onchain_settlement()
+            && !state.has_pending_tlc_delivery()
+        {
+            myself.stop(Some(format!("ChannelStopped: {:?}", StopReason::Closed)));
+        }
 
         if state.needs_backup {
             if let Some(ref store_actor) = self.store_actor {
@@ -6263,6 +6284,15 @@ impl ChannelActorState {
         )
     }
 
+    /// Whether durable TLC commands or result deliveries still need this actor.
+    pub(crate) fn has_pending_tlc_delivery(&self) -> bool {
+        !self.retryable_tlc_operations.is_empty()
+            || self
+                .session_v2
+                .as_ref()
+                .is_some_and(|session| !session.remove_effects.is_empty())
+    }
+
     pub fn offline_restore_mode(&self) -> Option<OfflineChannelRestoreMode> {
         match self.state {
             ChannelState::ChannelReady
@@ -6279,7 +6309,8 @@ impl ChannelActorState {
             }
             ChannelState::ShuttingDown(_) => Some(OfflineChannelRestoreMode::ReestablishPeer),
             ChannelState::Closed(flags)
-                if flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT) =>
+                if flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT)
+                    || self.has_pending_tlc_delivery() =>
             {
                 Some(OfflineChannelRestoreMode::WatchChain)
             }
@@ -9707,33 +9738,34 @@ impl ChannelActorState {
                 }
             }
             ChannelState::AwaitingChannelReady(flags) => {
-                // It's turn to send the funding tx to chain and waiting for confirmations
+                // V2 must replay Ready even if both flags were saved before opening completed.
+                if flags.contains(AwaitingChannelReadyFlags::OUR_CHANNEL_READY)
+                    && (self.session_v2.is_some()
+                        || !flags.contains(AwaitingChannelReadyFlags::CHANNEL_READY))
+                {
+                    let message = if let Some(session) = &self.session_v2 {
+                        FiberMessage::channel_ready_v2(crate::fiber::types::ChannelReadyV2 {
+                            channel_id: self.id,
+                            next_commitment_number: session.own.number,
+                            next_commitment_nonce: session.own.public_nonce.clone(),
+                        })
+                    } else {
+                        FiberMessage::channel_ready(ChannelReady {
+                            channel_id: self.get_id(),
+                        })
+                    };
+                    self.network()
+                        .send_message(NetworkActorMessage::new_command(
+                            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                                self.get_remote_pubkey(),
+                                message,
+                            )),
+                        ))
+                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                }
                 if flags.contains(AwaitingChannelReadyFlags::CHANNEL_READY) {
                     self.maybe_channel_is_ready(myself);
                 } else {
-                    if flags.contains(AwaitingChannelReadyFlags::OUR_CHANNEL_READY) {
-                        // If we are ready, resend the ChannelReady message
-                        let message = if let Some(session) = &self.session_v2 {
-                            FiberMessage::channel_ready_v2(crate::fiber::types::ChannelReadyV2 {
-                                channel_id: self.id,
-                                next_commitment_number: session.own.number,
-                                next_commitment_nonce: session.own.public_nonce.clone(),
-                            })
-                        } else {
-                            FiberMessage::channel_ready(ChannelReady {
-                                channel_id: self.get_id(),
-                            })
-                        };
-                        self.network()
-                            .send_message(NetworkActorMessage::new_command(
-                                NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
-                                    self.get_remote_pubkey(),
-                                    message,
-                                )),
-                            ))
-                            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-                    }
-
                     // Trace the funding tx again
                     self.network()
                         .send_message(NetworkActorMessage::new_event(
@@ -10366,7 +10398,9 @@ impl ChannelActorState {
                 self.step_shutting_down(flags).await?;
             }
             ChannelState::Closed(_) => {
-                myself.stop(Some("ChannelClosed".to_string()));
+                if !self.has_pending_tlc_delivery() {
+                    myself.stop(Some("ChannelClosed".to_string()));
+                }
             }
         }
         Ok(())
