@@ -23,6 +23,15 @@ use crate::fiber::{
     NetworkActorEvent, NetworkActorMessage,
 };
 
+/// CKB's PoolRejectedRBF: another transaction in the pool spends an input.
+fn pool_conflict() -> RpcError {
+    RpcError::Rpc(jsonrpc_core::Error {
+        code: jsonrpc_core::ErrorCode::ServerError(-1111),
+        message: "PoolRejectedRBF: RBF rejected".to_string(),
+        data: None,
+    })
+}
+
 fn permanent_send_tx_error() -> RpcError {
     RpcError::Other(anyhow::anyhow!(
         "TransactionFailedToResolve: Unknown(OutPoint)"
@@ -72,7 +81,7 @@ impl CkbChainClient for MockChainClient {
 
 struct TestChainState {
     tracing_actor: ActorRef<CkbTxTracingMessage>,
-    send_tx_should_fail: bool,
+    send_tx_error: Option<fn() -> RpcError>,
     send_tx_calls: Arc<AtomicUsize>,
     report_send_tx_error_calls: Arc<AtomicUsize>,
 }
@@ -102,10 +111,9 @@ impl Actor for TestChainActor {
         match message {
             CkbChainMessage::SendTx(_tx, reply_port) => {
                 state.send_tx_calls.fetch_add(1, Ordering::SeqCst);
-                let result = if state.send_tx_should_fail {
-                    Err(permanent_send_tx_error())
-                } else {
-                    Ok(())
+                let result = match state.send_tx_error {
+                    Some(error) => Err(error()),
+                    None => Ok(()),
                 };
                 let _ = reply_port.send(result);
             }
@@ -168,6 +176,27 @@ async fn spawn_test_actors(
     ActorRef<CkbTxTracingMessage>,
     Hash256,
 ) {
+    let error = send_tx_should_fail.then_some(permanent_send_tx_error as fn() -> RpcError);
+    spawn_test_actors_with(
+        tx_status,
+        error,
+        InFlightCkbTxKind::Funding(Hash256::from([1; 32])),
+    )
+    .await
+}
+
+async fn spawn_test_actors_with(
+    tx_status: TxStatus,
+    send_tx_error: Option<fn() -> RpcError>,
+    tx_kind: InFlightCkbTxKind,
+) -> (
+    ActorRef<InFlightCkbTxActorMessage>,
+    mpsc::UnboundedReceiver<NetworkActorEvent>,
+    Arc<AtomicUsize>,
+    Arc<AtomicUsize>,
+    ActorRef<CkbTxTracingMessage>,
+    Hash256,
+) {
     let (tracing_actor, _) = Actor::spawn(
         None,
         CkbTxTracingActor::new(),
@@ -187,7 +216,7 @@ async fn spawn_test_actors(
         TestChainActor,
         TestChainState {
             tracing_actor,
-            send_tx_should_fail,
+            send_tx_error,
             send_tx_calls: send_tx_calls.clone(),
             report_send_tx_error_calls: report_send_tx_error_calls.clone(),
         },
@@ -202,7 +231,6 @@ async fn spawn_test_actors(
 
     let tx = TransactionView::new_advanced_builder().build();
     let tx_hash: Hash256 = tx.hash().into();
-    let channel_id = Hash256::from([1; 32]);
     let (in_flight_actor, _) = Actor::spawn(
         None,
         InFlightCkbTxActor {
@@ -212,7 +240,7 @@ async fn spawn_test_actors(
             },
             network_actor,
             tx_hash,
-            tx_kind: InFlightCkbTxKind::Funding(channel_id),
+            tx_kind,
             confirmations: 1,
         },
         InFlightCkbTxActorArguments {
@@ -279,5 +307,59 @@ async fn committed_preflight_skips_send_tx_and_error_reporting() {
         "committed preflight should not emit funding failure"
     );
     assert_eq!(send_tx_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(report_calls.load(Ordering::SeqCst), 0);
+}
+
+/// A funding whose input another transaction in the pool spends fails at the next poll, not at
+/// its timeout (LSP2, 2026-10-28: a watchtower settlement had taken one of its cells).
+#[tokio::test]
+async fn a_pool_conflict_fails_a_funding_at_once() {
+    let (_in_flight_actor, mut event_rx, send_tx_calls, report_calls, tracing_actor, tx_hash) =
+        spawn_test_actors_with(
+            TxStatus::Unknown,
+            Some(pool_conflict),
+            InFlightCkbTxKind::Funding(Hash256::from([1; 32])),
+        )
+        .await;
+
+    tokio::time::sleep(TokioDuration::from_millis(100)).await;
+    assert!(report_calls.load(Ordering::SeqCst) >= 1);
+
+    poll_unknown_with_tip(&tracing_actor, tx_hash, 100).await;
+    poll_unknown_with_tip(&tracing_actor, tx_hash, 101).await;
+
+    let event = timeout(TokioDuration::from_secs(1), event_rx.recv())
+        .await
+        .expect("should receive network event within timeout")
+        .expect("network event channel open");
+    assert!(matches!(
+        event,
+        NetworkActorEvent::FundingTransactionFailed(_)
+    ));
+    assert_eq!(send_tx_calls.load(Ordering::SeqCst), 1);
+}
+
+/// A closing that meets a pool conflict goes on as before: nothing reported, no failure.
+#[tokio::test]
+async fn a_pool_conflict_leaves_a_closing_as_before() {
+    let pubkey = fiber_types::Privkey::from([7u8; 32]).pubkey();
+    let (_in_flight_actor, mut event_rx, send_tx_calls, report_calls, tracing_actor, tx_hash) =
+        spawn_test_actors_with(
+            TxStatus::Unknown,
+            Some(pool_conflict),
+            InFlightCkbTxKind::Closing(pubkey, Hash256::from([2; 32]), true),
+        )
+        .await;
+
+    tokio::time::sleep(TokioDuration::from_millis(100)).await;
+    poll_unknown_with_tip(&tracing_actor, tx_hash, 100).await;
+    poll_unknown_with_tip(&tracing_actor, tx_hash, 101).await;
+
+    let recv_result = timeout(TokioDuration::from_millis(300), event_rx.recv()).await;
+    assert!(
+        recv_result.is_err(),
+        "no closing failure for a pool conflict"
+    );
+    assert_eq!(send_tx_calls.load(Ordering::SeqCst), 1);
     assert_eq!(report_calls.load(Ordering::SeqCst), 0);
 }

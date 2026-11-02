@@ -22,6 +22,14 @@ fn is_permanent_error(err: &RpcError) -> bool {
     crate::ckb::is_permanent_send_tx_error(err)
 }
 
+/// Whether a send error ends this transaction's wait. A pool conflict ends a funding's (the other
+/// transaction took an input, so the funding is failed at once, not at its timeout), but not a
+/// closing's, which goes on as before.
+fn reports_send_error(kind: &InFlightCkbTxKind, err: &RpcError) -> bool {
+    is_permanent_error(err)
+        && (matches!(kind, InFlightCkbTxKind::Funding(_)) || !crate::ckb::is_pool_conflict(err))
+}
+
 // tx index is not returned on older ckb version, using dummy tx index instead.
 // Waiting for https://github.com/nervosnetwork/ckb/pull/4583/ to be released.
 const DUMMY_FUNDING_TX_INDEX: u32 = 0;
@@ -275,7 +283,7 @@ where
                     self.tx_hash,
                     err
                 );
-                if is_permanent_error(&err) {
+                if reports_send_error(&self.tx_kind, &err) {
                     let _ = self
                         .chain_actor
                         .send_message(CkbChainMessage::ReportSendTxError(self.tx_hash, err));
