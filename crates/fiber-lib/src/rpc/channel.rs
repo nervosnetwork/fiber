@@ -10,6 +10,7 @@ use crate::fiber::{
     },
     FiberActorCommand, FiberActorMessage, FiberActorRef, NetworkActorMessage,
 };
+use crate::rpc::scoped::{BackendResolver, RpcBackendStore, ScopedBackend};
 use crate::rpc::utils::{rpc_error, RpcResultExt};
 use crate::{handle_actor_call, log_and_error};
 use ckb_types::{
@@ -176,17 +177,17 @@ fn pending_accept_channel_to_rpc(pending: PendingAcceptChannel) -> Channel {
 }
 
 pub struct ChannelRpcServerImpl<S> {
-    backend: crate::rpc::scoped::BackendResolver<S>,
+    backend: BackendResolver<S>,
 }
 
-impl<S: crate::rpc::scoped::RpcBackendStore> ChannelRpcServerImpl<S> {
+impl<S: RpcBackendStore> ChannelRpcServerImpl<S> {
     pub fn new(actor: ActorRef<NetworkActorMessage>, store: S) -> Self {
         Self::new_fiber(FiberActorRef::from_network(&actor), store)
     }
 
     pub(crate) fn new_fiber(actor: FiberActorRef, store: S) -> Self {
         ChannelRpcServerImpl {
-            backend: crate::rpc::scoped::BackendResolver::new(actor, store, None),
+            backend: BackendResolver::new(actor, store, None),
         }
     }
 
@@ -197,10 +198,7 @@ impl<S: crate::rpc::scoped::RpcBackendStore> ChannelRpcServerImpl<S> {
     }
 
     /// The public backend, for callers that hold no request (wasm bindings).
-    pub fn public_scope(&self) -> crate::rpc::scoped::ScopedBackend<S>
-    where
-        S: crate::rpc::scoped::RpcBackendStore,
-    {
+    pub fn public_scope(&self) -> ScopedBackend<S> {
         self.backend.public_scope()
     }
 }
@@ -209,12 +207,7 @@ impl<S: crate::rpc::scoped::RpcBackendStore> ChannelRpcServerImpl<S> {
 #[async_trait::async_trait]
 impl<S> ChannelRpcServer for ChannelRpcServerImpl<S>
 where
-    S: ChannelActorStateStore
-        + ChannelOpenRecordStore
-        + crate::rpc::scoped::RpcBackendStore
-        + Send
-        + Sync
-        + 'static,
+    S: ChannelActorStateStore + ChannelOpenRecordStore + RpcBackendStore + Send + Sync + 'static,
 {
     /// Attempts to open a channel with a peer.
     async fn open_channel(
@@ -394,7 +387,7 @@ where
             .await
     }
 }
-impl<S> crate::rpc::scoped::ScopedBackend<S>
+impl<S> ScopedBackend<S>
 where
     S: ChannelActorStateStore + ChannelOpenRecordStore + Send + Sync + 'static,
 {
