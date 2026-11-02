@@ -1,3 +1,4 @@
+#![cfg_attr(target_arch = "wasm32", allow(dead_code))] // wasm has no tenant scoping
 //! Tenancy declarations and tenant-backend resolution for the JSON-RPC surface.
 //!
 //! Tenancy used to be two separate things that had to stay in sync by hand: an
@@ -30,12 +31,15 @@
 //! question; the tests exist so that forgetting to give a handler the inputs
 //! fails CI instead of leaking public state silently.
 
+#[cfg(not(target_arch = "wasm32"))]
 use anyhow::bail;
+#[cfg(not(target_arch = "wasm32"))]
 use biscuit_auth::Biscuit;
 use jsonrpsee::{types::ErrorObjectOwned, Extensions};
 
 use crate::fiber::network::FiberActorRef;
 use crate::fiber_types::{Pubkey, TenantId};
+#[cfg(not(target_arch = "wasm32"))]
 use crate::rpc::biscuit::extract_tenant_id;
 #[cfg(feature = "lsp")]
 use crate::rpc::middleware::RpcAuthorization;
@@ -243,6 +247,7 @@ pub(crate) fn is_tenant_allowed_method(method: &str) -> bool {
 /// Reject tenant-scoped tokens that try to call a method outside the allowlist.
 ///
 /// Operator tokens without an authority `tenant(...)` fact are unchanged.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn enforce_tenant_method_allowlist(method: &str, token: &Biscuit) -> anyhow::Result<()> {
     if extract_tenant_id(token)?.is_some() && !is_tenant_allowed_method(method) {
         bail!("tenant token is not allowed to call {method}");

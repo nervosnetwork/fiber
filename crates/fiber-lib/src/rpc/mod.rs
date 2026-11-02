@@ -21,9 +21,9 @@ pub mod peer;
 pub mod prof;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod pubsub;
+pub(crate) mod scoped;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod subscription;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod tenant;
 pub mod utils;
 pub mod watchtower;
@@ -360,7 +360,9 @@ pub mod server {
 
     #[allow(clippy::type_complexity)]
     #[allow(clippy::too_many_arguments)]
-    pub async fn start_rpc<S: RpcServerStore + Clone + Send + Sync + 'static>(
+    pub async fn start_rpc<
+        S: RpcServerStore + crate::rpc::scoped::RpcBackendStore + Clone + Send + Sync + 'static,
+    >(
         config: RpcConfig,
         ckb_config: Option<CkbConfig>,
         fiber_config: Option<FiberConfig>,

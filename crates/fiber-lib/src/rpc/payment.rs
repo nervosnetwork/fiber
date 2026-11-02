@@ -80,45 +80,41 @@ trait PaymentRpc {
 }
 
 pub struct PaymentRpcServerImpl<S> {
-    actor: FiberActorRef,
-    store: S,
-    #[cfg(not(target_arch = "wasm32"))]
-    lsp_actor: crate::rpc::tenant::LspActorHandle,
+    backend: crate::rpc::scoped::BackendResolver<S>,
 }
 
-impl<S> PaymentRpcServerImpl<S> {
+impl<S: crate::rpc::scoped::RpcBackendStore> PaymentRpcServerImpl<S> {
     pub fn new(actor: ActorRef<NetworkActorMessage>, store: S) -> Self {
         Self::new_fiber(FiberActorRef::from_network(&actor), store)
     }
 
     pub(crate) fn new_fiber(actor: FiberActorRef, store: S) -> Self {
         PaymentRpcServerImpl {
-            actor,
-            store,
-            #[cfg(not(target_arch = "wasm32"))]
-            lsp_actor: None,
+            backend: crate::rpc::scoped::BackendResolver::new(actor, store, None),
         }
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     pub fn with_lsp_actor(mut self, lsp_actor: crate::rpc::tenant::LspActorHandle) -> Self {
-        self.lsp_actor = lsp_actor;
+        self.backend = self.backend.with_lsp_actor(lsp_actor);
         self
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    async fn tenant_rpc_context(
-        &self,
-        extensions: &Extensions,
-    ) -> Result<Option<crate::rpc::tenant::HostedTenantRpcContext>, ErrorObjectOwned> {
-        crate::rpc::tenant::resolve_tenant_rpc_context(extensions, &self.lsp_actor).await
+    /// The public backend, for callers that hold no request (wasm bindings).
+    pub fn public_scope(&self) -> crate::rpc::scoped::ScopedBackend<S> {
+        self.backend.public_scope()
     }
 }
 #[cfg(not(target_arch = "wasm32"))]
 #[async_trait::async_trait]
 impl<S> PaymentRpcServer for PaymentRpcServerImpl<S>
 where
-    S: ChannelActorStateStore + NetworkGraphStateStore + Send + Sync + 'static,
+    S: ChannelActorStateStore
+        + NetworkGraphStateStore
+        + crate::rpc::scoped::RpcBackendStore
+        + Send
+        + Sync
+        + 'static,
 {
     /// Sends a payment to a peer.
     async fn send_payment(
@@ -126,12 +122,11 @@ where
         extensions: &Extensions,
         params: SendPaymentCommandParams,
     ) -> Result<GetPaymentCommandResult, ErrorObjectOwned> {
-        if let Some(context) = self.tenant_rpc_context(extensions).await? {
-            return PaymentRpcServerImpl::new_fiber(context.fiber_actor, context.store)
-                .send_payment(params)
-                .await;
-        }
-        self.send_payment(params).await
+        self.backend
+            .resolve(extensions)
+            .await?
+            .send_payment(params)
+            .await
     }
 
     /// Retrieves a payment.
@@ -140,22 +135,15 @@ where
         extensions: &Extensions,
         params: GetPaymentCommandParams,
     ) -> Result<GetPaymentCommandResult, ErrorObjectOwned> {
-        let context = crate::rpc::tenant::resolve_tenant_query_rpc_context(
-            extensions,
-            &self.lsp_actor,
-            params.tenant_id.as_deref(),
-        )
-        .await?;
+        let backend = self
+            .backend
+            .resolve_query(extensions, params.tenant_id.as_deref())
+            .await?;
         let params = GetPaymentCommandParams {
             payment_hash: params.payment_hash,
             tenant_id: None,
         };
-        if let Some(context) = context {
-            return PaymentRpcServerImpl::new_fiber(context.fiber_actor, context.store)
-                .get_payment(params)
-                .await;
-        }
-        self.get_payment(params).await
+        backend.get_payment(params).await
     }
 
     /// Builds a router with a list of pubkeys and required channels.
@@ -164,12 +152,11 @@ where
         extensions: &Extensions,
         params: BuildRouterParams,
     ) -> Result<BuildPaymentRouterResult, ErrorObjectOwned> {
-        if let Some(context) = self.tenant_rpc_context(extensions).await? {
-            return PaymentRpcServerImpl::new_fiber(context.fiber_actor, context.store)
-                .build_router(params)
-                .await;
-        }
-        self.build_router(params).await
+        self.backend
+            .resolve(extensions)
+            .await?
+            .build_router(params)
+            .await
     }
 
     /// Sends a payment to a peer with specified router.
@@ -180,12 +167,11 @@ where
         extensions: &Extensions,
         params: SendPaymentWithRouterParams,
     ) -> Result<GetPaymentCommandResult, ErrorObjectOwned> {
-        if let Some(context) = self.tenant_rpc_context(extensions).await? {
-            return PaymentRpcServerImpl::new_fiber(context.fiber_actor, context.store)
-                .send_payment_with_router(params)
-                .await;
-        }
-        self.send_payment_with_router(params).await
+        self.backend
+            .resolve(extensions)
+            .await?
+            .send_payment_with_router(params)
+            .await
     }
 
     /// Lists all payments, optionally filtered by status.
@@ -194,12 +180,11 @@ where
         extensions: &Extensions,
         params: ListPaymentsParams,
     ) -> Result<ListPaymentsResult, ErrorObjectOwned> {
-        if let Some(context) = self.tenant_rpc_context(extensions).await? {
-            return PaymentRpcServerImpl::new_fiber(context.fiber_actor, context.store)
-                .list_payments(params)
-                .await;
-        }
-        self.list_payments(params).await
+        self.backend
+            .resolve(extensions)
+            .await?
+            .list_payments(params)
+            .await
     }
 }
 
@@ -230,7 +215,7 @@ fn send_payment_response_to_json(
     }
 }
 
-impl<S> PaymentRpcServerImpl<S>
+impl<S> crate::rpc::scoped::ScopedBackend<S>
 where
     S: ChannelActorStateStore + NetworkGraphStateStore + Send + Sync + 'static,
 {

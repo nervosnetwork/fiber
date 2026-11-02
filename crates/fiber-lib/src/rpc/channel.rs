@@ -176,45 +176,45 @@ fn pending_accept_channel_to_rpc(pending: PendingAcceptChannel) -> Channel {
 }
 
 pub struct ChannelRpcServerImpl<S> {
-    actor: FiberActorRef,
-    store: S,
-    #[cfg(not(target_arch = "wasm32"))]
-    lsp_actor: crate::rpc::tenant::LspActorHandle,
+    backend: crate::rpc::scoped::BackendResolver<S>,
 }
 
-impl<S> ChannelRpcServerImpl<S> {
+impl<S: crate::rpc::scoped::RpcBackendStore> ChannelRpcServerImpl<S> {
     pub fn new(actor: ActorRef<NetworkActorMessage>, store: S) -> Self {
         Self::new_fiber(FiberActorRef::from_network(&actor), store)
     }
 
     pub(crate) fn new_fiber(actor: FiberActorRef, store: S) -> Self {
         ChannelRpcServerImpl {
-            actor,
-            store,
-            #[cfg(not(target_arch = "wasm32"))]
-            lsp_actor: None,
+            backend: crate::rpc::scoped::BackendResolver::new(actor, store, None),
         }
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     pub fn with_lsp_actor(mut self, lsp_actor: crate::rpc::tenant::LspActorHandle) -> Self {
-        self.lsp_actor = lsp_actor;
+        self.backend = self.backend.with_lsp_actor(lsp_actor);
         self
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    async fn tenant_rpc_context(
-        &self,
-        extensions: &Extensions,
-    ) -> Result<Option<crate::rpc::tenant::HostedTenantRpcContext>, ErrorObjectOwned> {
-        crate::rpc::tenant::resolve_tenant_rpc_context(extensions, &self.lsp_actor).await
+    /// The public backend, for callers that hold no request (wasm bindings).
+    pub fn public_scope(&self) -> crate::rpc::scoped::ScopedBackend<S>
+    where
+        S: crate::rpc::scoped::RpcBackendStore,
+    {
+        self.backend.public_scope()
     }
 }
+
 #[cfg(not(target_arch = "wasm32"))]
 #[async_trait::async_trait]
 impl<S> ChannelRpcServer for ChannelRpcServerImpl<S>
 where
-    S: ChannelActorStateStore + ChannelOpenRecordStore + Send + Sync + 'static,
+    S: ChannelActorStateStore
+        + ChannelOpenRecordStore
+        + crate::rpc::scoped::RpcBackendStore
+        + Send
+        + Sync
+        + 'static,
 {
     /// Attempts to open a channel with a peer.
     async fn open_channel(
@@ -222,9 +222,10 @@ where
         extensions: &Extensions,
         params: OpenChannelParams,
     ) -> Result<OpenChannelResult, ErrorObjectOwned> {
-        if let Some(context) = self.tenant_rpc_context(extensions).await? {
+        let backend = self.backend.resolve(extensions).await?;
+        if let Some(tenant) = backend.tenant() {
             let pubkey = Pubkey::try_from(params.pubkey).rpc_err()?;
-            if pubkey != context.public_node_id {
+            if pubkey != tenant.public_node_id {
                 return Err(rpc_error(
                     "hosted tenants may only open a channel to the public LSP node",
                 ));
@@ -232,11 +233,8 @@ where
             if params.public.unwrap_or(true) {
                 return Err(rpc_error("hosted tenant channels must be private"));
             }
-            return ChannelRpcServerImpl::new_fiber(context.fiber_actor, context.store)
-                .open_channel(params)
-                .await;
         }
-        self.open_channel(params).await
+        backend.open_channel(params).await
     }
 
     /// Accepts a channel opening request from a peer.
@@ -245,12 +243,11 @@ where
         extensions: &Extensions,
         params: AcceptChannelParams,
     ) -> Result<AcceptChannelResult, ErrorObjectOwned> {
-        if let Some(context) = self.tenant_rpc_context(extensions).await? {
-            return ChannelRpcServerImpl::new_fiber(context.fiber_actor, context.store)
-                .accept_channel(params)
-                .await;
-        }
-        self.accept_channel(params).await
+        self.backend
+            .resolve(extensions)
+            .await?
+            .accept_channel(params)
+            .await
     }
 
     /// Abandon a channel, this will remove the channel from the channel manager and DB.
@@ -260,12 +257,11 @@ where
         extensions: &Extensions,
         params: AbandonChannelParams,
     ) -> Result<(), ErrorObjectOwned> {
-        if let Some(context) = self.tenant_rpc_context(extensions).await? {
-            return ChannelRpcServerImpl::new_fiber(context.fiber_actor, context.store)
-                .abandon_channel(params)
-                .await;
-        }
-        self.abandon_channel(params).await
+        self.backend
+            .resolve(extensions)
+            .await?
+            .abandon_channel(params)
+            .await
     }
 
     /// Lists all channels.
@@ -274,12 +270,11 @@ where
         extensions: &Extensions,
         params: ListChannelsParams,
     ) -> Result<ListChannelsResult, ErrorObjectOwned> {
-        if let Some(context) = self.tenant_rpc_context(extensions).await? {
-            return ChannelRpcServerImpl::new_fiber(context.fiber_actor, context.store)
-                .list_channels(params)
-                .await;
-        }
-        self.list_channels(params).await
+        self.backend
+            .resolve(extensions)
+            .await?
+            .list_channels(params)
+            .await
     }
 
     /// Shuts down a channel.
@@ -288,12 +283,11 @@ where
         extensions: &Extensions,
         params: ShutdownChannelParams,
     ) -> Result<(), ErrorObjectOwned> {
-        if let Some(context) = self.tenant_rpc_context(extensions).await? {
-            return ChannelRpcServerImpl::new_fiber(context.fiber_actor, context.store)
-                .shutdown_channel(params)
-                .await;
-        }
-        self.shutdown_channel(params).await
+        self.backend
+            .resolve(extensions)
+            .await?
+            .shutdown_channel(params)
+            .await
     }
 
     /// Updates a channel.
@@ -302,12 +296,11 @@ where
         extensions: &Extensions,
         params: UpdateChannelParams,
     ) -> Result<(), ErrorObjectOwned> {
-        if let Some(context) = self.tenant_rpc_context(extensions).await? {
-            return ChannelRpcServerImpl::new_fiber(context.fiber_actor, context.store)
-                .update_channel(params)
-                .await;
-        }
-        self.update_channel(params).await
+        self.backend
+            .resolve(extensions)
+            .await?
+            .update_channel(params)
+            .await
     }
 
     /// Opens a channel with external funding.
@@ -316,12 +309,14 @@ where
         extensions: &Extensions,
         params: OpenChannelWithExternalFundingParams,
     ) -> Result<OpenChannelWithExternalFundingResult, ErrorObjectOwned> {
-        if let Some(context) = self.tenant_rpc_context(extensions).await? {
-            validate_tenant_opening_params(&params, context.public_node_id.into())?;
+        let backend = self.backend.resolve(extensions).await?;
+        if let Some(tenant) = backend.tenant() {
+            validate_tenant_opening_params(&params, tenant.public_node_id.into())?;
             let command = external_funding_command(&params)?;
+            let actor = backend.actor.clone();
             // The actor owns the durable tenant opening; a disconnected caller can retry.
             return ractor::call_t!(
-                context.fiber_actor,
+                actor,
                 |reply| FiberActorMessage::new_command(FiberActorCommand::OpenTenantChannel {
                     command,
                     reply
@@ -335,7 +330,7 @@ where
             })?
             .map_err(rpc_error);
         }
-        self.open_channel_with_external_funding(params).await
+        backend.open_channel_with_external_funding(params).await
     }
 
     /// Submits a signed funding transaction for an externally funded channel.
@@ -344,12 +339,11 @@ where
         extensions: &Extensions,
         params: SubmitSignedFundingTxParams,
     ) -> Result<SubmitSignedFundingTxResult, ErrorObjectOwned> {
-        if let Some(context) = self.tenant_rpc_context(extensions).await? {
-            return ChannelRpcServerImpl::new_fiber(context.fiber_actor, context.store)
-                .submit_signed_funding_tx(params)
-                .await;
-        }
-        self.submit_signed_funding_tx(params).await
+        self.backend
+            .resolve(extensions)
+            .await?
+            .submit_signed_funding_tx(params)
+            .await
     }
 
     async fn get_channel_signing_status(
@@ -362,7 +356,8 @@ where
         #[cfg(all(not(target_arch = "wasm32"), feature = "lsp"))]
         if let Some(tenant) = extensions.get::<crate::rpc::tenant::AuthenticatedTenant>() {
             let actor = self
-                .lsp_actor
+                .backend
+                .lsp()
                 .as_ref()
                 .ok_or_else(|| rpc_error("hosted LSP service is not enabled"))?;
             let channel_id: fiber_types::Hash256 = params.channel_id.into();
@@ -380,7 +375,11 @@ where
                 status: to_rpc_channel_signing_status(&state).rpc_err()?,
             });
         }
-        self.get_channel_signing_status(params).await
+        self.backend
+            .resolve(extensions)
+            .await?
+            .get_channel_signing_status(params)
+            .await
     }
 
     async fn submit_channel_signature(
@@ -388,15 +387,14 @@ where
         extensions: &Extensions,
         params: SubmitChannelSignatureParams,
     ) -> Result<SubmitChannelSignatureResult, ErrorObjectOwned> {
-        if let Some(context) = self.tenant_rpc_context(extensions).await? {
-            return ChannelRpcServerImpl::new_fiber(context.fiber_actor, context.store)
-                .submit_channel_signature(params)
-                .await;
-        }
-        self.submit_channel_signature(params).await
+        self.backend
+            .resolve(extensions)
+            .await?
+            .submit_channel_signature(params)
+            .await
     }
 }
-impl<S> ChannelRpcServerImpl<S>
+impl<S> crate::rpc::scoped::ScopedBackend<S>
 where
     S: ChannelActorStateStore + ChannelOpenRecordStore + Send + Sync + 'static,
 {
