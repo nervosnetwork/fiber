@@ -374,6 +374,7 @@ async fn test_cancel_open_invoice_with_stored_preimage_succeeds() {
 
     let rpc = InvoiceRpcServerImpl::new(node.store.clone(), Some(node.network_actor.clone()), None);
     let res = rpc
+        .public_backend()
         .cancel_invoice(InvoiceParams {
             payment_hash: payment_hash.into(),
         })
@@ -551,6 +552,7 @@ async fn test_settle_invoice_status_checks() {
 
     let rpc = InvoiceRpcServerImpl::new(node.store.clone(), Some(node.network_actor.clone()), None);
     let rpc_cancel_res = rpc
+        .public_backend()
         .cancel_invoice(InvoiceParams {
             payment_hash: payment_hash_success.into(),
         })
@@ -721,6 +723,7 @@ async fn test_cancel_hold_invoice_fails_pending_tlcs() {
         None,
     );
     let res = rpc
+        .public_backend()
         .cancel_invoice(InvoiceParams {
             payment_hash: payment_hash.into(),
         })

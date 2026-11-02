@@ -86,6 +86,12 @@ trait DevRpc {
     ) -> Result<SignExternalFundingTxResult, ErrorObjectOwned>;
 }
 
+/// Development-only RPC module.
+///
+/// Unlike the channel/payment/invoice modules this one holds no scoped backend:
+/// its handlers run on the host's CKB and network handles by design (they are all
+/// operator-only except `check_channel_shutdown`, which resolves the calling
+/// tenant's actor before using it).
 pub struct DevRpcServerImpl {
     ckb_rpc_url: String,
     ckb_chain_actor: ActorRef<CkbChainMessage>,

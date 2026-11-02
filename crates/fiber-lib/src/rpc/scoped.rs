@@ -22,10 +22,13 @@ use crate::rpc::tenant::{resolve_tenant_rpc_context, HostedTenantRpcContext, Lsp
 use crate::store::Store;
 
 /// The identity a request is allowed to see while it runs for a tenant.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub(crate) struct TenantScope {
     pub(crate) tenant_id: TenantId,
     pub(crate) public_node_id: Pubkey,
+    /// The tenant runtime's Fiber config, for handlers that rebuild a service
+    /// handle (invoice keys, currency, node features).
+    pub(crate) config: crate::FiberConfig,
 }
 
 /// Lets a public store answer a tenant request with that tenant's namespace.
@@ -48,13 +51,30 @@ impl RpcBackendStore for Store {
 /// marker keeps the struct from being constructed anywhere outside this module.
 #[doc(hidden)]
 pub struct ScopedBackend<S> {
-    pub(crate) actor: FiberActorRef,
+    /// Missing when the node runs without a Fiber actor (config-only RPC).
+    actor: Option<FiberActorRef>,
     pub(crate) store: S,
     pub(crate) tenant: Option<TenantScope>,
     _sealed: (),
 }
 
 impl<S> ScopedBackend<S> {
+    /// The Fiber actor this request runs against.
+    ///
+    /// Errors instead of panicking when the node has no actor: handlers that
+    /// need one are then simply unavailable, which is what a config-only node
+    /// should report.
+    pub(crate) fn actor(&self) -> Result<&FiberActorRef, ErrorObjectOwned> {
+        self.actor
+            .as_ref()
+            .ok_or_else(|| crate::rpc::utils::rpc_error("this node has no running Fiber actor"))
+    }
+
+    /// The actor, when the caller can run without one.
+    pub(crate) fn actor_opt(&self) -> Option<&FiberActorRef> {
+        self.actor.as_ref()
+    }
+
     /// The tenant this request runs for, if any.
     pub(crate) fn tenant(&self) -> Option<&TenantScope> {
         self.tenant.as_ref()
@@ -63,7 +83,7 @@ impl<S> ScopedBackend<S> {
 
 /// Resolves the caller's backend; the handler's only door to an actor.
 pub(crate) struct BackendResolver<S> {
-    public_actor: FiberActorRef,
+    public_actor: Option<FiberActorRef>,
     public_store: S,
     #[allow(dead_code)]
     lsp_actor: LspActorHandle,
@@ -71,7 +91,7 @@ pub(crate) struct BackendResolver<S> {
 
 impl<S: RpcBackendStore> BackendResolver<S> {
     pub(crate) fn new(
-        public_actor: FiberActorRef,
+        public_actor: Option<FiberActorRef>,
         public_store: S,
         lsp_actor: LspActorHandle,
     ) -> Self {
@@ -153,11 +173,12 @@ impl<S: RpcBackendStore> BackendResolver<S> {
 
     fn for_tenant(context: HostedTenantRpcContext, public_store: S) -> ScopedBackend<S> {
         ScopedBackend {
-            actor: context.fiber_actor,
+            actor: Some(context.fiber_actor),
             store: public_store.for_tenant(context.store),
             tenant: Some(TenantScope {
                 tenant_id: context.tenant_id,
                 public_node_id: context.public_node_id,
+                config: context.config,
             }),
             _sealed: (),
         }

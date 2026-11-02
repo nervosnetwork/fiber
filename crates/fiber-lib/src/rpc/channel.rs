@@ -187,7 +187,7 @@ impl<S: RpcBackendStore> ChannelRpcServerImpl<S> {
 
     pub(crate) fn new_fiber(actor: FiberActorRef, store: S) -> Self {
         ChannelRpcServerImpl {
-            backend: BackendResolver::new(actor, store, None),
+            backend: BackendResolver::new(Some(actor), store, None),
         }
     }
 
@@ -306,7 +306,9 @@ where
         if let Some(tenant) = backend.tenant() {
             validate_tenant_opening_params(&params, tenant.public_node_id.into())?;
             let command = external_funding_command(&params)?;
-            let actor = backend.actor.clone();
+            let actor = backend.actor_opt().cloned().ok_or_else(|| {
+                rpc_error("tenant channel opening requires a running Fiber actor")
+            })?;
             // The actor owns the durable tenant opening; a disconnected caller can retry.
             return ractor::call_t!(
                 actor,
@@ -422,7 +424,7 @@ where
                 rpc_reply,
             ))
         };
-        handle_actor_call!(self.actor, message, params).map(|response| OpenChannelResult {
+        handle_actor_call!(self.actor()?, message, params).map(|response| OpenChannelResult {
             temporary_channel_id: response.channel_id.into(),
         })
     }
@@ -448,7 +450,7 @@ where
             ))
         };
 
-        handle_actor_call!(self.actor, message, params).map(|response| AcceptChannelResult {
+        handle_actor_call!(self.actor()?, message, params).map(|response| AcceptChannelResult {
             channel_id: response.new_channel_id.into(),
         })
     }
@@ -461,7 +463,7 @@ where
         let message = |rpc_reply| {
             FiberActorMessage::new_command(FiberActorCommand::AbandonChannel(channel_id, rpc_reply))
         };
-        handle_actor_call!(self.actor, message, params)
+        handle_actor_call!(self.actor()?, message, params)
     }
 
     pub async fn list_channels(
@@ -649,9 +651,12 @@ where
                     rpc_reply,
                 ))
             };
-            let pending_accept = match call!(self.actor, pending_accept_msg) {
-                Ok(Ok(list)) => list,
-                _ => vec![],
+            let pending_accept = match self.actor_opt() {
+                Some(actor) => match call!(actor, pending_accept_msg) {
+                    Ok(Ok(list)) => list,
+                    _ => vec![],
+                },
+                None => vec![],
             };
             for pending in pending_accept {
                 // Apply pubkey filter if provided
@@ -708,7 +713,7 @@ where
                 },
             ))
         };
-        handle_actor_call!(self.actor, message, params)
+        handle_actor_call!(self.actor()?, message, params)
     }
 
     pub async fn update_channel(
@@ -732,7 +737,7 @@ where
                 },
             ))
         };
-        handle_actor_call!(self.actor, message, params)
+        handle_actor_call!(self.actor()?, message, params)
     }
 
     /// Opens a channel with external funding.
@@ -746,7 +751,7 @@ where
                 command, rpc_reply,
             ))
         };
-        handle_actor_call!(self.actor, message, params).map(|response| {
+        handle_actor_call!(self.actor()?, message, params).map(|response| {
             OpenChannelWithExternalFundingResult {
                 channel_id: response.channel_id.into(),
                 unsigned_funding_tx: ckb_jsonrpc_types::Transaction::from(
@@ -771,9 +776,11 @@ where
                 reply: rpc_reply,
             })
         };
-        handle_actor_call!(self.actor, message, params).map(|tx_hash| SubmitSignedFundingTxResult {
-            channel_id: channel_id.into(),
-            funding_tx_hash: tx_hash.into(),
+        handle_actor_call!(self.actor()?, message, params).map(|tx_hash| {
+            SubmitSignedFundingTxResult {
+                channel_id: channel_id.into(),
+                funding_tx_hash: tx_hash.into(),
+            }
         })
     }
 
@@ -818,7 +825,7 @@ where
                 rpc_reply,
             ))
         };
-        handle_actor_call!(self.actor, message, params).map(|outcome| match outcome {
+        handle_actor_call!(self.actor()?, message, params).map(|outcome| match outcome {
             fiber_types::SubmitSignatureOutcome::Applied => SubmitChannelSignatureResult::Applied,
             fiber_types::SubmitSignatureOutcome::AlreadyApplied => {
                 SubmitChannelSignatureResult::AlreadyApplied

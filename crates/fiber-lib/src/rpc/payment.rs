@@ -91,7 +91,7 @@ impl<S: RpcBackendStore> PaymentRpcServerImpl<S> {
 
     pub(crate) fn new_fiber(actor: FiberActorRef, store: S) -> Self {
         PaymentRpcServerImpl {
-            backend: BackendResolver::new(actor, store, None),
+            backend: BackendResolver::new(Some(actor), store, None),
         }
     }
 
@@ -277,7 +277,7 @@ where
                 rpc_reply,
             ))
         };
-        handle_actor_call!(self.actor, message, params)
+        handle_actor_call!(self.actor()?, message, params)
             .map(|response| send_payment_response_to_json(&response))
     }
 
@@ -294,7 +294,7 @@ where
         let message = |rpc_reply| -> FiberActorMessage {
             FiberActorMessage::new_command(FiberActorCommand::GetPayment(payment_hash, rpc_reply))
         };
-        handle_actor_call!(self.actor, message, params)
+        handle_actor_call!(self.actor()?, message, params)
             .map(|response| send_payment_response_to_json(&response))
     }
 
@@ -322,12 +322,14 @@ where
             ))
         };
 
-        handle_actor_call!(self.actor, message, params).map(|response| BuildPaymentRouterResult {
-            router_hops: response
-                .router_hops
-                .into_iter()
-                .map(JsonRouterHop::from)
-                .collect(),
+        handle_actor_call!(self.actor()?, message, params).map(|response| {
+            BuildPaymentRouterResult {
+                router_hops: response
+                    .router_hops
+                    .into_iter()
+                    .map(JsonRouterHop::from)
+                    .collect(),
+            }
         })
     }
 
@@ -362,7 +364,7 @@ where
                 rpc_reply,
             ))
         };
-        handle_actor_call!(self.actor, message, params)
+        handle_actor_call!(self.actor()?, message, params)
             .map(|response| send_payment_response_to_json(&response))
     }
 

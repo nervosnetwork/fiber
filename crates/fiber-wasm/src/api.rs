@@ -209,6 +209,7 @@ pub mod invoice {
     pub async fn new_invoice(params: JsValue) -> Result<JsValue, JsValue> {
         fiber_wasm()?
             .invoice
+            .public_backend()
             .new_invoice(param(params)?)
             .await
             .map(result)
@@ -218,6 +219,7 @@ pub mod invoice {
     pub async fn parse_invoice(params: JsValue) -> Result<JsValue, JsValue> {
         fiber_wasm()?
             .invoice
+            .public_backend()
             .parse_invoice(param(params)?)
             .await
             .map(result)
@@ -227,6 +229,7 @@ pub mod invoice {
     pub async fn get_invoice(payment_hash: JsValue) -> Result<JsValue, JsValue> {
         fiber_wasm()?
             .invoice
+            .public_backend()
             .get_invoice(param(payment_hash)?)
             .await
             .map(result)
@@ -236,6 +239,7 @@ pub mod invoice {
     pub async fn cancel_invoice(payment_hash: JsValue) -> Result<JsValue, JsValue> {
         fiber_wasm()?
             .invoice
+            .public_backend()
             .cancel_invoice(param(payment_hash)?)
             .await
             .map(result)
@@ -245,6 +249,7 @@ pub mod invoice {
     pub async fn settle_invoice(params: JsValue) -> Result<JsValue, JsValue> {
         fiber_wasm()?
             .invoice
+            .public_backend()
             .settle_invoice(param(params)?)
             .await
             .map(result)

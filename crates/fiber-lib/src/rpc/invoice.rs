@@ -73,7 +73,8 @@ trait InvoiceRpc {
     ) -> Result<SettleInvoiceResult, ErrorObjectOwned>;
 }
 
-pub struct InvoiceRpcServerImpl<S> {
+#[doc(hidden)]
+pub struct InvoiceBackend<S> {
     store: S,
     fiber_actor: Option<FiberActorRef>,
     keypair: Option<(PublicKey, SecretKey)>,
@@ -83,11 +84,9 @@ pub struct InvoiceRpcServerImpl<S> {
     /// Hosted tenants must supply `payment_hash` or `payment_preimage` so the
     /// LSP does not generate and store a settle secret.
     require_client_payment_lock: bool,
-    #[cfg(not(target_arch = "wasm32"))]
-    lsp_actor: crate::rpc::tenant::LspActorHandle,
 }
 
-impl<S> InvoiceRpcServerImpl<S> {
+impl<S> InvoiceBackend<S> {
     pub fn new(
         store: S,
         network_actor: Option<ActorRef<NetworkActorMessage>>,
@@ -137,8 +136,6 @@ impl<S> InvoiceRpcServerImpl<S> {
             node_features,
             trampoline_route_hint: None,
             require_client_payment_lock: false,
-            #[cfg(not(target_arch = "wasm32"))]
-            lsp_actor: None,
         }
     }
 
@@ -152,26 +149,67 @@ impl<S> InvoiceRpcServerImpl<S> {
         self.require_client_payment_lock = required;
         self
     }
+}
+
+/// Registered invoice RPC module.
+///
+/// Holds only the resolver and the host config: the invoice backend (which owns
+/// key material) is built from the request's scope, so a handler cannot reach the
+/// public node's invoice keys without resolving the caller first.
+pub struct InvoiceRpcServerImpl<S> {
+    backend: crate::rpc::scoped::BackendResolver<S>,
+    config: Option<FiberConfig>,
+}
+
+impl<S: crate::rpc::scoped::RpcBackendStore> InvoiceRpcServerImpl<S> {
+    pub fn new(
+        store: S,
+        network_actor: Option<ActorRef<NetworkActorMessage>>,
+        config: Option<FiberConfig>,
+    ) -> Self {
+        Self {
+            backend: crate::rpc::scoped::BackendResolver::new(
+                network_actor.map(|actor| FiberActorRef::from_network(&actor)),
+                store,
+                None,
+            ),
+            config,
+        }
+    }
 
     #[cfg(not(target_arch = "wasm32"))]
     pub fn with_lsp_actor(mut self, lsp_actor: crate::rpc::tenant::LspActorHandle) -> Self {
-        self.lsp_actor = lsp_actor;
+        self.backend = self.backend.with_lsp_actor(lsp_actor);
         self
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    async fn tenant_rpc_context(
-        &self,
-        extensions: &Extensions,
-    ) -> Result<Option<crate::rpc::tenant::HostedTenantRpcContext>, ErrorObjectOwned> {
-        crate::rpc::tenant::resolve_tenant_rpc_context(extensions, &self.lsp_actor).await
+    /// Build the invoice backend for a resolved scope.
+    fn for_scope(&self, scope: &crate::rpc::scoped::ScopedBackend<S>) -> InvoiceBackend<S> {
+        let config = scope
+            .tenant()
+            .map(|tenant| tenant.config.clone())
+            .or_else(|| self.config.clone());
+        let mut backend =
+            InvoiceBackend::new_fiber(scope.store.clone(), scope.actor_opt().cloned(), config);
+        if let Some(tenant) = scope.tenant() {
+            backend = backend
+                .with_trampoline_route_hint(tenant.public_node_id.into())
+                .with_require_client_payment_lock(true);
+        }
+        backend
+    }
+
+    /// The public invoice backend, for callers that hold no request (wasm, tests).
+    pub fn public_backend(&self) -> InvoiceBackend<S> {
+        self.for_scope(&self.backend.public_scope())
     }
 }
+
 #[cfg(not(target_arch = "wasm32"))]
 #[async_trait::async_trait]
 impl<S> InvoiceRpcServer for InvoiceRpcServerImpl<S>
 where
-    S: InvoiceStore + Send + Sync + 'static,
+    S: InvoiceStore + crate::rpc::scoped::RpcBackendStore + Send + Sync + 'static,
 {
     /// Generates a new invoice.
     async fn new_invoice(
@@ -179,46 +217,45 @@ where
         extensions: &Extensions,
         params: NewInvoiceParams,
     ) -> Result<InvoiceResult, ErrorObjectOwned> {
-        #[cfg(not(feature = "lsp"))]
-        let _ = extensions;
-        #[cfg(feature = "lsp")]
-        if let Some(context) = self.tenant_rpc_context(extensions).await? {
+        let scope = self.backend.resolve(extensions).await?;
+        let backend = self.for_scope(&scope);
+        if let Some(tenant) = scope.tenant() {
             if params.allow_mpp == Some(true) {
                 return Err(rpc_error("hosted tenant invoices do not support MPP"));
             }
-            let tenant_id = context.tenant_id.clone();
-            let result = InvoiceRpcServerImpl::new_fiber(
-                context.store,
-                Some(context.fiber_actor),
-                Some(context.config),
-            )
-            .with_trampoline_route_hint(context.public_node_id.into())
-            .with_require_client_payment_lock(true)
-            .new_invoice(params)
-            .await?;
+            let tenant_id = tenant.tenant_id.clone();
+            let result = backend.new_invoice(params).await?;
             let invoice = result
                 .invoice_address
                 .parse::<InternalCkbInvoice>()
                 .map_err(|error| {
                     rpc_error(format!("failed to parse generated hosted invoice: {error}"))
                 })?;
-            let lsp_actor = self
-                .lsp_actor
-                .as_ref()
-                .ok_or_else(|| rpc_error("hosted LSP service is not enabled"))?;
-            call!(lsp_actor, |reply| {
-                crate::lsp::LspServiceMessage::RegisterInvoice {
-                    tenant_id,
-                    invoice,
-                    buffer_duration_ms: None,
-                    reply,
-                }
-            })
-            .rpc_err()?
-            .rpc_err()?;
+            #[cfg(feature = "lsp")]
+            {
+                let lsp_actor = self
+                    .backend
+                    .lsp()
+                    .as_ref()
+                    .ok_or_else(|| rpc_error("hosted LSP service is not enabled"))?;
+                call!(lsp_actor, |reply| {
+                    crate::lsp::LspServiceMessage::RegisterInvoice {
+                        tenant_id,
+                        invoice,
+                        buffer_duration_ms: None,
+                        reply,
+                    }
+                })
+                .rpc_err()?
+                .rpc_err()?;
+            }
+            #[cfg(not(feature = "lsp"))]
+            {
+                let _ = (tenant_id, invoice);
+            }
             return Ok(result);
         }
-        self.new_invoice(params).await
+        self.public_backend().new_invoice(params).await
     }
 
     /// Parses a encoded invoice.
@@ -226,7 +263,7 @@ where
         &self,
         params: ParseInvoiceParams,
     ) -> Result<ParseInvoiceResult, ErrorObjectOwned> {
-        self.parse_invoice(params).await
+        self.public_backend().parse_invoice(params).await
     }
 
     /// Retrieves an invoice.
@@ -235,25 +272,15 @@ where
         extensions: &Extensions,
         params: GetInvoiceParams,
     ) -> Result<GetInvoiceResult, ErrorObjectOwned> {
-        let context = crate::rpc::tenant::resolve_tenant_query_rpc_context(
-            extensions,
-            &self.lsp_actor,
-            params.tenant_id.as_deref(),
-        )
-        .await?;
+        let scope = self
+            .backend
+            .resolve_query(extensions, params.tenant_id.as_deref())
+            .await?;
+        let backend = self.for_scope(&scope);
         let params = InvoiceParams {
             payment_hash: params.payment_hash,
         };
-        if let Some(context) = context {
-            return InvoiceRpcServerImpl::new_fiber(
-                context.store,
-                Some(context.fiber_actor),
-                Some(context.config),
-            )
-            .get_invoice(params)
-            .await;
-        }
-        self.get_invoice(params).await
+        backend.get_invoice(params).await
     }
 
     /// Cancels an invoice, only when invoice is in status `Open` can be canceled.
@@ -262,16 +289,9 @@ where
         extensions: &Extensions,
         payment_hash: InvoiceParams,
     ) -> Result<GetInvoiceResult, ErrorObjectOwned> {
-        if let Some(context) = self.tenant_rpc_context(extensions).await? {
-            return InvoiceRpcServerImpl::new_fiber(
-                context.store,
-                Some(context.fiber_actor),
-                Some(context.config),
-            )
+        self.for_scope(&self.backend.resolve(extensions).await?)
             .cancel_invoice(payment_hash)
-            .await;
-        }
-        self.cancel_invoice(payment_hash).await
+            .await
     }
 
     /// Settles an invoice by saving the preimage to this invoice.
@@ -280,20 +300,13 @@ where
         extensions: &Extensions,
         settle_invoice: SettleInvoiceParams,
     ) -> Result<SettleInvoiceResult, ErrorObjectOwned> {
-        if let Some(context) = self.tenant_rpc_context(extensions).await? {
-            return InvoiceRpcServerImpl::new_fiber(
-                context.store,
-                Some(context.fiber_actor),
-                Some(context.config),
-            )
+        self.for_scope(&self.backend.resolve(extensions).await?)
             .settle_invoice(settle_invoice)
-            .await;
-        }
-        self.settle_invoice(settle_invoice).await
+            .await
     }
 }
 
-impl<S> InvoiceRpcServerImpl<S>
+impl<S> InvoiceBackend<S>
 where
     S: InvoiceStore + Send + Sync + 'static,
 {
