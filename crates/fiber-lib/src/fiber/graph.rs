@@ -551,7 +551,7 @@ where
     /// deliberately does not load public gossip from the shared physical store;
     /// the tenant only needs its private first-hop channel to the public LSP
     /// node when constructing a trampoline payment.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), feature = "lsp"))]
     pub(crate) fn new_owned_channels(store: S, source: Pubkey) -> Self {
         Self::empty(store, source, false, NetworkGraphScope::OwnedChannelsOnly)
     }

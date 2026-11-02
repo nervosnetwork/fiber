@@ -11,6 +11,7 @@ use crate::invoice::{
 };
 use crate::rpc::utils::rpc_error;
 #[cfg(not(target_arch = "wasm32"))]
+#[cfg(feature = "lsp")]
 use crate::rpc::utils::RpcResultExt;
 use crate::{gen_rand_sha256_hash, handle_actor_call, log_and_error, FiberConfig};
 use fiber_types::{FeatureVector, Privkey};
@@ -83,7 +84,7 @@ pub struct InvoiceRpcServerImpl<S> {
     /// LSP does not generate and store a settle secret.
     require_client_payment_lock: bool,
     #[cfg(not(target_arch = "wasm32"))]
-    lsp_actor: Option<ActorRef<crate::lsp::LspServiceMessage>>,
+    lsp_actor: crate::rpc::tenant::LspActorHandle,
 }
 
 impl<S> InvoiceRpcServerImpl<S> {
@@ -153,10 +154,7 @@ impl<S> InvoiceRpcServerImpl<S> {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn with_lsp_actor(
-        mut self,
-        lsp_actor: Option<ActorRef<crate::lsp::LspServiceMessage>>,
-    ) -> Self {
+    pub fn with_lsp_actor(mut self, lsp_actor: crate::rpc::tenant::LspActorHandle) -> Self {
         self.lsp_actor = lsp_actor;
         self
     }
@@ -165,8 +163,8 @@ impl<S> InvoiceRpcServerImpl<S> {
     async fn tenant_rpc_context(
         &self,
         extensions: &Extensions,
-    ) -> Result<Option<crate::lsp::HostedTenantRpcContext>, ErrorObjectOwned> {
-        crate::rpc::tenant::resolve_tenant_rpc_context(extensions, self.lsp_actor.as_ref()).await
+    ) -> Result<Option<crate::rpc::tenant::HostedTenantRpcContext>, ErrorObjectOwned> {
+        crate::rpc::tenant::resolve_tenant_rpc_context(extensions, &self.lsp_actor).await
     }
 }
 #[cfg(not(target_arch = "wasm32"))]
@@ -181,6 +179,9 @@ where
         extensions: &Extensions,
         params: NewInvoiceParams,
     ) -> Result<InvoiceResult, ErrorObjectOwned> {
+        #[cfg(not(feature = "lsp"))]
+        let _ = extensions;
+        #[cfg(feature = "lsp")]
         if let Some(context) = self.tenant_rpc_context(extensions).await? {
             if params.allow_mpp == Some(true) {
                 return Err(rpc_error("hosted tenant invoices do not support MPP"));
@@ -236,7 +237,7 @@ where
     ) -> Result<GetInvoiceResult, ErrorObjectOwned> {
         let context = crate::rpc::tenant::resolve_tenant_query_rpc_context(
             extensions,
-            self.lsp_actor.as_ref(),
+            &self.lsp_actor,
             params.tenant_id.as_deref(),
         )
         .await?;

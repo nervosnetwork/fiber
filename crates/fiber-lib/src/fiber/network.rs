@@ -952,6 +952,8 @@ pub struct SendPaymentResponse {
     pub last_updated_at: u64,
     pub failed_error: Option<String>,
     #[cfg(not(target_arch = "wasm32"))]
+    // Written by the payment data plane; only the hosted delivery path reads it.
+    #[cfg_attr(not(feature = "lsp"), allow(dead_code))]
     pub(crate) failed_error_code: Option<TlcErrorCode>,
     pub custom_records: Option<PaymentCustomRecords>,
     pub fee: u128,
@@ -1915,7 +1917,7 @@ where
         }
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), feature = "lsp"))]
     fn with_signing_events(mut self, events: crate::signing::ChannelSigningEvents) -> Self {
         self.signing_events = events;
         self
@@ -9045,7 +9047,7 @@ pub struct NetworkActorStartArguments {
     pub default_shutdown_script: Script,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "lsp"))]
 pub(crate) struct HostedTenantActorStartArguments {
     pub config: FiberConfig,
     pub default_shutdown_script: Script,
@@ -9056,12 +9058,12 @@ pub(crate) struct HostedTenantActorStartArguments {
 /// It drives the shared data-plane core directly, without constructing
 /// or wrapping a public `NetworkActor`. Its only available peer is the public
 /// LSP node through an in-process transport.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "lsp"))]
 pub(crate) struct HostedTenantActor<S, C> {
     core: FiberActorCore<S, C>,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "lsp"))]
 impl<S, C> HostedTenantActor<S, C>
 where
     S: NetworkActorStateStore
@@ -9117,7 +9119,7 @@ where
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "lsp"))]
 #[async_trait::async_trait]
 impl<S, C> Actor for HostedTenantActor<S, C>
 where
@@ -10059,7 +10061,7 @@ pub async fn start_network<
     actor
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "lsp"))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn start_hosted_tenant_actor<
     S: NetworkActorStateStore

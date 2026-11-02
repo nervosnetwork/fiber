@@ -14,7 +14,8 @@ pub fn is_permanent_hosted_payment_failure(error_code: crate::fiber_types::TlcEr
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-mod config;
+pub use crate::rpc::tenant::HostedTenantRpcContext;
+
 #[cfg(not(target_arch = "wasm32"))]
 mod delivery;
 #[cfg(not(target_arch = "wasm32"))]
@@ -35,7 +36,7 @@ mod token;
 mod watch;
 
 #[cfg(not(target_arch = "wasm32"))]
-pub use config::{LspConfig, DEFAULT_MAX_ACTIVE_TENANTS};
+pub use crate::lsp_config::{LspConfig, DEFAULT_MAX_ACTIVE_TENANTS};
 #[cfg(not(target_arch = "wasm32"))]
 pub use delivery::{
     LspPaymentDelivery, LspPaymentDeliveryKey, LspPaymentDeliveryLimits, LspPaymentDeliveryManager,
@@ -52,8 +53,7 @@ pub use port::LspDeliveryPort;
 pub use registry::{TenantRegistry, TenantRegistryStore};
 #[cfg(not(target_arch = "wasm32"))]
 pub use runtime::{
-    FiberTenantRuntimeFactory, HostedTenantRpcContext, HostedTenantRuntime, TenantRuntimeFactory,
-    TenantSupervisor,
+    FiberTenantRuntimeFactory, HostedTenantRuntime, TenantRuntimeFactory, TenantSupervisor,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use service::{

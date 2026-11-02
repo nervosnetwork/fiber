@@ -10,10 +10,11 @@ use biscuit_auth::{
     Authorizer, AuthorizerBuilder, AuthorizerLimits, Biscuit, PublicKey,
 };
 
-use crate::lsp::TenantId;
 use crate::now_timestamp_as_millis_u64;
 use fiber_types::NodeId;
+use fiber_types::TenantId;
 
+#[cfg(feature = "lsp")]
 pub use crate::lsp::BiscuitTokenIssuer;
 
 const DEFAULT_BISCUIT_AUTH_MAX_TIME: Duration = Duration::from_millis(10);
@@ -360,14 +361,14 @@ mod tests {
         KeyPair,
     };
 
-    use crate::{
-        lsp::TenantId,
-        rpc::biscuit::{extract_node_id, extract_tenant_id, scoped_rpc_node_id},
-    };
-    use fiber_types::NodeId;
+    #[cfg(feature = "lsp")]
+    use crate::lsp::BiscuitTokenIssuer;
+    use crate::rpc::biscuit::{extract_node_id, extract_tenant_id, scoped_rpc_node_id};
+    use fiber_types::{NodeId, TenantId};
 
-    use super::{build_authorizer, AuthRule, BiscuitAuth, BiscuitTokenIssuer};
+    use super::{build_authorizer, AuthRule, BiscuitAuth};
 
+    #[cfg(feature = "lsp")]
     #[test]
     fn tenant_token_issuer_binds_identity_and_data_plane_capabilities() {
         let root = KeyPair::new();
@@ -534,7 +535,7 @@ mod tests {
         let tenant_token = biscuit!(r#"tenant("u1");"#).build(&root).unwrap();
         assert_eq!(
             extract_tenant_id(&tenant_token).unwrap(),
-            Some(crate::lsp::TenantId::new("u1").unwrap())
+            Some(TenantId::new("u1").unwrap())
         );
 
         let public_token = biscuit!(r#"read("channels");"#).build(&root).unwrap();

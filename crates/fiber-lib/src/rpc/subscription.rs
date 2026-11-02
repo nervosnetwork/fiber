@@ -3,7 +3,9 @@
 mod service;
 mod transport;
 
-use anyhow::{anyhow, bail, Result};
+#[cfg(feature = "lsp")]
+use anyhow::bail;
+use anyhow::{anyhow, Result};
 use fiber_json_types::{SubscriptionOptions, SubscriptionTopic};
 use fiber_types::NodeId;
 use jsonrpsee::{
@@ -11,13 +13,12 @@ use jsonrpsee::{
     PendingSubscriptionSink,
 };
 
-use crate::{
-    lsp::LspServiceMessage,
-    rpc::{
-        biscuit::{extract_tenant_id, scoped_rpc_node_id},
-        middleware::RpcAuthorization,
-        server::RpcServerStore,
-    },
+#[cfg(feature = "lsp")]
+use crate::lsp::LspServiceMessage;
+use crate::rpc::{
+    biscuit::{extract_tenant_id, scoped_rpc_node_id},
+    middleware::RpcAuthorization,
+    server::RpcServerStore,
 };
 
 use service::{EventStream, Source, SubscriptionService};
@@ -234,7 +235,9 @@ pub(crate) trait SubscriptionRpc {
 pub(crate) struct SubscriptionRpcServerImpl<S> {
     events: crate::signing::SigningEvents,
     store: S,
-    lsp: Option<ractor::ActorRef<LspServiceMessage>>,
+    // Only the tenant-scoped branch reads it; empty when the `lsp` feature is off.
+    #[cfg_attr(not(feature = "lsp"), allow(dead_code))]
+    lsp: crate::rpc::tenant::LspActorHandle,
     service: SubscriptionService,
 }
 
@@ -242,7 +245,8 @@ impl<S: RpcServerStore + Clone + Send + Sync + 'static> SubscriptionRpcServerImp
     pub(crate) fn new(
         events: crate::signing::SigningEvents,
         store: S,
-        lsp: Option<ractor::ActorRef<LspServiceMessage>>,
+        // Only the tenant-scoped branch reads it; empty when the `lsp` feature is off.
+        #[cfg_attr(not(feature = "lsp"), allow(dead_code))] lsp: crate::rpc::tenant::LspActorHandle,
         channels_enabled: bool,
         watchtower_enabled: bool,
     ) -> Self {
@@ -285,6 +289,9 @@ impl<S: RpcServerStore + Clone + Send + Sync + 'static> SubscriptionRpcServerImp
                 None => (None, NodeId::local()),
             }
         };
+        #[cfg(not(feature = "lsp"))]
+        let _ = tenant;
+        #[cfg(feature = "lsp")]
         if let Some(tenant) = tenant {
             let actor = self
                 .lsp
@@ -301,7 +308,8 @@ impl<S: RpcServerStore + Clone + Send + Sync + 'static> SubscriptionRpcServerImp
             if topic == SubscriptionTopic::WatchtowerSigning && node != context.node_id {
                 bail!("watchtower identity does not match tenant");
             }
-            self.service
+            return self
+                .service
                 .clone()
                 .subscribe_async(
                     Source {
@@ -315,24 +323,23 @@ impl<S: RpcServerStore + Clone + Send + Sync + 'static> SubscriptionRpcServerImp
                     topic,
                     options,
                 )
-                .await
-        } else {
-            self.service
-                .clone()
-                .subscribe_async(
-                    Source {
-                        events: self.events.clone(),
-                        tenant: None,
-                        channels: self.store.clone(),
-                        #[cfg(feature = "watchtower")]
-                        watchtower: self.store.clone(),
-                        node,
-                    },
-                    topic,
-                    options,
-                )
-                .await
+                .await;
         }
+        self.service
+            .clone()
+            .subscribe_async(
+                Source {
+                    events: self.events.clone(),
+                    tenant: None,
+                    channels: self.store.clone(),
+                    #[cfg(feature = "watchtower")]
+                    watchtower: self.store.clone(),
+                    node,
+                },
+                topic,
+                options,
+            )
+            .await
     }
 }
 

@@ -21,18 +21,9 @@ use crate::fiber::{
 use crate::fiber_types::Pubkey;
 use crate::store::{NodeNamespace, Store};
 
-use super::{HostedTenantRecord, LspConfig, TenantId};
+use crate::rpc::tenant::HostedTenantRpcContext;
 
-/// Tenant-scoped handles used by the authenticated LSP RPC facade.
-#[doc(hidden)]
-#[derive(Clone)]
-pub struct HostedTenantRpcContext {
-    pub(crate) tenant_id: TenantId,
-    pub(crate) config: FiberConfig,
-    pub(crate) fiber_actor: FiberActorRef,
-    pub(crate) public_node_id: Pubkey,
-    pub(crate) store: Store,
-}
+use super::{HostedTenantRecord, LspConfig, TenantId};
 
 /// A running tenant-scoped Fiber runtime. It reuses the channel/payment
 /// coordinator but has no listening P2P endpoint or gossip service.

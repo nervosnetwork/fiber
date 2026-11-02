@@ -2,7 +2,10 @@ use std::path::{Path, PathBuf};
 
 use clap_serde_derive::ClapSerde;
 
-use super::MAX_LSP_BUFFER_DURATION_MS;
+/// Default time an LSP may wait for an offline tenant before dispatching.
+pub const DEFAULT_LSP_BUFFER_DURATION_MS: u64 = 24 * 60 * 60 * 1_000;
+/// Protocol cap for invoice-requested offline buffering.
+pub const MAX_LSP_BUFFER_DURATION_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
 
 /// Default upper bound for simultaneously active hosted tenant runtimes.
 pub const DEFAULT_MAX_ACTIVE_TENANTS: usize = 64;

@@ -2,13 +2,15 @@ use crate::ckb::tests::test_utils::{
     complete_commitment_tx, MockChainActorMiddleware, MockChainActorState,
 };
 use crate::ckb::{CkbChainMessage, FundingContext, FundingTx, GetShutdownTxResponse};
+#[cfg(feature = "lsp")]
+use crate::fiber::channel::TestPendingMessages;
 use crate::fiber::channel::{
     funding_timeout_check_delay, merge_external_funding_witnesses, settlement_tlc_to_witness,
     AddTlcResponse, ChannelActor, ChannelActorMessage, ChannelActorState, ChannelActorStateStore,
-    ChannelOpenRecordStore, ProcessingChannelResult, ReloadParams, ReplayOrderHint,
-    TestPendingMessages, UpdateCommand, DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_FEE_RATE,
-    DEFAULT_MAX_TLC_VALUE_IN_FLIGHT, MAX_COMMITMENT_DELAY_EPOCHS, MAX_TLC_NUMBER_IN_FLIGHT,
-    MIN_COMMITMENT_DELAY_EPOCHS, PEER_CHANNEL_RESPONSE_TIMEOUT, XUDT_COMPATIBLE_WITNESS,
+    ChannelOpenRecordStore, ProcessingChannelResult, ReloadParams, ReplayOrderHint, UpdateCommand,
+    DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_FEE_RATE, DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
+    MAX_COMMITMENT_DELAY_EPOCHS, MAX_TLC_NUMBER_IN_FLIGHT, MIN_COMMITMENT_DELAY_EPOCHS,
+    PEER_CHANNEL_RESPONSE_TIMEOUT, XUDT_COMPATIBLE_WITNESS,
 };
 use crate::fiber::config::{
     DEFAULT_COMMITMENT_DELAY_EPOCHS, DEFAULT_FINAL_TLC_EXPIRY_DELTA, DEFAULT_TLC_EXPIRY_DELTA,
@@ -25,21 +27,23 @@ use crate::fiber::network::{
 #[cfg(not(target_arch = "wasm32"))]
 use crate::fiber::onchain_tlc_reconcile::OnChainTlcSettlement;
 use crate::fiber::payment::SendPaymentCommand;
+#[cfg(feature = "lsp")]
+use crate::fiber::types::UpdateTlcInfo;
 use crate::fiber::types::{
     AddTlc, AnnouncementSignatures, CommitmentSigned, FiberChannelMessage, FiberMessage, Hash256,
     Init, PeeledPaymentOnionPacket, Pubkey, ReestablishChannel, TlcErr, TxSignatures,
-    UpdateTlcInfo,
 };
 use crate::fiber::ChannelConnectivityState;
 use crate::fiber::{FiberActorMessage, FiberActorRef};
 use crate::invoice::{CkbInvoiceStatus, Currency, InvoiceBuilder, InvoiceStore};
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "lsp"))]
 use crate::rpc::channel::{
-    to_rpc_channel_open_signer_material, GetChannelSigningStatusParams,
-    GetChannelSigningStatusResult, OpenChannelWithExternalFundingParams,
+    to_rpc_channel_open_signer_material, OpenChannelWithExternalFundingParams,
     OpenChannelWithExternalFundingResult, SubmitChannelSignatureParams,
     SubmitChannelSignatureResult, SubmitSignedFundingTxParams, SubmitSignedFundingTxResult,
 };
+#[cfg(all(not(target_arch = "wasm32"), feature = "lsp"))]
+use crate::rpc::channel::{GetChannelSigningStatusParams, GetChannelSigningStatusResult};
 use crate::store::sample::StoreSample;
 use crate::test_utils::{init_tracing, NetworkNode, NetworkNodeConfigBuilder};
 use crate::tests::test_utils::*;
@@ -67,19 +71,19 @@ use ckb_types::{
     prelude::{AsTransactionBuilder, Builder, Entity, IntoTransactionView, Pack, Unpack},
     H256,
 };
-use fiber_types::ChannelSignatureRequest;
 use fiber_types::{
     derive_private_key, is_tlc_key_derivation_safe, try_derive_tlc_pubkey, AddTlcCommand,
     AppliedFlags, AwaitingChannelReadyFlags, AwaitingTxSignaturesFlags, ChannelConstraints,
-    ChannelOpeningStatus, ChannelState, ChannelUpdateChannelFlags, CollaboratingFundingTxFlags,
-    CommitmentContractFeatures, HashAlgorithm, InMemorySigner, InboundTlcStatus,
-    NegotiatingFundingFlags, OutboundTlcStatus, PaymentHopData, PaymentStatus, Privkey, RemoveTlc,
-    RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation, RevokeAndAck, SettlementTlc,
-    ShuttingDownFlags, SigningCommitmentFlags, TLCId, TlcErrPacket, TlcErrorCode, TlcInfo,
-    TlcStatus, NO_SHARED_SECRET,
+    ChannelOpeningStatus, ChannelState, CollaboratingFundingTxFlags, CommitmentContractFeatures,
+    HashAlgorithm, InMemorySigner, InboundTlcStatus, NegotiatingFundingFlags, OutboundTlcStatus,
+    PaymentHopData, PaymentStatus, Privkey, RemoveTlc, RemoveTlcFulfill, RemoveTlcReason,
+    RetryableTlcOperation, RevokeAndAck, SettlementTlc, ShuttingDownFlags, SigningCommitmentFlags,
+    TLCId, TlcErrPacket, TlcErrorCode, TlcInfo, TlcStatus, NO_SHARED_SECRET,
 };
+#[cfg(feature = "lsp")]
+use fiber_types::{ChannelSignatureRequest, ChannelUpdateChannelFlags};
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "lsp"))]
 use fiber_lsp_sdk::{ChannelSigner, MemoryStore, RootSigner};
 use fiber_store::backend::StorageBackend;
 use fiber_types::{ChannelActorData, Musig2Context, NoncePurpose, NonceSlot};
@@ -1841,6 +1845,7 @@ async fn test_network_send_payment_send_each_other() {
     assert_eq!(node_b_new_balance, node_b_old_balance + 1);
 }
 
+#[cfg(feature = "lsp")]
 #[cfg(not(target_arch = "wasm32"))]
 #[tokio::test]
 async fn test_external_signer_commitment_pauses_until_signature_is_submitted() {
@@ -2191,6 +2196,7 @@ async fn test_external_signer_commitment_pauses_until_signature_is_submitted() {
     ));
 }
 
+#[cfg(feature = "lsp")]
 #[cfg(not(target_arch = "wasm32"))]
 #[tokio::test]
 async fn test_external_signer_public_channel_announcement_pauses_until_signature_is_submitted() {
@@ -2312,13 +2318,13 @@ async fn test_external_signer_public_channel_announcement_pauses_until_signature
 ///
 /// It never sends ChannelActor commands for query or submit, and the node does not
 /// start a signer actor for this channel.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "lsp"))]
 struct ExternalSignerHttpClient<'a> {
     node: &'a NetworkNode,
     signer: &'a ChannelSigner<MemoryStore>,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "lsp"))]
 impl ExternalSignerHttpClient<'_> {
     async fn get_signing_status(&self, channel_id: Hash256) -> GetChannelSigningStatusResult {
         self.node
@@ -2348,6 +2354,7 @@ impl ExternalSignerHttpClient<'_> {
         assert_eq!(result, SubmitChannelSignatureResult::Applied);
     }
 
+    #[cfg(feature = "lsp")]
     async fn prepare_submission(
         &self,
         channel_id: Hash256,
@@ -2371,6 +2378,7 @@ impl ExternalSignerHttpClient<'_> {
     }
 }
 
+#[cfg(feature = "lsp")]
 #[cfg(not(target_arch = "wasm32"))]
 async fn new_external_signer_channel() -> ([NetworkNode; 2], Hash256, ChannelSigner<MemoryStore>) {
     let nodes = NetworkNode::new_n_interconnected_nodes_with_config(2, |index| {
@@ -2500,7 +2508,7 @@ async fn new_external_signer_channel() -> ([NetworkNode; 2], Hash256, ChannelSig
     ([node_a, node_b], channel_id, signer)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "lsp"))]
 async fn wait_for_external_signer_recovery(
     node_a: &NetworkNode,
     node_b: &NetworkNode,
@@ -2544,7 +2552,7 @@ async fn wait_for_external_signer_recovery(
     .is_ok()
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "lsp"))]
 async fn live_pending_messages(node: &NetworkNode, channel_id: Hash256) -> TestPendingMessages {
     let actor = node
         .get_channel_actor(channel_id)
@@ -2553,6 +2561,7 @@ async fn live_pending_messages(node: &NetworkNode, channel_id: Hash256) -> TestP
     call!(actor, ChannelActorMessage::TestGetPendingMessages).expect("channel actor is alive")
 }
 
+#[cfg(feature = "lsp")]
 #[cfg(not(target_arch = "wasm32"))]
 #[tokio::test]
 async fn test_external_signer_pending_update_tlc_info_after_peer_restart() {
@@ -2623,6 +2632,7 @@ async fn test_external_signer_pending_update_tlc_info_after_peer_restart() {
     assert!(recovered, "external-signer channel and TLC state recover");
 }
 
+#[cfg(feature = "lsp")]
 #[cfg(not(target_arch = "wasm32"))]
 #[tokio::test]
 async fn test_external_signer_pending_commitment_tail_after_peer_restart() {
@@ -2683,6 +2693,7 @@ async fn test_external_signer_pending_commitment_tail_after_peer_restart() {
     assert!(recovered, "external-signer channel and TLC state recover");
 }
 
+#[cfg(feature = "lsp")]
 #[cfg(not(target_arch = "wasm32"))]
 #[tokio::test]
 async fn test_external_signer_pending_revoke_tail_after_peer_restart() {
@@ -2764,6 +2775,7 @@ async fn test_external_signer_pending_revoke_tail_after_peer_restart() {
         .is_awaiting_signature());
 }
 
+#[cfg(feature = "lsp")]
 #[cfg(not(target_arch = "wasm32"))]
 #[tokio::test]
 async fn test_external_signer_pending_send_revoke_peer_restart_race() {
@@ -2900,6 +2912,7 @@ async fn test_external_signer_pending_send_revoke_peer_restart_race() {
     );
 }
 
+#[cfg(feature = "lsp")]
 #[cfg(not(target_arch = "wasm32"))]
 #[tokio::test]
 async fn test_external_signer_pending_add_tlc_peer_restart() {
@@ -2971,6 +2984,7 @@ async fn test_external_signer_pending_add_tlc_peer_restart() {
     );
 }
 
+#[cfg(feature = "lsp")]
 #[cfg(not(target_arch = "wasm32"))]
 #[tokio::test]
 async fn test_external_signer_tenant_restart_while_awaiting_signature() {
@@ -3044,6 +3058,7 @@ async fn test_external_signer_tenant_restart_while_awaiting_signature() {
     );
 }
 
+#[cfg(feature = "lsp")]
 #[cfg(not(target_arch = "wasm32"))]
 #[tokio::test]
 async fn test_external_signer_tenant_restart_while_awaiting_commitment_signature() {
@@ -3219,6 +3234,7 @@ async fn test_external_signer_offline_reestablish_arrives_no_duplicate_reestabli
     );
 }
 
+#[cfg(feature = "lsp")]
 #[cfg(not(target_arch = "wasm32"))]
 #[tokio::test]
 async fn test_external_signer_cooperative_shutdown() {
@@ -3277,6 +3293,7 @@ async fn test_external_signer_cooperative_shutdown() {
     .await;
 }
 
+#[cfg(feature = "lsp")]
 #[cfg(not(target_arch = "wasm32"))]
 #[tokio::test]
 async fn test_external_signer_shutdown_after_tlc_resolved() {

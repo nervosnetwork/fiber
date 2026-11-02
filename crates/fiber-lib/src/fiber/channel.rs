@@ -130,7 +130,7 @@ use tracing::{debug, error, info, trace, warn};
 pub const FUNDING_CELL_WITNESS_LEN: usize = 16 + 32 + 64;
 
 /// Everything needed to create the host watchtower row for a hosted channel.
-#[cfg(all(not(target_arch = "wasm32"), feature = "watchtower"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "watchtower", feature = "lsp"))]
 pub(crate) struct HostedWatchChannelSnapshot {
     pub keys: WatchChannelKeys,
     pub commitment_contract_features: CommitmentContractFeatures,
@@ -11699,7 +11699,7 @@ impl ChannelActorState {
     }
 
     /// Snapshot used to register a hosted tenant watchtower row.
-    #[cfg(all(not(target_arch = "wasm32"), feature = "watchtower"))]
+    #[cfg(all(not(target_arch = "wasm32"), feature = "watchtower", feature = "lsp"))]
     pub(crate) fn hosted_watch_channel_snapshot(
         &self,
     ) -> Result<HostedWatchChannelSnapshot, String> {

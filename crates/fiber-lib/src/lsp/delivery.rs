@@ -42,9 +42,9 @@ impl LspPaymentDeliveryKey {
 impl Default for LspPaymentDeliveryLimits {
     fn default() -> Self {
         Self {
-            max_pending_deliveries: super::config::DEFAULT_MAX_PENDING_DELIVERIES,
+            max_pending_deliveries: crate::lsp_config::DEFAULT_MAX_PENDING_DELIVERIES,
             max_pending_deliveries_per_tenant:
-                super::config::DEFAULT_MAX_PENDING_DELIVERIES_PER_TENANT,
+                crate::lsp_config::DEFAULT_MAX_PENDING_DELIVERIES_PER_TENANT,
         }
     }
 }

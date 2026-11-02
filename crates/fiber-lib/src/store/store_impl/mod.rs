@@ -1103,9 +1103,17 @@ impl ChannelActorStateStore for Store {
         if self.namespace.is_some() {
             return Ok(false);
         }
-        crate::lsp::TenantRegistry::new(self.namespaced(NodeNamespace::lsp_metadata()))
-            .find_by_tenant_pubkey(peer)
-            .map(|tenant| tenant.is_some())
+        #[cfg(feature = "lsp")]
+        {
+            return crate::lsp::TenantRegistry::new(self.namespaced(NodeNamespace::lsp_metadata()))
+                .find_by_tenant_pubkey(peer)
+                .map(|tenant| tenant.is_some());
+        }
+        #[cfg(not(feature = "lsp"))]
+        {
+            let _ = peer;
+            Ok(false)
+        }
     }
 
     fn get_channel_actor_state(&self, id: &Hash256) -> Option<ChannelActorState> {

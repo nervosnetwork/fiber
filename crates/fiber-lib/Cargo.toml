@@ -115,8 +115,13 @@ wasm-bindgen-futures = "0.4"
 
 [features]
 bench = ["tempfile", "ckb-testtool"]
-default = ["watchtower"]
+# A crate that depends on `fnn` with `default-features = false` (fiber-bin,
+# fiber-wasm) has to forward these itself; keep that mirror in sync when adding a
+# default feature.
+default = ["watchtower", "lsp"]
 debug-add-tlc = []
+# Hosted LSP service, tenant scoping and external signer plumbing.
+lsp = ["watchtower"]
 portable = ["fiber-store/portable"]
 rocksdb = ["fiber-store/rocksdb"]
 sample = ["fiber-types/sample"]

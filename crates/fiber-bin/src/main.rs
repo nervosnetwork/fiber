@@ -9,17 +9,23 @@ use fnn::ckb::contracts::TypeIDResolver;
 use fnn::ckb::contracts::{get_cell_deps, Contract};
 use fnn::ckb::{contracts::try_init_contracts_context, CkbChainActor};
 use fnn::event_handler::forward_event_to_client;
+#[cfg(feature = "lsp")]
+use fnn::fiber::network::PublicNetworkCommand;
 use fnn::fiber::{
     graph::NetworkGraph,
-    network::{init_chain_hash, NetworkActorMessage, PublicNetworkCommand},
+    network::{init_chain_hash, NetworkActorMessage},
 };
+#[cfg(feature = "lsp")]
 use fnn::fiber_types::Privkey;
+#[cfg(feature = "lsp")]
 use fnn::lsp::{BiscuitTokenIssuer, FiberTenantRuntimeFactory, LspService, LspServiceArgs};
 use fnn::rpc::server::start_rpc;
 use fnn::store::actor::{StoreActor, StoreActorInitializationParameter};
 use fnn::store::open_store_with_migration;
 use fnn::store::restore::restore;
-use fnn::store::{MigrationPlan, MigrationProgress, NodeNamespace};
+#[cfg(feature = "lsp")]
+use fnn::store::NodeNamespace;
+use fnn::store::{MigrationPlan, MigrationProgress};
 use fnn::tasks::{
     cancel_tasks_and_wait_for_completion, new_tokio_cancellation_token, new_tokio_task_tracker,
 };
@@ -209,6 +215,7 @@ async fn run_node(
     });
 
     let signing_events = fnn::signing::SigningEvents::default();
+    #[cfg(feature = "lsp")]
     let mut tenant_runtime_factory = None;
     #[allow(unused_variables)]
     let (network_actor, ckb_chain_actor, network_graph, store_actor) = match config.fiber.clone() {
@@ -308,6 +315,7 @@ async fn run_node(
             )
             .await;
 
+            #[cfg(feature = "lsp")]
             if let Some(lsp_config) = config.lsp.clone() {
                 tenant_runtime_factory = Some(Arc::new(FiberTenantRuntimeFactory::new(
                     signing_events.clone(),
@@ -465,6 +473,14 @@ async fn run_node(
         None => (None, None, None, None),
     };
 
+    #[cfg(not(feature = "lsp"))]
+    if config.lsp.is_some() {
+        return ExitMessage::err(
+            "this binary was built without the `lsp` feature, but the config requests it"
+                .to_string(),
+        );
+    }
+    #[cfg(feature = "lsp")]
     let lsp_actor = match (
         config.lsp.clone(),
         network_actor.as_ref(),
@@ -551,6 +567,10 @@ async fn run_node(
         }
         (None, _, _) => None,
     };
+    // Without the feature nothing can be installed as the delivery port; the type
+    // makes that unrepresentable instead of silently passing a handle around.
+    #[cfg(not(feature = "lsp"))]
+    let lsp_actor = None;
     if lsp_actor.is_none()
         && config
             .rpc

@@ -92,7 +92,7 @@ pub struct DevRpcServerImpl {
     network_actor: ActorRef<NetworkActorMessage>,
     commitment_txs: Arc<RwLock<HashMap<(Hash256, u64), TransactionView>>>,
     #[cfg(not(target_arch = "wasm32"))]
-    lsp_actor: Option<ActorRef<crate::lsp::LspServiceMessage>>,
+    lsp_actor: crate::rpc::tenant::LspActorHandle,
 }
 
 impl DevRpcServerImpl {
@@ -113,10 +113,7 @@ impl DevRpcServerImpl {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn with_lsp_actor(
-        mut self,
-        lsp_actor: Option<ActorRef<crate::lsp::LspServiceMessage>>,
-    ) -> Self {
+    pub fn with_lsp_actor(mut self, lsp_actor: crate::rpc::tenant::LspActorHandle) -> Self {
         self.lsp_actor = lsp_actor;
         self
     }
@@ -302,8 +299,7 @@ impl DevRpcServerImpl {
         let channel_id = params.channel_id.into();
         #[cfg(not(target_arch = "wasm32"))]
         let actor = if let Some(context) =
-            crate::rpc::tenant::resolve_tenant_rpc_context(extensions, self.lsp_actor.as_ref())
-                .await?
+            crate::rpc::tenant::resolve_tenant_rpc_context(extensions, &self.lsp_actor).await?
         {
             context.fiber_actor
         } else {

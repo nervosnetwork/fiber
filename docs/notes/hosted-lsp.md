@@ -200,6 +200,14 @@ settles all parts from one downstream outcome.
 
 ## Configuration
 
+The service is compiled behind the `lsp` Cargo feature, which is on by default:
+`fnn = { default-features = false, features = ["rocksdb", "watchtower"] }` builds a
+node without the hosted LSP, the tenant RPC scoping and the external signer
+plumbing. A binary built without it rejects an `lsp` section in the config with a
+clear error instead of starting a node that ignores it. The Fiber core talks to
+the service only through `crate::fiber::delivery::HostedDeliveryPort`, so the
+data plane compiles and runs unchanged in both builds.
+
 Enable `fiber`, `ckb`, `rpc`, and `lsp` in `services`. The `lsp` section accepts
 a bound on resident tenant runtimes, a buffer policy cap, and global/per-tenant
 pending-delivery limits. LSP startup requires `rpc.biscuit_public_key` and

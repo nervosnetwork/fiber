@@ -33,12 +33,56 @@
 use anyhow::bail;
 use biscuit_auth::Biscuit;
 use jsonrpsee::{types::ErrorObjectOwned, Extensions};
+
+use crate::fiber::network::FiberActorRef;
+use crate::fiber_types::{Pubkey, TenantId};
+use crate::rpc::biscuit::extract_tenant_id;
+#[cfg(feature = "lsp")]
+use crate::rpc::middleware::RpcAuthorization;
+#[cfg(feature = "lsp")]
+use crate::rpc::utils::{rpc_error, RpcResultExt};
+use crate::store::Store;
+use crate::FiberConfig;
+
+#[cfg(feature = "lsp")]
+use crate::lsp::LspServiceMessage;
+#[cfg(feature = "lsp")]
 use ractor::{call, ActorRef};
 
-use crate::lsp::{HostedTenantRpcContext, LspServiceMessage, TenantId};
-use crate::rpc::biscuit::extract_tenant_id;
-use crate::rpc::middleware::RpcAuthorization;
-use crate::rpc::utils::{rpc_error, RpcResultExt};
+/// Handle to the hosted LSP service.
+///
+/// With the `lsp` feature off there is no service to hold, so the alias becomes
+/// `Option<UnavailableLspActor>`: the value can only be `None`, which keeps every
+/// caller signature identical while making a real handle impossible to construct.
+#[cfg(feature = "lsp")]
+pub(crate) type LspActorHandle = Option<ActorRef<LspServiceMessage>>;
+#[cfg(not(feature = "lsp"))]
+pub(crate) type LspActorHandle = Option<UnavailableLspActor>;
+
+/// Uninhabited stand-in for the LSP service handle.
+///
+/// Not `Copy`, so call sites that clone the handle keep compiling, and not
+/// constructible, so no build without the `lsp` feature can install one.
+#[cfg(not(feature = "lsp"))]
+#[doc(hidden)]
+#[derive(Clone, Debug)]
+pub enum UnavailableLspActor {}
+
+/// Tenant-scoped handles used by the authenticated LSP RPC facade.
+///
+/// Lives here rather than in the LSP module so the RPC layer keeps its signature
+/// when the `lsp` feature is off; nothing can populate it in that build.
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct HostedTenantRpcContext {
+    // Only the LSP-feature code paths read the identity back out.
+    #[cfg_attr(not(feature = "lsp"), allow(dead_code))]
+    pub(crate) tenant_id: TenantId,
+    pub(crate) config: FiberConfig,
+    pub(crate) fiber_actor: FiberActorRef,
+    pub(crate) public_node_id: Pubkey,
+    pub(crate) store: Store,
+}
 
 /// Tenant identity extracted from the authority block of an authenticated
 /// Biscuit token. Request parameters cannot construct this extension.
@@ -208,16 +252,26 @@ pub(crate) fn enforce_tenant_method_allowlist(method: &str, token: &Biscuit) -> 
 
 /// Resolve the hosted tenant backend selected by an authenticated request.
 /// Requests without a tenant identity continue to use the public node backend.
+#[cfg(feature = "lsp")]
 pub(crate) async fn resolve_tenant_rpc_context(
     extensions: &Extensions,
-    lsp_actor: Option<&ActorRef<LspServiceMessage>>,
+    lsp_actor: &LspActorHandle,
 ) -> Result<Option<HostedTenantRpcContext>, ErrorObjectOwned> {
     let Some(tenant) = extensions.get::<AuthenticatedTenant>() else {
         return Ok(None);
     };
-    resolve_tenant_rpc_context_for(lsp_actor, tenant.0.clone())
+    resolve_tenant_rpc_context_for(lsp_actor.as_ref(), tenant.0.clone())
         .await
         .map(Some)
+}
+
+/// Without the `lsp` feature no tenant backend can exist.
+#[cfg(not(feature = "lsp"))]
+pub(crate) async fn resolve_tenant_rpc_context(
+    _extensions: &Extensions,
+    _lsp_actor: &LspActorHandle,
+) -> Result<Option<HostedTenantRpcContext>, ErrorObjectOwned> {
+    Ok(None)
 }
 
 /// Resolve a query target for the ordinary `get_invoice`/`get_payment` methods.
@@ -227,9 +281,10 @@ pub(crate) async fn resolve_tenant_rpc_context(
 /// tenant explicitly rechecks the `read("lsp")` capability. Auth-disabled local
 /// RPC has no token and may select a tenant. A missing or unavailable target is
 /// always an error rather than a fallback to public state.
+#[cfg(feature = "lsp")]
 pub(crate) async fn resolve_tenant_query_rpc_context(
     extensions: &Extensions,
-    lsp_actor: Option<&ActorRef<LspServiceMessage>>,
+    lsp_actor: &LspActorHandle,
     requested_tenant: Option<&str>,
 ) -> Result<Option<HostedTenantRpcContext>, ErrorObjectOwned> {
     let requested = requested_tenant
@@ -239,7 +294,7 @@ pub(crate) async fn resolve_tenant_query_rpc_context(
 
     match (extensions.get::<AuthenticatedTenant>(), requested) {
         (Some(authenticated), None) => {
-            resolve_tenant_rpc_context_for(lsp_actor, authenticated.0.clone())
+            resolve_tenant_rpc_context_for(lsp_actor.as_ref(), authenticated.0.clone())
                 .await
                 .map(Some)
         }
@@ -249,20 +304,31 @@ pub(crate) async fn resolve_tenant_query_rpc_context(
                     "tenant token cannot query another tenant's state",
                 ));
             }
-            resolve_tenant_rpc_context_for(lsp_actor, requested)
+            resolve_tenant_rpc_context_for(lsp_actor.as_ref(), requested)
                 .await
                 .map(Some)
         }
         (None, None) => Ok(None),
         (None, Some(requested)) => {
             authorize_explicit_tenant_query(extensions)?;
-            resolve_tenant_rpc_context_for(lsp_actor, requested)
+            resolve_tenant_rpc_context_for(lsp_actor.as_ref(), requested)
                 .await
                 .map(Some)
         }
     }
 }
 
+/// Without the `lsp` feature no tenant backend can exist.
+#[cfg(not(feature = "lsp"))]
+pub(crate) async fn resolve_tenant_query_rpc_context(
+    _extensions: &Extensions,
+    _lsp_actor: &LspActorHandle,
+    _requested_tenant: Option<&str>,
+) -> Result<Option<HostedTenantRpcContext>, ErrorObjectOwned> {
+    Ok(None)
+}
+
+#[cfg(feature = "lsp")]
 fn authorize_explicit_tenant_query(extensions: &Extensions) -> Result<(), ErrorObjectOwned> {
     let authorization = extensions
         .get::<RpcAuthorization>()
@@ -280,6 +346,7 @@ fn authorize_explicit_tenant_query(extensions: &Extensions) -> Result<(), ErrorO
         })
 }
 
+#[cfg(feature = "lsp")]
 async fn resolve_tenant_rpc_context_for(
     lsp_actor: Option<&ActorRef<LspServiceMessage>>,
     tenant: TenantId,
@@ -294,14 +361,17 @@ async fn resolve_tenant_rpc_context_for(
 mod tests {
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
+    #[cfg(feature = "lsp")]
     use std::sync::Arc;
 
     use biscuit_auth::{macros::biscuit, KeyPair};
+    #[cfg(feature = "lsp")]
     use jsonrpsee::Extensions;
 
     use super::*;
     use crate::rpc::biscuit::BiscuitAuth;
 
+    #[cfg(feature = "lsp")]
     fn authorization(root: &KeyPair, token: Option<String>) -> RpcAuthorization {
         RpcAuthorization {
             auth: Arc::new(BiscuitAuth::from_pubkey(root.public().to_string()).unwrap()),
@@ -309,6 +379,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "lsp")]
     fn tenant_extensions(root: &KeyPair, tenant: &str, token: &str) -> Extensions {
         let mut extensions = Extensions::new();
         extensions.insert(AuthenticatedTenant(TenantId::new(tenant).unwrap()));
@@ -589,6 +660,7 @@ mod tests {
         enforce_tenant_method_allowlist("open_channel", &attenuated).unwrap();
     }
 
+    #[cfg(feature = "lsp")]
     #[tokio::test]
     async fn query_tenant_target_policy_is_fail_closed() {
         let root = KeyPair::new();
@@ -612,7 +684,7 @@ mod tests {
         // an LSP actor the next step is context resolution, not a public fallback.
         for requested in [None, Some("u1")] {
             let extensions = tenant_extensions(&root, "u1", &tenant_token);
-            let error = resolve_tenant_query_rpc_context(&extensions, None, requested)
+            let error = resolve_tenant_query_rpc_context(&extensions, &None, requested)
                 .await
                 .err()
                 .expect("query must fail");
@@ -622,7 +694,7 @@ mod tests {
         // Cross-tenant targeting is denied even when the tenant token carries the
         // operator read("lsp") capability.
         let extensions = tenant_extensions(&root, "u1", &tenant_token);
-        let error = resolve_tenant_query_rpc_context(&extensions, None, Some("u2"))
+        let error = resolve_tenant_query_rpc_context(&extensions, &None, Some("u2"))
             .await
             .err()
             .expect("query must fail");
@@ -632,7 +704,7 @@ mod tests {
         // rule and the additional read("lsp") capability.
         let mut extensions = Extensions::new();
         extensions.insert(authorization(&root, Some(invoice_operator)));
-        let error = resolve_tenant_query_rpc_context(&extensions, None, Some("u1"))
+        let error = resolve_tenant_query_rpc_context(&extensions, &None, Some("u1"))
             .await
             .err()
             .expect("query must fail");
@@ -640,7 +712,7 @@ mod tests {
 
         let mut extensions = Extensions::new();
         extensions.insert(authorization(&root, Some(lsp_operator)));
-        let error = resolve_tenant_query_rpc_context(&extensions, None, Some("u1"))
+        let error = resolve_tenant_query_rpc_context(&extensions, &None, Some("u1"))
             .await
             .err()
             .expect("query must fail");
@@ -650,14 +722,14 @@ mod tests {
         // fall back when the LSP service is absent.
         let mut extensions = Extensions::new();
         extensions.insert(authorization(&root, None));
-        let error = resolve_tenant_query_rpc_context(&extensions, None, Some("u1"))
+        let error = resolve_tenant_query_rpc_context(&extensions, &None, Some("u1"))
             .await
             .err()
             .expect("query must fail");
         assert!(error.to_string().contains("not enabled"), "{error}");
 
         // Missing authorization context fails closed for explicit operator targets.
-        let error = resolve_tenant_query_rpc_context(&Extensions::new(), None, Some("u1"))
+        let error = resolve_tenant_query_rpc_context(&Extensions::new(), &None, Some("u1"))
             .await
             .err()
             .expect("query must fail");
@@ -669,12 +741,12 @@ mod tests {
         // Omitting the target keeps the public namespace, and an invalid target
         // is rejected instead of being ignored.
         assert!(
-            resolve_tenant_query_rpc_context(&Extensions::new(), None, None)
+            resolve_tenant_query_rpc_context(&Extensions::new(), &None, None)
                 .await
                 .unwrap()
                 .is_none()
         );
-        let error = resolve_tenant_query_rpc_context(&Extensions::new(), None, Some("bad/id"))
+        let error = resolve_tenant_query_rpc_context(&Extensions::new(), &None, Some("bad/id"))
             .await
             .err()
             .expect("query must fail");

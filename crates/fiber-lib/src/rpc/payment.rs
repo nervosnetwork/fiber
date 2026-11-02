@@ -83,7 +83,7 @@ pub struct PaymentRpcServerImpl<S> {
     actor: FiberActorRef,
     store: S,
     #[cfg(not(target_arch = "wasm32"))]
-    lsp_actor: Option<ActorRef<crate::lsp::LspServiceMessage>>,
+    lsp_actor: crate::rpc::tenant::LspActorHandle,
 }
 
 impl<S> PaymentRpcServerImpl<S> {
@@ -101,10 +101,7 @@ impl<S> PaymentRpcServerImpl<S> {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn with_lsp_actor(
-        mut self,
-        lsp_actor: Option<ActorRef<crate::lsp::LspServiceMessage>>,
-    ) -> Self {
+    pub fn with_lsp_actor(mut self, lsp_actor: crate::rpc::tenant::LspActorHandle) -> Self {
         self.lsp_actor = lsp_actor;
         self
     }
@@ -113,8 +110,8 @@ impl<S> PaymentRpcServerImpl<S> {
     async fn tenant_rpc_context(
         &self,
         extensions: &Extensions,
-    ) -> Result<Option<crate::lsp::HostedTenantRpcContext>, ErrorObjectOwned> {
-        crate::rpc::tenant::resolve_tenant_rpc_context(extensions, self.lsp_actor.as_ref()).await
+    ) -> Result<Option<crate::rpc::tenant::HostedTenantRpcContext>, ErrorObjectOwned> {
+        crate::rpc::tenant::resolve_tenant_rpc_context(extensions, &self.lsp_actor).await
     }
 }
 #[cfg(not(target_arch = "wasm32"))]
@@ -145,7 +142,7 @@ where
     ) -> Result<GetPaymentCommandResult, ErrorObjectOwned> {
         let context = crate::rpc::tenant::resolve_tenant_query_rpc_context(
             extensions,
-            self.lsp_actor.as_ref(),
+            &self.lsp_actor,
             params.tenant_id.as_deref(),
         )
         .await?;

@@ -11,7 +11,7 @@ pub mod dev;
 pub mod graph;
 pub mod info;
 pub mod invoice;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "lsp"))]
 pub mod lsp;
 #[cfg(not(target_arch = "wasm32"))]
 mod middleware;
@@ -24,7 +24,7 @@ pub mod pubsub;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod subscription;
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) mod tenant;
+pub mod tenant;
 pub mod utils;
 pub mod watchtower;
 #[cfg(not(target_arch = "wasm32"))]
@@ -42,6 +42,7 @@ pub mod server {
     use crate::rpc::graph::{GraphRpcServer, GraphRpcServerImpl};
     use crate::rpc::info::{InfoRpcServer, InfoRpcServerImpl};
     use crate::rpc::invoice::{InvoiceRpcServer, InvoiceRpcServerImpl};
+    #[cfg(feature = "lsp")]
     use crate::rpc::lsp::{LspRpcServer, LspRpcServerImpl};
     use crate::rpc::middleware::{
         prepare_browser_websocket, BiscuitAuthMiddleware, BROWSER_WS_PROTOCOL,
@@ -365,7 +366,7 @@ pub mod server {
         fiber_config: Option<FiberConfig>,
         network_actor: Option<ActorRef<NetworkActorMessage>>,
         cch_actor: Option<ActorRef<CchMessage>>,
-        lsp_actor: Option<ActorRef<crate::lsp::LspServiceMessage>>,
+        lsp_actor: crate::rpc::tenant::LspActorHandle,
         store: S,
         store_actor: Option<ActorRef<StoreActorMessage>>,
         network_graph: Option<Arc<RwLock<NetworkGraph<S>>>>,
@@ -511,6 +512,7 @@ pub mod server {
                     .unwrap();
             }
         }
+        #[cfg(feature = "lsp")]
         if let Some(lsp_actor) = lsp_actor.clone() {
             if config.is_module_enabled("lsp") {
                 modules

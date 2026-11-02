@@ -179,7 +179,7 @@ pub struct ChannelRpcServerImpl<S> {
     actor: FiberActorRef,
     store: S,
     #[cfg(not(target_arch = "wasm32"))]
-    lsp_actor: Option<ActorRef<crate::lsp::LspServiceMessage>>,
+    lsp_actor: crate::rpc::tenant::LspActorHandle,
 }
 
 impl<S> ChannelRpcServerImpl<S> {
@@ -197,10 +197,7 @@ impl<S> ChannelRpcServerImpl<S> {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn with_lsp_actor(
-        mut self,
-        lsp_actor: Option<ActorRef<crate::lsp::LspServiceMessage>>,
-    ) -> Self {
+    pub fn with_lsp_actor(mut self, lsp_actor: crate::rpc::tenant::LspActorHandle) -> Self {
         self.lsp_actor = lsp_actor;
         self
     }
@@ -209,8 +206,8 @@ impl<S> ChannelRpcServerImpl<S> {
     async fn tenant_rpc_context(
         &self,
         extensions: &Extensions,
-    ) -> Result<Option<crate::lsp::HostedTenantRpcContext>, ErrorObjectOwned> {
-        crate::rpc::tenant::resolve_tenant_rpc_context(extensions, self.lsp_actor.as_ref()).await
+    ) -> Result<Option<crate::rpc::tenant::HostedTenantRpcContext>, ErrorObjectOwned> {
+        crate::rpc::tenant::resolve_tenant_rpc_context(extensions, &self.lsp_actor).await
     }
 }
 #[cfg(not(target_arch = "wasm32"))]
@@ -360,7 +357,9 @@ where
         extensions: &Extensions,
         params: GetChannelSigningStatusParams,
     ) -> Result<GetChannelSigningStatusResult, ErrorObjectOwned> {
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(not(feature = "lsp"))]
+        let _ = extensions;
+        #[cfg(all(not(target_arch = "wasm32"), feature = "lsp"))]
         if let Some(tenant) = extensions.get::<crate::rpc::tenant::AuthenticatedTenant>() {
             let actor = self
                 .lsp_actor
@@ -1058,6 +1057,7 @@ fn try_into_next_channel_signer_material(
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[cfg(feature = "lsp")]
 pub(crate) fn to_rpc_channel_open_signer_material(
     material: &ChannelOpenSignerMaterial,
 ) -> fiber_json_types::ChannelOpenSignerMaterial {
