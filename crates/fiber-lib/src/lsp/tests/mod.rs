@@ -1944,7 +1944,7 @@ async fn authenticated_registration_issues_tenant_token_through_issuer() {
         expected_node
     );
     assert_eq!(
-        crate::rpc::biscuit::scoped_rpc_node_id(&biscuit).unwrap(),
+        crate::rpc::tenant::scoped_rpc_node_id(&biscuit).unwrap(),
         expected_node
     );
     crate::rpc::tenant::enforce_tenant_method_allowlist("get_invoice", &biscuit).unwrap();
@@ -2072,7 +2072,7 @@ async fn authenticated_registration_refreshes_token_after_lost_reply_and_restart
         Some(tenant_id)
     );
     assert_eq!(
-        crate::rpc::biscuit::scoped_rpc_node_id(&biscuit).unwrap(),
+        crate::rpc::tenant::scoped_rpc_node_id(&biscuit).unwrap(),
         tenant_watchtower_node_id(&original.tenant_pubkey)
     );
     assert!(auth

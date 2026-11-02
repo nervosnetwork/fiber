@@ -302,7 +302,7 @@ pub fn extract_node_id(token: &Biscuit) -> Result<NodeId> {
     extract_optional_node_id(token)?.ok_or_else(|| anyhow!("token is missing a node fact"))
 }
 
-fn extract_optional_node_id(token: &Biscuit) -> Result<Option<NodeId>> {
+pub(crate) fn extract_optional_node_id(token: &Biscuit) -> Result<Option<NodeId>> {
     const QUERY: &str = "data($id) <- node($id)";
     let mut authorizer = build_authorizer(token)?;
     let nodes: Vec<(String,)> = authorizer.query(QUERY)?;
@@ -312,23 +312,6 @@ fn extract_optional_node_id(token: &Biscuit) -> Result<Option<NodeId>> {
         _ => Err(anyhow!(
             "token authority block must contain at most one node fact"
         )),
-    }
-}
-
-/// Resolve the watchtower namespace for an authenticated token.
-///
-/// Tenant tokens may only touch the `node(...)` bound at issue time, which is
-/// the hosted tenant watchtower id. They cannot address `NodeId::local()`.
-/// Operator tokens without a node fact use the host namespace.
-pub fn scoped_rpc_node_id(token: &Biscuit) -> Result<NodeId> {
-    match (extract_tenant_id(token)?, extract_optional_node_id(token)?) {
-        (Some(_), Some(node_id)) if node_id != NodeId::local() => Ok(node_id),
-        (Some(_), Some(_)) => Err(anyhow!(
-            "tenant token cannot access the host watchtower namespace"
-        )),
-        (Some(_), None) => Err(anyhow!("tenant token is missing a node fact")),
-        (None, Some(node_id)) => Ok(node_id),
-        (None, None) => Ok(NodeId::local()),
     }
 }
 
@@ -363,7 +346,8 @@ mod tests {
 
     #[cfg(feature = "lsp")]
     use crate::lsp::BiscuitTokenIssuer;
-    use crate::rpc::biscuit::{extract_node_id, extract_tenant_id, scoped_rpc_node_id};
+    use crate::rpc::biscuit::{extract_node_id, extract_tenant_id};
+    use crate::rpc::tenant::scoped_rpc_node_id;
     use fiber_types::{NodeId, TenantId};
 
     use super::{build_authorizer, AuthRule, BiscuitAuth};

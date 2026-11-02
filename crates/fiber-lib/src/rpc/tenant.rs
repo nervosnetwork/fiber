@@ -32,15 +32,17 @@
 //! fails CI instead of leaking public state silently.
 
 #[cfg(not(target_arch = "wasm32"))]
-use anyhow::bail;
+use anyhow::{anyhow, bail};
 #[cfg(not(target_arch = "wasm32"))]
 use biscuit_auth::Biscuit;
 use jsonrpsee::{types::ErrorObjectOwned, Extensions};
 
 use crate::fiber::network::FiberActorRef;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::fiber_types::NodeId;
 use crate::fiber_types::{Pubkey, TenantId};
 #[cfg(not(target_arch = "wasm32"))]
-use crate::rpc::biscuit::extract_tenant_id;
+use crate::rpc::biscuit::{extract_optional_node_id, extract_tenant_id};
 #[cfg(feature = "lsp")]
 use crate::rpc::middleware::RpcAuthorization;
 #[cfg(feature = "lsp")]
@@ -86,6 +88,24 @@ pub struct HostedTenantRpcContext {
     pub(crate) fiber_actor: FiberActorRef,
     pub(crate) public_node_id: Pubkey,
     pub(crate) store: Store,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+/// Resolve the watchtower namespace for an authenticated token.
+///
+/// Tenant tokens may only touch the `node(...)` bound at issue time, which is
+/// the hosted tenant watchtower id. They cannot address `NodeId::local()`.
+/// Operator tokens without a node fact use the host namespace.
+pub fn scoped_rpc_node_id(token: &Biscuit) -> anyhow::Result<NodeId> {
+    match (extract_tenant_id(token)?, extract_optional_node_id(token)?) {
+        (Some(_), Some(node_id)) if node_id != NodeId::local() => Ok(node_id),
+        (Some(_), Some(_)) => Err(anyhow!(
+            "tenant token cannot access the host watchtower namespace"
+        )),
+        (Some(_), None) => Err(anyhow!("tenant token is missing a node fact")),
+        (None, Some(node_id)) => Ok(node_id),
+        (None, None) => Ok(NodeId::local()),
+    }
 }
 
 /// Tenant identity extracted from the authority block of an authenticated

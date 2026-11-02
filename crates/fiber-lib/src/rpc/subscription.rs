@@ -16,9 +16,8 @@ use jsonrpsee::{
 #[cfg(feature = "lsp")]
 use crate::lsp::LspServiceMessage;
 use crate::rpc::{
-    biscuit::{extract_tenant_id, scoped_rpc_node_id},
-    middleware::RpcAuthorization,
-    server::RpcServerStore,
+    biscuit::extract_tenant_id, middleware::RpcAuthorization, server::RpcServerStore,
+    tenant::scoped_rpc_node_id,
 };
 
 use service::{EventStream, Source, SubscriptionService};

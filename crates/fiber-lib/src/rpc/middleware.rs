@@ -15,8 +15,11 @@ use jsonrpsee::server::middleware::rpc::RpcServiceT;
 use jsonrpsee::types::{ErrorObject, ErrorObjectOwned, Id, Request};
 use jsonrpsee::{Extensions, MethodResponse};
 
-use crate::rpc::biscuit::{extract_tenant_id, scoped_rpc_node_id};
-use crate::rpc::tenant::{enforce_tenant_method_allowlist, AuthenticatedTenant};
+use crate::rpc::biscuit::extract_tenant_id;
+use crate::rpc::tenant::{
+    enforce_tenant_method_allowlist, scoped_rpc_node_id, AuthenticatedTenant,
+};
+
 use fiber_json_types::RpcContext;
 use fiber_types::NodeId;
 
