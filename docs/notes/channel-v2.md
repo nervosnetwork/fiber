@@ -170,6 +170,19 @@ successful updates in one commitment. Successful add results are notified only
 after that commitment intent is stored. Peer updates already awaiting a follow-up
 commitment share this round. V1 retains its single-success retry behavior.
 
+## Retry queues after confirmed close
+
+A confirmed close retires ordinary TLC retries before the ACK-wait gate. Unexecuted
+forwarded Adds report permanent channel failure, or re-link to an existing durable
+owner, and remain queued until the upstream actor durably accepts the result.
+Unavailable handoffs retry through chain maintenance, not the 100ms TLC retry loop.
+Closed watch-chain actors also finish this handoff after restart and cannot exit
+while it is pending. Locally originated queued Adds use the normal payment result
+path. Fulfill Removes retain their already-persisted preimages and existing TLCs
+remain subject to chain reconciliation; queue retirement does not apply off-chain
+balances or pretend an RAA arrived. The historical `waiting_ack` flag and signing
+counters are left unchanged so closed snapshots still validate on restore.
+
 ## Restart recovery for forwarded and settled TLCs
 
 Two durable records outlive the in-memory task that was supposed to finish them,

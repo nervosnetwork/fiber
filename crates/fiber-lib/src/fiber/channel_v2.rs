@@ -3209,6 +3209,631 @@ mod tests {
         task.await.unwrap();
     }
 
+    struct TerminalRetryNetwork;
+
+    struct TerminalRetryNetworkState {
+        store: crate::store::Store,
+        upstream: ChannelActorState,
+        sink: ActorRef<ChannelActorMessage>,
+        accepted: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl Actor for TerminalRetryNetwork {
+        type Msg = NetworkActorMessage;
+        type State = TerminalRetryNetworkState;
+        type Arguments = Self::State;
+
+        async fn pre_start(
+            &self,
+            _: ActorRef<Self::Msg>,
+            state: Self::Arguments,
+        ) -> Result<Self::State, ActorProcessingErr> {
+            Ok(state)
+        }
+
+        async fn handle(
+            &self,
+            myself: ActorRef<Self::Msg>,
+            message: Self::Msg,
+            state: &mut Self::State,
+        ) -> Result<(), ActorProcessingErr> {
+            if let NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(command)) =
+                message
+            {
+                if command.channel_id == state.upstream.id {
+                    state.upstream.network = Some(myself.clone());
+                    let actor = ChannelActor::new(
+                        state.upstream.local_pubkey,
+                        state.upstream.remote_pubkey,
+                        myself,
+                        state.store.clone(),
+                        None,
+                    );
+                    actor
+                        .handle_command(&state.sink, &mut state.upstream, command.command)
+                        .await?;
+                    state
+                        .accepted
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+            Ok(())
+        }
+    }
+
+    struct RetryTaskCounter;
+
+    #[async_trait::async_trait]
+    impl Actor for RetryTaskCounter {
+        type Msg = ChannelActorMessage;
+        type State = Arc<std::sync::atomic::AtomicUsize>;
+        type Arguments = Self::State;
+        async fn pre_start(
+            &self,
+            _: ActorRef<Self::Msg>,
+            state: Self::Arguments,
+        ) -> Result<Self::State, ActorProcessingErr> {
+            Ok(state)
+        }
+        async fn handle(
+            &self,
+            _: ActorRef<Self::Msg>,
+            message: Self::Msg,
+            state: &mut Self::State,
+        ) -> Result<(), ActorProcessingErr> {
+            if matches!(
+                message,
+                ChannelActorMessage::Event(super::super::ChannelEvent::RunRetryTask)
+            ) {
+                state.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_closed_v2_retry_queue_hands_off_adds_and_keeps_chain_obligations() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let (mut a, mut b, id) =
+            create_nodes_with_established_channel(100000000000, 11800000000, false).await;
+        let mut state = a.get_channel_actor_state(id);
+        b.stop().await;
+        a.stop().await;
+        let upstream_id = crate::gen_rand_sha256_hash();
+        let mut upstream = crate::fiber::tests::create_test_channel_state_with_tlc(
+            upstream_id,
+            0,
+            1000,
+            [42; 32].into(),
+            None,
+        );
+        let template = upstream.tlc_state.received_tlcs.tlcs[0].clone();
+        upstream.tlc_state.received_tlcs.tlcs.clear();
+        for index in 0..3 {
+            let mut command = retry_batch_add(42 + index, 1000);
+            command.previous_tlc = Some(fiber_types::PrevTlcInfo::new_with_shared_secret(
+                upstream_id,
+                index.into(),
+                0,
+                [7; 32],
+            ));
+            let mut tlc = template.clone();
+            tlc.tlc_id = fiber_types::TLCId::Received(index.into());
+            tlc.payment_hash = command.payment_hash;
+            upstream.tlc_state.received_tlcs.tlcs.push(tlc);
+            upstream
+                .waiting_forward_tlc_tasks
+                .insert(fiber_types::TLCId::Received(index.into()), [7; 32]);
+            state
+                .retryable_tlc_operations
+                .push_back(RetryableTlcOperation::AddTlc(command));
+        }
+        upstream.tlc_state.received_tlcs.next_tlc_id = 3;
+        a.store.insert_channel_actor_state(upstream.clone());
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let retried = Arc::new(AtomicUsize::new(0));
+        let (sink, sink_task) = Actor::spawn(None, NoopChannelActor, ()).await.unwrap();
+        let (myself, handle) = Actor::spawn(None, RetryTaskCounter, retried.clone())
+            .await
+            .unwrap();
+        let (network, task) = Actor::spawn(
+            None,
+            TerminalRetryNetwork,
+            TerminalRetryNetworkState {
+                store: a.store.clone(),
+                upstream,
+                sink: sink.clone(),
+                accepted: accepted.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        state.network = Some(network.clone());
+        let actor = ChannelActor::new(a.pubkey, b.pubkey, network.clone(), a.store.clone(), None);
+        let mut preimages = Vec::new();
+        for index in 0..2 {
+            let preimage = crate::gen_rand_sha256_hash();
+            let hash = fiber_types::HashAlgorithm::CkbHash.hash(preimage).into();
+            let mut tlc = template.clone();
+            tlc.tlc_id = fiber_types::TLCId::Received(index);
+            tlc.payment_hash = hash;
+            tlc.created_at = state.get_current_commitment_numbers();
+            state.tlc_state.received_tlcs.tlcs.push(tlc);
+            actor.register_retryable_tlc_remove(
+                &myself,
+                &mut state,
+                fiber_types::TLCId::Received(index),
+                fiber_types::RemoveTlcReason::RemoveTlcFulfill(fiber_types::RemoveTlcFulfill {
+                    payment_preimage: preimage,
+                }),
+            );
+            preimages.push((hash, preimage));
+        }
+        state.tlc_state.received_tlcs.next_tlc_id = 2;
+        state.prepare_outgoing_v2(false).unwrap();
+        state.tlc_state.waiting_ack = true;
+        let balances = (state.to_local_amount, state.to_remote_amount);
+        let tlcs = bincode::serialize(&state.tlc_state).unwrap();
+        let mut before_receipts = state.core.clone();
+        before_receipts.state = ChannelState::Closed(
+            fiber_types::CloseFlags::UNCOOPERATIVE_REMOTE
+                | fiber_types::CloseFlags::WAITING_ONCHAIN_SETTLEMENT,
+        );
+        before_receipts.shutdown_transaction_hash = Some(ckb_types::H256::from([8; 32]));
+        actor
+            .handle_event(
+                &myself,
+                &mut state,
+                super::super::ChannelEvent::ClosingTransactionConfirmed(
+                    ckb_types::H256::from([8; 32]),
+                    true,
+                    false,
+                ),
+            )
+            .await
+            .unwrap();
+        actor
+            .apply_retryable_tlc_operations(&myself, &mut state, true)
+            .await;
+        assert!(
+            state.retryable_tlc_operations.is_empty(),
+            "terminal work must not wait for an impossible ACK"
+        );
+        assert_eq!(
+            accepted.load(Ordering::SeqCst),
+            3,
+            "each Add needs a durable upstream receipt"
+        );
+        let saved_upstream = a.store.get_channel_actor_state(&upstream_id).unwrap();
+        assert!(saved_upstream.waiting_forward_tlc_tasks.is_empty());
+        assert_eq!(saved_upstream.retryable_tlc_operations.len(), 3);
+        assert!(saved_upstream
+            .retryable_tlc_operations
+            .iter()
+            .all(|op| matches!(
+                op,
+                RetryableTlcOperation::RemoveTlc(_, fiber_types::RemoveTlcReason::RemoveTlcFail(_))
+            )));
+        assert_eq!(bincode::serialize(&state.tlc_state).unwrap(), tlcs);
+        assert_eq!((state.to_local_amount, state.to_remote_amount), balances);
+        for (hash, preimage) in preimages {
+            assert_eq!(a.store.get_preimage(&hash), Some(preimage));
+        }
+        assert!(
+            state.tlc_state.waiting_ack,
+            "retain the signed history, do not fabricate an ACK"
+        );
+        state.validate_session_v2().unwrap();
+        actor.persist_state_and_publish_pending_effects(&mut state);
+        let mut restored =
+            ChannelActorState::from(a.store.get_channel_actor_state(&id).unwrap().core);
+        restored.network = Some(network.clone());
+        restored.validate_session_v2().unwrap();
+        actor
+            .apply_retryable_tlc_operations(&myself, &mut restored, true)
+            .await;
+        // Crash after upstream's durable receipt but before retiring the downstream queue.
+        let mut cut = ChannelActorState::from(before_receipts);
+        cut.network = Some(network.clone());
+        actor
+            .apply_retryable_tlc_operations(&myself, &mut cut, true)
+            .await;
+        assert!(cut.retryable_tlc_operations.is_empty());
+        assert_eq!(
+            a.store
+                .get_channel_actor_state(&upstream_id)
+                .unwrap()
+                .retryable_tlc_operations
+                .len(),
+            3
+        );
+        state.schedule_next_retry_task(&myself);
+        tokio::time::sleep(std::time::Duration::from_millis(220)).await;
+        assert_eq!(retried.load(Ordering::SeqCst), 0);
+        assert_eq!(accepted.load(Ordering::SeqCst), 3);
+        myself.stop(None);
+        handle.await.unwrap();
+        sink.stop(None);
+        sink_task.await.unwrap();
+        network.stop(None);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_terminal_forward_receipt_is_identity_checked_and_idempotent() {
+        let (a, b, _) =
+            create_nodes_with_established_channel(100000000000, 11800000000, false).await;
+        let (network, task) = Actor::spawn(None, CaptureNetwork, Default::default())
+            .await
+            .unwrap();
+        let (myself, handle) = Actor::spawn(None, NoopChannelActor, ()).await.unwrap();
+        for mode in ["wrong_hash", "missing", "removed", "pending"] {
+            let id = crate::gen_rand_sha256_hash();
+            let hash = fiber_types::Hash256::from([41; 32]);
+            let mut state =
+                crate::fiber::tests::create_test_channel_state_with_tlc(id, 0, 1000, hash, None);
+            state.network = Some(network.clone());
+            state
+                .waiting_forward_tlc_tasks
+                .insert(fiber_types::TLCId::Received(0), [7; 32]);
+            let reason =
+                fiber_types::TlcErr::new(fiber_types::TlcErrorCode::PermanentChannelFailure);
+            if mode == "missing" {
+                state.tlc_state.received_tlcs.tlcs.clear();
+            }
+            if mode == "removed" {
+                state.tlc_state.received_tlcs.tlcs[0].removed_reason =
+                    Some(fiber_types::RemoveTlcReason::RemoveTlcFail(
+                        fiber_types::TlcErrPacket::new(reason.clone(), &[7; 32]),
+                    ));
+            }
+            let actor =
+                ChannelActor::new(a.pubkey, b.pubkey, network.clone(), MockStore::new(), None);
+            let result = crate::fiber::types::ForwardTlcResult {
+                channel_id: id,
+                tlc_id: 0,
+                payment_hash: if mode == "wrong_hash" {
+                    [42; 32].into()
+                } else {
+                    hash
+                },
+                add_tlc_result: Err((
+                    ProcessingChannelError::InvalidState("closed".to_owned()),
+                    reason,
+                )),
+            };
+            let before = bincode::serialize(&state.core).unwrap();
+            let (reply, receipt) = tokio::sync::oneshot::channel();
+            let outcome = actor
+                .handle_command(
+                    &myself,
+                    &mut state,
+                    super::super::ChannelCommand::CompleteForward(result.clone(), reply.into()),
+                )
+                .await;
+            assert_eq!(outcome.is_ok(), mode != "wrong_hash");
+            assert_eq!(receipt.await.unwrap().is_ok(), mode != "wrong_hash");
+            if mode == "wrong_hash" {
+                assert_eq!(bincode::serialize(&state.core).unwrap(), before);
+            } else {
+                assert!(state.waiting_forward_tlc_tasks.is_empty());
+                assert_eq!(
+                    state.retryable_tlc_operations.len(),
+                    usize::from(mode == "pending"),
+                    "{mode}: do not create a failure for an already completed TLC"
+                );
+                let (reply, receipt) = tokio::sync::oneshot::channel();
+                actor
+                    .handle_command(
+                        &myself,
+                        &mut state,
+                        super::super::ChannelCommand::CompleteForward(result, reply.into()),
+                    )
+                    .await
+                    .unwrap();
+                receipt.await.unwrap().unwrap();
+                let durable = actor.store.get_channel_actor_state(&id).unwrap();
+                assert_eq!(
+                    durable.retryable_tlc_operations.len(),
+                    usize::from(mode == "pending")
+                );
+            }
+        }
+        myself.stop(None);
+        handle.await.unwrap();
+        network.stop(None);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_closed_forward_handoff_survives_timeout_and_watch_chain_restart() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let (mut a, mut b, id) =
+            create_nodes_with_established_channel(100000000000, 11800000000, false).await;
+        let mut state = a.get_channel_actor_state(id);
+        b.stop().await;
+        a.stop().await;
+        state.prepare_outgoing_v2(false).unwrap();
+        state.tlc_state.waiting_ack = true;
+        state.state = ChannelState::Closed(
+            fiber_types::CloseFlags::UNCOOPERATIVE_LOCAL
+                | fiber_types::CloseFlags::WAITING_ONCHAIN_SETTLEMENT,
+        );
+        let upstream_id = crate::gen_rand_sha256_hash();
+        let mut command = retry_batch_add(19, 1000);
+        command.previous_tlc = Some(fiber_types::PrevTlcInfo::new_with_shared_secret(
+            upstream_id,
+            0,
+            0,
+            [7; 32],
+        ));
+        let mut upstream = crate::fiber::tests::create_test_channel_state_with_tlc(
+            upstream_id,
+            0,
+            1000,
+            command.payment_hash,
+            None,
+        );
+        upstream
+            .waiting_forward_tlc_tasks
+            .insert(fiber_types::TLCId::Received(0), [7; 32]);
+        a.store.insert_channel_actor_state(upstream.clone());
+        state
+            .retryable_tlc_operations
+            .push_back(RetryableTlcOperation::AddTlc(command));
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let (silent, silent_task) = Actor::spawn(None, CaptureNetwork, captured).await.unwrap();
+        let retried = Arc::new(AtomicUsize::new(0));
+        let (myself, handle) = Actor::spawn(None, RetryTaskCounter, retried.clone())
+            .await
+            .unwrap();
+        state.network = Some(silent.clone());
+        let actor = ChannelActor::new(a.pubkey, b.pubkey, silent.clone(), a.store.clone(), None);
+        actor
+            .apply_retryable_tlc_operations(&myself, &mut state, true)
+            .await;
+        assert_eq!(
+            state.retryable_tlc_operations.len(),
+            1,
+            "do not lose a result without a durable receipt"
+        );
+        let mut restored =
+            ChannelActorState::from(a.store.get_channel_actor_state(&id).unwrap().core);
+        restored.mark_watching_chain_offline();
+        restored.validate_session_v2().unwrap();
+        state.schedule_next_retry_task(&myself);
+        tokio::time::sleep(std::time::Duration::from_millis(220)).await;
+        assert_eq!(retried.load(Ordering::SeqCst), 0);
+        let (sink, sink_task) = Actor::spawn(None, NoopChannelActor, ()).await.unwrap();
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let (network, task) = Actor::spawn(
+            None,
+            TerminalRetryNetwork,
+            TerminalRetryNetworkState {
+                store: a.store.clone(),
+                upstream,
+                sink: sink.clone(),
+                accepted: accepted.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        restored.network = Some(network.clone());
+        let actor = ChannelActor::new(a.pubkey, b.pubkey, network.clone(), a.store.clone(), None);
+        let (restarted, restarted_task) = Actor::spawn(
+            None,
+            actor,
+            super::super::ChannelInitializationParameter {
+                operation: super::super::ChannelInitializationOperation::RestoreOfflineChannel(id),
+                ephemeral_config: Default::default(),
+                private_key: a.private_key.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        crate::tests::test_utils::wait_until_timeout(5000, || {
+            a.store
+                .get_channel_actor_state(&id)
+                .unwrap()
+                .retryable_tlc_operations
+                .is_empty()
+        })
+        .await;
+        let restored = a.store.get_channel_actor_state(&id).unwrap();
+        assert!(restored.retryable_tlc_operations.is_empty());
+        assert_eq!(accepted.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            a.store
+                .get_channel_actor_state(&upstream_id)
+                .unwrap()
+                .retryable_tlc_operations
+                .len(),
+            1
+        );
+        restored.validate_session_v2().unwrap();
+        restarted
+            .send_message(ChannelActorMessage::Event(
+                super::super::ChannelEvent::MaintainChannelTlcs,
+            ))
+            .unwrap();
+        ractor::call_t!(
+            restarted,
+            |reply| ChannelActorMessage::Command(super::super::ChannelCommand::TestBarrier(reply)),
+            5000
+        )
+        .unwrap();
+        assert_eq!(accepted.load(Ordering::SeqCst), 1);
+        restarted.stop(None);
+        restarted_task.await.unwrap();
+        myself.stop(None);
+        handle.await.unwrap();
+        sink.stop(None);
+        sink_task.await.unwrap();
+        network.stop(None);
+        task.await.unwrap();
+        silent.stop(None);
+        silent_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_closed_forward_queue_preserves_another_durable_owner() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let (mut a, mut b, id) =
+            create_nodes_with_established_channel(100000000000, 11800000000, false).await;
+        let original = a.get_channel_actor_state(id);
+        b.stop().await;
+        a.stop().await;
+        for created in [false, true] {
+            let mut state = original.clone();
+            state.prepare_outgoing_v2(false).unwrap();
+            state.tlc_state.waiting_ack = true;
+            state.state = ChannelState::Closed(
+                fiber_types::CloseFlags::UNCOOPERATIVE_REMOTE
+                    | fiber_types::CloseFlags::WAITING_ONCHAIN_SETTLEMENT,
+            );
+            let upstream_id = crate::gen_rand_sha256_hash();
+            let owner_id = crate::gen_rand_sha256_hash();
+            let mut command = retry_batch_add(if created { 92 } else { 91 }, 1000);
+            command.previous_tlc = Some(fiber_types::PrevTlcInfo::new_with_shared_secret(
+                upstream_id,
+                0,
+                0,
+                [7; 32],
+            ));
+            let mut upstream = crate::fiber::tests::create_test_channel_state_with_tlc(
+                upstream_id,
+                0,
+                1000,
+                command.payment_hash,
+                None,
+            );
+            upstream
+                .waiting_forward_tlc_tasks
+                .insert(fiber_types::TLCId::Received(0), [7; 32]);
+            let mut owner = crate::fiber::tests::create_test_channel_state_with_tlc(
+                owner_id,
+                0,
+                1000,
+                command.payment_hash,
+                None,
+            );
+            let mut tlc = owner.tlc_state.received_tlcs.tlcs[0].clone();
+            owner.tlc_state = Default::default();
+            if created {
+                tlc.tlc_id = fiber_types::TLCId::Offered(7);
+                tlc.status =
+                    fiber_types::TlcStatus::Outbound(fiber_types::OutboundTlcStatus::Committed);
+                tlc.forwarding_tlc = Some((upstream_id, 0));
+                owner.tlc_state.offered_tlcs.tlcs.push(tlc);
+            } else {
+                owner
+                    .retryable_tlc_operations
+                    .push_back(RetryableTlcOperation::AddTlc(command.clone()));
+            }
+            a.store.insert_channel_actor_state(upstream.clone());
+            a.store.insert_channel_actor_state(owner);
+            state
+                .retryable_tlc_operations
+                .push_back(RetryableTlcOperation::AddTlc(command));
+            let (sink, sink_task) = Actor::spawn(None, NoopChannelActor, ()).await.unwrap();
+            let accepted = Arc::new(AtomicUsize::new(0));
+            let (network, task) = Actor::spawn(
+                None,
+                TerminalRetryNetwork,
+                TerminalRetryNetworkState {
+                    store: a.store.clone(),
+                    upstream,
+                    sink: sink.clone(),
+                    accepted: accepted.clone(),
+                },
+            )
+            .await
+            .unwrap();
+            state.network = Some(network.clone());
+            let actor =
+                ChannelActor::new(a.pubkey, b.pubkey, network.clone(), a.store.clone(), None);
+            actor
+                .apply_retryable_tlc_operations(&sink, &mut state, true)
+                .await;
+            assert!(state.retryable_tlc_operations.is_empty());
+            let upstream = a.store.get_channel_actor_state(&upstream_id).unwrap();
+            assert!(
+                upstream.retryable_tlc_operations.is_empty(),
+                "do not fail a backed forward"
+            );
+            assert!(upstream.tlc_state.received_tlcs.tlcs[0]
+                .removed_reason
+                .is_none());
+            assert_eq!(accepted.load(Ordering::SeqCst), usize::from(created));
+            if created {
+                assert_eq!(
+                    upstream.tlc_state.received_tlcs.tlcs[0].forwarding_tlc,
+                    Some((owner_id, 7))
+                );
+            } else {
+                assert_eq!(upstream.waiting_forward_tlc_tasks.len(), 1);
+            }
+            state.validate_session_v2().unwrap();
+            network.stop(None);
+            task.await.unwrap();
+            sink.stop(None);
+            sink_task.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_closed_retry_scheduler_does_not_rearm_nonempty_queue() {
+        let (a, _, id) =
+            create_nodes_with_established_channel(100000000000, 11800000000, false).await;
+        let mut state = a.get_channel_actor_state(id);
+        state.state = ChannelState::Closed(
+            fiber_types::CloseFlags::UNCOOPERATIVE_REMOTE
+                | fiber_types::CloseFlags::WAITING_ONCHAIN_SETTLEMENT,
+        );
+        let mut command = retry_batch_add(9, 1000);
+        command.attempt_id = Some(123);
+        state
+            .retryable_tlc_operations
+            .push_back(RetryableTlcOperation::AddTlc(command));
+        let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (myself, handle) = Actor::spawn(None, RetryTaskCounter, count.clone())
+            .await
+            .unwrap();
+        state.schedule_next_retry_task(&myself);
+        tokio::time::sleep(std::time::Duration::from_millis(220)).await;
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let (network, task) = Actor::spawn(None, CaptureNetwork, captured.clone())
+            .await
+            .unwrap();
+        state.network = Some(network.clone());
+        let actor = ChannelActor::new(
+            state.local_pubkey,
+            state.remote_pubkey,
+            network.clone(),
+            MockStore::new(),
+            None,
+        );
+        actor
+            .apply_retryable_tlc_operations(&myself, &mut state, true)
+            .await;
+        assert!(state.retryable_tlc_operations.is_empty());
+        assert!(actor
+            .store
+            .get_channel_actor_state(&id)
+            .unwrap()
+            .retryable_tlc_operations
+            .is_empty());
+        capture_barrier(&network, id).await;
+        assert!(captured.lock().unwrap().iter().any(|message| matches!(message,
+            NetworkActorMessage::Event(NetworkActorEvent::AddTlcResult(_, Some(123), Err((_, error)), None)) if error.error_code == fiber_types::TlcErrorCode::PermanentChannelFailure)));
+        network.stop(None);
+        task.await.unwrap();
+        myself.stop(None);
+        handle.await.unwrap();
+    }
+
     fn retry_batch_add(tag: u8, amount: u128) -> fiber_types::AddTlcCommand {
         fiber_types::AddTlcCommand {
             amount,

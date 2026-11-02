@@ -223,6 +223,8 @@ pub enum ChannelCommand {
     BroadcastChannelUpdate(),
     Update(UpdateCommand, RpcReplyPort<Result<(), String>>),
     NotifyEvent(ChannelEvent),
+    /// Accept a forwarding result durably before its terminal queue owner retires it.
+    CompleteForward(ForwardTlcResult, RpcReplyPort<ProcessingChannelResult>),
     /// Set the unsigned funding transaction for external funding channels.
     /// This is called after the peer accepts the channel.
     SetUnsignedFundingTx(Transaction),
@@ -249,6 +251,7 @@ impl Display for ChannelCommand {
             ChannelCommand::BroadcastChannelUpdate() => write!(f, "BroadcastChannelUpdate"),
             ChannelCommand::Update(_, _) => write!(f, "Update"),
             ChannelCommand::NotifyEvent(event) => write!(f, "NotifyEvent [{:?}]", event),
+            ChannelCommand::CompleteForward(_, _) => write!(f, "CompleteForward"),
             ChannelCommand::SetUnsignedFundingTx(_) => write!(f, "SetUnsignedFundingTx"),
             ChannelCommand::SubmitExternalFundingTx(_, _) => write!(f, "SubmitExternalFundingTx"),
             #[cfg(any(test, feature = "bench"))]
@@ -2923,6 +2926,11 @@ where
         state: &mut ChannelActorState,
         trigger_next: bool,
     ) {
+        if state.is_closed() {
+            self.finalize_closed_retryable_tlc_operations(myself, state)
+                .await;
+            return;
+        }
         if state.session_v2.is_some() {
             self.apply_retryable_tlc_operations_v2(myself, state, trigger_next)
                 .await;
@@ -2995,6 +3003,137 @@ where
             trigger_next,
             state.is_waiting_tlc_ack()
         );
+    }
+
+    async fn finalize_closed_retryable_tlc_operations(
+        &self,
+        myself: &ActorRef<ChannelActorMessage>,
+        state: &mut ChannelActorState,
+    ) {
+        if !state.is_closed() || state.retryable_tlc_operations.is_empty() {
+            return;
+        }
+        // Publish the terminal owner first; its queued Adds must not index as executable work.
+        self.store.insert_channel_actor_state(state.clone());
+        let owners = self.forwarded_tlc_index();
+        let mut local_failures = Vec::new();
+        let mut changed = false;
+        for _ in 0..state.retryable_tlc_operations.len() {
+            let operation = state
+                .retryable_tlc_operations
+                .pop_front()
+                .expect("queue length");
+            let done = match &operation {
+                // Fulfill preimages were saved on enqueue; existing TLCs now settle on-chain.
+                RetryableTlcOperation::RemoveTlc(_, _) => true,
+                RetryableTlcOperation::AddTlc(command) => {
+                    if let Some(previous) = command.previous_tlc {
+                        let upstream = self
+                            .store
+                            .get_channel_actor_state(&previous.prev_channel_id);
+                        if let Some(upstream) = upstream {
+                            let id = TLCId::Received(previous.prev_tlc_id);
+                            let tlc = upstream.tlc_state.get(&id);
+                            let handed_off = !upstream.waiting_forward_tlc_tasks.contains_key(&id)
+                                && (tlc.is_some_and(|tlc| tlc.forwarding_tlc.is_some())
+                                    || upstream.retryable_tlc_operations.iter().any(|op| matches!(op, RetryableTlcOperation::RemoveTlc(queued, _) if *queued == id)));
+                            if upstream.is_closed()
+                                || tlc.is_none_or(|tlc| {
+                                    tlc.payment_hash != command.payment_hash
+                                        || tlc.removed_reason.is_some()
+                                })
+                                || handed_off
+                            {
+                                true
+                            } else if self.store.has_trampoline_payment_for_tlc(
+                                command.payment_hash,
+                                upstream.id,
+                                previous.prev_tlc_id,
+                            ) || matches!(
+                                owners.get(&(
+                                    upstream.id,
+                                    previous.prev_tlc_id,
+                                    command.payment_hash
+                                )),
+                                Some(ForwardTlcRecovery::Queued)
+                            ) {
+                                // Another durable owner still backs the upstream TLC.
+                                true
+                            } else {
+                                let result = match owners.get(&(
+                                    upstream.id,
+                                    previous.prev_tlc_id,
+                                    command.payment_hash,
+                                )) {
+                                    Some(ForwardTlcRecovery::Created { channel_id, tlc_id }) => {
+                                        Ok((*channel_id, *tlc_id))
+                                    }
+                                    _ => Err((
+                                        ProcessingChannelError::InvalidState(
+                                            "Forwarding channel closed before AddTlc execution"
+                                                .to_owned(),
+                                        ),
+                                        TlcErr::new(TlcErrorCode::PermanentChannelFailure),
+                                    )),
+                                };
+                                let result = ForwardTlcResult {
+                                    channel_id: upstream.id,
+                                    payment_hash: command.payment_hash,
+                                    tlc_id: previous.prev_tlc_id,
+                                    add_tlc_result: result,
+                                };
+                                match ractor::call_t!(
+                                    self.network,
+                                    |reply| NetworkActorMessage::new_command(
+                                        NetworkActorCommand::ControlFiberChannel(
+                                            ChannelCommandWithId {
+                                                channel_id: upstream.id,
+                                                command: ChannelCommand::CompleteForward(
+                                                    result, reply
+                                                ),
+                                            }
+                                        )
+                                    ),
+                                    5000
+                                ) {
+                                    Ok(Ok(())) => true,
+                                    result => {
+                                        warn!(?result, channel_id = ?state.id, upstream_channel_id = ?upstream.id, "Retaining terminal forwarding result for maintenance retry");
+                                        false
+                                    }
+                                }
+                            }
+                        } else {
+                            false
+                        }
+                    } else {
+                        local_failures.push(command.clone());
+                        true
+                    }
+                }
+            };
+            if done {
+                changed = true;
+            } else {
+                state.retryable_tlc_operations.push_back(operation);
+            }
+        }
+        if changed {
+            self.store.insert_channel_actor_state(state.clone());
+        }
+        for command in local_failures {
+            self.post_add_tlc_command(
+                myself,
+                state,
+                command,
+                &Err(ProcessingChannelError::InvalidState(
+                    "Channel closed before AddTlc execution".to_owned(),
+                )),
+            );
+        }
+        if state.retryable_tlc_operations.is_empty() && !state.is_waiting_onchain_settlement() {
+            myself.stop(Some(format!("ChannelStopped: {:?}", StopReason::Closed)));
+        }
     }
 
     fn handle_forward_tlc_result(
@@ -3386,6 +3525,29 @@ where
                 Ok(())
             }
             ChannelCommand::NotifyEvent(event) => self.handle_event(myself, state, event).await,
+            ChannelCommand::CompleteForward(result, reply) => {
+                let id = TLCId::Received(result.tlc_id);
+                let tlc = state.tlc_state.get(&id);
+                let outcome = if result.channel_id != state.id || tlc.is_some_and(|tlc| tlc.payment_hash != result.payment_hash) {
+                    Err(ProcessingChannelError::InvalidParameter("Forward result does not match upstream TLC".to_owned()))
+                } else if state.is_closed()
+                    || tlc.is_none_or(|tlc| tlc.removed_reason.is_some() || tlc.forwarding_tlc.is_some())
+                    || state.retryable_tlc_operations.iter().any(|op| matches!(op, RetryableTlcOperation::RemoveTlc(queued, _) if *queued == id)) {
+                    // A replay must not recreate work for an already resolved or re-linked TLC.
+                    state.waiting_forward_tlc_tasks.remove(&id);
+                    Ok(())
+                } else if state.waiting_forward_tlc_tasks.contains_key(&id) {
+                    self.handle_forward_tlc_result(myself, state, result);
+                    Ok(())
+                } else {
+                    Err(ProcessingChannelError::InvalidState("Upstream forwarding owner is not recoverable yet".to_owned()))
+                };
+                if outcome.is_ok() {
+                    self.persist_state_and_publish_pending_effects(state);
+                }
+                let _ = reply.send(outcome.clone());
+                outcome
+            }
             ChannelCommand::SetUnsignedFundingTx(tx) => {
                 self.store_external_unsigned_funding_tx(myself, state, tx)
             }
@@ -3962,6 +4124,8 @@ where
         myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
     ) -> ProcessingChannelResult {
+        self.finalize_closed_retryable_tlc_operations(myself, state)
+            .await;
         let ChannelState::Closed(mut flags) = state.state else {
             return Err(ProcessingChannelError::InvalidState(format!(
                 "Expecting closed channel for on-chain settlement completion, got {:?}",
@@ -3980,7 +4144,9 @@ where
         state.update_state(ChannelState::Closed(flags));
         self.store.insert_channel_actor_state(state.clone());
         let now = now_timestamp_as_millis_u64();
-        if self.reconcile_onchain_tlcs(state, now).await {
+        if self.reconcile_onchain_tlcs(state, now).await
+            && state.retryable_tlc_operations.is_empty()
+        {
             flags.remove(
                 CloseFlags::WAITING_ONCHAIN_SETTLEMENT | CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED,
             );
@@ -4318,12 +4484,16 @@ where
                 state
                     .update_close_transaction_confirmed(tx_hash, force, close_by_us)
                     .await?;
+                self.finalize_closed_retryable_tlc_operations(myself, state)
+                    .await;
                 debug_event!(self.network, "ChannelClosed");
-                if matches!(
-                    state.state,
-                    ChannelState::Closed(flags)
-                        if !flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT)
-                ) {
+                if state.retryable_tlc_operations.is_empty()
+                    && matches!(
+                        state.state,
+                        ChannelState::Closed(flags)
+                            if !flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT)
+                    )
+                {
                     myself.stop(Some(format!("ChannelStopped: {:?}", StopReason::Closed)));
                 }
             }
@@ -4353,6 +4523,8 @@ where
                 }
             }
             ChannelEvent::MaintainChannelTlcs => {
+                self.finalize_closed_retryable_tlc_operations(myself, state)
+                    .await;
                 // A delayed/early one-shot check must not be the only route to
                 // a durable V2 deadline. Maintenance also covers offline actors.
                 if state.ensure_v2_not_quarantined().is_ok()
@@ -5366,6 +5538,8 @@ where
     ) -> Result<(), ActorProcessingErr> {
         // A forward dispatched before the process exit has no in-memory result left, and
         // reestablishment does not replay it. Resolve it from the persisted downstream link.
+        self.finalize_closed_retryable_tlc_operations(&myself, state)
+            .await;
         self.recover_pending_forward_tlcs(&myself, state);
 
         // One-shot peer timers disappear on process exit. Restore the durable
@@ -6771,6 +6945,9 @@ impl ChannelActorState {
     }
 
     fn schedule_next_retry_task(&mut self, myself: &ActorRef<ChannelActorMessage>) {
+        if self.is_closed() {
+            return;
+        }
         if !self.retryable_tlc_operations.is_empty() {
             myself.send_after(RETRYABLE_TLC_OPS_INTERVAL, || {
                 ChannelActorMessage::Event(ChannelEvent::RunRetryTask)
