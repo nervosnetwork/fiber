@@ -198,6 +198,9 @@ impl<S: RpcBackendStore> ChannelRpcServerImpl<S> {
     }
 
     /// The public backend, for callers that hold no request (wasm bindings).
+    ///
+    /// Not available to handlers: they must resolve the request's tenant first.
+    #[cfg(any(test, target_arch = "wasm32"))]
     pub fn public_scope(&self) -> ScopedBackend<S> {
         self.backend.public_scope()
     }

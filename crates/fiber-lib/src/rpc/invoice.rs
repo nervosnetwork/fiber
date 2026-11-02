@@ -200,8 +200,18 @@ impl<S: crate::rpc::scoped::RpcBackendStore> InvoiceRpcServerImpl<S> {
     }
 
     /// The public invoice backend, for callers that hold no request (wasm, tests).
-    pub fn public_backend(&self) -> InvoiceBackend<S> {
+    ///
+    /// Not available to handlers: they must resolve the request's tenant first.
+    /// The public invoice backend. Handlers use it only after `resolve` reported
+    /// that no tenant is involved.
+    fn public_backend(&self) -> InvoiceBackend<S> {
         self.for_scope(&self.backend.public_scope())
+    }
+
+    /// Handle exposed to request-less callers (wasm bindings, tests).
+    #[cfg(any(test, target_arch = "wasm32"))]
+    pub fn public_handler(&self) -> InvoiceBackend<S> {
+        self.public_backend()
     }
 }
 
