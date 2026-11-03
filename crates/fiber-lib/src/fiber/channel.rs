@@ -3108,6 +3108,22 @@ where
                         } else {
                             false
                         }
+                    } else if command.attempt_id.is_some() {
+                        let result = ractor::call_t!(
+                            self.network,
+                            |reply| NetworkActorMessage::new_command(
+                                NetworkActorCommand::CompleteClosedLocalAdd {
+                                    channel_id: state.id,
+                                    command: Box::new(command.clone()),
+                                    reply,
+                                }
+                            ),
+                            5000
+                        );
+                        if !matches!(result, Ok(Ok(()))) {
+                            warn!(?result, channel_id = ?state.id, "Retaining closed local Add until the payment outcome is durable");
+                        }
+                        matches!(result, Ok(Ok(())))
                     } else {
                         local_failures.push(command.clone());
                         true
@@ -6833,9 +6849,12 @@ impl ChannelActorState {
                 let funding_key = self.signer.funding_key.clone();
                 let number = self.get_remote_commitment_number();
                 let ready_advertised = matches!(self.state, ChannelState::AwaitingChannelReady(flags)
-                    if flags.contains(AwaitingChannelReadyFlags::OUR_CHANNEL_READY));
+                    if flags.contains(AwaitingChannelReadyFlags::OUR_CHANNEL_READY))
+                    || (self.state == ChannelState::ChannelReady
+                        && self.get_local_commitment_number() == INITIAL_COMMITMENT_NUMBER + 2
+                        && number == INITIAL_COMMITMENT_NUMBER + 2);
                 if let Some(session) = self.session_v2.as_mut() {
-                    // Until opening completes, our advertised Ready must be replayed verbatim.
+                    // Before either normal round completes, the peer may still need this exact Ready.
                     if !ready_advertised {
                         // Only same-round retired allocations may sign a late CS; acceptance
                         // advances own and discards retired copies of the consumed allocation.

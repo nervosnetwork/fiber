@@ -914,6 +914,12 @@ pub enum NetworkActorCommand {
     /// Explicit legacy-only test fixture; unavailable in production builds.
     #[cfg(test)]
     TestEnableLegacyFixture(RpcReplyPort<()>),
+    /// Complete a closed channel's queued local Add after the payment outcome is saved.
+    CompleteClosedLocalAdd {
+        channel_id: Hash256,
+        command: Box<AddTlcCommand>,
+        reply: RpcReplyPort<Result<(), String>>,
+    },
     /// Bind a durable V2 payer effect to the current payment execution.
     GetV2PaymentExecution(Hash256, Option<u64>, RpcReplyPort<Option<u32>>),
     /// Deliver an offered-TLC outbox record, acknowledging after durable receipt.
@@ -1384,6 +1390,8 @@ pub enum NetworkActorEvent {
 
     // A payment need to retry
     RetrySendPayment(Hash256, Option<u64>),
+    /// Restart recovery without duplicating an attempt's live callback/timer work.
+    ResumePaymentAfterClosedChannel(Hash256, u64),
 
     // AddTlc result from peer (payment_hash, attempt_id, add_tlc_result, (previous_channel_id, previous_tlc_id))
     AddTlcResult(
@@ -2126,6 +2134,15 @@ where
                         );
                     }
                 }
+            }
+            NetworkActorEvent::ResumePaymentAfterClosedChannel(payment_hash, attempt_id) => {
+                self.resume_payment_actor_and_send_command(
+                    myself,
+                    state,
+                    payment_hash,
+                    PaymentActorMessage::ResumeAfterClosedChannel(attempt_id),
+                )
+                .await;
             }
             NetworkActorEvent::RetrySendPayment(payment_hash, attempt_id) => {
                 self.resume_payment_actor_and_send_command(
@@ -2974,6 +2991,64 @@ where
                     );
                 }
                 let _ = reply.send(result);
+            }
+            NetworkActorCommand::CompleteClosedLocalAdd {
+                channel_id,
+                command,
+                reply,
+            } => {
+                let Some(source) = self.store.get_channel_actor_state(&channel_id) else {
+                    let _ = reply.send(Err("Closed Add source not found".to_owned()));
+                    return Ok(());
+                };
+                if !matches!(source.state, ChannelState::Closed(_))
+                    || command.previous_tlc.is_some()
+                    || command.attempt_id.is_none()
+                    || !source
+                        .retryable_tlc_operations
+                        .contains(&RetryableTlcOperation::AddTlc(*command.clone()))
+                {
+                    let _ = reply.send(Err("Closed Add source identity mismatch".to_owned()));
+                    return Ok(());
+                }
+                if source
+                    .tlc_state
+                    .offered_tlcs
+                    .tlcs
+                    .iter()
+                    .chain(
+                        source
+                            .session_v2
+                            .iter()
+                            .flat_map(|session| session.remove_effects.iter().map(|(tlc, _)| tlc)),
+                    )
+                    .any(|tlc| {
+                        tlc.payment_hash == command.payment_hash
+                            && tlc.attempt_id == command.attempt_id
+                            && tlc.onion_packet == command.onion_packet
+                            && tlc.amount == command.amount
+                            && tlc.expiry == command.expiry
+                    })
+                {
+                    let _ = reply.send(Ok(()));
+                    return Ok(());
+                }
+                let Some(channel_outpoint) = source.get_funding_transaction_outpoint() else {
+                    let _ = reply.send(Err("Closed Add source has no funding outpoint".to_owned()));
+                    return Ok(());
+                };
+                self.resume_payment_actor_and_send_command(
+                    myself,
+                    state,
+                    command.payment_hash,
+                    PaymentActorMessage::CompleteClosedLocalAdd {
+                        channel_id,
+                        channel_outpoint,
+                        command,
+                        reply,
+                    },
+                )
+                .await;
             }
             NetworkActorCommand::GetV2PaymentExecution(hash, attempt_id, reply) => {
                 let execution = attempt_id
@@ -7077,6 +7152,48 @@ where
             let Some(channel_actor_state) = self.store.get_channel_actor_state(&channel_id) else {
                 continue;
             };
+            if channel_actor_state.channel_features.is_v2()
+                && matches!(channel_actor_state.state, ChannelState::Closed(_))
+            {
+                // A receipt can retire the source before a persisted payment retry's timer runs.
+                if let Some(outpoint) = channel_actor_state.get_funding_transaction_outpoint() {
+                    let attempts = self
+                        .store
+                        .get_pending_attempts_by_channel_outpoint(&outpoint);
+                    if !attempts.is_empty() {
+                        if let Err(error) = fiber_types::channel_v2_validation::validate_channel_v2(
+                            &channel_actor_state.core,
+                        ) {
+                            warn!(
+                                ?channel_id,
+                                ?error,
+                                "Not resuming payments from invalid closed signing history"
+                            );
+                            continue;
+                        }
+                    }
+                    for attempt in attempts {
+                        // The index retains the original hop; the payer rechecks the current route's owner.
+                        let owned = attempt.first_hop_channel_outpoint_eq(&outpoint)
+                            && (channel_actor_state
+                                .owns_payment_attempt(attempt.payment_hash, attempt.id)
+                                || channel_actor_state.session_v2.iter().any(|session| {
+                                    session.remove_effects.iter().any(|(tlc, _)| {
+                                        tlc.payment_hash == attempt.payment_hash
+                                            && tlc.attempt_id == Some(attempt.id)
+                                    })
+                                }));
+                        if !owned {
+                            let _ = self.network.send_message(NetworkActorMessage::new_event(
+                                NetworkActorEvent::ResumePaymentAfterClosedChannel(
+                                    attempt.payment_hash,
+                                    attempt.id,
+                                ),
+                            ));
+                        }
+                    }
+                }
+            }
             if channel_actor_state.offline_restore_mode().is_none() {
                 continue;
             }
