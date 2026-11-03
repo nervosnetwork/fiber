@@ -1449,6 +1449,10 @@ impl NetworkGraphStateStore for Store {
             .into_iter()
             .filter_map(|kv| {
                 let session: PaymentSession = deserialize_from(kv.value.as_ref(), "PaymentSession");
+                // Loading attempts cannot change a persisted terminal status.
+                if session.status.is_final() && session.status != status {
+                    return None;
+                }
                 let session = session.init_attempts(self);
                 if session.status == status {
                     Some(session)
@@ -1474,6 +1478,9 @@ impl NetworkGraphStateStore for Store {
 
         iter.filter_map(|(_key, value)| {
             let session: PaymentSession = deserialize_from(&value, "PaymentSession");
+            if session.status.is_final() && status.is_some_and(|s| session.status != s) {
+                return None;
+            }
             let session = session.init_attempts(self);
             match status {
                 Some(ref s) if session.status != *s => None,

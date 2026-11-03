@@ -1718,6 +1718,46 @@ fn test_store_payment_sessions_with_status() {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
+fn test_payment_status_queries_skip_attempts_for_mismatched_terminal_sessions() {
+    for terminal_status in [PaymentStatus::Success, PaymentStatus::Failed] {
+        let (store, _dir) = generate_store();
+        let hash = Hash256::from([1; 32]);
+        let request = SendPaymentDataBuilder::new(gen_rand_fiber_public_key(), 100, hash)
+            .max_fee_amount(Some(1000))
+            .build()
+            .unwrap();
+        let mut session = PaymentSession::new_session(&store, request, 1);
+        session.status = terminal_status;
+        store.insert_payment_session(session);
+
+        // An unreadable sentinel makes unnecessary attempt hydration fail.
+        let attempt_key = [
+            &[fiber_types::schema::ATTEMPT_PREFIX],
+            hash.as_ref(),
+            &1u64.to_le_bytes(),
+        ]
+        .concat();
+        store.put(attempt_key, []);
+
+        for status in [
+            PaymentStatus::Created,
+            PaymentStatus::Inflight,
+            PaymentStatus::Success,
+            PaymentStatus::Failed,
+        ] {
+            if status == terminal_status {
+                continue;
+            }
+            assert!(store.get_payment_sessions_with_status(status).is_empty());
+            assert!(store
+                .get_payment_sessions_with_limit(1, None, Some(status))
+                .is_empty());
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
 fn test_payment_status_queries_filter_hydrated_attempts_before_pagination() {
     let (store, _dir) = generate_store();
     let source = gen_rand_fiber_public_key();
