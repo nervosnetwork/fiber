@@ -32,6 +32,106 @@ fn rpc_config_with_auth() -> (RpcConfig, KeyPair) {
 }
 
 #[tokio::test]
+async fn test_list_payments_filters_effective_status_with_cursor() {
+    use crate::fiber::config::DEFAULT_TLC_EXPIRY_DELTA;
+    use crate::fiber::graph::NetworkGraphStateStore;
+    use crate::fiber::payment::{PaymentSessionExt, SendPaymentDataBuilder};
+    use fiber_json_types::{
+        ListPaymentsParams, ListPaymentsResult, PaymentStatus as JsonPaymentStatus,
+    };
+    use fiber_types::{PaymentHopData, PaymentSession};
+
+    let node = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .node_name(Some("list-payments-status".to_owned()))
+            .base_dir_prefix("test-list-payments-status-")
+            .rpc_config(Some(gen_rpc_config()))
+            .build(),
+    )
+    .await;
+    let target = gen_rand_fiber_public_key();
+    for tag in 1..=8 {
+        let hash = Hash256::from([tag; 32]);
+        let request = SendPaymentDataBuilder::new(target, 100, hash)
+            .max_fee_amount(Some(1000))
+            .build()
+            .unwrap();
+        let session = PaymentSession::new_session(&node.store, request, 1);
+        node.store.insert_payment_session(session.clone());
+        if tag % 2 == 1 {
+            let mut attempt = session.new_attempt(
+                1,
+                node.pubkey,
+                target,
+                vec![PaymentHopData {
+                    amount: 100,
+                    expiry: DEFAULT_TLC_EXPIRY_DELTA,
+                    ..Default::default()
+                }],
+            );
+            attempt.set_inflight_status();
+            node.store.insert_attempt(attempt);
+        }
+    }
+    for (status, tags) in [
+        (JsonPaymentStatus::Created, [2, 4, 6, 8]),
+        (JsonPaymentStatus::Inflight, [1, 3, 5, 7]),
+    ] {
+        let mut after = None;
+        for expected in tags.chunks(2) {
+            let result: ListPaymentsResult = node
+                .send_rpc_request(
+                    "list_payments",
+                    ListPaymentsParams {
+                        status: Some(status),
+                        limit: Some(2),
+                        after,
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                result
+                    .payments
+                    .iter()
+                    .map(|payment| Hash256::from(payment.payment_hash))
+                    .collect::<Vec<_>>(),
+                expected
+                    .iter()
+                    .map(|&tag| Hash256::from([tag; 32]))
+                    .collect::<Vec<_>>()
+            );
+            assert!(result
+                .payments
+                .iter()
+                .all(|payment| payment.status == status));
+            assert_eq!(
+                result.last_cursor,
+                result.payments.last().map(|payment| payment.payment_hash)
+            );
+            after = result.last_cursor;
+        }
+        let end: ListPaymentsResult = node
+            .send_rpc_request(
+                "list_payments",
+                ListPaymentsParams {
+                    status: Some(status),
+                    limit: Some(2),
+                    after,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(end.payments.is_empty());
+        assert!(end.last_cursor.is_none());
+    }
+    assert_eq!(
+        node.store.get_persisted_payment_status([1; 32].into()),
+        Some(fiber_types::PaymentStatus::Created)
+    );
+}
+
+#[tokio::test]
 async fn test_rpc_basic() {
     let (nodes, _channels) = create_n_nodes_network_with_params(
         &[
