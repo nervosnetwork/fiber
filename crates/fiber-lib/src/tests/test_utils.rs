@@ -1530,15 +1530,18 @@ impl NetworkNode {
     }
 
     pub async fn disable_channel_stealthy(&self, channel_id: Hash256) {
-        let mut channel_actor_state = self.get_channel_actor_state(channel_id);
-        channel_actor_state.local_tlc_info.enabled = false;
-        self.update_channel_actor_state(
-            channel_actor_state,
-            Some(ReloadParams {
-                notify_changes: false,
-            }),
+        // Mutate the live actor: an external snapshot write can be overwritten before ReloadState.
+        ractor::call_t!(
+            self.network_actor,
+            |reply| NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+                ChannelCommandWithId {
+                    channel_id,
+                    command: ChannelCommand::TestDisableTlc(reply),
+                }
+            )),
+            5000
         )
-        .await;
+        .expect("channel actor durably disables outbound TLCs");
     }
 
     pub async fn handle_shutdown_command_without_check(

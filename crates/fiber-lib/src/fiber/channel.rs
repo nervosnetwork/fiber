@@ -235,6 +235,9 @@ pub enum ChannelCommand {
     SetDeferPeerTlcUpdates(bool),
     #[cfg(any(test, feature = "bench"))]
     TestBarrier(RpcReplyPort<()>),
+    /// Disable outbound TLCs in the actor without advertising the fixture change.
+    #[cfg(any(test, feature = "bench"))]
+    TestDisableTlc(RpcReplyPort<()>),
     #[cfg(any(test, feature = "bench"))]
     ReloadState(ReloadParams),
 }
@@ -260,6 +263,8 @@ impl Display for ChannelCommand {
             }
             #[cfg(any(test, feature = "bench"))]
             ChannelCommand::TestBarrier(_) => write!(f, "TestBarrier"),
+            #[cfg(any(test, feature = "bench"))]
+            ChannelCommand::TestDisableTlc(_) => write!(f, "TestDisableTlc"),
             #[cfg(any(test, feature = "bench"))]
             ChannelCommand::ReloadState(_) => write!(f, "ReloadState"),
         }
@@ -3601,6 +3606,13 @@ where
             }
             #[cfg(any(test, feature = "bench"))]
             ChannelCommand::TestBarrier(reply) => {
+                let _ = reply.send(());
+                Ok(())
+            }
+            #[cfg(any(test, feature = "bench"))]
+            ChannelCommand::TestDisableTlc(reply) => {
+                state.local_tlc_info.enabled = false;
+                self.store.insert_channel_actor_state(state.clone());
                 let _ = reply.send(());
                 Ok(())
             }

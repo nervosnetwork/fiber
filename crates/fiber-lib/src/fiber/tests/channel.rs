@@ -114,6 +114,96 @@ impl Actor for CapturingNetworkActor {
     }
 }
 
+#[tokio::test]
+async fn test_stealth_disable_survives_interleaved_channel_maintenance() {
+    struct MaintainBeforeControl;
+
+    #[async_trait::async_trait]
+    impl Actor for MaintainBeforeControl {
+        type Msg = NetworkActorMessage;
+        type State = ActorRef<ChannelActorMessage>;
+        type Arguments = ActorRef<ChannelActorMessage>;
+
+        async fn pre_start(
+            &self,
+            _: ActorRef<Self::Msg>,
+            channel: Self::Arguments,
+        ) -> Result<Self::State, ActorProcessingErr> {
+            Ok(channel)
+        }
+
+        async fn handle(
+            &self,
+            _: ActorRef<Self::Msg>,
+            message: Self::Msg,
+            channel: &mut Self::State,
+        ) -> Result<(), ActorProcessingErr> {
+            if let NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(command)) =
+                message
+            {
+                // Reproduce an actor-tail save between an external fixture write and its reload.
+                channel
+                    .send_message(ChannelActorMessage::Event(
+                        ChannelEvent::MaintainChannelTlcs,
+                    ))
+                    .unwrap();
+                channel
+                    .send_message(ChannelActorMessage::Command(command.command))
+                    .unwrap();
+            }
+            Ok(())
+        }
+    }
+
+    let (mut a, b, id) =
+        create_nodes_with_established_channel(100000000000, 11800000000, false).await;
+    let channel = a.get_channel_actor(id).await.unwrap();
+    let outpoint = a.get_channel_outpoint(&id).unwrap();
+    let real_network = a.network_actor.clone();
+    let (interleaved, task) = Actor::spawn(None, MaintainBeforeControl, channel)
+        .await
+        .unwrap();
+    a.network_actor = interleaved.clone();
+    a.disable_channel_stealthy(id).await;
+    ractor::call_t!(
+        a.network_actor,
+        |reply| NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: id,
+                command: ChannelCommand::TestBarrier(reply),
+            }
+        )),
+        5000
+    )
+    .unwrap();
+    a.network_actor = real_network;
+    ractor::call_t!(
+        a.network_actor,
+        |reply| NetworkActorMessage::new_command(
+            NetworkActorCommand::GetTestHeldFiberMessageCount(reply)
+        ),
+        5000
+    )
+    .unwrap();
+    interleaved.stop(None);
+    task.await.unwrap();
+    assert!(
+        !a.get_channel_actor_state(id).local_tlc_info.enabled,
+        "queued actor maintenance must not overwrite the stealth disable"
+    );
+    let graph_channel = a.get_network_graph_channel(&outpoint).await.unwrap();
+    let update = if graph_channel.node1 == a.pubkey {
+        graph_channel.update_of_node1
+    } else {
+        graph_channel.update_of_node2
+    };
+    assert!(
+        update.unwrap().enabled,
+        "stealth disable must not notify the routing graph"
+    );
+    drop(b);
+}
+
 struct NoopChannelActor;
 
 #[async_trait::async_trait]
