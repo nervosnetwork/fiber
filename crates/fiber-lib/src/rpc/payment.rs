@@ -2,10 +2,11 @@ use crate::fiber::graph::NetworkGraphStateStore;
 use crate::fiber::network::BuildRouterCommand;
 use crate::fiber::payment::SendPaymentWithRouterCommand;
 use crate::fiber::{
-    channel::ChannelActorStateStore, payment::SendPaymentCommand, NetworkActorCommand,
-    NetworkActorMessage,
+    channel::ChannelActorStateStore, payment::SendPaymentCommand, FiberActorCommand,
+    FiberActorMessage, FiberActorRef, NetworkActorMessage,
 };
-use crate::rpc::utils::RpcResultExt;
+use crate::rpc::utils::{rpc_error, RpcResultExt};
+use crate::rpc_scope::{BackendResolver, RpcBackendStore, ScopedBackend};
 use crate::{handle_actor_call, log_and_error};
 #[cfg(debug_assertions)]
 use fiber_json_types::SessionRoute as JsonSessionRoute;
@@ -16,6 +17,8 @@ use fiber_json_types::{
 #[cfg(not(target_arch = "wasm32"))]
 use jsonrpsee::proc_macros::rpc;
 use jsonrpsee::types::ErrorObjectOwned;
+#[cfg(not(target_arch = "wasm32"))]
+use jsonrpsee::Extensions;
 
 use ractor::{call, ActorRef};
 
@@ -30,21 +33,21 @@ pub use fiber_json_types::{
 #[rpc(server)]
 trait PaymentRpc {
     /// Sends a payment to a peer.
-    #[method(name = "send_payment")]
+    #[method(name = "send_payment", with_extensions)]
     async fn send_payment(
         &self,
         params: SendPaymentCommandParams,
     ) -> Result<GetPaymentCommandResult, ErrorObjectOwned>;
 
     /// Retrieves a payment.
-    #[method(name = "get_payment")]
+    #[method(name = "get_payment", with_extensions)]
     async fn get_payment(
         &self,
         params: GetPaymentCommandParams,
     ) -> Result<GetPaymentCommandResult, ErrorObjectOwned>;
 
     /// Builds a router with a list of pubkeys and required channels.
-    #[method(name = "build_router")]
+    #[method(name = "build_router", with_extensions)]
     async fn build_router(
         &self,
         params: BuildRouterParams,
@@ -63,14 +66,14 @@ trait PaymentRpc {
     /// 2. Call `send_payment_with_router` with the returned `router_hops` and `keysend: true`.
     ///
     /// Only routing fees are deducted; your total balance across channels remains the same.
-    #[method(name = "send_payment_with_router")]
+    #[method(name = "send_payment_with_router", with_extensions)]
     async fn send_payment_with_router(
         &self,
         params: SendPaymentWithRouterParams,
     ) -> Result<GetPaymentCommandResult, ErrorObjectOwned>;
 
     /// Lists all payments, optionally filtered by status.
-    #[method(name = "list_payments")]
+    #[method(name = "list_payments", with_extensions)]
     async fn list_payments(
         &self,
         params: ListPaymentsParams,
@@ -78,43 +81,116 @@ trait PaymentRpc {
 }
 
 pub struct PaymentRpcServerImpl<S> {
-    actor: ActorRef<NetworkActorMessage>,
-    store: S,
+    backend: BackendResolver<S>,
 }
 
-impl<S> PaymentRpcServerImpl<S> {
+impl<S: RpcBackendStore> PaymentRpcServerImpl<S> {
     pub fn new(actor: ActorRef<NetworkActorMessage>, store: S) -> Self {
-        PaymentRpcServerImpl { actor, store }
+        Self::new_fiber(FiberActorRef::from_network(&actor), store)
+    }
+
+    pub(crate) fn new_fiber(actor: FiberActorRef, store: S) -> Self {
+        PaymentRpcServerImpl {
+            backend: BackendResolver::new(Some(actor), store, None),
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn with_lsp_actor(mut self, lsp_actor: crate::rpc::tenant::LspActorHandle) -> Self {
+        self.backend = self.backend.with_lsp_actor(lsp_actor);
+        self
+    }
+
+    /// Resolve the caller's tenant and wrap it for the handler bodies.
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn backend_for(
+        &self,
+        extensions: &Extensions,
+    ) -> Result<PaymentBackend<S>, ErrorObjectOwned> {
+        Ok(PaymentBackend(self.backend.resolve(extensions).await?))
+    }
+
+    /// Resolve a query target that may name a tenant explicitly.
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn backend_for_query(
+        &self,
+        extensions: &Extensions,
+        requested_tenant: Option<&str>,
+    ) -> Result<PaymentBackend<S>, ErrorObjectOwned> {
+        Ok(PaymentBackend(
+            self.backend
+                .resolve_query(extensions, requested_tenant)
+                .await?,
+        ))
+    }
+
+    /// The public backend, for callers that hold no request (wasm bindings).
+    ///
+    /// Not available to handlers: they must resolve the request's tenant first.
+    #[cfg(any(test, target_arch = "wasm32"))]
+    pub fn public_handler(&self) -> PaymentBackend<S> {
+        PaymentBackend(self.backend.public_scope())
     }
 }
+
+/// Everything a payment handler runs against.
+///
+/// A thin view over the resolved [`ScopedBackend`]; the bodies live here, so the
+/// registered RPC type holds no actor at all.
+#[doc(hidden)]
+pub struct PaymentBackend<S>(ScopedBackend<S>);
+
+impl<S> std::ops::Deref for PaymentBackend<S> {
+    type Target = ScopedBackend<S>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[async_trait::async_trait]
 impl<S> PaymentRpcServer for PaymentRpcServerImpl<S>
 where
-    S: ChannelActorStateStore + NetworkGraphStateStore + Send + Sync + 'static,
+    S: ChannelActorStateStore + NetworkGraphStateStore + RpcBackendStore + Send + Sync + 'static,
 {
     /// Sends a payment to a peer.
     async fn send_payment(
         &self,
+        extensions: &Extensions,
         params: SendPaymentCommandParams,
     ) -> Result<GetPaymentCommandResult, ErrorObjectOwned> {
-        self.send_payment(params).await
+        self.backend_for(extensions)
+            .await?
+            .send_payment(params)
+            .await
     }
 
     /// Retrieves a payment.
     async fn get_payment(
         &self,
+        extensions: &Extensions,
         params: GetPaymentCommandParams,
     ) -> Result<GetPaymentCommandResult, ErrorObjectOwned> {
-        self.get_payment(params).await
+        let backend = self
+            .backend_for_query(extensions, params.tenant_id.as_deref())
+            .await?;
+        let params = GetPaymentCommandParams {
+            payment_hash: params.payment_hash,
+            tenant_id: None,
+        };
+        backend.get_payment(params).await
     }
 
     /// Builds a router with a list of pubkeys and required channels.
     async fn build_router(
         &self,
+        extensions: &Extensions,
         params: BuildRouterParams,
     ) -> Result<BuildPaymentRouterResult, ErrorObjectOwned> {
-        self.build_router(params).await
+        self.backend_for(extensions)
+            .await?
+            .build_router(params)
+            .await
     }
 
     /// Sends a payment to a peer with specified router.
@@ -122,17 +198,25 @@ where
     /// This can be used for things like channel rebalancing.
     async fn send_payment_with_router(
         &self,
+        extensions: &Extensions,
         params: SendPaymentWithRouterParams,
     ) -> Result<GetPaymentCommandResult, ErrorObjectOwned> {
-        self.send_payment_with_router(params).await
+        self.backend_for(extensions)
+            .await?
+            .send_payment_with_router(params)
+            .await
     }
 
     /// Lists all payments, optionally filtered by status.
     async fn list_payments(
         &self,
+        extensions: &Extensions,
         params: ListPaymentsParams,
     ) -> Result<ListPaymentsResult, ErrorObjectOwned> {
-        self.list_payments(params).await
+        self.backend_for(extensions)
+            .await?
+            .list_payments(params)
+            .await
     }
 }
 
@@ -163,7 +247,7 @@ fn send_payment_response_to_json(
     }
 }
 
-impl<S> PaymentRpcServerImpl<S>
+impl<S> PaymentBackend<S>
 where
     S: ChannelActorStateStore + NetworkGraphStateStore + Send + Sync + 'static,
 {
@@ -205,8 +289,8 @@ where
             .transpose()
             .rpc_err()?;
 
-        let message = |rpc_reply| -> NetworkActorMessage {
-            NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
+        let message = |rpc_reply| -> FiberActorMessage {
+            FiberActorMessage::new_command(FiberActorCommand::SendPayment(
                 SendPaymentCommand {
                     target_pubkey,
                     amount: params.amount,
@@ -229,7 +313,7 @@ where
                 rpc_reply,
             ))
         };
-        handle_actor_call!(self.actor, message, params)
+        handle_actor_call!(self.actor()?, message, params)
             .map(|response| send_payment_response_to_json(&response))
     }
 
@@ -237,11 +321,16 @@ where
         &self,
         params: GetPaymentCommandParams,
     ) -> Result<GetPaymentCommandResult, ErrorObjectOwned> {
+        if params.tenant_id.is_some() {
+            return Err(rpc_error(
+                "tenant_id is only supported by the native get_payment RPC",
+            ));
+        }
         let payment_hash = params.payment_hash.into();
-        let message = |rpc_reply| -> NetworkActorMessage {
-            NetworkActorMessage::Command(NetworkActorCommand::GetPayment(payment_hash, rpc_reply))
+        let message = |rpc_reply| -> FiberActorMessage {
+            FiberActorMessage::new_command(FiberActorCommand::GetPayment(payment_hash, rpc_reply))
         };
-        handle_actor_call!(self.actor, message, params)
+        handle_actor_call!(self.actor()?, message, params)
             .map(|response| send_payment_response_to_json(&response))
     }
 
@@ -257,8 +346,8 @@ where
             .collect::<Result<Vec<_>, _>>()
             .rpc_err()?;
 
-        let message = |rpc_reply| -> NetworkActorMessage {
-            NetworkActorMessage::Command(NetworkActorCommand::BuildPaymentRouter(
+        let message = |rpc_reply| -> FiberActorMessage {
+            FiberActorMessage::new_command(FiberActorCommand::BuildPaymentRouter(
                 BuildRouterCommand {
                     amount: params.amount,
                     hops_info,
@@ -269,12 +358,14 @@ where
             ))
         };
 
-        handle_actor_call!(self.actor, message, params).map(|response| BuildPaymentRouterResult {
-            router_hops: response
-                .router_hops
-                .into_iter()
-                .map(JsonRouterHop::from)
-                .collect(),
+        handle_actor_call!(self.actor()?, message, params).map(|response| {
+            BuildPaymentRouterResult {
+                router_hops: response
+                    .router_hops
+                    .into_iter()
+                    .map(JsonRouterHop::from)
+                    .collect(),
+            }
         })
     }
 
@@ -295,8 +386,8 @@ where
             .clone()
             .map(fiber_types::PaymentCustomRecords::from);
 
-        let message = |rpc_reply| -> NetworkActorMessage {
-            NetworkActorMessage::Command(NetworkActorCommand::SendPaymentWithRouter(
+        let message = |rpc_reply| -> FiberActorMessage {
+            FiberActorMessage::new_command(FiberActorCommand::SendPaymentWithRouter(
                 SendPaymentWithRouterCommand {
                     payment_hash,
                     router,
@@ -309,7 +400,7 @@ where
                 rpc_reply,
             ))
         };
-        handle_actor_call!(self.actor, message, params)
+        handle_actor_call!(self.actor()?, message, params)
             .map(|response| send_payment_response_to_json(&response))
     }
 

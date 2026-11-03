@@ -1,0 +1,52 @@
+meta {
+  name: wait recipient invoice paid
+  type: http
+  seq: 28.5
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "get_invoice",
+    "params": [
+      { "payment_hash": "{{LSP_OUTGOING_PAYMENT_HASH}}" }
+    ]
+  }
+}
+
+script:pre-request {
+  const body = req.getBody();
+  body.params[0].payment_hash = bru.getVar("LSP_OUTGOING_PAYMENT_HASH");
+  req.setBody(body);
+}
+
+assert {
+  res.body.error: isUndefined
+}
+
+script:post-response {
+  if (res.body.result?.status === "Paid") {
+    bru.setVar("LSP_RECIPIENT_PAID_ITERATION", 0);
+    return;
+  }
+  const iteration = Number(bru.getVar("LSP_RECIPIENT_PAID_ITERATION") || 0);
+  if (iteration + 1 < 30) {
+    bru.setVar("LSP_RECIPIENT_PAID_ITERATION", iteration + 1);
+    await new Promise(r => setTimeout(r, 1000));
+    bru.setNextRequest("wait recipient invoice paid");
+    return;
+  }
+  throw new Error(`recipient invoice stayed ${JSON.stringify(res.body)}`);
+}

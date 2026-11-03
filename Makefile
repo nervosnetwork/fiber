@@ -9,7 +9,7 @@ NATIVE_PACKAGES = -p fnn -p fiber-bin -p fnn-cli -p fiber-store -p fiber-types -
 # fiber-types excluded because fiber-store depends on fiber-types@0.8.1 from
 # crates.io, making "-p fiber-types" ambiguous. Checked separately.
 NATIVE_NO_FIBER_TYPES = -p fnn -p fiber-bin -p fnn-cli -p fiber-store -p fiber-json-types
-WASM_PACKAGES = -p fiber-wasm -p fiber-wasm-db-worker -p fiber-wasm-db-common
+WASM_PACKAGES = -p fiber-wasm -p fiber-wasm-db-worker -p fiber-wasm-db-common -p fiber-lsp-sdk
 
 .PHONY: build-metrics-prof
 build-metrics-prof:
@@ -18,22 +18,25 @@ build-metrics-prof:
 .PHONY: test
 test:
 	RUST_LOG=off cargo nextest run --no-fail-fast $(NATIVE_NO_FIBER_TYPES)
-	RUST_LOG=off cargo nextest run --no-fail-fast --no-default-features --features sqlite $(NATIVE_NO_FIBER_TYPES)
+	RUST_LOG=off cargo nextest run --no-fail-fast --no-default-features --features "sqlite watchtower" $(NATIVE_NO_FIBER_TYPES)
 	RUST_LOG=off cargo nextest run --no-fail-fast -p fiber-types
 
 .PHONY: check
 check:
+	# Default build enables `watchtower` and `lsp`; the explicit no-default-features
+	# lines below also compile the hosted LSP feature out.
 	cargo check --locked
 	cargo check --release --locked
 	cargo check --package fnn --no-default-features --features rocksdb
-	cargo check --no-default-features --features sqlite $(NATIVE_NO_FIBER_TYPES)
+	cargo check --package fnn --no-default-features --features "rocksdb watchtower lsp"
+	cargo check --no-default-features --features "sqlite watchtower" $(NATIVE_NO_FIBER_TYPES)
 	rustup target add wasm32-unknown-unknown
 	cargo check --target wasm32-unknown-unknown -p fiber-types --all-features
 
 .PHONY: clippy
 clippy:
 	cargo clippy --all-targets --all-features $(NATIVE_NO_FIBER_TYPES) -- -D warnings
-	cargo clippy --no-default-features --features sqlite $(NATIVE_NO_FIBER_TYPES) -- -D warnings
+	cargo clippy --no-default-features --features "sqlite watchtower" $(NATIVE_NO_FIBER_TYPES) -- -D warnings
 	# fiber-types checked separately to avoid "-p fiber-types" ambiguity with crates.io dep
 	cd crates/fiber-types && cargo clippy -- -D warnings
 	cargo clippy $(WASM_PACKAGES) --target wasm32-unknown-unknown -- -D warnings

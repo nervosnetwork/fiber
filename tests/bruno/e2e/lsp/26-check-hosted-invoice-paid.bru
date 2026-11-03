@@ -1,0 +1,51 @@
+meta {
+  name: check hosted tenant invoice paid
+  type: http
+  seq: 26
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+  Authorization: Bearer {{LSP_TENANT_TOKEN}}
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "get_invoice",
+    "params": [
+      {
+        "payment_hash": "{{LSP_INCOMING_PAYMENT_HASH}}"
+      }
+    ]
+  }
+}
+
+script:pre-request {
+  const body = req.getBody();
+  body.params[0].payment_hash = bru.getVar("LSP_INCOMING_PAYMENT_HASH");
+  req.setBody(body);
+  const token = bru.getVar("LSP_TENANT_TOKEN");
+  if (token) {
+    req.setHeader("Authorization", `Bearer ${token}`);
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+  res.body.result.status: eq "Paid"
+}
+
+script:post-response {
+  if (res.body.error) {
+    console.log("Step 26 ERROR:", JSON.stringify(res.body.error));
+  }
+}

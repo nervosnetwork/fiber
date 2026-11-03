@@ -6,6 +6,7 @@ use fiber_store::db_migrate::DbMigrate;
 use fiber_store::migration::{Migration, MigrationStore, INIT_DB_VERSION, MIGRATION_VERSION_KEY};
 
 use crate::store::store_impl::{open_store_with_migration, open_store_with_migrations};
+use crate::store::NodeNamespace;
 use crate::tests::test_utils::TempDir;
 use crate::FiberConfig;
 
@@ -80,5 +81,31 @@ fn test_store_sync_writes_cover_the_migrations() {
             "the migration ran with sync {sync}"
         );
         assert_eq!(store.sync_writes(), sync);
+    }
+}
+
+#[test]
+fn test_namespaced_store_sync_writes_cover_the_migrations() {
+    for sync in [true, false] {
+        let dir = TempDir::new("namespaced-store-sync-migration");
+        let store =
+            open_store_with_migration(dir.as_ref(), sync, Box::new(|_| true), Box::new(|_| {}))
+                .expect("open store");
+        let tenant = store.namespaced(NodeNamespace::hosted_tenant("sync-probe"));
+        StorageBackend::put(&tenant, MIGRATION_VERSION_KEY, INIT_DB_VERSION);
+
+        let seen = Arc::new(RwLock::new(None));
+        let mut migrate = DbMigrate::new();
+        migrate.add_migration(Arc::new(SyncProbe { seen: seen.clone() }));
+        migrate
+            .auto_migrate(&tenant, Box::new(|_| true), Box::new(|_| {}))
+            .expect("migrate tenant store");
+        assert_eq!(*seen.read().unwrap(), Some(sync));
+        assert_eq!(
+            StorageBackend::get(&tenant, b"sync-probe"),
+            Some(b"written".to_vec())
+        );
+        assert_eq!(StorageBackend::get(&store, b"sync-probe"), None);
+        tenant.ensure_current_schema().expect("check tenant schema");
     }
 }

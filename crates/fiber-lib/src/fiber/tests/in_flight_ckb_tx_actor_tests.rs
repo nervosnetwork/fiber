@@ -19,8 +19,8 @@ use crate::ckb::{
     CkbTxTracingResult,
 };
 use crate::fiber::{
-    InFlightCkbTxActor, InFlightCkbTxActorArguments, InFlightCkbTxActorMessage, InFlightCkbTxKind,
-    NetworkActorEvent, NetworkActorMessage,
+    FiberActorEvent, FiberActorMessage, FiberActorRef, InFlightCkbTxActor,
+    InFlightCkbTxActorArguments, InFlightCkbTxActorMessage, InFlightCkbTxKind, NetworkActorMessage,
 };
 
 /// CKB's PoolRejectedRBF: another transaction in the pool spends an input.
@@ -141,8 +141,8 @@ struct TestNetworkActor;
 #[async_trait::async_trait]
 impl Actor for TestNetworkActor {
     type Msg = NetworkActorMessage;
-    type State = mpsc::UnboundedSender<NetworkActorEvent>;
-    type Arguments = mpsc::UnboundedSender<NetworkActorEvent>;
+    type State = mpsc::UnboundedSender<FiberActorEvent>;
+    type Arguments = mpsc::UnboundedSender<FiberActorEvent>;
 
     async fn pre_start(
         &self,
@@ -158,7 +158,7 @@ impl Actor for TestNetworkActor {
         message: Self::Msg,
         sender: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        if let NetworkActorMessage::Event(event) = message {
+        if let NetworkActorMessage::Fiber(FiberActorMessage::Event(event)) = message {
             let _ = sender.send(event);
         }
         Ok(())
@@ -170,7 +170,7 @@ async fn spawn_test_actors(
     send_tx_should_fail: bool,
 ) -> (
     ActorRef<InFlightCkbTxActorMessage>,
-    mpsc::UnboundedReceiver<NetworkActorEvent>,
+    mpsc::UnboundedReceiver<FiberActorEvent>,
     Arc<AtomicUsize>,
     Arc<AtomicUsize>,
     ActorRef<CkbTxTracingMessage>,
@@ -191,7 +191,7 @@ async fn spawn_test_actors_with(
     tx_kind: InFlightCkbTxKind,
 ) -> (
     ActorRef<InFlightCkbTxActorMessage>,
-    mpsc::UnboundedReceiver<NetworkActorEvent>,
+    mpsc::UnboundedReceiver<FiberActorEvent>,
     Arc<AtomicUsize>,
     Arc<AtomicUsize>,
     ActorRef<CkbTxTracingMessage>,
@@ -238,7 +238,7 @@ async fn spawn_test_actors_with(
             chain_client: MockChainClient {
                 tx_status: tx_status.clone(),
             },
-            network_actor,
+            network_actor: FiberActorRef::from_network(&network_actor),
             tx_hash,
             tx_kind,
             confirmations: 1,
@@ -290,7 +290,7 @@ async fn permanent_send_tx_error_on_unknown_tx_emits_funding_transaction_failed(
         .expect("network event channel open");
     assert!(matches!(
         event,
-        NetworkActorEvent::FundingTransactionFailed(_)
+        FiberActorEvent::FundingTransactionFailed(_)
     ));
     assert_eq!(send_tx_calls.load(Ordering::SeqCst), 1);
     assert!(report_calls.load(Ordering::SeqCst) >= 1);
@@ -334,7 +334,7 @@ async fn a_pool_conflict_fails_a_funding_at_once() {
         .expect("network event channel open");
     assert!(matches!(
         event,
-        NetworkActorEvent::FundingTransactionFailed(_)
+        FiberActorEvent::FundingTransactionFailed(_)
     ));
     assert_eq!(send_tx_calls.load(Ordering::SeqCst), 1);
 }

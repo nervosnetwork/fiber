@@ -28,8 +28,8 @@ use crate::{
             Init, OpenChannel, ReestablishChannel,
         },
         BroadcastMessage, ChannelAnnouncement, ChannelUpdateChannelFlags, Cursor, FeatureVector,
-        NetworkActorCommand, NetworkActorEvent, NetworkActorMessage, NodeAnnouncement, Privkey,
-        Pubkey, SendPaymentData,
+        FiberActorCommand, NetworkActorMessage, NodeAnnouncement, Privkey, Pubkey,
+        PublicNetworkCommand, PublicNetworkEvent, SendPaymentData,
     },
     gen_rand_fiber_public_key, gen_rand_secp256k1_keypair_tuple, gen_rand_sha256_hash,
     invoice::{Currency, InvoiceBuilder},
@@ -76,7 +76,7 @@ async fn test_reject_legacy_channel_open_without_full_hash_feature() {
     node_a.connect_to(&mut legacy_peer).await;
 
     let result = call!(node_a.network_actor, |reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::OpenChannel(
             OpenChannelCommand {
                 pubkey: legacy_peer.pubkey,
                 public: false,
@@ -112,8 +112,9 @@ async fn test_reject_legacy_external_funding_channel_open() {
     node.connect_to(&mut legacy_peer).await;
 
     let result = call!(node.network_actor, |reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::OpenChannelWithExternalFunding(
+        NetworkActorMessage::new_command(FiberActorCommand::OpenChannelWithExternalFunding(
             OpenChannelWithExternalFundingCommand {
+                external_channel_signer: None,
                 pubkey: legacy_peer.pubkey,
                 funding_amount: 10_000_000_000,
                 public: false,
@@ -177,11 +178,13 @@ async fn test_reject_legacy_inbound_open_before_creating_pending_record() {
     };
 
     node.network_actor
-        .send_message(NetworkActorMessage::Event(NetworkActorEvent::FiberMessage(
-            legacy_peer.pubkey,
-            FiberMessage::ChannelInitialization(open_channel),
-            None,
-        )))
+        .send_message(NetworkActorMessage::new_event(
+            crate::fiber::network::PublicNetworkEvent::FiberMessage(
+                legacy_peer.pubkey,
+                FiberMessage::ChannelInitialization(open_channel),
+                None,
+            ),
+        ))
         .expect("network actor alive");
     node.expect_debug_event("ChannelPendingToBeRejected").await;
     assert!(node.store.get_channel_open_records().is_empty());
@@ -265,7 +268,7 @@ async fn test_fiber_message_hold_isolates_and_releases_messages_in_fifo_order() 
     node_a
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+            FiberActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
                 node_b.pubkey,
                 FiberMessage::add_tlc(AddTlc {
                     channel_id: gen_rand_sha256_hash(),
@@ -285,7 +288,7 @@ async fn test_fiber_message_hold_isolates_and_releases_messages_in_fifo_order() 
         node_a
             .network_actor
             .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                FiberActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
                     node_b.pubkey,
                     FiberMessage::add_tlc(AddTlc {
                         channel_id,
@@ -315,7 +318,7 @@ async fn test_fiber_message_hold_isolates_and_releases_messages_in_fifo_order() 
         node_a
             .network_actor
             .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                FiberActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
                     node_b.pubkey,
                     FiberMessage::add_tlc(AddTlc {
                         channel_id,
@@ -375,7 +378,7 @@ async fn test_fiber_message_hold_release_cancels_active_hold() {
     node_a
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+            FiberActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
                 node_b.pubkey,
                 FiberMessage::add_tlc(AddTlc {
                     channel_id,
@@ -423,7 +426,7 @@ async fn test_fiber_message_hold_release_retains_unattempted_messages_after_send
     for tlc_id in 0..2 {
         node.network_actor
             .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                FiberActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
                     target,
                     FiberMessage::add_tlc(AddTlc {
                         channel_id,
@@ -442,9 +445,7 @@ async fn test_fiber_message_hold_release_retains_unattempted_messages_after_send
 
     let result = tokio::time::timeout(event_wait_timeout(), async {
         call!(node.network_actor, |reply| {
-            NetworkActorMessage::new_command(NetworkActorCommand::ReleaseTestHeldFiberMessages(
-                reply,
-            ))
+            NetworkActorMessage::new_command(FiberActorCommand::ReleaseTestHeldFiberMessages(reply))
         })
     })
     .await
@@ -456,7 +457,7 @@ async fn test_fiber_message_hold_release_retains_unattempted_messages_after_send
 
     let remaining = tokio::time::timeout(event_wait_timeout(), async {
         call!(node.network_actor, |reply| {
-            NetworkActorMessage::new_command(NetworkActorCommand::TakeTestHeldFiberMessages(reply))
+            NetworkActorMessage::new_command(FiberActorCommand::TakeTestHeldFiberMessages(reply))
         })
     })
     .await
@@ -568,7 +569,7 @@ async fn relay_onchain_tlc_remove_does_not_block_network_actor() {
     .expect("spawn delayed channel actor");
 
     call!(node.network_actor, |reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::InstallTestChannelActor(
+        NetworkActorMessage::new_command(FiberActorCommand::InstallTestChannelActor(
             forwarding_channel_id,
             channel_actor,
             reply,
@@ -578,7 +579,7 @@ async fn relay_onchain_tlc_remove_does_not_block_network_actor() {
 
     node.network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::RelayOnChainTlcRemove {
+            FiberActorCommand::RelayOnChainTlcRemove {
                 downstream_channel_id: gen_rand_sha256_hash(),
                 downstream_tlc_id: TLCId::Offered(1),
                 forwarding_channel_id,
@@ -608,7 +609,7 @@ fn create_invalid_node_announcement_message() -> BroadcastMessage {
 
 async fn list_connected_peers(node: &NetworkNode) -> Vec<crate::fiber::network::PeerInfo> {
     call!(node.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ListPeers((), rpc_reply))
+        NetworkActorMessage::new_command(PublicNetworkCommand::ListPeers((), rpc_reply))
     })
     .expect("node alive")
     .expect("list peers")
@@ -1327,8 +1328,8 @@ async fn test_query_missing_broadcast_message() {
 
     node1
         .network_actor
-        .send_message(NetworkActorMessage::Command(
-            NetworkActorCommand::BroadcastMessages(vec![
+        .send_message(NetworkActorMessage::new_command(
+            PublicNetworkCommand::BroadcastMessages(vec![
                 BroadcastMessageWithTimestamp::ChannelUpdate(channel_update.clone()),
             ]),
         ))
@@ -1553,7 +1554,7 @@ async fn test_disconnected_finished_active_sync_peer_releases_budget() {
     victim
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::DisconnectPeer(
+            PublicNetworkCommand::DisconnectPeer(
                 empty_peer.pubkey,
                 PeerDisconnectReason::Requested,
                 None,
@@ -2039,7 +2040,7 @@ async fn test_exceeding_inbound_peer_budget_evicts_oldest_no_channel_peer_immedi
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
     let peers = call!(target.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ListPeers((), rpc_reply))
+        NetworkActorMessage::new_command(PublicNetworkCommand::ListPeers((), rpc_reply))
     })
     .expect("target alive")
     .expect("list peers");
@@ -2084,7 +2085,7 @@ async fn test_inbound_peer_with_channel_does_not_consume_no_channel_peer_budget(
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
     let peers = call!(target.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ListPeers((), rpc_reply))
+        NetworkActorMessage::new_command(PublicNetworkCommand::ListPeers((), rpc_reply))
     })
     .expect("target alive")
     .expect("list peers");
@@ -2140,7 +2141,7 @@ async fn test_inbound_peer_with_only_closed_channels_consumes_no_channel_peer_bu
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
     let peers = call!(target.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ListPeers((), rpc_reply))
+        NetworkActorMessage::new_command(PublicNetworkCommand::ListPeers((), rpc_reply))
     })
     .expect("target alive")
     .expect("list peers");
@@ -2187,7 +2188,7 @@ async fn test_new_inbound_peer_can_open_channel_after_replacing_oldest_no_channe
         .await;
 
     let peers = call!(target.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ListPeers((), rpc_reply))
+        NetworkActorMessage::new_command(PublicNetworkCommand::ListPeers((), rpc_reply))
     })
     .expect("target alive")
     .expect("list peers");
@@ -2203,7 +2204,7 @@ async fn test_new_inbound_peer_can_open_channel_after_replacing_oldest_no_channe
 
     let target_pubkey = target.pubkey;
     let message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::OpenChannel(
             OpenChannelCommand {
                 pubkey: target_pubkey,
                 public: true,
@@ -2297,7 +2298,7 @@ async fn test_repeated_nonexistent_channel_messages_trigger_disconnect_and_temp_
     for _ in 0..20 {
         peer.network_actor
             .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                FiberActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
                     target.pubkey,
                     FiberMessage::reestablish_channel(ReestablishChannel {
                         channel_id: gen_rand_sha256_hash(),
@@ -2521,7 +2522,7 @@ async fn test_saving_and_connecting_to_node() {
     node2
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::SavePeerAddress(node1_address),
+            PublicNetworkCommand::SavePeerAddress(node1_address),
         ))
         .expect("send message to network actor");
 
@@ -2750,7 +2751,7 @@ async fn test_abort_funding_on_building_funding_tx() {
 
     // Use a huge amount to fail the funding
     let message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::OpenChannel(
             OpenChannelCommand {
                 pubkey: node_b.pubkey,
                 public: true,
@@ -2784,7 +2785,7 @@ async fn test_abort_funding_on_building_funding_tx() {
         })
         .await;
     let message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::AcceptChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::AcceptChannel(
             AcceptChannelCommand {
                 temp_channel_id: open_channel_result.channel_id,
                 funding_amount: funding_amount_b,
@@ -2880,7 +2881,7 @@ async fn test_abort_funding_on_committing_funding_tx_on_chain() {
     node_a.connect_to(&mut node_b).await;
 
     let message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::OpenChannel(
             OpenChannelCommand {
                 pubkey: node_b.pubkey,
                 public: true,
@@ -2914,7 +2915,7 @@ async fn test_abort_funding_on_committing_funding_tx_on_chain() {
         })
         .await;
     let message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::AcceptChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::AcceptChannel(
             AcceptChannelCommand {
                 temp_channel_id: open_channel_result.channel_id,
                 funding_amount: funding_amount_b,
@@ -2971,7 +2972,7 @@ async fn test_abort_funding_on_sign_funding_tx_failure() {
     node_a.connect_to(&mut node_b).await;
 
     let message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::OpenChannel(
             OpenChannelCommand {
                 pubkey: node_b.pubkey,
                 public: true,
@@ -3006,7 +3007,7 @@ async fn test_abort_funding_on_sign_funding_tx_failure() {
         .await;
 
     let message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::AcceptChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::AcceptChannel(
             AcceptChannelCommand {
                 temp_channel_id: open_channel_result.channel_id,
                 funding_amount: funding_amount_b,
@@ -3122,7 +3123,7 @@ async fn test_to_be_accepted_channels_number_limit() {
     let node_pubkey = node.pubkey;
 
     let message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::OpenChannel(
             OpenChannelCommand {
                 pubkey: node_pubkey,
                 public: true,
@@ -3187,7 +3188,7 @@ async fn test_to_be_accepted_channels_number_limit() {
 
 async fn open_channel_from_peer(peer: &NetworkNode, target_pubkey: Pubkey, funding_amount: u128) {
     let message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::OpenChannel(
             OpenChannelCommand {
                 pubkey: target_pubkey,
                 public: true,
@@ -3319,17 +3320,19 @@ async fn test_malicious_open_channel_reserved_overflow_rejected_before_pending_a
     };
 
     node.network_actor
-        .send_message(NetworkActorMessage::Event(NetworkActorEvent::FiberMessage(
-            peer.pubkey,
-            FiberMessage::ChannelInitialization(open_channel),
-            None,
-        )))
+        .send_message(NetworkActorMessage::new_event(
+            PublicNetworkEvent::FiberMessage(
+                peer.pubkey,
+                FiberMessage::ChannelInitialization(open_channel),
+                None,
+            ),
+        ))
         .expect("network actor alive");
 
     node.expect_debug_event("ChannelPendingToBeRejected").await;
 
     let pending = call!(node.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::GetPendingAcceptChannels(rpc_reply))
+        NetworkActorMessage::new_command(FiberActorCommand::GetPendingAcceptChannels(rpc_reply))
     })
     .expect("network actor alive")
     .expect("pending channels");
@@ -3395,7 +3398,7 @@ async fn test_to_be_accepted_channels_bytes_limit() {
     let node_pubkey = node.pubkey;
 
     let message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::OpenChannel(
             OpenChannelCommand {
                 pubkey: node_pubkey,
                 public: true,

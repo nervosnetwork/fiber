@@ -6,13 +6,21 @@ use crate::ckb::contracts::{get_script_by_contract, Contract};
 use crate::fiber::onchain_tlc_reconcile::{OnChainTlcSettlement, StoredOnChainTlcSettlement};
 use fiber_types::TLCId;
 use fiber_types::{
-    ChannelData, CommitmentContractFeatures, Hash256, NodeId, Privkey, Pubkey, RevocationData,
-    SettlementData,
+    ChannelData, CommitmentContractFeatures, Hash256, NodeId, RevocationData, SettlementData,
+    WatchChannelKeys, WatchtowerSignerState,
 };
 
 pub trait WatchtowerStore {
     /// Get the channels currently being watched together with their owning node.
     fn get_watch_channels_with_nodes(&self) -> Vec<(NodeId, ChannelData)>;
+
+    /// Get watched channels belonging to one authorized node.
+    fn get_watch_channels_for_node(&self, node_id: &NodeId) -> Vec<ChannelData> {
+        self.get_watch_channels_with_nodes()
+            .into_iter()
+            .filter_map(|(owner, channel)| (owner == *node_id).then_some(channel))
+            .collect()
+    }
 
     /// Get the channels that are currently being watched by the watchtower
     fn get_watch_channels(&self) -> Vec<ChannelData> {
@@ -23,47 +31,44 @@ pub trait WatchtowerStore {
     }
     /// Insert a channel's funding tx lock script into the store, it will be used to monitor the channel,
     /// please note that the lock script should be globally unique, so that the watchtower can identify the channel.
-    #[allow(clippy::too_many_arguments)]
     fn insert_watch_channel(
         &self,
         node_id: NodeId,
         channel_id: Hash256,
         funding_udt_type_script: Option<Script>,
-        local_settlement_key: Privkey,
-        remote_settlement_key: Pubkey,
-        local_funding_pubkey: Pubkey,
-        remote_funding_pubkey: Pubkey,
+        keys: WatchChannelKeys,
         settlement_data: SettlementData,
     ) {
         self.insert_watch_channel_with_features(
             node_id,
             channel_id,
             funding_udt_type_script,
-            local_settlement_key,
-            remote_settlement_key,
-            local_funding_pubkey,
-            remote_funding_pubkey,
+            keys,
             settlement_data,
             CommitmentContractFeatures::LEGACY,
         );
     }
 
     /// Insert a channel while retaining its negotiated witness layout.
-    #[allow(clippy::too_many_arguments)]
     fn insert_watch_channel_with_features(
         &self,
         node_id: NodeId,
         channel_id: Hash256,
         funding_udt_type_script: Option<Script>,
-        local_settlement_key: Privkey,
-        remote_settlement_key: Pubkey,
-        local_funding_pubkey: Pubkey,
-        remote_funding_pubkey: Pubkey,
+        keys: WatchChannelKeys,
         settlement_data: SettlementData,
         commitment_contract_features: CommitmentContractFeatures,
     );
-    /// Remove a channel from the store, the watchtower will stop monitoring the channel
-    fn remove_watch_channel(&self, node_id: NodeId, channel_id: Hash256);
+    /// Stop monitoring a channel. Returns false if removal is refused for a live channel.
+    fn remove_watch_channel(&self, node_id: NodeId, channel_id: Hash256) -> bool;
+
+    /// Read one watched channel, if present.
+    fn get_watch_channel(&self, node_id: &NodeId, channel_id: &Hash256) -> Option<ChannelData> {
+        self.get_watch_channels_with_nodes()
+            .into_iter()
+            .find(|(stored_node, data)| stored_node == node_id && data.channel_id == *channel_id)
+            .map(|(_, data)| data)
+    }
     /// Update the revocation data of a channel, the watchtower will use this data to revoke an old version commitment transaction and settle the remote commitment transaction of a force closed channel
     fn update_revocation(
         &self,
@@ -94,6 +99,31 @@ pub trait WatchtowerStore {
 
     /// Remove a watch preimage from the store.
     fn remove_watch_preimage(&self, node_id: NodeId, payment_hash: Hash256);
+
+    /// Read the external-signer pause state for a watched channel.
+    fn get_watchtower_signer(
+        &self,
+        node_id: &NodeId,
+        channel_id: &Hash256,
+    ) -> WatchtowerSignerState;
+
+    /// Persist the external-signer pause state for a watched channel.
+    fn put_watchtower_signer(
+        &self,
+        node_id: &NodeId,
+        channel_id: &Hash256,
+        state: WatchtowerSignerState,
+    );
+
+    /// Atomically read, modify and persist signer state under the watchtower write lock.
+    /// Failed updates must leave persisted state unchanged. The callback must not
+    /// perform blocking network I/O or call another watchtower write operation.
+    fn update_watchtower_signer<R, E>(
+        &self,
+        node_id: &NodeId,
+        channel_id: &Hash256,
+        update: impl FnOnce(&mut WatchtowerSignerState) -> Result<R, E>,
+    ) -> Result<R, E>;
 
     /// Get a watch preimage owned by the given node.
     fn get_watch_preimage(&self, node_id: &NodeId, payment_hash: &Hash256) -> Option<Hash256>;
@@ -142,7 +172,8 @@ pub fn channel_data_x_only_aggregated_pubkey(cd: &ChannelData, for_remote: bool)
 ///
 /// Free function replacement for `ChannelData::local_settlement_pubkey_hash()`.
 pub fn channel_data_local_settlement_pubkey_hash(cd: &ChannelData) -> [u8; 20] {
-    blake160(cd.local_settlement_key.pubkey().serialize().as_ref()).0
+    let pubkey = cd.local_settlement_pubkey();
+    blake160(pubkey.serialize().as_ref()).0
 }
 
 /// Compute the funding transaction lock script for a channel.

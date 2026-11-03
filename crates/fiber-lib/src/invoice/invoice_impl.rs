@@ -100,6 +100,11 @@ impl InvoiceBuilder {
     attr_setter!(payment_secret, PaymentSecret, Hash256);
     attr_setter!(hash_algorithm, HashAlgorithm, HashAlgorithm);
 
+    pub fn trampoline_route_hint(self, node_id: PublicKey) -> Self {
+        self.allow_trampoline_routing(true)
+            .add_attr(Attribute::TrampolineRouteHint(node_id))
+    }
+
     fn update_feature_vector<F>(self, f: F) -> Self
     where
         F: FnOnce(&mut FeatureVector),

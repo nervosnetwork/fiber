@@ -1,0 +1,36 @@
+meta {
+  name: open payer CKB channel
+  type: http
+  seq: 8
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "id":"42","jsonrpc":"2.0","method":"open_channel",
+    "params":[{"pubkey":"{{NODE2_PUBKEY}}","funding_amount":"0xba43b7400","public":false}]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+  res.body.result.temporary_channel_id: isDefined
+}
+
+script:post-response {
+  if (res.body.error) throw new Error(JSON.stringify(res.body.error));
+  bru.setVar("CURRENT_PAYER_ASSET", "ckb");
+  bru.setVar("CURRENT_PAYER_UDT_SCRIPT", "");
+  bru.setVar("CURRENT_PAYER_FUNDING_ITERATION", 0);
+  bru.setVar("CURRENT_PAYER_BROADCAST_ITERATION", 0);
+  bru.setNextRequest("wait payer funding transaction");
+}

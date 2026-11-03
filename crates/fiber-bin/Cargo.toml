@@ -9,13 +9,20 @@ name = "fnn"
 path = "src/main.rs"
 
 [features]
-default = ["fnn/rocksdb"]
+default = ["fnn/rocksdb", "watchtower", "lsp"]
 debug-add-tlc = ["fnn/debug-add-tlc"]
 metrics = ["fnn/metrics"]
-sqlite = ["fnn/sqlite"]
+sqlite = ["fnn/sqlite", "watchtower"]
+lsp = ["fnn/lsp"]
+watchtower = ["fnn/watchtower"]
 
 [dependencies]
-fnn = { path = "../fiber-lib" }
+# Default features are switched off on purpose: a dependency's default features are
+# enabled by Cargo regardless of this crate's `--no-default-features`, so leaving
+# them on would make the `lsp` and `watchtower` features below one-way switches and
+# no one could build a node without the hosted LSP. Every default of `fnn` must be
+# mirrored as a feature here.
+fnn = { path = "../fiber-lib", default-features = false }
 ckb-chain-spec = "1"
 ckb-resource = "1"
 ractor = { version = "0.15", features = [

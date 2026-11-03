@@ -1,0 +1,54 @@
+meta {
+  name: wait current hosted hold invoice received
+  type: http
+  seq: 14.01
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Authorization: Bearer {{LSP_TENANT_TOKEN}}
+}
+
+body:json {
+  {"id":"42","jsonrpc":"2.0","method":"get_invoice","params":[{"payment_hash":"placeholder"}]}
+}
+
+script:pre-request {
+  const body = req.getBody();
+  body.params[0].payment_hash = bru.getVar("CURRENT_PAYMENT_HASH");
+  req.setBody(body);
+}
+
+assert {
+  res.body.error: isUndefined
+}
+
+script:post-response {
+  if (res.body.error) throw new Error(res.body.error.message);
+  const status = res.body.result.status;
+  if (status === "Paid") {
+    throw new Error("hold invoice settled before SDK preimage release");
+  }
+  if (status === "Received") {
+    bru.setVar("CURRENT_HOLD_RECEIVED_ITERATION", 0);
+    bru.setNextRequest("release current hosted invoice preimage");
+    return;
+  }
+  if (status === "Cancelled" || status === "Expired") {
+    throw new Error(`hosted hold invoice became ${status}`);
+  }
+  const iteration = Number(bru.getVar("CURRENT_HOLD_RECEIVED_ITERATION") || 0);
+  if (iteration + 1 < 60) {
+    bru.setVar("CURRENT_HOLD_RECEIVED_ITERATION", iteration + 1);
+    await new Promise(r => setTimeout(r, 1000));
+    bru.setNextRequest("wait current hosted hold invoice received");
+    return;
+  }
+  throw new Error(`hosted hold invoice stayed ${status}`);
+}

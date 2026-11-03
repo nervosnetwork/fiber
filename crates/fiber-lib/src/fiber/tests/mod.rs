@@ -1,6 +1,9 @@
 mod channel;
 mod channel_commit_diff;
 mod channel_restart_stress;
+#[cfg(not(target_arch = "wasm32"))]
+#[cfg(feature = "lsp")]
+pub(crate) mod external_signer_restart;
 mod features;
 mod fee;
 mod gossip;
@@ -10,6 +13,7 @@ mod hash_algorithm;
 mod history;
 mod in_flight_ckb_tx_actor_tests;
 #[cfg(not(target_arch = "wasm32"))]
+#[cfg(feature = "watchtower")]
 mod invoice_settlement;
 #[cfg(not(target_arch = "wasm32"))]
 mod mpp;

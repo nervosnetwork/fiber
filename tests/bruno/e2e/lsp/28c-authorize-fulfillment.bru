@@ -1,0 +1,32 @@
+meta {
+  name: approve outgoing payment fulfillment
+  type: http
+  seq: 28.6
+}
+
+post {
+  url: {{LSP_SDK_AGENT_URL}}/authorize
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {"type":"Fulfillment","channel_id":"placeholder","payment_hash":"placeholder","preimage":"placeholder"}
+}
+
+script:pre-request {
+  const body = req.getBody();
+  body.channel_id = bru.getVar("HOSTED_CHANNEL_ID");
+  body.payment_hash = bru.getVar("LSP_OUTGOING_PAYMENT_HASH");
+  body.preimage = bru.getVar("LSP_OUTGOING_PREIMAGE");
+  req.setBody(body);
+}
+
+assert {
+  res.status: eq 200
+  res.body.result.authorized: eq true
+}

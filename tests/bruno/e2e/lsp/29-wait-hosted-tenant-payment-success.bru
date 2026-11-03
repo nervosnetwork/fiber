@@ -1,0 +1,69 @@
+meta {
+  name: wait hosted tenant outgoing payment success
+  type: http
+  seq: 29
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+  Authorization: Bearer {{LSP_TENANT_TOKEN}}
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "get_payment",
+    "params": [
+      {
+        "payment_hash": "{{LSP_OUTGOING_PAYMENT_HASH}}"
+      }
+    ]
+  }
+}
+
+script:pre-request {
+  const body = req.getBody();
+  body.params[0].payment_hash = bru.getVar("LSP_OUTGOING_PAYMENT_HASH");
+  req.setBody(body);
+  const token = bru.getVar("LSP_TENANT_TOKEN");
+  if (token) {
+    req.setHeader("Authorization", `Bearer ${token}`);
+  }
+}
+
+vars:post-response {
+  LSP_OUTGOING_MAX_ITERATIONS: 30
+}
+
+assert {
+  res.body.error: isUndefined
+}
+
+script:post-response {
+  const payment = res.body.result;
+  const iteration = Number(bru.getVar("LSP_OUTGOING_ITERATION") || 0);
+  const maxIterations = Number(bru.getVar("LSP_OUTGOING_MAX_ITERATIONS"));
+
+  if (payment.status === "Success") {
+    bru.setVar("LSP_OUTGOING_ITERATION", 0);
+    return;
+  }
+  if (payment.status === "Failed") {
+    throw new Error(`hosted tenant payment failed: ${payment.failed_error}`);
+  }
+  if (iteration + 1 < maxIterations) {
+    bru.setVar("LSP_OUTGOING_ITERATION", iteration + 1);
+    await new Promise(r => setTimeout(r, 1000));
+    bru.setNextRequest("wait hosted tenant outgoing payment success");
+    return;
+  }
+  throw new Error(`hosted tenant payment stayed ${payment.status}`);
+}

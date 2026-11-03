@@ -68,6 +68,7 @@ pub mod channel {
     pub async fn open_channel(params: JsValue) -> Result<JsValue, JsValue> {
         fiber_wasm()?
             .channel
+            .public_handler()
             .open_channel(param(params)?)
             .await
             .map(result)
@@ -77,6 +78,7 @@ pub mod channel {
     pub async fn accept_channel(params: JsValue) -> Result<JsValue, JsValue> {
         fiber_wasm()?
             .channel
+            .public_handler()
             .accept_channel(param(params)?)
             .await
             .map(result)
@@ -86,6 +88,7 @@ pub mod channel {
     pub async fn abandon_channel(params: JsValue) -> Result<(), JsValue> {
         fiber_wasm()?
             .channel
+            .public_handler()
             .abandon_channel(param(params)?)
             .await
             .map_err(error)
@@ -94,6 +97,7 @@ pub mod channel {
     pub async fn list_channels(params: JsValue) -> Result<JsValue, JsValue> {
         fiber_wasm()?
             .channel
+            .public_handler()
             .list_channels(param(params)?)
             .await
             .map(result)
@@ -103,6 +107,7 @@ pub mod channel {
     pub async fn shutdown_channel(params: JsValue) -> Result<(), JsValue> {
         fiber_wasm()?
             .channel
+            .public_handler()
             .shutdown_channel(param(params)?)
             .await
             .map_err(error)
@@ -111,6 +116,7 @@ pub mod channel {
     pub async fn update_channel(params: JsValue) -> Result<(), JsValue> {
         fiber_wasm()?
             .channel
+            .public_handler()
             .update_channel(param(params)?)
             .await
             .map_err(error)
@@ -119,6 +125,7 @@ pub mod channel {
     pub async fn open_channel_with_external_funding(params: JsValue) -> Result<JsValue, JsValue> {
         fiber_wasm()?
             .channel
+            .public_handler()
             .open_channel_with_external_funding(param(params)?)
             .await
             .map(result)
@@ -128,7 +135,28 @@ pub mod channel {
     pub async fn submit_signed_funding_tx(params: JsValue) -> Result<JsValue, JsValue> {
         fiber_wasm()?
             .channel
+            .public_handler()
             .submit_signed_funding_tx(param(params)?)
+            .await
+            .map(result)
+            .map_err(error)
+    }
+    #[wasm_bindgen]
+    pub async fn get_channel_signing_status(params: JsValue) -> Result<JsValue, JsValue> {
+        fiber_wasm()?
+            .channel
+            .public_handler()
+            .get_channel_signing_status(param(params)?)
+            .await
+            .map(result)
+            .map_err(error)
+    }
+    #[wasm_bindgen]
+    pub async fn submit_channel_signature(params: JsValue) -> Result<JsValue, JsValue> {
+        fiber_wasm()?
+            .channel
+            .public_handler()
+            .submit_channel_signature(param(params)?)
             .await
             .map(result)
             .map_err(error)
@@ -181,6 +209,7 @@ pub mod invoice {
     pub async fn new_invoice(params: JsValue) -> Result<JsValue, JsValue> {
         fiber_wasm()?
             .invoice
+            .public_handler()
             .new_invoice(param(params)?)
             .await
             .map(result)
@@ -190,6 +219,7 @@ pub mod invoice {
     pub async fn parse_invoice(params: JsValue) -> Result<JsValue, JsValue> {
         fiber_wasm()?
             .invoice
+            .public_handler()
             .parse_invoice(param(params)?)
             .await
             .map(result)
@@ -199,6 +229,7 @@ pub mod invoice {
     pub async fn get_invoice(payment_hash: JsValue) -> Result<JsValue, JsValue> {
         fiber_wasm()?
             .invoice
+            .public_handler()
             .get_invoice(param(payment_hash)?)
             .await
             .map(result)
@@ -208,6 +239,7 @@ pub mod invoice {
     pub async fn cancel_invoice(payment_hash: JsValue) -> Result<JsValue, JsValue> {
         fiber_wasm()?
             .invoice
+            .public_handler()
             .cancel_invoice(param(payment_hash)?)
             .await
             .map(result)
@@ -217,6 +249,7 @@ pub mod invoice {
     pub async fn settle_invoice(params: JsValue) -> Result<JsValue, JsValue> {
         fiber_wasm()?
             .invoice
+            .public_handler()
             .settle_invoice(param(params)?)
             .await
             .map(result)
@@ -231,6 +264,7 @@ pub mod payment {
     pub async fn send_payment(params: JsValue) -> Result<JsValue, JsValue> {
         fiber_wasm()?
             .payment
+            .public_handler()
             .send_payment(param(params)?)
             .await
             .map(result)
@@ -240,6 +274,7 @@ pub mod payment {
     pub async fn get_payment(params: JsValue) -> Result<JsValue, JsValue> {
         fiber_wasm()?
             .payment
+            .public_handler()
             .get_payment(param(params)?)
             .await
             .map(result)
@@ -249,6 +284,7 @@ pub mod payment {
     pub async fn build_router(params: JsValue) -> Result<JsValue, JsValue> {
         fiber_wasm()?
             .payment
+            .public_handler()
             .build_router(param(params)?)
             .await
             .map(result)
@@ -258,6 +294,7 @@ pub mod payment {
     pub async fn send_payment_with_router(params: JsValue) -> Result<JsValue, JsValue> {
         fiber_wasm()?
             .payment
+            .public_handler()
             .send_payment_with_router(param(params)?)
             .await
             .map(result)

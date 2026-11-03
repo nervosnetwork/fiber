@@ -1,0 +1,48 @@
+meta {
+  name: wait prefund invoice paid
+  type: http
+  seq: 5.955
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Authorization: Bearer {{LSP_OPERATOR_TOKEN}}
+}
+
+body:json {
+  {"id":"42","jsonrpc":"2.0","method":"get_invoice","params":[{"payment_hash":"placeholder"}]}
+}
+
+script:pre-request {
+  const body = req.getBody();
+  body.params[0].payment_hash = bru.getVar("PREFUND_PAYMENT_HASH");
+  req.setBody(body);
+}
+
+assert {
+  res.body.error: isUndefined
+}
+
+script:post-response {
+  if (res.body.error) throw new Error(JSON.stringify(res.body.error));
+  if (res.body.result.status === "Paid") {
+    bru.setVar("PREFUND_INVOICE_ITERATION", 0);
+    bru.setNextRequest(bru.getVar("PREFUND_ASSET") === "simple"
+      ? "prefund public T XUDT" : "connect payer to Public T");
+    return;
+  }
+  const iteration = Number(bru.getVar("PREFUND_INVOICE_ITERATION") || 0);
+  if (iteration + 1 < 30) {
+    bru.setVar("PREFUND_INVOICE_ITERATION", iteration + 1);
+    await new Promise(r => setTimeout(r, 1000));
+    bru.setNextRequest("wait prefund invoice paid");
+    return;
+  }
+  throw new Error(`prefund invoice stayed ${res.body.result.status}`);
+}

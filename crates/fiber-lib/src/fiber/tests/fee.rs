@@ -29,7 +29,9 @@ fn settlement_transaction_v1_witness_is_12_bytes_larger_per_pending_htlc() {
             payment_amount: 1_000,
             payment_hash: Hash256::from([8u8; 32]),
             expiry: 0,
-            local_key: Privkey::from(&[1u8; 32]),
+            local_key: Some(Privkey::from(&[1u8; 32])),
+            local_key_pubkey: None,
+            local_key_commitment_number: None,
             remote_key: Privkey::from(&[2u8; 32]).pubkey(),
         }],
     };
@@ -42,7 +44,7 @@ fn settlement_transaction_v1_witness_is_12_bytes_larger_per_pending_htlc() {
                 &settlement_data,
                 false,
                 version,
-                Privkey::from(&[3u8; 32]),
+                Privkey::from(&[3u8; 32]).pubkey(),
                 Privkey::from(&[4u8; 32]).pubkey(),
             )
             .as_slice(),
@@ -144,7 +146,9 @@ fn full_hash_feature_serializes_full_payment_hash_in_tlc() {
         payment_amount: 1_000,
         payment_hash: Hash256::from([8u8; 32]),
         expiry: 0,
-        local_key: Privkey::from(&[1u8; 32]),
+        local_key: Some(Privkey::from(&[1u8; 32])),
+        local_key_pubkey: None,
+        local_key_commitment_number: None,
         remote_key: Privkey::from(&[2u8; 32]).pubkey(),
     };
     let legacy = settlement_tlc_to_witness(&tlc, false, Features::LEGACY);

@@ -26,4 +26,18 @@ body:json {
 
 assert {
   res.status: eq 200
+  res.body.error: isUndefined
+}
+
+script:pre-request {
+  // Share one bounded wait across the commitment and both balance checks.
+  // Spending the original commitment output is not enough: later settlement
+  // transactions must also be mined before wallet balances are final.
+  if (!bru.getVar("SETTLEMENT_DEADLINE")) {
+    bru.setVar("SETTLEMENT_DEADLINE", Date.now() + 120000);
+  }
+}
+
+script:post-response {
+  await new Promise(r => setTimeout(r, 1000));
 }

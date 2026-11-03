@@ -1,0 +1,32 @@
+meta {
+  name: authorize Watchtower
+  type: http
+  seq: 9.5
+}
+
+post {
+  url: {{LSP_SDK_AGENT_URL}}/authorize
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {"type":"Watchtower","channel_id":"placeholder","destination":{},"max_fee":10000}
+}
+
+script:pre-request {
+  const body = req.getBody();
+  body.channel_id = bru.getVar("REMOTE_CHANNEL_ID");
+  // Explicit fixture consent: settlement and sponsor change go to Public T.
+  body.destination = bru.getVar("REMOTE_PEER_SHUTDOWN_SCRIPT");
+  req.setBody(body);
+}
+
+assert {
+  res.status: eq 200
+  res.body.result.authorized: eq true
+}
