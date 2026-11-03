@@ -273,11 +273,13 @@ where
 {
     let mut cell_collector = new_default_cell_collector(&rpc_url);
 
+    // One client for the round: building one loads the TLS root store, about 6 ms of CPU, and it
+    // was built for every watched channel.
+    let ckb_client = CkbRpcClient::with_builder(&rpc_url, |builder| {
+        builder.timeout(CKB_RPC_TIMEOUT).no_proxy()
+    })
+    .expect("create ckb rpc client should not fail");
     for (channel_node_id, channel_data) in store.get_watch_channels_with_nodes() {
-        let ckb_client = CkbRpcClient::with_builder(&rpc_url, |builder| {
-            builder.timeout(CKB_RPC_TIMEOUT).no_proxy()
-        })
-        .expect("create ckb rpc client should not fail");
         let tx_hash = match crate::ckb::client::find_first_input_tx_hash(
             &ckb_client,
             &channel_data_funding_tx_lock(&channel_data),
@@ -375,7 +377,7 @@ where
                                             try_settle_commitment_tx(
                                                 commitment_lock,
                                                 first_commitment_tx_out_point,
-                                                ckb_client,
+                                                &ckb_client,
                                                 channel_data,
                                                 true,
                                                 &signer,
@@ -390,7 +392,7 @@ where
                                     try_settle_commitment_tx(
                                         commitment_lock,
                                         first_commitment_tx_out_point,
-                                        ckb_client,
+                                        &ckb_client,
                                         channel_data,
                                         false,
                                         &signer,
@@ -537,7 +539,7 @@ fn build_revocation_tx(
 fn try_settle_commitment_tx<S: WatchtowerStore>(
     commitment_lock: Script,
     first_commitment_tx_out_point: OutPoint,
-    ckb_client: CkbRpcClient,
+    ckb_client: &CkbRpcClient,
     channel_data: ChannelData,
     for_remote: bool,
     signer: &LocalSigner,
@@ -619,7 +621,7 @@ fn try_settle_commitment_tx<S: WatchtowerStore>(
 
     let settlement_scan = scan_watched_settlement_txs(
         search_key.clone(),
-        &ckb_client,
+        ckb_client,
         &script,
         first_commitment_tx_out_point.clone(),
         initial_tlcs,
