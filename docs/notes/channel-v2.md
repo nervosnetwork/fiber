@@ -94,6 +94,12 @@ prove that another copy of it has not already signed. Advancing `own` clears its
 retired allocations; older healthy snapshots with past-round retired entries
 remain readable, but those entries cannot be selected for a later round.
 
+The unaccepted initial CS is different: opening recovery replays its exact original
+signature. Its verification allocation and any staged incoming signing context
+are retained across reconnects until acceptance, not rotated through the bounded
+retired list. Once accepted, duplicate initial CS uses its saved incoming record;
+normal rotation and advancement to the Ready allocation remain unchanged.
+
 While an outgoing CS awaits its RAA, a peer may advertise the following round.
 That advertisement stays in the per-connection recovery state until RAA acceptance
 advances the local counter and confirmed remote session together. A replayed RAA
@@ -105,10 +111,12 @@ until opening completes. Its sent flag and nonce are committed together before
 publication. Reconnection must not replace it with a normal handshake nonce, and
 replays the saved Ready even if both Ready flags were committed before the local
 opening transition completed. While both counters are still at the first normal
-round, the unused bootstrap Ready allocation is also retained after local Ready:
-the peer may have missed it while a first payment was sent. Recovery publishes
-that Ready before pending updates and continues the outstanding round; it does
-not stop at the opening replay. Once either normal direction advances, ordinary
+round, the unused bootstrap Ready allocation is also retained after local Ready
+and during early cooperative shutdown: the peer may have missed it while a first
+payment or shutdown was started. Recovery publishes that Ready before pending
+updates or shutdown messages and continues the outstanding round/closing flow;
+it does not stop at the opening replay. Dropping/chain-confirmation phases do not
+reactivate opening Ready. Once either normal direction advances, ordinary
 reconnect nonce rotation applies again. A submitted external-funding initiator
 waiting for Ready can replay its saved witness response to a matching TxSignatures retry, followed by its saved
 Ready if already advertised. This replay does not mutate funding/signing state

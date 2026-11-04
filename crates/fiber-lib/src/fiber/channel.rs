@@ -6852,22 +6852,21 @@ impl ChannelActorState {
             self.connectivity_state = ChannelConnectivityState::Syncing;
             if self.session_v2.is_some() {
                 self.reestablish_started_at = Some(now_timestamp_as_millis_u64());
-                // Every handshake must carry a fresh verification nonce (`next_local_nonces` in
-                // `bolt-simple-taproot`). Rotate at the single place a handshake can be emitted, so
-                // no path can advertise a superseded nonce. Staged records bound to the old nonce
-                // are dropped; `incoming` is kept because ACK processing needs its history.
+                // Ordinary rounds advertise a fresh verification nonce at each handshake.
+                // Bootstrap CS/Ready replays keep their original allocation until safe to advance;
+                // `incoming` is kept because ACK processing needs its history.
                 let channel_id = self.id;
                 let local_funding_pubkey = *self.get_local_funding_pubkey();
                 let funding_key = self.signer.funding_key.clone();
                 let number = self.get_remote_commitment_number();
                 let ready_advertised = matches!(self.state, ChannelState::AwaitingChannelReady(flags)
                     if flags.contains(AwaitingChannelReadyFlags::OUR_CHANNEL_READY))
-                    || (self.state == ChannelState::ChannelReady
-                        && self.get_local_commitment_number() == INITIAL_COMMITMENT_NUMBER + 2
-                        && number == INITIAL_COMMITMENT_NUMBER + 2);
+                    || self.may_need_ready_replay_v2();
                 if let Some(session) = self.session_v2.as_mut() {
-                    // Before either normal round completes, the peer may still need this exact Ready.
-                    if !ready_advertised {
+                    // Initial CS recovery replays the original signature, so its nonce/context must survive.
+                    let initial_unaccepted = session.own.number == INITIAL_COMMITMENT_NUMBER + 1
+                        && session.incoming.is_none();
+                    if !initial_unaccepted && !ready_advertised {
                         // Only same-round retired allocations may sign a late CS; acceptance
                         // advances own and discards retired copies of the consumed allocation.
                         let previous = session.own.clone();
@@ -6881,7 +6880,9 @@ impl ChannelActorState {
                         session.own_retired.insert(0, previous);
                         session.own_retired.truncate(2);
                     }
-                    session.pending_incoming = None;
+                    if !initial_unaccepted {
+                        session.pending_incoming = None;
+                    }
                     session.pending_ack = None;
                 }
             }
