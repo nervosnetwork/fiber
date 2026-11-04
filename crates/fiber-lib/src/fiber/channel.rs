@@ -9828,23 +9828,9 @@ impl ChannelActorState {
         // Every completed round appends one point, so the vector has to be pruned here rather
         // than only when a TLC is removed: a channel can complete many rounds while its TLC set
         // is unchanged (see the V2 round storm in #1561), and nothing else would shrink it.
+        // The directions advance independently, so the required set is not bounded by the
+        // negotiated TLC count: never evict a point that survives reference pruning.
         self.prune_remote_commitment_points();
-
-        let limit = self.local_constraints.max_tlc_number_in_flight as usize
-            + self.remote_constraints.max_tlc_number_in_flight as usize
-            + 2;
-        if self.remote_commitment_points.len() > limit {
-            // `prune_remote_commitment_points` keeps every point a live TLC can still reference,
-            // so this means more commitment rounds than in-flight TLCs allow. Keep the most
-            // recent points and never panic the channel actor over a bookkeeping overflow.
-            let excess = self.remote_commitment_points.len() - limit;
-            self.remote_commitment_points.drain(0..excess);
-            error!(
-                "Channel {} retained more remote commitment points than its constraints allow, dropped {} oldest entries",
-                self.get_id(),
-                excess
-            );
-        }
     }
 
     /// Drop remote commitment points that no live TLC (nor the current commitment numbers) can
@@ -11982,6 +11968,65 @@ mod tests {
             forwarding_tlc: None,
             removed_confirmed_at: None,
             applied_flags: AppliedFlags::ADD,
+        }
+    }
+
+    #[test]
+    fn remote_commitment_points_keep_references_and_prune_obsolete_rounds() {
+        let mut state = channel_state_with_limits(
+            ChannelConstraints::new(1_000_000, 1),
+            ChannelConstraints::new(1_000_000, 1),
+        );
+        let remote_signer = InMemorySigner::generate_from_seed(b"tlc-limit-remote");
+        let mut offered = committed_tlc(TLCId::Offered(0), 10);
+        offered.created_at = CommitmentNumbers {
+            local: 2,
+            remote: 3,
+        };
+        let mut received = committed_tlc(TLCId::Received(0), 10);
+        received.created_at = CommitmentNumbers {
+            local: 4,
+            remote: 5,
+        };
+        state.tlc_state.add_offered_tlc(offered.clone());
+        state.tlc_state.add_received_tlc(received.clone());
+        state.remote_commitment_points = (2..=5)
+            .map(|number| (number, remote_signer.get_commitment_point(number)))
+            .collect();
+        let offered_keys = state.get_tlc_pubkeys(&offered).unwrap();
+        let received_keys = state.get_tlc_pubkeys(&received).unwrap();
+
+        // The shared helper must also preserve references for legacy channels.
+        assert!(!state.channel_features.is_v2());
+        for number in 6..=40 {
+            state.commitment_numbers = CommitmentNumbers {
+                local: number,
+                remote: number - 1,
+            };
+            state.append_remote_commitment_point(remote_signer.get_commitment_point(number));
+            assert_eq!(state.get_tlc_pubkeys(&offered).unwrap(), offered_keys);
+            assert_eq!(state.get_tlc_pubkeys(&received).unwrap(), received_keys);
+            assert!(state.remote_commitment_points.len() <= 6);
+        }
+        let point_numbers = |state: &ChannelActorState| {
+            state
+                .remote_commitment_points
+                .iter()
+                .map(|(number, _)| *number)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(point_numbers(&state), vec![2, 3, 4, 5, 39, 40]);
+        state.apply_remove_tlc(offered.tlc_id);
+        assert_eq!(point_numbers(&state), vec![4, 5, 39, 40]);
+        state.apply_remove_tlc(received.tlc_id);
+        assert_eq!(point_numbers(&state), vec![39, 40]);
+        for number in 41..=64 {
+            state.commitment_numbers = CommitmentNumbers {
+                local: number,
+                remote: number - 1,
+            };
+            state.append_remote_commitment_point(remote_signer.get_commitment_point(number));
+            assert_eq!(point_numbers(&state), vec![number - 1, number]);
         }
     }
 

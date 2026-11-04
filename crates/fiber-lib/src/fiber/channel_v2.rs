@@ -5240,6 +5240,166 @@ mod tests {
         handle.await.unwrap();
     }
 
+    #[tokio::test]
+    async fn test_v2_remote_commitment_points_survive_asymmetric_rounds_and_restore() {
+        let (mut a, mut b, id) =
+            create_nodes_with_established_channel(100000000000, 100000000000, false).await;
+        let mut local = a.get_channel_actor_state(id);
+        let mut remote = b.get_channel_actor_state(id);
+        a.stop().await;
+        b.stop().await;
+        let balances = (local.to_local_amount, local.to_remote_amount);
+        for state in [&mut local, &mut remote] {
+            state.local_constraints.max_tlc_number_in_flight = 1;
+            state.remote_constraints.max_tlc_number_in_flight = 1;
+        }
+        let (network, task) = Actor::spawn(None, CaptureNetwork, Arc::new(Mutex::new(Vec::new())))
+            .await
+            .unwrap();
+        local.network = Some(network.clone());
+        remote.network = Some(network.clone());
+        let local_actor =
+            ChannelActor::new(a.pubkey, b.pubkey, network.clone(), a.store.clone(), None);
+        let remote_actor =
+            ChannelActor::new(b.pubkey, a.pubkey, network.clone(), b.store.clone(), None);
+        let (myself, handle) = Actor::spawn(None, NoopChannelActor, ()).await.unwrap();
+
+        // Drive real CS/ACK signing without invoice application so both TLCs stay in flight.
+        // Empty rounds separate the two TLCs' creation counters on the local side.
+        for (index, (from_local, add)) in [
+            (false, None),
+            (true, Some(71)),
+            (false, None),
+            (true, None),
+            (false, None),
+            (false, Some(72)),
+            (true, None),
+            (true, None),
+            (false, None),
+            (true, None),
+            (false, None),
+            (true, None),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (sender_actor, receiver_actor, sender, receiver) = if from_local {
+                (&local_actor, &remote_actor, &mut local, &mut remote)
+            } else {
+                (&remote_actor, &local_actor, &mut remote, &mut local)
+            };
+            if let Some(tag) = add {
+                sender_actor
+                    .add_tlc_update(sender, &retry_batch_add(tag, 1000))
+                    .unwrap();
+            }
+            let (request, _) = sender.prepare_outgoing_v2(false).unwrap();
+            sender.set_waiting_ack(&myself, true);
+            for update in &sender
+                .session_v2
+                .as_ref()
+                .unwrap()
+                .outgoing
+                .as_ref()
+                .unwrap()
+                .updates
+            {
+                let fiber_types::TlcReplayUpdate::Add(add) = update else {
+                    panic!("only Adds in this fixture")
+                };
+                receiver_actor
+                    .handle_add_tlc_peer_message(receiver, add.clone())
+                    .unwrap();
+            }
+            receiver.stage_incoming_v2(&request, false).unwrap();
+            let (_, _, ack) = receiver
+                .accept_commitment_v2(&request, false, false)
+                .unwrap();
+            receiver.tlc_state.update_for_commitment_signed();
+            receiver.last_was_revoke = true;
+            let ack = ack.unwrap();
+            sender.stage_ack_v2(&ack).unwrap();
+            sender.accept_ack_v2(&myself, &ack, false).unwrap();
+            for state in [&local, &remote] {
+                state.validate_session_v2().unwrap();
+            }
+            if index == 7 {
+                assert_eq!(local.get_local_commitment_number(), 6);
+                assert_eq!(local.get_remote_commitment_number(), 6);
+                let offered = local
+                    .tlc_state
+                    .get(&fiber_types::TLCId::Offered(0))
+                    .unwrap();
+                let received = local
+                    .tlc_state
+                    .get(&fiber_types::TLCId::Received(0))
+                    .unwrap();
+                assert_eq!(
+                    offered.created_at,
+                    fiber_types::CommitmentNumbers {
+                        local: 2,
+                        remote: 3
+                    }
+                );
+                assert_eq!(
+                    received.created_at,
+                    fiber_types::CommitmentNumbers {
+                        local: 4,
+                        remote: 5
+                    }
+                );
+                assert_eq!(
+                    offered.status,
+                    fiber_types::TlcStatus::Outbound(fiber_types::OutboundTlcStatus::Committed)
+                );
+                assert_eq!(
+                    received.status,
+                    fiber_types::TlcStatus::Inbound(fiber_types::InboundTlcStatus::Committed)
+                );
+                let signed = local.latest_commitment_transaction.clone().unwrap();
+                a.store.insert_channel_actor_state(local.clone());
+                local = a.store.get_channel_actor_state(&id).unwrap();
+                local.validate_session_v2().unwrap();
+                assert_eq!(
+                    local
+                        .latest_commitment_transaction
+                        .as_ref()
+                        .unwrap()
+                        .as_slice(),
+                    signed.as_slice()
+                );
+                local.build_commitment_tx_and_settlement_data(true).expect(
+                    "restored live TLC must retain its remote commitment point despite the count cap",
+                );
+                assert_eq!(
+                    local
+                        .remote_commitment_points
+                        .iter()
+                        .map(|(n, _)| *n)
+                        .collect::<Vec<_>>(),
+                    vec![2, 3, 4, 5, 6]
+                );
+                local.network = Some(network.clone());
+            }
+        }
+        for state in [&local, &remote] {
+            assert_eq!(state.tlc_state.offered_tlcs.tlcs.len(), 1);
+            assert_eq!(state.tlc_state.received_tlcs.tlcs.len(), 1);
+            for tlc in state.tlc_state.all_tlcs() {
+                state.get_tlc_pubkeys(tlc).unwrap();
+            }
+            state.build_commitment_tx_and_settlement_data(true).unwrap();
+            state
+                .build_commitment_tx_and_settlement_data(false)
+                .unwrap();
+        }
+        assert_eq!((local.to_local_amount, local.to_remote_amount), balances);
+        assert_eq!((remote.to_remote_amount, remote.to_local_amount), balances);
+        handle.abort();
+        network.stop(None);
+        task.await.unwrap();
+    }
+
     fn retry_batch_add(tag: u8, amount: u128) -> fiber_types::AddTlcCommand {
         fiber_types::AddTlcCommand {
             amount,
