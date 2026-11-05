@@ -6,8 +6,7 @@ use crate::ckb::contracts::{get_script_by_contract, Contract};
 use crate::fiber::onchain_tlc_reconcile::{OnChainTlcSettlement, StoredOnChainTlcSettlement};
 use fiber_types::TLCId;
 use fiber_types::{
-    ChannelData, CommitmentContractFeatures, Hash256, NodeId, Privkey, Pubkey, RevocationData,
-    SettlementData,
+    ChannelData, ChannelFeatures, Hash256, NodeId, Privkey, Pubkey, RevocationData, SettlementData,
 };
 
 pub trait WatchtowerStore {
@@ -44,7 +43,7 @@ pub trait WatchtowerStore {
             local_funding_pubkey,
             remote_funding_pubkey,
             settlement_data,
-            CommitmentContractFeatures::LEGACY,
+            ChannelFeatures::LEGACY,
         );
     }
 
@@ -60,7 +59,7 @@ pub trait WatchtowerStore {
         local_funding_pubkey: Pubkey,
         remote_funding_pubkey: Pubkey,
         settlement_data: SettlementData,
-        commitment_contract_features: CommitmentContractFeatures,
+        channel_features: ChannelFeatures,
     );
     /// Remove a channel from the store, the watchtower will stop monitoring the channel
     fn remove_watch_channel(&self, node_id: NodeId, channel_id: Hash256);

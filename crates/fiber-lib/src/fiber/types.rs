@@ -32,6 +32,10 @@ use std::fmt::Debug;
 use std::fmt::Display;
 use thiserror::Error;
 
+#[cfg(test)]
+#[path = "types_wire_tests.rs"]
+mod wire_tests;
+
 pub(crate) const MAX_NUM_OF_BROADCAST_MESSAGES: u16 = 1000;
 /// Convert a `tentacle::secio::PublicKey` to a `Pubkey`.
 pub fn pubkey_from_tentacle(pk: tentacle::secio::PublicKey) -> Pubkey {
@@ -786,6 +790,423 @@ pub fn new_channel_update_unsigned(
     }
 }
 
+/// V2 opening offer, advertising the sender's own initial commitment session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenChannelV2 {
+    pub chain_hash: Hash256,
+    pub channel_id: Hash256,
+    pub funding_udt_type_script: Option<Script>,
+    pub funding_amount: u128,
+    pub shutdown_script: Script,
+    pub reserved_ckb_amount: u64,
+    pub funding_fee_rate: u64,
+    pub commitment_fee_rate: u64,
+    pub commitment_delay_epoch: u64,
+    pub max_tlc_value_in_flight: u128,
+    pub max_tlc_number_in_flight: u64,
+    pub funding_pubkey: Pubkey,
+    pub tlc_basepoint: Pubkey,
+    pub first_per_commitment_point: Pubkey,
+    pub second_per_commitment_point: Pubkey,
+    pub channel_announcement_nonce: Option<PubNonce>,
+    pub initial_commitment_nonce: PubNonce,
+    pub channel_flags: ChannelFlags,
+    /// Explicit V2 confirmation; only 1 is valid on the wire.
+    pub channel_features: u8,
+}
+
+/// V2 opening acceptance, confirming the capability and initial session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcceptChannelV2 {
+    pub channel_id: Hash256,
+    pub funding_amount: u128,
+    pub reserved_ckb_amount: u64,
+    pub max_tlc_value_in_flight: u128,
+    pub max_tlc_number_in_flight: u64,
+    pub funding_pubkey: Pubkey,
+    pub shutdown_script: Script,
+    pub tlc_basepoint: Pubkey,
+    pub first_per_commitment_point: Pubkey,
+    pub second_per_commitment_point: Pubkey,
+    pub channel_announcement_nonce: Option<PubNonce>,
+    pub initial_commitment_nonce: PubNonce,
+    /// Explicit V2 confirmation; only 1 is valid on the wire.
+    pub channel_features: u8,
+}
+
+/// Signs the numbered peer commitment using a fresh funding nonce.
+#[serde_as]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommitmentSignedV2 {
+    pub channel_id: Hash256,
+    pub commitment_number: u64,
+    #[serde_as(as = "PartialSignatureAsBytes")]
+    pub funding_tx_partial_signature: PartialSignature,
+    #[serde_as(as = "PubNonceAsBytes")]
+    pub funding_nonce: PubNonce,
+    /// Absent for initial commitments, present for established updates.
+    #[serde_as(as = "Option<PubNonceAsBytes>")]
+    pub revocation_nonce: Option<PubNonce>,
+}
+
+/// Acknowledges a numbered commitment and revokes its predecessor.
+#[serde_as]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RevokeAndAckV2 {
+    pub channel_id: Hash256,
+    pub commitment_number: u64,
+    #[serde_as(as = "PartialSignatureAsBytes")]
+    pub revocation_partial_signature: PartialSignature,
+    #[serde_as(as = "PubNonceAsBytes")]
+    pub revocation_nonce: PubNonce,
+    pub next_per_commitment_point: Pubkey,
+    #[serde_as(as = "PubNonceAsBytes")]
+    pub next_commitment_nonce: PubNonce,
+}
+
+/// Publishes the next own commitment session after opening.
+#[serde_as]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChannelReadyV2 {
+    pub channel_id: Hash256,
+    pub next_commitment_number: u64,
+    #[serde_as(as = "PubNonceAsBytes")]
+    pub next_commitment_nonce: PubNonce,
+}
+
+/// Reconciles incoming commitment and acknowledgement progress independently.
+#[serde_as]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReestablishChannelV2 {
+    pub channel_id: Hash256,
+    pub next_commitment_number: u64,
+    pub next_ack_number: u64,
+    #[serde_as(as = "PubNonceAsBytes")]
+    pub next_local_commitment_nonce: PubNonce,
+}
+
+/// Starts cooperative closing with a dedicated nonce session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShutdownV2 {
+    pub channel_id: Hash256,
+    pub fee_rate: u64,
+    pub close_script: Script,
+    pub closing_nonce: PubNonce,
+}
+
+/// V2 closing signature, distinct from V1 for protocol version gating.
+#[serde_as]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClosingSignedV2 {
+    pub channel_id: Hash256,
+    #[serde_as(as = "PartialSignatureAsBytes")]
+    pub partial_signature: PartialSignature,
+}
+
+/// Confirms the existing bootstrap session without advancing a nonce chain.
+#[serde_as]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TxCompleteV2 {
+    pub channel_id: Hash256,
+    #[serde_as(as = "PubNonceAsBytes")]
+    pub initial_commitment_nonce: PubNonce,
+}
+
+fn pub_nonce_opt_to_molecule(nonce: Option<PubNonce>) -> PubNonceOpt {
+    PubNonceOpt::new_builder()
+        .set(nonce.map(Into::into))
+        .build()
+}
+
+fn pub_nonce_opt_from_molecule(nonce: PubNonceOpt) -> Result<Option<PubNonce>, Error> {
+    Ok(nonce.to_opt().map(TryInto::try_into).transpose()?)
+}
+
+fn validate_v2_confirmation(features: u8) -> Result<u8, Error> {
+    if features != 1 {
+        return Err(
+            anyhow!("Invalid V2 channel_features confirmation: {features}, expected 1").into(),
+        );
+    }
+    Ok(features)
+}
+
+impl From<OpenChannelV2> for molecule_fiber::OpenChannelV2 {
+    fn from(m: OpenChannelV2) -> Self {
+        Self::new_builder()
+            .chain_hash(m.chain_hash.into())
+            .channel_id(m.channel_id.into())
+            .funding_udt_type_script(m.funding_udt_type_script.pack())
+            .funding_amount(m.funding_amount.pack())
+            .shutdown_script(m.shutdown_script)
+            .reserved_ckb_amount(m.reserved_ckb_amount.pack())
+            .funding_fee_rate(m.funding_fee_rate.pack())
+            .commitment_fee_rate(m.commitment_fee_rate.pack())
+            .commitment_delay_epoch(m.commitment_delay_epoch.pack())
+            .max_tlc_value_in_flight(m.max_tlc_value_in_flight.pack())
+            .max_tlc_number_in_flight(m.max_tlc_number_in_flight.pack())
+            .funding_pubkey(m.funding_pubkey.into())
+            .tlc_basepoint(m.tlc_basepoint.into())
+            .first_per_commitment_point(m.first_per_commitment_point.into())
+            .second_per_commitment_point(m.second_per_commitment_point.into())
+            .channel_announcement_nonce(pub_nonce_opt_to_molecule(m.channel_announcement_nonce))
+            .initial_commitment_nonce(m.initial_commitment_nonce.into())
+            .channel_flags(m.channel_flags.bits().into())
+            .channel_features(m.channel_features.into())
+            .build()
+    }
+}
+
+impl TryFrom<molecule_fiber::OpenChannelV2> for OpenChannelV2 {
+    type Error = Error;
+
+    fn try_from(m: molecule_fiber::OpenChannelV2) -> Result<Self, Self::Error> {
+        Ok(Self {
+            chain_hash: m.chain_hash().into(),
+            channel_id: m.channel_id().into(),
+            funding_udt_type_script: m.funding_udt_type_script().to_opt(),
+            funding_amount: m.funding_amount().unpack(),
+            shutdown_script: m.shutdown_script(),
+            reserved_ckb_amount: m.reserved_ckb_amount().unpack(),
+            funding_fee_rate: m.funding_fee_rate().unpack(),
+            commitment_fee_rate: m.commitment_fee_rate().unpack(),
+            commitment_delay_epoch: m.commitment_delay_epoch().unpack(),
+            max_tlc_value_in_flight: m.max_tlc_value_in_flight().unpack(),
+            max_tlc_number_in_flight: m.max_tlc_number_in_flight().unpack(),
+            funding_pubkey: m.funding_pubkey().try_into()?,
+            tlc_basepoint: m.tlc_basepoint().try_into()?,
+            first_per_commitment_point: m.first_per_commitment_point().try_into()?,
+            second_per_commitment_point: m.second_per_commitment_point().try_into()?,
+            channel_announcement_nonce: pub_nonce_opt_from_molecule(
+                m.channel_announcement_nonce(),
+            )?,
+            initial_commitment_nonce: m.initial_commitment_nonce().try_into()?,
+            channel_flags: ChannelFlags::from_bits(m.channel_flags().into())
+                .ok_or_else(|| anyhow!("Invalid channel flags: {}", m.channel_flags()))?,
+            channel_features: validate_v2_confirmation(m.channel_features().into())?,
+        })
+    }
+}
+
+impl From<AcceptChannelV2> for molecule_fiber::AcceptChannelV2 {
+    fn from(m: AcceptChannelV2) -> Self {
+        Self::new_builder()
+            .channel_id(m.channel_id.into())
+            .funding_amount(m.funding_amount.pack())
+            .shutdown_script(m.shutdown_script)
+            .reserved_ckb_amount(m.reserved_ckb_amount.pack())
+            .max_tlc_value_in_flight(m.max_tlc_value_in_flight.pack())
+            .max_tlc_number_in_flight(m.max_tlc_number_in_flight.pack())
+            .funding_pubkey(m.funding_pubkey.into())
+            .tlc_basepoint(m.tlc_basepoint.into())
+            .first_per_commitment_point(m.first_per_commitment_point.into())
+            .second_per_commitment_point(m.second_per_commitment_point.into())
+            .channel_announcement_nonce(pub_nonce_opt_to_molecule(m.channel_announcement_nonce))
+            .initial_commitment_nonce(m.initial_commitment_nonce.into())
+            .channel_features(m.channel_features.into())
+            .build()
+    }
+}
+
+impl TryFrom<molecule_fiber::AcceptChannelV2> for AcceptChannelV2 {
+    type Error = Error;
+
+    fn try_from(m: molecule_fiber::AcceptChannelV2) -> Result<Self, Self::Error> {
+        Ok(Self {
+            channel_id: m.channel_id().into(),
+            funding_amount: m.funding_amount().unpack(),
+            shutdown_script: m.shutdown_script(),
+            reserved_ckb_amount: m.reserved_ckb_amount().unpack(),
+            max_tlc_value_in_flight: m.max_tlc_value_in_flight().unpack(),
+            max_tlc_number_in_flight: m.max_tlc_number_in_flight().unpack(),
+            funding_pubkey: m.funding_pubkey().try_into()?,
+            tlc_basepoint: m.tlc_basepoint().try_into()?,
+            first_per_commitment_point: m.first_per_commitment_point().try_into()?,
+            second_per_commitment_point: m.second_per_commitment_point().try_into()?,
+            channel_announcement_nonce: pub_nonce_opt_from_molecule(
+                m.channel_announcement_nonce(),
+            )?,
+            initial_commitment_nonce: m.initial_commitment_nonce().try_into()?,
+            channel_features: validate_v2_confirmation(m.channel_features().into())?,
+        })
+    }
+}
+
+impl From<CommitmentSignedV2> for molecule_fiber::CommitmentSignedV2 {
+    fn from(m: CommitmentSignedV2) -> Self {
+        Self::new_builder()
+            .channel_id(m.channel_id.into())
+            .commitment_number(m.commitment_number.pack())
+            .funding_tx_partial_signature(partial_signature_to_molecule(
+                m.funding_tx_partial_signature,
+            ))
+            .funding_nonce(m.funding_nonce.into())
+            .revocation_nonce(pub_nonce_opt_to_molecule(m.revocation_nonce))
+            .build()
+    }
+}
+
+impl TryFrom<molecule_fiber::CommitmentSignedV2> for CommitmentSignedV2 {
+    type Error = Error;
+
+    fn try_from(m: molecule_fiber::CommitmentSignedV2) -> Result<Self, Self::Error> {
+        Ok(Self {
+            channel_id: m.channel_id().into(),
+            commitment_number: m.commitment_number().unpack(),
+            funding_tx_partial_signature: PartialSignature::from_slice(
+                m.funding_tx_partial_signature().as_slice(),
+            )
+            .map_err(|e| anyhow!(e))?,
+            funding_nonce: m.funding_nonce().try_into()?,
+            revocation_nonce: pub_nonce_opt_from_molecule(m.revocation_nonce())?,
+        })
+    }
+}
+
+impl From<RevokeAndAckV2> for molecule_fiber::RevokeAndAckV2 {
+    fn from(m: RevokeAndAckV2) -> Self {
+        Self::new_builder()
+            .channel_id(m.channel_id.into())
+            .commitment_number(m.commitment_number.pack())
+            .revocation_partial_signature(partial_signature_to_molecule(
+                m.revocation_partial_signature,
+            ))
+            .revocation_nonce(m.revocation_nonce.into())
+            .next_per_commitment_point(m.next_per_commitment_point.into())
+            .next_commitment_nonce(m.next_commitment_nonce.into())
+            .build()
+    }
+}
+
+impl TryFrom<molecule_fiber::RevokeAndAckV2> for RevokeAndAckV2 {
+    type Error = Error;
+
+    fn try_from(m: molecule_fiber::RevokeAndAckV2) -> Result<Self, Self::Error> {
+        Ok(Self {
+            channel_id: m.channel_id().into(),
+            commitment_number: m.commitment_number().unpack(),
+            revocation_partial_signature: PartialSignature::from_slice(
+                m.revocation_partial_signature().as_slice(),
+            )
+            .map_err(|e| anyhow!(e))?,
+            revocation_nonce: m.revocation_nonce().try_into()?,
+            next_per_commitment_point: m.next_per_commitment_point().try_into()?,
+            next_commitment_nonce: m.next_commitment_nonce().try_into()?,
+        })
+    }
+}
+
+impl From<ChannelReadyV2> for molecule_fiber::ChannelReadyV2 {
+    fn from(m: ChannelReadyV2) -> Self {
+        Self::new_builder()
+            .channel_id(m.channel_id.into())
+            .next_commitment_number(m.next_commitment_number.pack())
+            .next_commitment_nonce(m.next_commitment_nonce.into())
+            .build()
+    }
+}
+
+impl TryFrom<molecule_fiber::ChannelReadyV2> for ChannelReadyV2 {
+    type Error = Error;
+
+    fn try_from(m: molecule_fiber::ChannelReadyV2) -> Result<Self, Self::Error> {
+        Ok(Self {
+            channel_id: m.channel_id().into(),
+            next_commitment_number: m.next_commitment_number().unpack(),
+            next_commitment_nonce: m.next_commitment_nonce().try_into()?,
+        })
+    }
+}
+
+impl From<ReestablishChannelV2> for molecule_fiber::ReestablishChannelV2 {
+    fn from(m: ReestablishChannelV2) -> Self {
+        Self::new_builder()
+            .channel_id(m.channel_id.into())
+            .next_commitment_number(m.next_commitment_number.pack())
+            .next_ack_number(m.next_ack_number.pack())
+            .next_local_commitment_nonce(m.next_local_commitment_nonce.into())
+            .build()
+    }
+}
+
+impl TryFrom<molecule_fiber::ReestablishChannelV2> for ReestablishChannelV2 {
+    type Error = Error;
+
+    fn try_from(m: molecule_fiber::ReestablishChannelV2) -> Result<Self, Self::Error> {
+        Ok(Self {
+            channel_id: m.channel_id().into(),
+            next_commitment_number: m.next_commitment_number().unpack(),
+            next_ack_number: m.next_ack_number().unpack(),
+            next_local_commitment_nonce: m.next_local_commitment_nonce().try_into()?,
+        })
+    }
+}
+
+impl From<ShutdownV2> for molecule_fiber::ShutdownV2 {
+    fn from(m: ShutdownV2) -> Self {
+        Self::new_builder()
+            .channel_id(m.channel_id.into())
+            .fee_rate(m.fee_rate.pack())
+            .close_script(m.close_script)
+            .closing_nonce(m.closing_nonce.into())
+            .build()
+    }
+}
+
+impl TryFrom<molecule_fiber::ShutdownV2> for ShutdownV2 {
+    type Error = Error;
+
+    fn try_from(m: molecule_fiber::ShutdownV2) -> Result<Self, Self::Error> {
+        Ok(Self {
+            channel_id: m.channel_id().into(),
+            fee_rate: m.fee_rate().unpack(),
+            close_script: m.close_script(),
+            closing_nonce: m.closing_nonce().try_into()?,
+        })
+    }
+}
+
+impl From<ClosingSignedV2> for molecule_fiber::ClosingSignedV2 {
+    fn from(m: ClosingSignedV2) -> Self {
+        Self::new_builder()
+            .channel_id(m.channel_id.into())
+            .partial_signature(partial_signature_to_molecule(m.partial_signature))
+            .build()
+    }
+}
+
+impl TryFrom<molecule_fiber::ClosingSignedV2> for ClosingSignedV2 {
+    type Error = Error;
+
+    fn try_from(m: molecule_fiber::ClosingSignedV2) -> Result<Self, Self::Error> {
+        Ok(Self {
+            channel_id: m.channel_id().into(),
+            partial_signature: PartialSignature::from_slice(m.partial_signature().as_slice())
+                .map_err(|e| anyhow!(e))?,
+        })
+    }
+}
+
+impl From<TxCompleteV2> for molecule_fiber::TxCompleteV2 {
+    fn from(m: TxCompleteV2) -> Self {
+        Self::new_builder()
+            .channel_id(m.channel_id.into())
+            .initial_commitment_nonce(m.initial_commitment_nonce.into())
+            .build()
+    }
+}
+
+impl TryFrom<molecule_fiber::TxCompleteV2> for TxCompleteV2 {
+    type Error = Error;
+
+    fn try_from(m: molecule_fiber::TxCompleteV2) -> Result<Self, Self::Error> {
+        Ok(Self {
+            channel_id: m.channel_id().into(),
+            initial_commitment_nonce: m.initial_commitment_nonce().try_into()?,
+        })
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum FiberQueryInformation {
     GetBroadcastMessages(GetBroadcastMessages),
@@ -797,9 +1218,55 @@ pub enum FiberMessage {
     Init(Init),
     ChannelInitialization(OpenChannel),
     ChannelNormalOperation(FiberChannelMessage),
+    ChannelInitializationV2(OpenChannelV2),
 }
 
 impl FiberMessage {
+    /// Creates a V2 opening offer without activating the protocol.
+    pub fn open_channel_v2(message: OpenChannelV2) -> Self {
+        Self::ChannelInitializationV2(message)
+    }
+
+    /// Creates a V2 opening acceptance.
+    pub fn accept_channel_v2(message: AcceptChannelV2) -> Self {
+        Self::ChannelNormalOperation(FiberChannelMessage::AcceptChannelV2(message))
+    }
+
+    /// Creates a V2 commitment signature request.
+    pub fn commitment_signed_v2(message: CommitmentSignedV2) -> Self {
+        Self::ChannelNormalOperation(FiberChannelMessage::CommitmentSignedV2(message))
+    }
+
+    /// Creates a V2 revocation acknowledgement.
+    pub fn revoke_and_ack_v2(message: RevokeAndAckV2) -> Self {
+        Self::ChannelNormalOperation(FiberChannelMessage::RevokeAndAckV2(message))
+    }
+
+    /// Creates a V2 channel-ready announcement.
+    pub fn channel_ready_v2(message: ChannelReadyV2) -> Self {
+        Self::ChannelNormalOperation(FiberChannelMessage::ChannelReadyV2(message))
+    }
+
+    /// Creates a V2 reestablishment message.
+    pub fn reestablish_channel_v2(message: ReestablishChannelV2) -> Self {
+        Self::ChannelNormalOperation(FiberChannelMessage::ReestablishChannelV2(message))
+    }
+
+    /// Creates a V2 cooperative shutdown request.
+    pub fn shutdown_v2(message: ShutdownV2) -> Self {
+        Self::ChannelNormalOperation(FiberChannelMessage::ShutdownV2(message))
+    }
+
+    /// Creates a V2 closing signature.
+    pub fn closing_signed_v2(message: ClosingSignedV2) -> Self {
+        Self::ChannelNormalOperation(FiberChannelMessage::ClosingSignedV2(message))
+    }
+
+    /// Creates a V2 bootstrap session confirmation.
+    pub fn tx_complete_v2(message: TxCompleteV2) -> Self {
+        Self::ChannelNormalOperation(FiberChannelMessage::TxCompleteV2(message))
+    }
+
     pub fn init(init_message: Init) -> Self {
         FiberMessage::Init(init_message)
     }
@@ -898,11 +1365,27 @@ pub enum FiberChannelMessage {
     RemoveTlc(RemoveTlc),
     ReestablishChannel(ReestablishChannel),
     AnnouncementSignatures(AnnouncementSignatures),
+    AcceptChannelV2(AcceptChannelV2),
+    CommitmentSignedV2(CommitmentSignedV2),
+    RevokeAndAckV2(RevokeAndAckV2),
+    ChannelReadyV2(ChannelReadyV2),
+    ReestablishChannelV2(ReestablishChannelV2),
+    ShutdownV2(ShutdownV2),
+    ClosingSignedV2(ClosingSignedV2),
+    TxCompleteV2(TxCompleteV2),
 }
 
 impl Display for FiberChannelMessage {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
+            FiberChannelMessage::AcceptChannelV2(_) => write!(f, "AcceptChannelV2"),
+            FiberChannelMessage::CommitmentSignedV2(_) => write!(f, "CommitmentSignedV2"),
+            FiberChannelMessage::RevokeAndAckV2(_) => write!(f, "RevokeAndAckV2"),
+            FiberChannelMessage::ChannelReadyV2(_) => write!(f, "ChannelReadyV2"),
+            FiberChannelMessage::ReestablishChannelV2(_) => write!(f, "ReestablishChannelV2"),
+            FiberChannelMessage::ShutdownV2(_) => write!(f, "ShutdownV2"),
+            FiberChannelMessage::ClosingSignedV2(_) => write!(f, "ClosingSignedV2"),
+            FiberChannelMessage::TxCompleteV2(_) => write!(f, "TxCompleteV2"),
             FiberChannelMessage::AcceptChannel(_) => write!(f, "AcceptChannel"),
             FiberChannelMessage::CommitmentSigned(_) => write!(f, "CommitmentSigned"),
             FiberChannelMessage::TxSignatures(_) => write!(f, "TxSignatures"),
@@ -927,6 +1410,14 @@ impl Display for FiberChannelMessage {
 impl FiberChannelMessage {
     pub fn get_channel_id(&self) -> Hash256 {
         match self {
+            FiberChannelMessage::AcceptChannelV2(m) => m.channel_id,
+            FiberChannelMessage::CommitmentSignedV2(m) => m.channel_id,
+            FiberChannelMessage::RevokeAndAckV2(m) => m.channel_id,
+            FiberChannelMessage::ChannelReadyV2(m) => m.channel_id,
+            FiberChannelMessage::ReestablishChannelV2(m) => m.channel_id,
+            FiberChannelMessage::ShutdownV2(m) => m.channel_id,
+            FiberChannelMessage::ClosingSignedV2(m) => m.channel_id,
+            FiberChannelMessage::TxCompleteV2(m) => m.channel_id,
             FiberChannelMessage::AcceptChannel(accept_channel) => accept_channel.channel_id,
             FiberChannelMessage::CommitmentSigned(commitment_signed) => {
                 commitment_signed.channel_id
@@ -1551,11 +2042,22 @@ impl TryFrom<molecule_gossip::QueryBroadcastMessagesResult> for QueryBroadcastMe
 impl From<FiberMessage> for molecule_fiber::FiberMessageUnion {
     fn from(fiber_message: FiberMessage) -> Self {
         match fiber_message {
+            FiberMessage::ChannelInitializationV2(m) => Self::OpenChannelV2(m.into()),
             FiberMessage::Init(init) => molecule_fiber::FiberMessageUnion::Init(init.into()),
             FiberMessage::ChannelInitialization(open_channel) => {
                 molecule_fiber::FiberMessageUnion::OpenChannel(open_channel.into())
             }
             FiberMessage::ChannelNormalOperation(m) => match m {
+                FiberChannelMessage::AcceptChannelV2(m) => Self::AcceptChannelV2(m.into()),
+                FiberChannelMessage::CommitmentSignedV2(m) => Self::CommitmentSignedV2(m.into()),
+                FiberChannelMessage::RevokeAndAckV2(m) => Self::RevokeAndAckV2(m.into()),
+                FiberChannelMessage::ChannelReadyV2(m) => Self::ChannelReadyV2(m.into()),
+                FiberChannelMessage::ReestablishChannelV2(m) => {
+                    Self::ReestablishChannelV2(m.into())
+                }
+                FiberChannelMessage::ShutdownV2(m) => Self::ShutdownV2(m.into()),
+                FiberChannelMessage::ClosingSignedV2(m) => Self::ClosingSignedV2(m.into()),
+                FiberChannelMessage::TxCompleteV2(m) => Self::TxCompleteV2(m.into()),
                 FiberChannelMessage::AcceptChannel(accept_channel) => {
                     molecule_fiber::FiberMessageUnion::AcceptChannel(accept_channel.into())
                 }
@@ -1621,6 +2123,31 @@ impl TryFrom<molecule_fiber::FiberMessageUnion> for FiberMessage {
 
     fn try_from(fiber_message: molecule_fiber::FiberMessageUnion) -> Result<Self, Self::Error> {
         Ok(match fiber_message {
+            molecule_fiber::FiberMessageUnion::OpenChannelV2(m) => {
+                Self::open_channel_v2(m.try_into()?)
+            }
+            molecule_fiber::FiberMessageUnion::AcceptChannelV2(m) => {
+                Self::accept_channel_v2(m.try_into()?)
+            }
+            molecule_fiber::FiberMessageUnion::CommitmentSignedV2(m) => {
+                Self::commitment_signed_v2(m.try_into()?)
+            }
+            molecule_fiber::FiberMessageUnion::RevokeAndAckV2(m) => {
+                Self::revoke_and_ack_v2(m.try_into()?)
+            }
+            molecule_fiber::FiberMessageUnion::ChannelReadyV2(m) => {
+                Self::channel_ready_v2(m.try_into()?)
+            }
+            molecule_fiber::FiberMessageUnion::ReestablishChannelV2(m) => {
+                Self::reestablish_channel_v2(m.try_into()?)
+            }
+            molecule_fiber::FiberMessageUnion::ShutdownV2(m) => Self::shutdown_v2(m.try_into()?),
+            molecule_fiber::FiberMessageUnion::ClosingSignedV2(m) => {
+                Self::closing_signed_v2(m.try_into()?)
+            }
+            molecule_fiber::FiberMessageUnion::TxCompleteV2(m) => {
+                Self::tx_complete_v2(m.try_into()?)
+            }
             molecule_fiber::FiberMessageUnion::Init(init) => FiberMessage::Init(init.try_into()?),
             molecule_fiber::FiberMessageUnion::OpenChannel(open_channel) => {
                 FiberMessage::ChannelInitialization(open_channel.try_into()?)
