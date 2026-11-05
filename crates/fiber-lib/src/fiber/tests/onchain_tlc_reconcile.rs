@@ -17,11 +17,11 @@ use ckb_types::prelude::*;
 #[cfg(feature = "watchtower")]
 use fiber_types::NodeId;
 use fiber_types::{
-    AppliedFlags, ChannelBasePublicKeys, ChannelData, ChannelState, CloseFlags,
-    CommitmentContractFeatures, CommitmentNumbers, Hash256, HashAlgorithm, InboundTlcStatus,
-    OutboundTlcStatus, Privkey, Pubkey, RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation,
-    RevocationData, SettlementData, SettlementTlc, ShutdownSettlementRecord, TLCId, TlcErr,
-    TlcErrPacket, TlcErrorCode, TlcInfo, TlcStatus,
+    AppliedFlags, ChannelBasePublicKeys, ChannelData, ChannelFeatures, ChannelState, CloseFlags,
+    CommitmentNumbers, Hash256, HashAlgorithm, InboundTlcStatus, OutboundTlcStatus, Privkey,
+    Pubkey, RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation, RevocationData,
+    SettlementData, SettlementTlc, ShutdownSettlementRecord, TLCId, TlcErr, TlcErrPacket,
+    TlcErrorCode, TlcInfo, TlcStatus,
 };
 use musig2::{secp::Point, CompactSignature, KeyAggContext};
 use ractor::Actor;
@@ -1648,7 +1648,7 @@ fn settlement_data_for_commitment_edge_cases_no_revocation_and_zero_commitment()
         pending_remote_settlement_data: pending_remote.clone(),
         local_settlement_data: local.clone(),
         revocation_data: None,
-        commitment_contract_features: CommitmentContractFeatures::LEGACY,
+        channel_features: ChannelFeatures::LEGACY,
     };
 
     // When revocation_data is None, remote commitment falls back to pending_remote_settlement_data
@@ -1683,7 +1683,7 @@ fn settlement_data_for_commitment_edge_cases_no_revocation_and_zero_commitment()
             output: CellOutput::default(),
             output_data: Default::default(),
         }),
-        commitment_contract_features: CommitmentContractFeatures::LEGACY,
+        channel_features: ChannelFeatures::LEGACY,
     };
 
     // Commitment 0 with revocation for 0: checked_sub(1) underflows safely to None -> returns pending
@@ -2078,7 +2078,7 @@ fn test_verify_and_select_settlement_data_preceding_and_pending() {
             output: CellOutput::default(),
             output_data: Default::default(),
         }),
-        commitment_contract_features: CommitmentContractFeatures::LEGACY,
+        channel_features: ChannelFeatures::LEGACY,
     };
 
     // A revoked remote lock needs no historical TLC snapshot. The same number in
@@ -2184,14 +2184,14 @@ fn test_tracked_settlement_tlcs_extraction() {
             tlcs: vec![],
         },
         revocation_data: None,
-        commitment_contract_features: CommitmentContractFeatures::LEGACY,
+        channel_features: ChannelFeatures::LEGACY,
     };
 
     // Commitment 2 = pending
     let pending_witness = settlement_data_to_witness(
         &pending_settlement,
         true,
-        CommitmentContractFeatures::LEGACY,
+        ChannelFeatures::LEGACY,
         local_settlement_key,
         remote_settlement_key,
     );
@@ -2212,20 +2212,13 @@ fn test_tracked_settlement_tlcs_extraction() {
 
     let (_, _, selected_settlement) = verify_and_select_settlement_data(&channel_data, &lock)
         .expect("should select the committed settlement snapshot");
-    let tracked = tracked_settlement_tlcs(
-        selected_settlement,
-        true,
-        channel_data.commitment_contract_features,
-    );
+    let tracked = tracked_settlement_tlcs(selected_settlement, true, channel_data.channel_features);
     assert_eq!(tracked.len(), 1);
     assert_eq!(tracked[0].tlc_id, TLCId::Offered(5));
     assert_eq!(tracked[0].payment_hash, payment_hash);
 
-    let tracked_local = tracked_settlement_tlcs(
-        selected_settlement,
-        false,
-        channel_data.commitment_contract_features,
-    );
+    let tracked_local =
+        tracked_settlement_tlcs(selected_settlement, false, channel_data.channel_features);
     assert_eq!(tracked_local[0].tlc_id, TLCId::Received(5));
 }
 
@@ -2264,12 +2257,12 @@ fn test_tracked_settlement_tlcs_preserves_verified_empty_snapshot() {
         pending_remote_settlement_data: pending_settlement,
         local_settlement_data: committed_settlement.clone(),
         revocation_data: None,
-        commitment_contract_features: CommitmentContractFeatures::LEGACY,
+        channel_features: ChannelFeatures::LEGACY,
     };
     let witness = settlement_data_to_witness(
         &committed_settlement,
         true,
-        CommitmentContractFeatures::LEGACY,
+        ChannelFeatures::LEGACY,
         local_settlement_key,
         remote_settlement_key,
     );
@@ -2287,10 +2280,7 @@ fn test_tracked_settlement_tlcs_preserves_verified_empty_snapshot() {
     let (_, _, selected) = verify_and_select_settlement_data(&channel_data, &lock)
         .expect("the on-chain S0 snapshot should verify");
     assert!(selected.tlcs.is_empty());
-    assert!(
-        tracked_settlement_tlcs(selected, true, channel_data.commitment_contract_features,)
-            .is_empty()
-    );
+    assert!(tracked_settlement_tlcs(selected, true, channel_data.channel_features,).is_empty());
 }
 
 #[derive(Clone, Default)]
@@ -2411,7 +2401,7 @@ fn create_test_commitment_lock_with_keys(
     let witness = settlement_data_to_witness(
         settlement_data,
         for_remote,
-        CommitmentContractFeatures::LEGACY,
+        ChannelFeatures::LEGACY,
         local_settlement_privkey.clone(),
         remote_settlement_pubkey,
     );
@@ -3482,7 +3472,7 @@ fn test_fresh_channel_pre_tlc_commitment_uses_verified_snapshot() {
         pending_remote_settlement_data: pending_settlement.clone(),
         local_settlement_data: local_settlement.clone(),
         revocation_data: None,
-        commitment_contract_features: CommitmentContractFeatures::LEGACY,
+        channel_features: ChannelFeatures::LEGACY,
     };
 
     for (for_remote, number, expected) in [
@@ -3504,12 +3494,10 @@ fn test_fresh_channel_pre_tlc_commitment_uses_verified_snapshot() {
                 .expect("fresh channel must recover the hash-matching snapshot without RAA");
         assert_eq!((direction, actual_number), (for_remote, number));
         assert_eq!(selected, expected);
-        assert!(tracked_settlement_tlcs(
-            selected,
-            for_remote,
-            channel_data.commitment_contract_features,
-        )
-        .is_empty());
+        assert!(
+            tracked_settlement_tlcs(selected, for_remote, channel_data.channel_features,)
+                .is_empty()
+        );
         let mut args = lock.args().raw_data().to_vec();
         args[40] ^= 0xff;
         let invalid = lock.as_builder().args(args.pack()).build();
@@ -4120,7 +4108,7 @@ fn test_local_force_close_excluded_tlc_ignores_remote_revocation_number() {
                 output: CellOutput::default(),
                 output_data: Default::default(),
             }),
-            commitment_contract_features: CommitmentContractFeatures::LEGACY,
+            channel_features: ChannelFeatures::LEGACY,
         },
     );
     for for_remote in [false, true] {
