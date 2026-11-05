@@ -831,6 +831,7 @@ pub enum TestFiberMessageKind {
     AddTlc,
     CommitmentSigned,
     RevokeAndAck,
+    ReestablishChannel,
     ClosingSigned,
     Shutdown,
     /// Preserve the CS/RAA stream order when simulating a lost response.
@@ -886,6 +887,10 @@ impl TestFiberMessageHold {
                 | (
                     TestFiberMessageKind::ClosingSigned,
                     FiberChannelMessage::ClosingSigned(_) | FiberChannelMessage::ClosingSignedV2(_)
+                )
+                | (
+                    TestFiberMessageKind::ReestablishChannel,
+                    FiberChannelMessage::ReestablishChannel(_)
                 )
         )
     }

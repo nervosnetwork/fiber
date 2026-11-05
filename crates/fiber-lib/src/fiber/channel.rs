@@ -158,7 +158,12 @@ pub const PEER_CHANNEL_RESPONSE_TIMEOUT: u64 = 30 * 1000;
 #[cfg(any(test, feature = "bench"))]
 pub const PEER_CHANNEL_RESPONSE_TIMEOUT: u64 = 10 * 1000;
 
+// if a reconnected peer does not send its ReestablishChannel in 5 minutes, we force close the
+// channel (see `ChannelActorState::is_reestablish_stalled`).
+#[cfg(not(test))]
 pub const REESTABLISH_TIMEOUT: u64 = 5 * 60 * 1000;
+#[cfg(test)]
+pub const REESTABLISH_TIMEOUT: u64 = 20 * 1000;
 
 const ACTOR_HANDLE_WARN_THRESHOLD_MS: u64 = 15_000;
 
@@ -4542,12 +4547,15 @@ where
                         state.get_remote_pubkey(),
                     );
                     self.notify_network_actor_shutdown_me(state);
-                } else if state.reestablishing
+                } else if state.session_v2.is_some()
+                    && state.reestablishing
                     && !state.is_closed()
                     && state.reestablish_started_at.is_some_and(|started| {
                         now_timestamp_as_millis_u64().saturating_sub(started) > REESTABLISH_TIMEOUT
                     })
                 {
+                    // V2 keeps its recovery deadline through validated handshake replay,
+                    // including funding states that the V1 TLC watchdog does not cover.
                     error!(
                         "Channel {} from peer {:?} has been reestablishing too long, shutting down it forcefully",
                         state.get_id(),
@@ -4585,6 +4593,15 @@ where
                         PEER_CHANNEL_RESPONSE_TIMEOUT,
                         state.remote_revocation_nonce_for_send.is_some(),
                         state.remote_revocation_nonce_for_verify.is_some(),
+                    );
+                    self.notify_network_actor_shutdown_me(state);
+                }
+                if state.is_reestablish_stalled(now) {
+                    error!(
+                        "Channel {} from peer {:?} has been waiting over {} ms for the reconnected peer's ReestablishChannel, shutting down it forcefully",
+                        state.get_id(),
+                        state.get_remote_pubkey(),
+                        REESTABLISH_TIMEOUT,
                     );
                     self.notify_network_actor_shutdown_me(state);
                 }
@@ -5852,6 +5869,10 @@ pub struct ChannelActorState {
     #[doc = "skip_store"]
     pub revocation_nonce_unbalanced_since: Option<u64>,
 
+    // When the peer reconnected and we started waiting for its ReestablishChannel (see
+    // `is_reestablish_stalled`). V1 clears it once that message arrives; V2 keeps its
+    // recovery deadline through handshake replay. Going offline clears it for both versions,
+    // so time spent offline never counts toward `REESTABLISH_TIMEOUT`.
     #[doc = "skip_store"]
     pub reestablish_started_at: Option<u64>,
 
@@ -6438,6 +6459,33 @@ impl ChannelActorState {
             })
     }
 
+    /// True if a V1 peer reconnected more than `REESTABLISH_TIMEOUT` ago and has still not sent
+    /// its ReestablishChannel. Until it does, every other peer message is ignored, our TLC
+    /// removals are blocked and the peer response timeout is off, so a peer that never sends it
+    /// could keep us from fulfilling or failing the TLCs it sent us indefinitely. Checked on
+    /// each `MaintainChannelTlcs` tick, so the channel is force-closed within one
+    /// `CHECK_CHANNELS_INTERVAL` after the timeout.
+    ///
+    /// Only states that can hold TLCs and accept a force close are covered. `Stale` must wait
+    /// for the peer's audit, and once our commitment is broadcast there is nothing left to do.
+    pub fn is_reestablish_stalled(&self, now: u64) -> bool {
+        let can_force_close = match self.state {
+            ChannelState::ChannelReady => true,
+            ChannelState::ShuttingDown(flags) => {
+                !flags.contains(ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION)
+            }
+            _ => false,
+        };
+        self.session_v2.is_none()
+            && can_force_close
+            && self.reestablishing
+            && self.connectivity_state == ChannelConnectivityState::Syncing
+            && self.reestablish_started_at.is_some_and(|started| {
+                // saturating_sub, as in `peer_does_not_reply_ack_in_time`: the wall clock may step back
+                now.saturating_sub(started) > REESTABLISH_TIMEOUT
+            })
+    }
+
     pub fn set_waiting_ack(&mut self, myself: &ActorRef<ChannelActorMessage>, waiting_ack: bool) {
         self.tlc_state.set_waiting_ack(waiting_ack);
         self.log_ack_state(if waiting_ack {
@@ -6811,7 +6859,9 @@ impl ChannelActorState {
         self.replayed_tlc_updates_v2 = 0;
         self.clear_waiting_peer_response();
         self.reestablishing = true;
-        self.reestablish_started_at = Some(now_timestamp_as_millis_u64());
+        // An offline peer is not withholding its ReestablishChannel; the clock starts when it
+        // reconnects.
+        self.reestablish_started_at = None;
         self.connectivity_state = ChannelConnectivityState::Offline;
         if let Some(handle) = self.scheduled_channel_update_handle.take() {
             handle.abort();
@@ -6850,8 +6900,8 @@ impl ChannelActorState {
     fn on_peer_reconnected(&mut self) {
         if self.reestablishing && self.connectivity_state == ChannelConnectivityState::Offline {
             self.connectivity_state = ChannelConnectivityState::Syncing;
+            self.reestablish_started_at = Some(now_timestamp_as_millis_u64());
             if self.session_v2.is_some() {
-                self.reestablish_started_at = Some(now_timestamp_as_millis_u64());
                 // Ordinary rounds advertise a fresh verification nonce at each handshake.
                 // Bootstrap CS/Ready replays keep their original allocation until safe to advance;
                 // `incoming` is kept because ACK processing needs its history.
@@ -10115,6 +10165,11 @@ impl ChannelActorState {
             self.state,
             pending_commit_diff.is_some()
         );
+        // The peer has answered, so stop the reestablish timeout whatever the outcome. Not all
+        // branches below clear `reestablishing` (`ShuttingDown` keeps it), and after a failed
+        // handshake a force close could broadcast a revoked commitment if our state is the stale
+        // one.
+        self.reestablish_started_at = None;
         let network = self.network();
         self.notify_funding_tx(&network);
         let external_funding_waiting_submit = self.ephemeral_config.external_funding.enabled
