@@ -130,6 +130,29 @@ pub(crate) fn take(
     (taken, refused)
 }
 
+/// The cells of `picked` that `take` would refuse now (held here, or in `spent`), without holding
+/// any. A lock that cannot be taken refuses nothing, as in `take`.
+fn unavailable<'a>(
+    picked: impl Iterator<Item = &'a OutPoint>,
+    spent: &HashSet<OutPoint>,
+    now_ms: u64,
+) -> HashSet<OutPoint> {
+    let Ok(held) = HELD.lock() else {
+        return HashSet::new();
+    };
+    picked
+        .filter(|cell| {
+            spent.contains(*cell)
+                || held.funding.values().flatten().any(|held| held == *cell)
+                || held
+                    .watchtower
+                    .get(*cell)
+                    .is_some_and(|until| *until > now_ms)
+        })
+        .cloned()
+        .collect()
+}
+
 /// Where `TakingCollector` learns whether a transaction in the node's pool already spends a cell.
 #[derive(Clone)]
 pub(crate) enum PoolCheck {
@@ -164,6 +187,10 @@ impl PoolCheck {
 /// the pool is locked in the inner collector and skipped, and the inner collector is asked again
 /// until the query's capacity is met or it has no more cells. A taken cell is held from the moment
 /// it is picked, so the other taker no longer sees it.
+///
+/// Cells are taken only when `apply_changes` is set. Without it the collector previews: it answers
+/// the cells it would give, less the held and spent ones, and takes none, so a caller can peek and
+/// then consume the same cell (the SDK's capacity balancer does this when the change is too small).
 #[derive(Clone)]
 pub(crate) struct TakingCollector<C> {
     inner: C,
@@ -180,6 +207,55 @@ impl<C> TakingCollector<C> {
     pub(crate) fn with_pool(inner: C, taker: Taker, pool: PoolCheck) -> Self {
         Self { inner, taker, pool }
     }
+
+    /// The cells of `picked` that a transaction in the node's pool spends, asked together.
+    async fn spent_in_pool(&self, picked: &[LiveCell]) -> HashSet<OutPoint> {
+        let answers =
+            futures::future::join_all(picked.iter().map(|cell| self.pool.spent(&cell.out_point)))
+                .await;
+        picked
+            .iter()
+            .zip(answers)
+            .filter(|(_, spent)| *spent)
+            .map(|(cell, _)| cell.out_point.clone())
+            .collect()
+    }
+}
+
+impl<C: CellCollector + Clone> TakingCollector<C> {
+    /// A preview: the cells the inner collector would give for `query`, less the held and spent
+    /// ones, with nothing taken. A refused cell is locked in the inner collector so the next ask
+    /// offers another; it could not be taken anyway.
+    async fn peek(
+        &mut self,
+        query: &CellQueryOptions,
+    ) -> Result<(Vec<LiveCell>, u64), CellCollectorError> {
+        let mut answer = (Vec::new(), 0u64);
+        for _ in 0..TAKE_ROUNDS {
+            let (picked, _) = self.inner.collect_live_cells_async(query, false).await?;
+            let spent = self.spent_in_pool(&picked).await;
+            let refused = unavailable(
+                picked.iter().map(|cell| &cell.out_point),
+                &spent,
+                crate::now_timestamp_as_millis_u64(),
+            );
+            let cells: Vec<LiveCell> = picked
+                .into_iter()
+                .filter(|cell| !refused.contains(&cell.out_point))
+                .collect();
+            let capacity = cells.iter().fold(0u64, |sum, cell| {
+                sum.saturating_add(Unpack::<u64>::unpack(&cell.output.capacity()))
+            });
+            answer = (cells, capacity);
+            if refused.is_empty() {
+                break;
+            }
+            for cell in refused {
+                self.inner.lock_cell(cell, u64::MAX)?;
+            }
+        }
+        Ok(answer)
+    }
 }
 
 #[async_trait::async_trait]
@@ -189,28 +265,18 @@ impl<C: CellCollector + Clone> CellCollector for TakingCollector<C> {
         query: &CellQueryOptions,
         apply_changes: bool,
     ) -> Result<(Vec<LiveCell>, u64), CellCollectorError> {
+        if !apply_changes {
+            return self.peek(query).await;
+        }
         let need = query.min_total_capacity;
         let mut query = query.clone();
         let (mut cells, mut capacity) = (Vec::new(), 0u64);
         for _ in 0..TAKE_ROUNDS {
-            let (picked, _) = self
-                .inner
-                .collect_live_cells_async(&query, apply_changes)
-                .await?;
+            let (picked, _) = self.inner.collect_live_cells_async(&query, true).await?;
             if picked.is_empty() {
                 break;
             }
-            // One question per cell, asked together.
-            let answers = futures::future::join_all(
-                picked.iter().map(|cell| self.pool.spent(&cell.out_point)),
-            )
-            .await;
-            let spent: HashSet<OutPoint> = picked
-                .iter()
-                .zip(answers)
-                .filter(|(_, spent)| *spent)
-                .map(|(cell, _)| cell.out_point.clone())
-                .collect();
+            let spent = self.spent_in_pool(&picked).await;
             let (taken, refused) = take(
                 picked.iter().map(|cell| cell.out_point.clone()).collect(),
                 &spent,
@@ -222,10 +288,6 @@ impl<C: CellCollector + Clone> CellCollector for TakingCollector<C> {
             }
             for cell in picked {
                 if taken.contains(&cell.out_point) {
-                    // Asked again, the collector must not answer with it a second time.
-                    if !apply_changes {
-                        self.inner.lock_cell(cell.out_point.clone(), u64::MAX)?;
-                    }
                     let cell_capacity: u64 = cell.output.capacity().unpack();
                     capacity = capacity.saturating_add(cell_capacity);
                     cells.push(cell);
@@ -473,7 +535,7 @@ mod tests {
         let mut watchtower =
             TakingCollector::with_pool(Cells::of(&[&x, &y, &z]), Taker::Watchtower, no_pool());
         let (picked, capacity) = watchtower
-            .collect_live_cells_async(&needing(CELL_CAPACITY), false)
+            .collect_live_cells_async(&needing(CELL_CAPACITY), true)
             .await
             .unwrap();
         assert_eq!(
@@ -495,7 +557,7 @@ mod tests {
         let mut watchtower =
             TakingCollector::with_pool(Cells::of(&[&x]), Taker::Watchtower, no_pool());
         let (picked, _) = watchtower
-            .collect_live_cells_async(&needing(CELL_CAPACITY), false)
+            .collect_live_cells_async(&needing(CELL_CAPACITY), true)
             .await
             .unwrap();
         assert_eq!(out_points(&picked), vec![x.clone()]);
@@ -547,7 +609,7 @@ mod tests {
         let mut watchtower =
             TakingCollector::with_pool(Cells::of(&[&x, &y]), Taker::Watchtower, spent);
         let (picked, _) = watchtower
-            .collect_live_cells_async(&needing(CELL_CAPACITY), false)
+            .collect_live_cells_async(&needing(CELL_CAPACITY), true)
             .await
             .unwrap();
         assert_eq!(out_points(&picked), vec![y.clone()]);
@@ -571,6 +633,64 @@ mod tests {
         assert_eq!(out_points(&picked), vec![y, z]);
         assert_eq!(capacity, 2 * CELL_CAPACITY);
         hold_funding(holder, vec![]);
+        hold_funding(other, vec![]);
+    }
+
+    /// The SDK's capacity balancer peeks (`apply_changes` false) for one more cell when the change
+    /// is too small, then asks again with `apply_changes` to consume it. The peek takes nothing,
+    /// so the cell it saw is still there to consume.
+    #[tokio::test]
+    async fn a_peeked_cell_can_then_be_consumed() {
+        let _serial = SERIAL.lock().await;
+        let x = cell(181);
+        let holder = new_holder();
+        let mut funding =
+            TakingCollector::with_pool(Cells::of(&[&x]), Taker::Funding(holder), no_pool());
+        let (peeked, _) = funding
+            .collect_live_cells_async(&needing(CELL_CAPACITY), false)
+            .await
+            .unwrap();
+        assert_eq!(out_points(&peeked), vec![x.clone()]);
+
+        let (taken, capacity) = funding
+            .collect_live_cells_async(&needing(CELL_CAPACITY), true)
+            .await
+            .unwrap();
+        assert_eq!(
+            out_points(&taken),
+            vec![x.clone()],
+            "the peeked cell is consumed"
+        );
+        assert_eq!(capacity, CELL_CAPACITY);
+        assert_eq!(
+            locked(std::slice::from_ref(&x), 0),
+            vec![x],
+            "consumed, it is held"
+        );
+        hold_funding(holder, vec![]);
+    }
+
+    #[tokio::test]
+    async fn a_peek_still_skips_a_cell_another_opening_holds() {
+        let _serial = SERIAL.lock().await;
+        let (x, y) = (cell(191), cell(192));
+        let other = new_holder();
+        hold_funding(other, vec![x.clone()]);
+
+        let holder = new_holder();
+        let mut funding =
+            TakingCollector::with_pool(Cells::of(&[&x, &y]), Taker::Funding(holder), no_pool());
+        let (peeked, capacity) = funding
+            .collect_live_cells_async(&needing(CELL_CAPACITY), false)
+            .await
+            .unwrap();
+        assert_eq!(
+            out_points(&peeked),
+            vec![y.clone()],
+            "x is the other opening's"
+        );
+        assert_eq!(capacity, CELL_CAPACITY);
+        assert!(locked(&[y], 0).is_empty(), "the peek holds nothing");
         hold_funding(other, vec![]);
     }
 }

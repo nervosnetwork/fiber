@@ -520,7 +520,7 @@ fn build_revocation_tx(
     query.secondary_script_len_range = Some(ValueRangeOption::new_exact(0));
     query.data_len_range = Some(ValueRangeOption::new_exact(0));
     query.min_total_capacity = min_total_capacity;
-    let (cells, _total_capacity) = cell_collector.collect_live_cells(&query, false)?;
+    let (cells, _total_capacity) = cell_collector.collect_live_cells(&query, true)?;
     let mut inputs_capacity = 0u64;
     for cell in cells {
         let input_capacity: u64 = cell.output.capacity().unpack();
@@ -1717,7 +1717,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
         if min_total_capacity > 0 {
             query.min_total_capacity = min_total_capacity;
         }
-        let (cells, _total_capacity) = cell_collector.collect_live_cells(&query, false)?;
+        let (cells, _total_capacity) = cell_collector.collect_live_cells(&query, true)?;
         let mut inputs_capacity = capacity;
         let since = if unlock.unlock_type < 0xFE && !unlock.with_preimage {
             Since::new(SinceType::Timestamp, current_time / 1000, false).value()
@@ -1945,7 +1945,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
         query.secondary_script_len_range = Some(ValueRangeOption::new_exact(0));
         query.data_len_range = Some(ValueRangeOption::new_exact(0));
         query.min_total_capacity = min_total_capacity;
-        let (cells, _total_capacity) = cell_collector.collect_live_cells(&query, false)?;
+        let (cells, _total_capacity) = cell_collector.collect_live_cells(&query, true)?;
         let mut inputs_capacity = commitment_cell.output.capacity.value();
         let since = if unlock.unlock_type < 0xFE && !unlock.with_preimage {
             Since::new(SinceType::Timestamp, current_time / 1000, false).value()
