@@ -1026,9 +1026,9 @@ dependencies = [
 
 [[package]]
 name = "ckb-gen-types"
-version = "1.1.1"
+version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba8b0a3f407c30d8bb5077370ad129bfea0e045c5ea85fda152a404bac410dc7"
+checksum = "8599199d192e324031cfa6ad922ed08f20f5bfdc1343e2dd2d1da52b8367beb5"
 dependencies = [
  "cfg-if",
  "ckb-error",
