@@ -47,7 +47,7 @@ use fiber_types::protocol::AnnouncedNodeName;
 use fiber_types::schema::WATCHTOWER_TLC_SETTLED_PREFIX;
 #[cfg(not(target_arch = "wasm32"))]
 use fiber_types::{
-    AddTlcCommand, AppliedFlags, CommitmentContractFeatures, CommitmentNumbers, OutboundTlcStatus,
+    AddTlcCommand, AppliedFlags, ChannelFeatures, CommitmentNumbers, OutboundTlcStatus,
     RetryableTlcOperation, SettlementTlc, TLCId, TlcInfo, TlcStatus,
 };
 use fiber_types::{
@@ -450,7 +450,7 @@ fn test_store_watchtower() {
             local_settlement_data: settlement_data.clone(),
             pending_remote_settlement_data: settlement_data.clone(),
             remote_settlement_data: settlement_data.clone(),
-            commitment_contract_features: Default::default(),
+            channel_features: Default::default(),
         }]
     );
 
@@ -480,9 +480,58 @@ fn test_store_watchtower() {
             revocation_data: Some(revocation_data),
             pending_remote_settlement_data: settlement_data.clone(),
             remote_settlement_data: settlement_data,
-            commitment_contract_features: Default::default(),
+            channel_features: Default::default(),
         }]
     );
+
+    let old = RevocationData {
+        commitment_number: 0,
+        aggregated_signature: CompactSignature::from_bytes(&[0u8; 64]).unwrap(),
+        output: CellOutput::default(),
+        output_data: Bytes::default(),
+    };
+    let mut newer = old.clone();
+    newer.commitment_number = 1;
+    let newer_settlement = SettlementData {
+        local_amount: 300,
+        remote_amount: 400,
+        tlcs: vec![],
+    };
+    store.update_revocation(
+        node_id.clone(),
+        channel_id,
+        newer.clone(),
+        newer_settlement.clone(),
+    );
+    store.update_revocation(
+        node_id.clone(),
+        channel_id,
+        old,
+        SettlementData {
+            local_amount: 1,
+            remote_amount: 2,
+            tlcs: vec![],
+        },
+    );
+    let stored = store.get_watch_channels().pop().unwrap();
+    assert_eq!(stored.revocation_data, Some(newer));
+    assert_eq!(stored.remote_settlement_data, newer_settlement);
+    // Replayed bootstrap registration cannot erase accepted revocation data.
+    store.insert_watch_channel(
+        node_id.clone(),
+        channel_id,
+        None,
+        Privkey::from(&[1; 32]),
+        remote_settlement_key,
+        local_funding_pubkey,
+        remote_funding_pubkey,
+        SettlementData {
+            local_amount: 100,
+            remote_amount: 200,
+            tlcs: vec![],
+        },
+    );
+    assert_eq!(store.get_watch_channels().pop().unwrap(), stored);
 
     store.remove_watch_channel(node_id, channel_id);
     assert_eq!(store.get_watch_channels(), vec![]);
@@ -510,7 +559,7 @@ fn test_store_watchtower_v1_registration_round_trip() {
         Privkey::from(&[3; 32]).pubkey(),
         Privkey::from(&[4; 32]).pubkey(),
         settlement_data,
-        CommitmentContractFeatures::ONCHAIN_FULL_PAYMENT_HASH,
+        ChannelFeatures::V2,
     );
 
     assert_eq!(
@@ -519,8 +568,8 @@ fn test_store_watchtower_v1_registration_round_trip() {
             .into_iter()
             .find(|channel| channel.channel_id == channel_id)
             .expect("stored channel")
-            .commitment_contract_features,
-        CommitmentContractFeatures::ONCHAIN_FULL_PAYMENT_HASH
+            .channel_features,
+        ChannelFeatures::V2
     );
 }
 
@@ -1169,7 +1218,7 @@ fn test_store_watchtower_with_wrong_node_id() {
         local_settlement_data: settlement_data.clone(),
         pending_remote_settlement_data: settlement_data.clone(),
         remote_settlement_data: settlement_data.clone(),
-        commitment_contract_features: Default::default(),
+        channel_features: Default::default(),
     }];
     assert_eq!(store.get_watch_channels(), expected_value);
 
@@ -1308,12 +1357,14 @@ fn test_channel_actor_state_store() {
             })],
             last_was_revoke: true,
             external_funding: None,
-            commitment_contract_features: Default::default(),
+            channel_features: Default::default(),
             created_at: SystemTime::now(),
+            session_v2: None,
         },
         waiting_peer_response: None,
         revocation_nonce_unbalanced_since: None,
         reestablish_started_at: None,
+        recovery_peer_v2: None,
         network: None,
         scheduled_channel_update_handle: None,
         pending_notify_settle_tlcs: vec![],
@@ -1324,6 +1375,8 @@ fn test_channel_actor_state_store() {
         funding_abort_detail: None,
         private_key: None,
         needs_backup: false,
+        pending_remove_effects_v2: 0,
+        replayed_tlc_updates_v2: 0,
     };
 
     let bincode_encoded = bincode::serialize(&state).unwrap();
@@ -1451,12 +1504,14 @@ fn sample_channel_actor_state(
             pending_replay_updates: vec![],
             last_was_revoke: false,
             external_funding: None,
-            commitment_contract_features: Default::default(),
+            channel_features: Default::default(),
             created_at: SystemTime::now(),
+            session_v2: None,
         },
         waiting_peer_response: None,
         revocation_nonce_unbalanced_since: None,
         reestablish_started_at: None,
+        recovery_peer_v2: None,
         network: None,
         scheduled_channel_update_handle: None,
         pending_notify_settle_tlcs: vec![],
@@ -1467,6 +1522,8 @@ fn sample_channel_actor_state(
         funding_abort_detail: None,
         private_key: None,
         needs_backup: false,
+        pending_remove_effects_v2: 0,
+        replayed_tlc_updates_v2: 0,
     }
 }
 
@@ -1487,12 +1544,13 @@ fn test_serde_channel_actor_state_ciborium() {
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 fn test_closed_onchain_settlement_state_round_trips() {
-    let state = sample_channel_actor_state(
+    let mut state = sample_channel_actor_state(
         ChannelState::Closed(
             CloseFlags::UNCOOPERATIVE_LOCAL | CloseFlags::WAITING_ONCHAIN_SETTLEMENT,
         ),
         Some(H256::default()),
     );
+    state.pending_remove_effects_v2 = 1;
     let (store, _dir) = generate_store();
 
     store.insert_channel_actor_state(state.clone());
@@ -1514,6 +1572,7 @@ fn test_closed_onchain_settlement_state_round_trips() {
     assert!(restored.network.is_none());
     assert!(restored.scheduled_channel_update_handle.is_none());
     assert!(restored.pending_notify_settle_tlcs.is_empty());
+    assert_eq!(restored.pending_remove_effects_v2, 0);
     assert!(!restored.pending_reestablish_channel_ready);
     assert!(!restored.defer_peer_tlc_updates);
     assert!(restored.deferred_peer_tlc_updates.is_empty());
@@ -1715,6 +1774,190 @@ fn test_store_payment_sessions_with_status() {
     let res = store.get_payment_sessions_with_status(PaymentStatus::Failed);
     assert_eq!(res.len(), 0);
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_payment_status_queries_skip_attempts_for_mismatched_terminal_sessions() {
+    for terminal_status in [PaymentStatus::Success, PaymentStatus::Failed] {
+        let (store, _dir) = generate_store();
+        let hash = Hash256::from([1; 32]);
+        let request = SendPaymentDataBuilder::new(gen_rand_fiber_public_key(), 100, hash)
+            .max_fee_amount(Some(1000))
+            .build()
+            .unwrap();
+        let mut session = PaymentSession::new_session(&store, request, 1);
+        session.status = terminal_status;
+        store.insert_payment_session(session);
+
+        // An unreadable sentinel makes unnecessary attempt hydration fail.
+        let attempt_key = [
+            &[fiber_types::schema::ATTEMPT_PREFIX],
+            hash.as_ref(),
+            &1u64.to_le_bytes(),
+        ]
+        .concat();
+        store.put(attempt_key, []);
+
+        for status in [
+            PaymentStatus::Created,
+            PaymentStatus::Inflight,
+            PaymentStatus::Success,
+            PaymentStatus::Failed,
+        ] {
+            if status == terminal_status {
+                continue;
+            }
+            assert!(store.get_payment_sessions_with_status(status).is_empty());
+            assert!(store
+                .get_payment_sessions_with_limit(1, None, Some(status))
+                .is_empty());
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_payment_status_queries_filter_hydrated_attempts_before_pagination() {
+    let (store, _dir) = generate_store();
+    let source = gen_rand_fiber_public_key();
+    let target = gen_rand_fiber_public_key();
+    let cases = [
+        (
+            PaymentStatus::Created,
+            AttemptStatus::Inflight,
+            PaymentStatus::Inflight,
+        ),
+        (
+            PaymentStatus::Inflight,
+            AttemptStatus::Created,
+            PaymentStatus::Created,
+        ),
+        (
+            PaymentStatus::Created,
+            AttemptStatus::Success,
+            PaymentStatus::Success,
+        ),
+        (
+            PaymentStatus::Created,
+            AttemptStatus::Failed,
+            PaymentStatus::Failed,
+        ),
+        (
+            PaymentStatus::Success,
+            AttemptStatus::Inflight,
+            PaymentStatus::Success,
+        ),
+        (
+            PaymentStatus::Failed,
+            AttemptStatus::Inflight,
+            PaymentStatus::Failed,
+        ),
+        (
+            PaymentStatus::Created,
+            AttemptStatus::Inflight,
+            PaymentStatus::Inflight,
+        ),
+        (
+            PaymentStatus::Created,
+            AttemptStatus::Inflight,
+            PaymentStatus::Inflight,
+        ),
+    ];
+    for (index, &(persisted, attempt_status, effective)) in cases.iter().enumerate() {
+        let hash = Hash256::from([index as u8 + 1; 32]);
+        let request = SendPaymentDataBuilder::new(target, 100, hash)
+            .max_fee_amount(Some(1000))
+            .build()
+            .unwrap();
+        let mut session = PaymentSession::new_session(&store, request, 1);
+        session.status = persisted;
+        store.insert_payment_session(session.clone());
+        let mut attempt = session.new_attempt(
+            1,
+            source,
+            target,
+            vec![PaymentHopData {
+                amount: 100,
+                expiry: DEFAULT_TLC_EXPIRY_DELTA,
+                ..Default::default()
+            }],
+        );
+        attempt.status = attempt_status;
+        store.insert_attempt(attempt);
+        assert_eq!(store.get_payment_session(hash).unwrap().status, effective);
+    }
+    for status in [
+        PaymentStatus::Created,
+        PaymentStatus::Inflight,
+        PaymentStatus::Success,
+        PaymentStatus::Failed,
+    ] {
+        let expected: Vec<_> = cases
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, _, effective))| *effective == status)
+            .map(|(index, _)| Hash256::from([index as u8 + 1; 32]))
+            .collect();
+        for sessions in [
+            store.get_payment_sessions_with_status(status),
+            store.get_payment_sessions_with_limit(100, None, Some(status)),
+        ] {
+            assert!(
+                sessions.iter().all(|session| session.status == status),
+                "filter must match returned status: {status:?}"
+            );
+            assert_eq!(
+                sessions
+                    .iter()
+                    .map(|session| session.payment_hash())
+                    .collect::<Vec<_>>(),
+                expected
+            );
+        }
+    }
+    for (limit, after, expected) in [
+        (2, 1, vec![7, 8]),
+        (1, 3, vec![7]),
+        (1, 7, vec![8]),
+        (1, 8, vec![]),
+        (0, 0, vec![]),
+    ] {
+        let page = store.get_payment_sessions_with_limit(
+            limit,
+            Some([after; 32].into()),
+            Some(PaymentStatus::Inflight),
+        );
+        assert_eq!(
+            page.iter()
+                .map(|session| session.payment_hash())
+                .collect::<Vec<_>>(),
+            expected
+                .into_iter()
+                .map(|tag| Hash256::from([tag; 32]))
+                .collect::<Vec<_>>()
+        );
+    }
+    let unfiltered = store.get_payment_sessions_with_limit(3, Some([1; 32].into()), None);
+    assert_eq!(
+        unfiltered
+            .iter()
+            .map(|session| session.status)
+            .collect::<Vec<_>>(),
+        vec![
+            PaymentStatus::Created,
+            PaymentStatus::Success,
+            PaymentStatus::Failed
+        ]
+    );
+    for (index, &(persisted, _, _)) in cases.iter().enumerate() {
+        assert_eq!(
+            store.get_persisted_payment_status([index as u8 + 1; 32].into()),
+            Some(persisted),
+            "queries must not rewrite durable aggregate status"
+        );
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

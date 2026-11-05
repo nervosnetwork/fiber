@@ -12,11 +12,23 @@ use super::jsonrpc_types_convert::tx_status_from_json;
 
 const SYNTHETIC_REJECT_REASON: &str = "Transaction rejected when submitting";
 
+/// CKB's `PoolRejectedRBF`: another transaction in the pool spends an input of this one.
+pub(crate) fn is_pool_conflict_code(code: i64) -> bool {
+    code == -1111
+}
+
+/// Whether `err` says another transaction in the pool spends an input of this one.
+pub(crate) fn is_pool_conflict(err: &RpcError) -> bool {
+    matches!(err, RpcError::Rpc(e) if is_pool_conflict_code(e.code.code()))
+}
+
 /// Permanent SendTx RPC errors that indicate the transaction cannot be accepted into the pool.
+/// A pool conflict counts: who reports it decides for which transactions (a funding, not a
+/// closing, `InFlightCkbTxActor`).
 pub(crate) fn is_permanent_send_tx_error(err: &RpcError) -> bool {
     match err {
         RpcError::Rpc(e) => {
-            if e.code.code() == -301 {
+            if e.code.code() == -301 || is_pool_conflict_code(e.code.code()) {
                 return true;
             }
             e.message.contains("TransactionFailedToResolve")

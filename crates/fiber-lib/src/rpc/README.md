@@ -73,12 +73,12 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Type `CchInvoice`](#type-cchinvoice)
     * [Type `CchOrderStatus`](#type-cchorderstatus)
     * [Type `Channel`](#type-channel)
+    * [Type `ChannelFeatures`](#type-channelfeatures)
     * [Type `ChannelInfo`](#type-channelinfo)
     * [Type `ChannelState`](#type-channelstate)
     * [Type `ChannelUpdateInfo`](#type-channelupdateinfo)
     * [Type `CkbInvoice`](#type-ckbinvoice)
     * [Type `CkbInvoiceStatus`](#type-ckbinvoicestatus)
-    * [Type `CommitmentContractFeatures`](#type-commitmentcontractfeatures)
     * [Type `Currency`](#type-currency)
     * [Type `GetPaymentCommandResult`](#type-getpaymentcommandresult)
     * [Type `Hash256`](#type-hash256)
@@ -1113,7 +1113,7 @@ Create a new watched channel
 * `local_funding_pubkey` - <em>[Pubkey](#type-pubkey)</em>, The local party's funding public key (hex without 0x prefix)
 * `remote_funding_pubkey` - <em>[Pubkey](#type-pubkey)</em>, The remote party's funding public key (hex without 0x prefix)
 * `settlement_data` - <em>[SettlementData](#type-settlementdata)</em>, Settlement data
-* `commitment_contract_features` - <em>[CommitmentContractFeatures](#type-commitmentcontractfeatures)</em>, Commitment-lock feature bitmap as hex: "0x0" (Legacy) or "0x1" (full payment hash).
+* `channel_features` - <em>[ChannelFeatures](#type-channelfeatures)</em>, Channel feature bitmap as hex: "0x0" (Legacy) or "0x1" (V2 with full payment hashes).
 
 ##### Returns
 
@@ -1327,6 +1327,15 @@ The channel data structure.
  Only present when the channel is in a failed state (e.g. abandoned or funding aborted).
 ---
 
+<a id="#type-channelfeatures"></a>
+### Type `ChannelFeatures`
+
+Channel version features (0x0: Legacy; 0x1: V2 with full payment hashes).
+
+
+
+---
+
 <a id="#type-channelinfo"></a>
 ### Type `ChannelInfo`
 
@@ -1424,15 +1433,6 @@ The status of an invoice.
 * `Expired` - The invoice is expired.
 * `Received` - The invoice is received, but not settled yet.
 * `Paid` - The invoice is paid.
----
-
-<a id="#type-commitmentcontractfeatures"></a>
-### Type `CommitmentContractFeatures`
-
-Commitment-lock feature bits (0x0: Legacy; 0x1: full payment hash).
-
-
-
 ---
 
 <a id="#type-currency"></a>

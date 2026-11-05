@@ -1,5 +1,7 @@
 #![cfg(not(target_arch = "wasm32"))]
-use crate::fiber::channel::{ChannelActorStateStore, ChannelCommand, ChannelCommandWithId};
+use crate::fiber::channel::{
+    ChannelActorMessage, ChannelActorStateStore, ChannelCommand, ChannelCommandWithId,
+};
 use crate::fiber::config::{
     DEFAULT_FINAL_TLC_EXPIRY_DELTA, DEFAULT_TLC_EXPIRY_DELTA, MIN_TLC_EXPIRY_DELTA,
 };
@@ -3595,7 +3597,7 @@ async fn test_trampoline_node_restart() {
 
     // A --(public)--> B --(private)--> C
     // Note: Use large amounts to ensure capacity.
-    let (nodes, _channels) = create_n_nodes_network_with_visibility(
+    let (nodes, channels) = create_n_nodes_network_with_visibility(
         &[
             ((0, 1), (MIN_RESERVED_CKB + 1000000, HUGE_CKB_AMOUNT), true),
             ((1, 2), (MIN_RESERVED_CKB + 1000000, HUGE_CKB_AMOUNT), false),
@@ -3605,6 +3607,8 @@ async fn test_trampoline_node_restart() {
     .await;
 
     let [node_a, mut node_b, node_c] = nodes.try_into().expect("3 nodes");
+    let upstream_balance = node_b.get_local_balance_from_channel(channels[0]);
+    let downstream_balance = node_b.get_local_balance_from_channel(channels[1]);
 
     // Wait until A learns B (public channel).
     wait_until_node_supports_trampoline_routing(&node_a, &node_b).await;
@@ -3661,10 +3665,40 @@ async fn test_trampoline_node_restart() {
 
     wait_for_received_tlc(&node_c, payment_hash).await;
     debug!("Node C received HTLC. Stopping Node B.");
+    let upstream_amount = node_b
+        .get_channel_actor_state(channels[0])
+        .tlc_state
+        .get(&TLCId::Received(0))
+        .expect("committed upstream TLC")
+        .amount;
 
     // Restart B
     node_b.restart().await;
     debug!("Node B restarted.");
+    let upstream_actor = node_b
+        .get_channel_actor(channels[0])
+        .await
+        .expect("restored channel actor");
+    ractor::call_t!(
+        upstream_actor,
+        |reply| ChannelActorMessage::Command(ChannelCommand::TestBarrier(reply)),
+        5000
+    )
+    .expect("recovery finishes before inspecting the upstream TLC");
+    let restored = node_b.get_channel_actor_state(channels[0]);
+    assert!(
+        restored.retryable_tlc_operations.is_empty(),
+        "recovery must not enqueue a failure for the trampoline-owned TLC"
+    );
+    assert!(
+        restored
+            .tlc_state
+            .get(&TLCId::Received(0))
+            .expect("upstream TLC remains pending")
+            .removed_reason
+            .is_none(),
+        "do not race a synthetic fail against the later legitimate fulfill"
+    );
 
     // Wait for channels to be ready/active again.
     // We can assume after connect_to, channel re-establishment kicks in.
@@ -3702,6 +3736,11 @@ async fn test_trampoline_node_restart() {
     debug!("Waiting for success on Node A...");
     // Wait for A to succeed.
     node_a.wait_until_success(payment_hash).await;
+    wait_until_timeout(5000, || {
+        node_b.get_local_balance_from_channel(channels[0]) == upstream_balance + upstream_amount
+            && node_b.get_local_balance_from_channel(channels[1]) == downstream_balance - amount
+    })
+    .await;
 }
 
 #[tokio::test]
