@@ -1,6 +1,7 @@
 mod actor;
 mod error;
 mod funding;
+pub(crate) mod held_cells;
 mod jsonrpc_types_convert;
 pub mod signer;
 mod tx_tracing_actor;

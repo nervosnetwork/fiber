@@ -11,7 +11,7 @@ use ckb_hash::new_blake2b;
 use ckb_jsonrpc_types::{Either, Status};
 use ckb_sdk::{
     rpc::ckb_indexer::{Cell, Order, ScriptType, SearchKey, SearchKeyFilter, SearchMode},
-    traits::{CellCollector, CellQueryOptions, DefaultCellCollector, ValueRangeOption},
+    traits::{CellCollector, CellQueryOptions, ValueRangeOption},
     transaction::builder::FeeCalculator,
     util::blake160,
     CkbRpcClient, RpcError, Since, SinceType,
@@ -271,7 +271,19 @@ fn run_periodic_check<S>(store: S, _node_id: NodeId, signer: LocalSigner, rpc_ur
 where
     S: WatchtowerStore + Send + Sync + 'static,
 {
-    let mut cell_collector = new_default_cell_collector(&rpc_url);
+    // Each cell it picks is held at once, so an opening cannot pick it meanwhile (`held_cells`).
+    let mut cell_collector = crate::ckb::held_cells::TakingCollector::new(
+        new_default_cell_collector(&rpc_url),
+        crate::ckb::held_cells::Taker::Watchtower,
+        rpc_url.clone(),
+    );
+    // Not the cells an opening put in its funding, nor those of this watchtower's own
+    // transactions still in the pool (`held_cells`).
+    if let Err(err) =
+        crate::ckb::held_cells::lock_held(&mut cell_collector, crate::now_timestamp_as_millis_u64())
+    {
+        error!("Failed to lock held cells: {:?}", err);
+    }
 
     // One client for the round: building one loads the TLS root store, about 6 ms of CPU, and it
     // was built for every watched channel.
@@ -356,8 +368,13 @@ where
                                                                 ) {
                                                                     Ok(tx_hash) => {
                                                                         info!("Revocation tx: {:?} sent, tx_hash: {:?}", tx, tx_hash);
+                                                                        hold_sent(
+                                                                            &tx,
+                                                                            &mut cell_collector,
+                                                                        );
                                                                     }
                                                                     Err(err) => {
+                                                                        crate::ckb::held_cells::release_for_watchtower(tx.input_pts_iter());
                                                                         error!("Failed to send revocation tx: {:?}, error: {:?}", tx, err);
                                                                     }
                                                                 }
@@ -428,12 +445,27 @@ where
     }
 }
 
+/// Holds the cells `tx` spends (`held_cells`), and locks them in `cell_collector` for the rest of
+/// this round.
+fn hold_sent(tx: &TransactionView, cell_collector: &mut dyn CellCollector) {
+    let cells: Vec<OutPoint> = tx.input_pts_iter().collect();
+    crate::ckb::held_cells::hold_for_watchtower(
+        cells.iter().cloned(),
+        crate::now_timestamp_as_millis_u64(),
+    );
+    for cell in cells {
+        if let Err(err) = cell_collector.lock_cell(cell, u64::MAX) {
+            error!("Failed to lock a sent cell: {:?}", err);
+        }
+    }
+}
+
 fn build_revocation_tx(
     commitment_tx_out_point: OutPoint,
     revocation_data: RevocationData,
     x_only_aggregated_pubkey: [u8; 32],
     signer: &LocalSigner,
-    cell_collector: &mut DefaultCellCollector,
+    cell_collector: &mut impl CellCollector,
 ) -> Result<TransactionView, Box<dyn std::error::Error>> {
     let witness = [
         XUDT_COMPATIBLE_WITNESS.to_vec(),
@@ -490,7 +522,7 @@ fn build_revocation_tx(
     query.secondary_script_len_range = Some(ValueRangeOption::new_exact(0));
     query.data_len_range = Some(ValueRangeOption::new_exact(0));
     query.min_total_capacity = min_total_capacity;
-    let (cells, _total_capacity) = cell_collector.collect_live_cells(&query, false)?;
+    let (cells, _total_capacity) = cell_collector.collect_live_cells(&query, true)?;
     let mut inputs_capacity = 0u64;
     for cell in cells {
         let input_capacity: u64 = cell.output.capacity().unpack();
@@ -543,7 +575,7 @@ fn try_settle_commitment_tx<S: WatchtowerStore>(
     channel_data: ChannelData,
     for_remote: bool,
     signer: &LocalSigner,
-    cell_collector: &mut DefaultCellCollector,
+    cell_collector: &mut impl CellCollector,
     store: &S,
     self_node_id: NodeId,
     first_commitment_block_number: u64,
@@ -755,8 +787,10 @@ fn try_settle_commitment_tx<S: WatchtowerStore>(
                         Ok(Some(tx)) => match ckb_client.send_transaction(tx.data().into(), None) {
                             Ok(tx_hash) => {
                                 info!("Settlement tx: {:?} sent, tx_hash: {:#x}", tx, tx_hash);
+                                hold_sent(&tx, cell_collector);
                             }
                             Err(err) => {
+                                crate::ckb::held_cells::release_for_watchtower(tx.input_pts_iter());
                                 error!("Failed to send settlement tx: {:?}, error: {:?}", tx, err);
                             }
                         },
@@ -1681,7 +1715,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
         if min_total_capacity > 0 {
             query.min_total_capacity = min_total_capacity;
         }
-        let (cells, _total_capacity) = cell_collector.collect_live_cells(&query, false)?;
+        let (cells, _total_capacity) = cell_collector.collect_live_cells(&query, true)?;
         let mut inputs_capacity = capacity;
         let since = if unlock.unlock_type < 0xFE && !unlock.with_preimage {
             Since::new(SinceType::Timestamp, current_time / 1000, false).value()
@@ -1909,7 +1943,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
         query.secondary_script_len_range = Some(ValueRangeOption::new_exact(0));
         query.data_len_range = Some(ValueRangeOption::new_exact(0));
         query.min_total_capacity = min_total_capacity;
-        let (cells, _total_capacity) = cell_collector.collect_live_cells(&query, false)?;
+        let (cells, _total_capacity) = cell_collector.collect_live_cells(&query, true)?;
         let mut inputs_capacity = commitment_cell.output.capacity.value();
         let since = if unlock.unlock_type < 0xFE && !unlock.with_preimage {
             Since::new(SinceType::Timestamp, current_time / 1000, false).value()
