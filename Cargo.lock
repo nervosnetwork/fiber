@@ -1053,9 +1053,9 @@ dependencies = [
 
 [[package]]
 name = "ckb-jsonrpc-types"
-version = "1.2.0"
+version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b7c621e0ea2746f0b0b8bfd220bae8d73896158986b77e881f38161bfa17c989"
+checksum = "b5b27933c2b7752b54039e7e4d4ca4554f3427b46cc32069373c9988a3fb5536"
 dependencies = [
  "ckb-types",
  "faster-hex",
