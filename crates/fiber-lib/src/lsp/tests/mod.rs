@@ -2512,6 +2512,21 @@ async fn cold_tenant_delivery_dispatches_only_after_channel_online() {
     };
     let now = crate::now_timestamp_as_millis_u64();
 
+    // A payment addressed to some other node must not be taken over just because
+    // its payment hash matches a hosted invoice: the tenant cannot peel an onion
+    // built for that node, so the payment would fail instead of reaching it.
+    let mut foreign = hosted_forwarding_request(&tenant, payment_hash, now);
+    foreign.next_node_id = Privkey::from(&[0x77; 32]).pubkey();
+    assert_eq!(
+        ractor::call!(service, |reply| {
+            LspServiceMessage::AcceptTrampolineDelivery(foreign, reply)
+        })
+        .unwrap()
+        .unwrap(),
+        DeliveryDecision::NotHosted,
+        "a trampoline hop aimed at another node is not a hosted delivery"
+    );
+
     assert_eq!(
         ractor::call!(service, |reply| {
             LspServiceMessage::AcceptTrampolineDelivery(

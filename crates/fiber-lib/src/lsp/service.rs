@@ -550,6 +550,15 @@ impl Actor for LspService {
                         Ok(Some(_)) if registration.hint.payload.buffer_duration_ms == 0 => {
                             Ok(DeliveryDecision::NotHosted)
                         }
+                        // A hosted invoice is only the target when the trampoline hop
+                        // asks for this tenant. Another node may issue an invoice that
+                        // reuses a hosted payment hash; taking that delivery over sends
+                        // an onion the tenant cannot peel, failing a payment that was
+                        // never ours. Hosted invoices are minted by the tenant runtime,
+                        // so their payee is the tenant and this is the same check.
+                        Ok(Some(tenant)) if request.next_node_id != tenant.tenant_pubkey => {
+                            Ok(DeliveryDecision::NotHosted)
+                        }
                         Ok(Some(tenant)) => (|| {
                             if let Some(existing) =
                                 state.delivery_manager.existing_request(&tenant, &request)?
