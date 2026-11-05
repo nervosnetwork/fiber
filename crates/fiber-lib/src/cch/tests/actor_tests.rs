@@ -30,7 +30,10 @@ use crate::invoice::{
     Attribute, CkbInvoice, CkbInvoiceStatus, Currency, InvoiceData, InvoiceError, PreimageStore,
     SettleInvoiceError,
 };
-use crate::store::{store_impl::StoreChange, Store};
+use crate::store::{
+    store_impl::{StoreChange, StoreChangePort},
+    Store,
+};
 use crate::tests::test_utils::{generate_store, TempDir};
 use crate::time::{Duration, SystemTime, UNIX_EPOCH};
 use fiber_types::{
@@ -694,7 +697,7 @@ struct TestHarness {
 struct StoreBackedTestHarness {
     actor: ActorRef<CchMessage>,
     event_port: Arc<OutputPort<CchTrackingEvent>>,
-    _store_change_port: Arc<OutputPort<StoreChange>>,
+    _store_change_port: Arc<StoreChangePort>,
     store: Store,
     _store_dir: TempDir,
     mock_state: MockNetworkState,
@@ -1146,7 +1149,7 @@ async fn setup_store_backed_test_harness_with_store(
     store_dir: TempDir,
 ) -> StoreBackedTestHarness {
     let event_port = Arc::new(OutputPort::<CchTrackingEvent>::default());
-    let store_change_port = Arc::new(OutputPort::<StoreChange>::default());
+    let store_change_port = Arc::new(StoreChangePort::default());
     let store_change_port_clone = store_change_port.clone();
     store.set_watcher(Arc::new(move |change| {
         store_change_port_clone.send(change);
@@ -1179,7 +1182,7 @@ async fn setup_store_backed_test_harness_with_store(
         .expect("spawn cch actor");
 
     actor_ref.subscribe_to_port(&event_port);
-    actor_ref.subscribe_to_port(&store_change_port);
+    store_change_port.subscribe(actor_ref.clone());
     *mock_state.cch_actor.lock().unwrap() = Some(actor_ref.clone());
 
     StoreBackedTestHarness {

@@ -514,6 +514,43 @@ pub enum StoreChange {
     },
 }
 
+/// Delivers each store change to every subscriber, in the order the store made them.
+///
+/// ractor's `OutputPort` holds at most 16 messages between a sender and each subscriber's
+/// forwarding task, and drops a subscriber for good once its task falls further behind. The
+/// store can send more changes than that in a row (#1717), so this port hands each change
+/// straight to the subscriber's mailbox instead, keeping no queue of its own. A subscriber
+/// that has stopped is removed.
+#[derive(Default)]
+pub struct StoreChangePort {
+    subscribers: parking_lot::Mutex<Vec<StoreChangeDelivery>>,
+}
+
+/// Hands a change to one subscriber; false once the subscriber has stopped.
+type StoreChangeDelivery = Box<dyn Fn(StoreChange) -> bool + Send>;
+
+impl StoreChangePort {
+    pub fn subscribe<M>(&self, receiver: ractor::ActorRef<M>)
+    where
+        M: ractor::Message + From<StoreChange>,
+    {
+        self.subscribers.lock().push(Box::new(move |change| {
+            receiver.cast(M::from(change)).is_ok()
+        }));
+    }
+
+    pub fn send(&self, change: StoreChange) {
+        self.subscribers
+            .lock()
+            .retain(|deliver| deliver(change.clone()));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn subscriber_count(&self) -> usize {
+        self.subscribers.lock().len()
+    }
+}
+
 pub trait StoreKeyValue {
     fn key(&self) -> Vec<u8>;
     fn value(&self) -> Vec<u8>;
@@ -1449,8 +1486,13 @@ impl NetworkGraphStateStore for Store {
             .into_iter()
             .filter_map(|kv| {
                 let session: PaymentSession = deserialize_from(kv.value.as_ref(), "PaymentSession");
+                // Loading attempts cannot change a persisted terminal status.
+                if session.status.is_final() && session.status != status {
+                    return None;
+                }
+                let session = session.init_attempts(self);
                 if session.status == status {
-                    Some(session.init_attempts(self))
+                    Some(session)
                 } else {
                     None
                 }
@@ -1473,9 +1515,13 @@ impl NetworkGraphStateStore for Store {
 
         iter.filter_map(|(_key, value)| {
             let session: PaymentSession = deserialize_from(&value, "PaymentSession");
+            if session.status.is_final() && status.is_some_and(|s| session.status != s) {
+                return None;
+            }
+            let session = session.init_attempts(self);
             match status {
                 Some(ref s) if session.status != *s => None,
-                _ => Some(session.init_attempts(self)),
+                _ => Some(session),
             }
         })
         .take(limit)
