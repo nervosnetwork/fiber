@@ -3767,8 +3767,20 @@ where
                 );
             }
         }
+    }
 
-        let expect_expiry = now_timestamp_as_millis_u64().saturating_add(epoch_delay_milliseconds);
+    /// Protect offered TLCs even while a cooperative shutdown waits for pending TLCs.
+    /// Otherwise a peer can reveal the preimage after the upstream TLC times out and
+    /// still receive the downstream balance through the cooperative close.
+    fn force_close_expiring_offered_tlcs(
+        &self,
+        myself: &ActorRef<ChannelActorMessage>,
+        state: &ChannelActorState,
+        now: u64,
+    ) {
+        let delay_epoch = EpochNumberWithFraction::from_full_value(state.commitment_delay_epoch);
+        let epoch_delay_milliseconds = tlc_expiry_delay(&delay_epoch);
+        let expect_expiry = now.saturating_add(epoch_delay_milliseconds);
         if state
             .tlc_state
             .get_expired_offered_tlcs(expect_expiry)
@@ -4615,8 +4627,14 @@ where
                 }
                 if state.is_ready() {
                     self.maintain_ready_channel_tlcs(myself, state).await;
-                } else {
+                } else if state.is_waiting_onchain_settlement() {
                     self.maintain_waiting_onchain_settlement_tlcs(state, now);
+                }
+                if matches!(
+                    state.state,
+                    ChannelState::ChannelReady | ChannelState::ShuttingDown(_)
+                ) {
+                    self.force_close_expiring_offered_tlcs(myself, state, now);
                 }
                 // Only closed or shutting-down channels can have on-chain TLC settlement
                 // signals. Scanning all TLCs against the watchtower store every tick on a

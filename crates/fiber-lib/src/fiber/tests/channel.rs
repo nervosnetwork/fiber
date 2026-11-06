@@ -4754,6 +4754,109 @@ async fn test_restarted_offline_channel_force_closes_expired_offered_tlc() {
 }
 
 #[tokio::test]
+async fn test_cooperative_shutdown_force_closes_expiring_offered_tlc_v1() {
+    do_test_cooperative_shutdown_force_closes_expiring_offered_tlc(false).await;
+}
+
+#[tokio::test]
+async fn test_cooperative_shutdown_force_closes_expiring_offered_tlc_v2() {
+    do_test_cooperative_shutdown_force_closes_expiring_offered_tlc(true).await;
+}
+
+async fn do_test_cooperative_shutdown_force_closes_expiring_offered_tlc(v2: bool) {
+    init_tracing();
+
+    let (node_a, node_b, channel_id) = if v2 {
+        create_nodes_with_established_channel(HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT, true).await
+    } else {
+        create_legacy_nodes_with_established_channel(HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT, true).await
+    };
+    for node in [&node_a, &node_b] {
+        assert_eq!(
+            node.get_channel_actor_state(channel_id)
+                .session_v2
+                .is_some(),
+            v2
+        );
+    }
+
+    let payment_hash = gen_rand_sha256_hash();
+    let expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
+    let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id,
+                command: ChannelCommand::AddTlc(
+                    create_mock_pending_add_tlc_command(
+                        &node_a,
+                        &node_b,
+                        1000,
+                        HashAlgorithm::CkbHash,
+                        payment_hash,
+                        expiry,
+                    ),
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("node_a alive")
+    .expect("successfully added tlc");
+
+    wait_until(|| {
+        node_a
+            .get_channel_actor_state(channel_id)
+            .tlc_state
+            .get(&TLCId::Offered(add_tlc_result.tlc_id))
+            .is_some_and(|tlc| tlc.outbound_status() == OutboundTlcStatus::Committed)
+    })
+    .await;
+
+    node_b
+        .send_shutdown(channel_id, false)
+        .await
+        .expect("peer shutdown accepted");
+    wait_until(|| {
+        matches!(
+            node_a.get_channel_actor_state(channel_id).state,
+            ChannelState::ShuttingDown(flags)
+                if flags.contains(ShuttingDownFlags::AWAITING_PENDING_TLCS)
+        )
+    })
+    .await;
+
+    // Advance the offered TLC into the commitment safety window while the
+    // channel is waiting for it to resolve. It has not expired yet.
+    let mut state = node_a.get_channel_actor_state(channel_id);
+    state
+        .tlc_state
+        .get_mut(&TLCId::Offered(add_tlc_result.tlc_id))
+        .expect("offered tlc exists")
+        .expiry = now_timestamp_as_millis_u64() + 5_000;
+    node_a
+        .update_channel_actor_state(
+            state,
+            Some(ReloadParams {
+                notify_changes: false,
+            }),
+        )
+        .await;
+
+    notify_maintain_channel_tlcs(&node_a, channel_id);
+    wait_until(|| {
+        matches!(
+            node_a.get_channel_actor_state(channel_id).state,
+            ChannelState::ShuttingDown(flags)
+                if flags.contains(ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION)
+        ) || matches!(
+            node_a.get_channel_actor_state(channel_id).state,
+            ChannelState::Closed(flags) if flags.contains(CloseFlags::UNCOOPERATIVE_LOCAL)
+        )
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn test_offered_tlc_survives_force_close_transition() {
     init_tracing();
 
