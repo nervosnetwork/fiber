@@ -1767,10 +1767,6 @@ where
         state: &mut ChannelActorState,
         tlc: TlcInfo,
     ) {
-        if !state.can_auto_fulfill_received_tlc(&tlc) {
-            return;
-        }
-
         // When a TLC has no associated invoice, it cannot be a hold invoice or MPP payment.
         // Check if we have the preimage: if yes, fulfill the TLC.
         let Some(payment_preimage) = self.store.get_preimage(&tlc.payment_hash) else {
@@ -1793,6 +1789,11 @@ where
         tlc_id: TLCId,
     ) -> Result<(), ProcessingChannelError> {
         let tlc_info = state.get_received_tlc(tlc_id).expect("expect tlc").clone();
+        // A forwarded TLC is resolved by the outcome of its forward, never by a local invoice
+        // or preimage that happens to share its payment hash.
+        if !state.can_auto_fulfill_received_tlc(&tlc_info) {
+            return Ok(());
+        }
         match self.store.get_invoice(&tlc_info.payment_hash) {
             Some(invoice) => {
                 if state.funding_udt_type_script.as_ref() != invoice.udt_type_script() {
@@ -1875,7 +1876,7 @@ where
         };
 
         // We don't need to settle the TLC if the authenticated onion payload shows
-        // this node is not the last hop.
+        // this node is not the final recipient.
         if should_settle {
             self.try_to_settle_down_tlc(myself, state, add_tlc.tlc_id)
                 .map_err(|err| err.with_shared_secret(shared_secret))?;
@@ -1933,7 +1934,8 @@ where
             }
         }
 
-        if (is_last && !is_trampoline) || last_hop_inner_onion.is_some() {
+        let is_final_recipient = (is_last && !is_trampoline) || last_hop_inner_onion.is_some();
+        if is_final_recipient {
             self.apply_final_hop_tlc_onion_packet(
                 state,
                 add_tlc,
@@ -1975,7 +1977,11 @@ where
                 forward_fee,
             );
         }
-        Ok(is_last)
+        // A trampoline forward ends the outer onion here too (`is_last`), but this node is not
+        // the payee: the forwarded payment's outcome resolves the TLC. Settling it against a
+        // local invoice could fail it while the forward is still pending, and the node would
+        // then pay downstream with nothing to claim upstream.
+        Ok(is_final_recipient)
     }
 
     fn apply_final_hop_tlc_onion_packet(

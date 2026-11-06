@@ -4711,3 +4711,181 @@ async fn test_trampoline_fulfill_does_not_settle_forwarder_invoice() {
         "a direct final-hop payment must still settle B's invoice"
     );
 }
+
+/// Stores a hold invoice (no preimage) for `payment_hash` on `node`.
+fn insert_local_hold_invoice(
+    node: &NetworkNode,
+    payment_hash: Hash256,
+    amount: u128,
+    udt_type_script: Option<ckb_types::packed::Script>,
+    expiry: Duration,
+) {
+    let mut builder = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(amount))
+        .payment_hash(payment_hash)
+        .payee_pub_key(node.get_public_key().into())
+        .expiry_time(expiry);
+    if let Some(script) = udt_type_script {
+        builder = builder.udt_type_script(script);
+    }
+    let invoice = builder
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node.private_key.0))
+        .expect("build local invoice");
+    node.insert_invoice(invoice, None);
+}
+
+/// A --(public)--> B --(private)--> C, where C holds the forwarded TLC with a hold invoice and
+/// B stores its own invoice (set up by `insert_local_invoice`) for the same payment hash. B is
+/// only forwarding, so it must keep A's TLC until C resolves its TLC, whatever B's invoice
+/// says. Failing A's TLC early would make B pay C with nothing to claim from A.
+async fn assert_trampoline_forward_ignores_local_invoice(
+    hold_at_payee_for: Duration,
+    insert_local_invoice: impl FnOnce(&NetworkNode, Hash256, u128),
+) {
+    init_tracing();
+    let (nodes, channels) = create_n_nodes_network_with_visibility(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 1000000, HUGE_CKB_AMOUNT), true),
+            ((1, 2), (MIN_RESERVED_CKB + 1000000, HUGE_CKB_AMOUNT), false),
+        ],
+        3,
+    )
+    .await;
+    let [node_a, node_b, node_c] = nodes.try_into().expect("3 nodes");
+    wait_until_node_supports_trampoline_routing(&node_a, &node_b).await;
+
+    let amount: u128 = 10000;
+    let preimage = gen_rand_sha256_hash();
+    let invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(amount))
+        .payment_preimage(preimage)
+        .payee_pub_key(node_c.get_public_key().into())
+        .expiry_time(Duration::from_secs(3600))
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_c.private_key.0))
+        .expect("build invoice");
+    let payment_hash = *invoice.payment_hash();
+    // Without the preimage, C holds the TLC until it settles the invoice.
+    node_c.insert_invoice(invoice.clone(), None);
+
+    insert_local_invoice(&node_b, payment_hash, amount);
+    let local_invoice_status = node_b.get_invoice_status(&payment_hash);
+    let b_balance = || {
+        channels
+            .iter()
+            .map(|channel_id| node_b.get_local_balance_from_channel(*channel_id))
+            .sum::<u128>()
+    };
+    let b_balance_before = b_balance();
+
+    node_a
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            max_fee_amount: Some(5000),
+            trampoline_hops: Some(vec![node_b.get_public_key()]),
+            ..Default::default()
+        })
+        .await
+        .expect("send payment");
+
+    wait_until_timeout(20_000, || {
+        node_c
+            .store
+            .get_node_hold_tlcs()
+            .iter()
+            .any(|(hash, _)| *hash == payment_hash)
+    })
+    .await;
+    tokio::time::sleep(hold_at_payee_for).await;
+    let upstream_tlc_pending = node_b
+        .get_channel_actor_state(channels[0])
+        .tlc_state
+        .all_tlcs()
+        .any(|tlc| {
+            tlc.is_received() && tlc.payment_hash == payment_hash && tlc.removed_reason.is_none()
+        });
+    assert!(
+        upstream_tlc_pending,
+        "trampoline resolved the upstream TLC while its forwarded TLC is still held"
+    );
+
+    node_c
+        .settle_invoice(&payment_hash, preimage)
+        .await
+        .expect("C settles its invoice");
+    node_a.wait_until_success(payment_hash).await;
+    // B's balances move once both removals are committed.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while b_balance() < b_balance_before && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        b_balance() >= b_balance_before,
+        "trampoline paid downstream without being paid upstream: balance {} -> {}",
+        b_balance_before,
+        b_balance()
+    );
+    assert_eq!(
+        node_b.get_invoice_status(&payment_hash),
+        local_invoice_status,
+        "forwarding must not touch the trampoline's own invoice"
+    );
+}
+
+#[tokio::test]
+async fn test_trampoline_forward_ignores_cancelled_local_invoice() {
+    assert_trampoline_forward_ignores_local_invoice(
+        Duration::from_secs(2),
+        |node, payment_hash, amount| {
+            insert_local_hold_invoice(node, payment_hash, amount, None, Duration::from_secs(3600));
+            node.cancel_invoice(&payment_hash);
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_trampoline_forward_ignores_local_invoice_of_other_udt() {
+    assert_trampoline_forward_ignores_local_invoice(
+        Duration::from_secs(2),
+        |node, payment_hash, amount| {
+            insert_local_hold_invoice(
+                node,
+                payment_hash,
+                amount,
+                Some(ckb_types::packed::Script::default()),
+                Duration::from_secs(3600),
+            );
+        },
+    )
+    .await;
+}
+
+/// An open single-path invoice for more than the forwarded amount.
+#[tokio::test]
+async fn test_trampoline_forward_ignores_open_local_invoice_of_larger_amount() {
+    assert_trampoline_forward_ignores_local_invoice(
+        Duration::from_secs(2),
+        |node, payment_hash, amount| {
+            insert_local_hold_invoice(
+                node,
+                payment_hash,
+                amount * 100,
+                None,
+                Duration::from_secs(3600),
+            );
+        },
+    )
+    .await;
+}
+
+/// The local hold invoice expires, and with it the hold, while C still holds the forwarded TLC.
+#[tokio::test]
+async fn test_trampoline_forward_ignores_open_local_hold_invoice() {
+    assert_trampoline_forward_ignores_local_invoice(
+        Duration::from_secs(10),
+        |node, payment_hash, amount| {
+            insert_local_hold_invoice(node, payment_hash, amount, None, Duration::from_secs(8));
+        },
+    )
+    .await;
+}

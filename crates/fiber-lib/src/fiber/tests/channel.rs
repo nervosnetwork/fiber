@@ -14310,7 +14310,7 @@ fn check_open_channel_parameters_rejects_excessive_funding_fee_rate() {
         100_000_000_000,
         MAX_FUNDING_FEE_RATE + 1,
         DEFAULT_COMMITMENT_FEE_RATE,
-        CommitmentContractFeatures::LEGACY,
+        ChannelFeatures::LEGACY,
         EpochNumberWithFraction::new(MIN_COMMITMENT_DELAY_EPOCHS, 0, 1).full_value(),
         MAX_TLC_NUMBER_IN_FLIGHT,
     )
@@ -14330,7 +14330,7 @@ fn check_open_channel_parameters_accepts_max_funding_fee_rate() {
         100_000_000_000,
         MAX_FUNDING_FEE_RATE,
         DEFAULT_COMMITMENT_FEE_RATE,
-        CommitmentContractFeatures::LEGACY,
+        ChannelFeatures::LEGACY,
         EpochNumberWithFraction::new(MIN_COMMITMENT_DELAY_EPOCHS, 0, 1).full_value(),
         MAX_TLC_NUMBER_IN_FLIGHT,
     )
