@@ -15,7 +15,7 @@ use crate::fiber::config::{
     MAX_PAYMENT_TLC_EXPIRY_LIMIT, MILLI_SECONDS_PER_EPOCH, MIN_TLC_EXPIRY_DELTA,
 };
 
-use crate::fiber::fee::check_open_channel_parameters;
+use crate::fiber::fee::{check_open_channel_parameters, MAX_FUNDING_FEE_RATE};
 use crate::fiber::graph::ChannelInfo;
 use crate::fiber::network::{
     DebugEvent, FiberMessageWithTarget, OpenChannelWithExternalFundingCommand, PeerConnectSource,
@@ -830,6 +830,7 @@ impl MockChainActorMiddleware for UnderfundInitialFundingTx {
                 funding_cell_lock_script,
                 funding_udt_type_script,
                 funding_source_lock_script,
+                funding_fee_rate,
                 reply,
             } = message
             else {
@@ -845,7 +846,7 @@ impl MockChainActorMiddleware for UnderfundInitialFundingTx {
             };
             let mut funding_tx: FundingTx = local_tx.into();
             let result = funding_tx
-                .update_for_peer(remote_tx.into_view(), context)
+                .update_for_peer(remote_tx.into_view(), context, funding_fee_rate)
                 .await;
             let _ = reply.send(result);
             return Ok(None);
@@ -14023,6 +14024,41 @@ fn check_open_channel_parameters_rejects_total_reserved_overflow() {
             .contains("Total reserved CKB amount overflows"),
         "expected total reserved overflow, got {err}"
     );
+}
+
+#[test]
+fn check_open_channel_parameters_rejects_excessive_funding_fee_rate() {
+    let err = check_open_channel_parameters(
+        &None,
+        &Script::default(),
+        100_000_000_000,
+        MAX_FUNDING_FEE_RATE + 1,
+        DEFAULT_COMMITMENT_FEE_RATE,
+        CommitmentContractFeatures::LEGACY,
+        EpochNumberWithFraction::new(MIN_COMMITMENT_DELAY_EPOCHS, 0, 1).full_value(),
+        MAX_TLC_NUMBER_IN_FLIGHT,
+    )
+    .expect_err("a peer-supplied funding fee rate above the local maximum must be rejected");
+
+    assert!(
+        err.to_string().contains("Funding fee rate"),
+        "expected funding fee rate rejection, got {err}"
+    );
+}
+
+#[test]
+fn check_open_channel_parameters_accepts_max_funding_fee_rate() {
+    check_open_channel_parameters(
+        &None,
+        &Script::default(),
+        100_000_000_000,
+        MAX_FUNDING_FEE_RATE,
+        DEFAULT_COMMITMENT_FEE_RATE,
+        CommitmentContractFeatures::LEGACY,
+        EpochNumberWithFraction::new(MIN_COMMITMENT_DELAY_EPOCHS, 0, 1).full_value(),
+        MAX_TLC_NUMBER_IN_FLIGHT,
+    )
+    .expect("the maximum allowed funding fee rate must still be accepted");
 }
 
 /// UDT collaborative funding: peer-supplied funding cell CKB capacity must match negotiated totals.

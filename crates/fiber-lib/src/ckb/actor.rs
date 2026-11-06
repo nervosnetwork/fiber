@@ -72,6 +72,7 @@ pub enum CkbChainMessage {
         funding_cell_lock_script: packed::Script,
         funding_udt_type_script: Option<packed::Script>,
         funding_source_lock_script: Option<packed::Script>,
+        funding_fee_rate: u64,
         reply: RpcReplyPort<Result<(), FundingError>>,
     },
     /// Add funding tx. This is used to reestablish a channel that is not ready yet.
@@ -237,6 +238,7 @@ impl Actor for CkbChainActor {
                 funding_cell_lock_script,
                 funding_udt_type_script,
                 funding_source_lock_script,
+                funding_fee_rate,
                 reply,
             } => {
                 let local_tx_hash = local_tx.calc_tx_hash();
@@ -254,7 +256,7 @@ impl Actor for CkbChainActor {
                     funding_source_lock_script,
                 );
                 let result = funding_tx
-                    .update_for_peer(remote_tx.into_view(), context)
+                    .update_for_peer(remote_tx.into_view(), context, funding_fee_rate)
                     .await;
                 match &result {
                     Ok(()) => {

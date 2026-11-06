@@ -9311,6 +9311,7 @@ impl ChannelActorState {
                             .external_funding
                             .funding_lock_script
                             .clone(),
+                        funding_fee_rate: self.funding_fee_rate,
                         reply: tx
                     }
                 ))

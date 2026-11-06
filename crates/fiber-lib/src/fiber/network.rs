@@ -1054,6 +1054,7 @@ pub enum NetworkActorCommand {
         funding_cell_lock_script: Script,
         funding_udt_type_script: Option<Script>,
         funding_source_lock_script: Option<Script>,
+        funding_fee_rate: u64,
         reply: RpcReplyPort<Result<(), FundingError>>,
     },
     SignFundingTx(Pubkey, Hash256, Transaction, Option<Vec<Vec<u8>>>),
@@ -3357,6 +3358,7 @@ where
                 funding_cell_lock_script,
                 funding_udt_type_script,
                 funding_source_lock_script,
+                funding_fee_rate,
                 reply,
             } => {
                 let _ = self
@@ -3368,6 +3370,7 @@ where
                         funding_cell_lock_script,
                         funding_udt_type_script,
                         funding_source_lock_script,
+                        funding_fee_rate,
                     });
             }
             NetworkActorCommand::NotifyFundingTx(tx) => {

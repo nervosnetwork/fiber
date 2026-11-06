@@ -21,7 +21,7 @@ use ckb_sdk::{
     ScriptId,
 };
 use ckb_types::{
-    core::{BlockView, Capacity, TransactionView},
+    core::{BlockView, Capacity, FeeRate, TransactionView},
     packed::{self, Bytes, CellInput, CellOutput, Script, Transaction},
     prelude::*,
 };
@@ -275,13 +275,18 @@ impl TxBuilder for FundingTxBuilder {
             .build_funding_cell()
             .map_err(|err| TxBuilderError::Other(err.into()))?;
 
-        self.build_base_from_funding_cell(
-            funding_cell_output,
-            funding_cell_output_data,
-            cell_collector,
-            cell_dep_resolver,
-        )
-        .await
+        let tx = self
+            .build_base_from_funding_cell(
+                funding_cell_output,
+                funding_cell_output_data,
+                cell_collector,
+                cell_dep_resolver,
+            )
+            .await?;
+        // Include every external lock dependency before the SDK balances fees.
+        // Appending them afterward increases the transaction size without paying
+        // for those bytes, so the peer rejects the initial funding transaction.
+        Ok(self.with_extra_cell_deps(tx))
     }
 }
 
@@ -783,7 +788,6 @@ impl FundingTxBuilder {
             self.request.funding_fee_rate,
         );
         let tx = self.build_and_balance_tx(live_cells_exclusion_map).await?;
-        let tx = self.with_extra_cell_deps(tx);
         debug!("final tx_builder: {:?}", tx.as_advanced_builder());
         Ok(self.finalize_funding_tx_update(tx, live_cells_exclusion_map))
     }
@@ -895,10 +899,16 @@ impl FundingTx {
     ///
     /// The received remote funding tx is verified against the local version. It is assumed that
     /// the peer only performs necessary operations to fund the channel.
+    ///
+    /// `funding_fee_rate` is the rate declared in the channel's `OpenChannel`
+    /// message. The peer's initial contribution must carry at least the fee
+    /// implied by that rate, otherwise the acceptor would end up paying the
+    /// peer's share (see `verify_peer_funding_contribution`).
     pub async fn update_for_peer(
         &mut self,
         remote_tx: TransactionView,
         context: FundingContext,
+        funding_fee_rate: u64,
     ) -> Result<(), FundingError> {
         let local_tx = self
             .tx
@@ -1103,7 +1113,12 @@ impl FundingTx {
                 }
             };
         }
-        verify_peer_funding_contribution(&local_tx, &remote_tx, &peer_input_cells)?;
+        verify_peer_funding_contribution(
+            &local_tx,
+            &remote_tx,
+            &peer_input_cells,
+            funding_fee_rate,
+        )?;
 
         self.tx = Some(remote_tx);
         Ok(())
@@ -1191,6 +1206,7 @@ pub(crate) fn verify_peer_funding_contribution(
     local_tx: &TransactionView,
     remote_tx: &TransactionView,
     peer_input_cells: &[PeerInputCell],
+    funding_fee_rate: u64,
 ) -> Result<(), FundingError> {
     let (funding_ckb_delta, funding_udt_delta) = funding_output_delta(local_tx, remote_tx)?;
     let peer_outputs = added_peer_outputs(remote_tx, local_tx.outputs().len());
@@ -1212,6 +1228,35 @@ pub(crate) fn verify_peer_funding_contribution(
             peer_input_ckb, funding_ckb_delta, peer_output_ckb
         );
         return Err(FundingError::InvalidPeerFundingTx);
+    }
+
+    // The opener declares the funding fee rate and the acceptor's balancer
+    // applies it to the whole transaction. For the opener's initial funding tx
+    // there is no local side yet, so require the opener's own inputs to carry
+    // the fee implied by the declared rate for that transaction. Otherwise a
+    // peer can declare a high rate while paying a low fee itself, forcing the
+    // acceptor to cover the difference.
+    //
+    // Later TxUpdate messages contain the local side's inputs and outputs; the
+    // peer's *incremental* share is not `rate * whole_tx_size`, so the check is
+    // deliberately limited to the initial peer transaction.
+    if local_tx.inputs().is_empty() && local_tx.outputs().is_empty() {
+        let peer_fee_ckb = peer_input_ckb - required_ckb;
+        let tx_size = u64::try_from(remote_tx.data().serialized_size_in_block())
+            .map_err(|_| FundingError::OverflowError)?;
+        let required_fee = FeeRate::from_u64(funding_fee_rate).fee(tx_size).as_u64();
+        if peer_fee_ckb < u128::from(required_fee) {
+            debug!(
+                "peer funding fee too low: peer paid {} shannons, declared rate {} requires {} shannons for a {}-byte tx",
+                peer_fee_ckb, funding_fee_rate, required_fee, tx_size
+            );
+            return Err(FundingError::PeerFundingFeeTooLow {
+                peer_fee: u64::try_from(peer_fee_ckb).unwrap_or(u64::MAX),
+                required_fee,
+                funding_fee_rate,
+                tx_size,
+            });
+        }
     }
 
     if let Some((udt_type_script, funding_udt_delta)) = funding_udt_delta {

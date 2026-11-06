@@ -24,6 +24,15 @@ use molecule::prelude::Entity;
 
 const FEE_RATE_WEIGHT_SCALE: u128 = 1000;
 
+/// Maximum funding fee rate a peer may request.
+///
+/// The funding fee rate is supplied by the channel opener and is applied to the
+/// acceptor's own capacity when the funding transaction is balanced. Without an
+/// upper bound a peer could make the acceptor pay an arbitrarily large miner
+/// fee. The default fee rate is 1,000 shannons/KB, so 100x still leaves plenty
+/// of room for legitimate fee spikes while keeping the worst-case fee tiny.
+pub(crate) const MAX_FUNDING_FEE_RATE: u64 = DEFAULT_FEE_RATE * 100;
+
 fn commitment_tx_size(
     udt_type_script: &Option<Script>,
     channel_features: ChannelFeatures,
@@ -270,6 +279,12 @@ pub(crate) fn check_open_channel_parameters(
         return Err(ProcessingChannelError::InvalidParameter(format!(
             "Funding fee rate is less than {}",
             DEFAULT_FEE_RATE,
+        )));
+    }
+    if funding_fee_rate > MAX_FUNDING_FEE_RATE {
+        return Err(ProcessingChannelError::InvalidParameter(format!(
+            "Funding fee rate {} is greater than the maximum {}",
+            funding_fee_rate, MAX_FUNDING_FEE_RATE,
         )));
     }
 
