@@ -50,7 +50,8 @@ serde_yaml = "0.9.32"
 strum = { version = "0.28", features = ["derive"] }
 tempfile = { version = "3.10.1", optional = true }
 thiserror = "1.0.58"
-tokio-util = { version = "0.7.10", features = ["rt"] }
+# shortcut: tokio-util 0.7.20 breaks tentacle-secio's Sink inference; lift after its upstream fix.
+tokio-util = { version = ">=0.7.10, <0.7.20", features = ["rt"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
