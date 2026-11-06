@@ -2016,13 +2016,26 @@ where
 
         match (invoice, mpp_record) {
             (Some(invoice), Some(record)) => {
-                if record.total_amount < invoice.amount.unwrap_or_default() {
+                let invoice_amount = invoice.amount.unwrap_or_default();
+                if record.total_amount < invoice_amount {
                     error!(
                         "total amount is less than invoice amount: {:?}",
                         payment_hash
                     );
                     return Err(ProcessingChannelError::FinalIncorrectMPPInfo(
                         "total amount in records is less than invoice amount".to_string(),
+                    ));
+                }
+                // `total_amount` is declared unilaterally by the payer. For an invoice
+                // with an explicit amount it must match exactly: an inflated value can
+                // never be accumulated and would permanently block settlement.
+                if invoice.amount.is_some() && record.total_amount != invoice_amount {
+                    error!(
+                        "total amount in records does not match invoice amount: {:?}, declared: {}, invoice: {}",
+                        payment_hash, record.total_amount, invoice_amount
+                    );
+                    return Err(ProcessingChannelError::FinalIncorrectMPPInfo(
+                        "total amount in records does not match invoice amount".to_string(),
                     ));
                 }
 

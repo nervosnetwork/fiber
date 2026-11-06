@@ -22,11 +22,15 @@ where
     };
 
     // check if total_amount is enough
-    let total_amount = first_tlc.total_amount.unwrap_or(first_tlc.amount);
+    let declared_total_amount = first_tlc.total_amount.unwrap_or(first_tlc.amount);
 
-    if total_amount < invoice.amount.unwrap_or_default() {
+    if declared_total_amount < invoice.amount.unwrap_or_default() {
         return false;
     }
+
+    // The invoice amount is authoritative when present; an inflated payer-declared
+    // total must not block invoice fulfillment.
+    let total_amount = invoice.amount.unwrap_or(declared_total_amount);
 
     let mut total_tlc_amount = first_tlc.amount;
     for tlc in it {
