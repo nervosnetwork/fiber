@@ -3116,6 +3116,13 @@ pub trait NetworkGraphStateStore {
     fn get_attempts(&self, payment_hash: Hash256) -> Vec<Attempt>;
     /// Deletes all attempts and their channel index entries for the given payment hash.
     fn delete_attempts(&self, payment_hash: Hash256);
+    /// Deletes attempts that have not settled yet, keeping `Success` attempts and
+    /// their channel index entries.
+    ///
+    /// Retrying a failed payment must not forget value that was already delivered.
+    /// Keeping settled attempts lets the rebuilt session derive the unpaid remainder
+    /// instead of re-dispatching the full payment amount.
+    fn delete_unsettled_attempts(&self, payment_hash: Hash256);
     /// Clears only the channel index entries for attempts, keeping the attempt records.
     fn clear_attempts_channel_index(&self, payment_hash: Hash256);
     /// Returns attempts that should be woken by a ChannelReady scan.

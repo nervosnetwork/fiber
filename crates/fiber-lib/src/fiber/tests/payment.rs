@@ -395,6 +395,85 @@ fn test_sender_side_trampoline_with_mpp_invoice_stays_single_attempt() {
     assert!(!session.allow_more_attempts());
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_retry_preserves_settled_mpp_attempts() {
+    init_tracing();
+    let (store, _dir) = generate_store();
+    let now = now_timestamp_as_millis_u64();
+    let source = gen_rand_fiber_public_key();
+    let target = gen_rand_fiber_public_key();
+    let payment_hash = gen_rand_sha256_hash();
+    let invoice_amount = 1_000;
+    let settled_amount = 300;
+
+    let payment_data = SendPaymentDataBuilder::new(target, invoice_amount, payment_hash)
+        .max_fee_amount(Some(50))
+        .allow_mpp(true)
+        .max_parts(Some(4))
+        .build()
+        .expect("valid payment data");
+
+    let route_hops = |amount: u128| {
+        vec![PaymentHopData {
+            amount,
+            expiry: now + 100_000,
+            hash_algorithm: HashAlgorithm::CkbHash,
+            funding_tx_hash: gen_rand_sha256_hash(),
+            ..Default::default()
+        }]
+    };
+
+    // Generation 1: one MPP part settled, the rest failed and exhausted the
+    // session retry budget.
+    let mut settled = test_attempt(
+        1,
+        payment_hash,
+        source,
+        target,
+        route_hops(settled_amount),
+        now,
+    );
+    settled.preimage = Some(gen_rand_sha256_hash());
+    settled.set_success_status();
+
+    let mut failed = Vec::new();
+    for id in 2..=4 {
+        let mut attempt = test_attempt(id, payment_hash, source, target, route_hops(250), now);
+        attempt.tried_times = 4;
+        attempt.set_failed_status("malicious recipient failed remaining part", false);
+        failed.push(attempt);
+    }
+
+    let mut session = test_payment_session(payment_data.clone(), now);
+    session.try_limit = 12;
+    session.cached_attempts.push(settled.clone());
+    for attempt in &failed {
+        session.cached_attempts.push(attempt.clone());
+    }
+    assert_eq!(session.remain_amount(), invoice_amount - settled_amount);
+    session.set_failed_status("Can not send payment with limited attempts");
+    store.insert_payment_session(session);
+    store.insert_attempt(settled);
+    for attempt in failed {
+        store.insert_attempt(attempt);
+    }
+
+    // Retry cleanup must keep the settled part, otherwise the rebuilt session
+    // forgets that 300 of 1000 was already delivered and re-dispatches the full
+    // invoice amount.
+    store.delete_unsettled_attempts(payment_hash);
+
+    let rebuilt = PaymentSession::new_session(&store, payment_data, 12);
+    assert_eq!(rebuilt.attempts_count(), 1);
+    assert_eq!(rebuilt.remain_amount(), invoice_amount - settled_amount);
+
+    let attempts = store.get_attempts(payment_hash);
+    assert_eq!(attempts.len(), 1);
+    assert!(attempts[0].is_success());
+    assert_eq!(attempts[0].route.receiver_amount(), settled_amount);
+}
+
 #[test]
 fn test_trampoline_context_mpp_counts_each_shard_receiver_amount() {
     init_tracing();
@@ -6169,14 +6248,13 @@ async fn test_mpp_payer_onchain_reconciliation_repairs_partial_session_commit_af
     );
 }
 
-// A failed payment retry deletes its old attempts and allocates attempt ids from one again. The
-// old force-closed channel can still retain an on-chain-confirmed TLC with one of those ids. That
-// proof belongs to both the old attempt generation and the old first-hop channel, so it must not
-// update a replacement attempt that happens to reuse `(payment_hash, attempt_id)` on another
-// channel.
+// A failed payment retry preserves already-settled MPP attempts and allocates a fresh attempt id
+// for the unpaid remainder. The old force-closed channel can still retain an on-chain-confirmed
+// TLC for a settled attempt. That proof belongs to the old first-hop channel, so it must not
+// update the fresh replacement attempt on another channel.
 #[cfg(feature = "watchtower")]
 #[tokio::test]
-async fn test_mpp_payer_old_onchain_tlc_does_not_reconcile_reused_attempt_id() {
+async fn test_mpp_payer_old_onchain_tlc_does_not_reconcile_fresh_retry_attempt() {
     init_tracing();
 
     let fixture = setup_mpp_remote_removed_payer_fixture_with_retry_channels(3, 1).await;
@@ -6220,8 +6298,9 @@ async fn test_mpp_payer_old_onchain_tlc_does_not_reconcile_reused_attempt_id() {
     fixture.payer.store.insert_attempt(failed_attempt);
 
     // Model only the durable terminal outcome of the old generation. From this point onward the
-    // retry itself is entirely production code: the old actor stops, send_payment deletes the old
-    // attempts, allocates ids from one, builds fresh routes, and adds fresh first-hop TLCs.
+    // retry itself is entirely production code: the old actor stops, send_payment preserves the
+    // settled attempts, allocates a fresh id for the unpaid remainder, builds a fresh route, and
+    // adds a fresh first-hop TLC.
     let mut failed_session = fixture
         .payer
         .get_payment_session(payment_hash)
@@ -6277,24 +6356,43 @@ async fn test_mpp_payer_old_onchain_tlc_does_not_reconcile_reused_attempt_id() {
             .get_payment_session(payment_hash)
             .is_some_and(|session| {
                 session.status == PaymentStatus::Inflight
-                    && session.attempts().count() == 1
+                    && session.attempts().count() == 3
                     && session
                         .attempts()
-                        .all(|attempt| attempt.status == AttemptStatus::Inflight)
+                        .filter(|attempt| attempt.status == AttemptStatus::Success)
+                        .count()
+                        == 2
+                    && session
+                        .attempts()
+                        .filter(|attempt| attempt.status == AttemptStatus::Inflight)
+                        .count()
+                        == 1
             })
     })
     .await;
 
     let replacement_attempt = fixture
         .payer
-        .store
-        .get_attempt(payment_hash, stale_attempt_id)
-        .expect("the retry reuses the old attempt id");
-    assert_ne!(
-        stale_attempt.first_hop_channel_outpoint(),
-        replacement_attempt.first_hop_channel_outpoint(),
-        "the reused attempt id must now belong to another first-hop channel"
-    );
+        .get_payment_session(payment_hash)
+        .expect("retried payment session exists")
+        .attempts()
+        .find(|attempt| attempt.status == AttemptStatus::Inflight)
+        .cloned()
+        .expect("retry allocates a fresh inflight attempt");
+    assert_ne!(replacement_attempt.id, stale_attempt_id);
+    assert_ne!(replacement_attempt.id, completed_attempt_id);
+
+    // The settled MPP shards survive the retry, so the old fulfilled TLC and its attempt
+    // stay consistent while the new attempt uses a fresh id.
+    for attempt_id in [stale_attempt_id, completed_attempt_id] {
+        let retained = fixture
+            .payer
+            .store
+            .get_attempt(payment_hash, attempt_id)
+            .expect("settled attempt is preserved across retry");
+        assert_eq!(retained.status, AttemptStatus::Success);
+        assert_eq!(retained.preimage, Some(fixture.payment_preimage));
+    }
     assert!(
         fixture.retry_channel_ids.iter().any(|channel_id| {
             fixture
@@ -6305,7 +6403,8 @@ async fn test_mpp_payer_old_onchain_tlc_does_not_reconcile_reused_attempt_id() {
                 .tlcs
                 .iter()
                 .any(|tlc| {
-                    tlc.payment_hash == payment_hash && tlc.attempt_id == Some(stale_attempt_id)
+                    tlc.payment_hash == payment_hash
+                        && tlc.attempt_id == Some(replacement_attempt.id)
                 })
         }),
         "the replacement attempt must have a real offered TLC on a fresh retry channel"
@@ -6319,12 +6418,12 @@ async fn test_mpp_payer_old_onchain_tlc_does_not_reconcile_reused_attempt_id() {
     let replacement_after_scan = fixture
         .payer
         .store
-        .get_attempt(payment_hash, stale_attempt_id)
+        .get_attempt(payment_hash, replacement_attempt.id)
         .expect("replacement attempt must remain present");
     assert_eq!(
         replacement_after_scan.status,
         AttemptStatus::Inflight,
-        "an old channel's on-chain TLC must not fulfill a reused attempt id from another channel"
+        "an old channel's on-chain TLC must not fulfill the fresh retry attempt"
     );
     assert_eq!(
         replacement_after_scan.preimage, None,

@@ -1367,7 +1367,14 @@ where
 
         let mut channel_stats = GraphChannelStat::new(Some(channel_stats));
         let amount_low_bound = Some(1);
-        let mut attempt_id = session.attempts_count() as u64;
+        // Derive the next id from the highest retained id: a retried session can
+        // keep settled attempts, so ids may not be contiguous and `attempts_count`
+        // could collide with an existing settled attempt.
+        let mut attempt_id = session
+            .attempts()
+            .map(|attempt| attempt.id)
+            .max()
+            .unwrap_or(0);
         let mut target_amount = remain_amount;
         let mut single_path_max = None;
         let mut iteration = 0_u64;
@@ -2382,7 +2389,12 @@ where
                     )));
                 }
                 if !payment_data.dry_run {
-                    self.store.delete_attempts(payment_data.payment_hash);
+                    // Keep successfully settled attempts: MPP payments can settle some
+                    // parts and fail others. Deleting all attempts would make the
+                    // rebuilt session forget the delivered amount and re-dispatch the
+                    // full payment amount on retry, allowing overpayment.
+                    self.store
+                        .delete_unsettled_attempts(payment_data.payment_hash);
                 }
             }
         }
@@ -2405,7 +2417,11 @@ where
             DEFAULT_PAYMENT_TRY_LIMIT
         };
         let mut payment_session = PaymentSession::new_session(&self.store, payment_data, try_limit);
-        assert!(payment_session.attempts_count() == 0);
+        // Unsettled attempts are removed above; any attempt that survives is a
+        // settled MPP part that the rebuilt session must keep accounting for.
+        assert!(payment_session
+            .attempts()
+            .all(|attempt| attempt.is_success()));
         self.store.insert_payment_session(payment_session.clone());
 
         self.resume_payment_session(myself, state, None).await?;

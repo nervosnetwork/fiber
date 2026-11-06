@@ -1650,6 +1650,45 @@ impl NetworkGraphStateStore for Store {
         batch.commit();
     }
 
+    fn delete_unsettled_attempts(&self, payment_hash: Hash256) {
+        let prefix = [&[ATTEMPT_PREFIX], payment_hash.as_ref()].concat();
+        let mut batch = self.batch();
+
+        // Get attempts to find their channel index entries
+        let attempts: Vec<_> = self
+            .collect_by_prefix(&prefix)
+            .into_iter()
+            .map(|kv| {
+                (
+                    kv.key,
+                    deserialize_from::<Attempt>(kv.value.as_ref(), "Attempt"),
+                )
+            })
+            .collect();
+
+        for (key, attempt) in attempts {
+            // Settled attempts record value that was already delivered. Deleting them
+            // makes a retried payment session re-dispatch the full amount and can
+            // overpay, so only clean up attempts that did not settle.
+            if attempt.is_success() {
+                continue;
+            }
+            batch.delete(key);
+            if let Some(outpoint) = attempt.first_hop_channel_outpoint() {
+                let index_key = [
+                    &[ATTEMPT_CHANNEL_INDEX_PREFIX],
+                    outpoint.as_slice(),
+                    attempt.payment_hash.as_ref(),
+                    &attempt.id.to_le_bytes(),
+                ]
+                .concat();
+                batch.delete(index_key);
+            }
+        }
+
+        batch.commit();
+    }
+
     fn clear_attempts_channel_index(&self, payment_hash: Hash256) {
         let prefix = [&[ATTEMPT_PREFIX], payment_hash.as_ref()].concat();
         let mut batch = self.batch();
