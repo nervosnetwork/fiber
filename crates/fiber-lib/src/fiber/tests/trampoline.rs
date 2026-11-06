@@ -3414,6 +3414,172 @@ async fn test_trampoline_routing_no_path_found() {
 }
 
 #[tokio::test]
+async fn test_trampoline_same_trampoline_buffered_dispatch_rejection() {
+    init_tracing();
+    let params = ChannelParameters {
+        public: true,
+        node_a_funding_amount: HUGE_CKB_AMOUNT,
+        node_b_funding_amount: HUGE_CKB_AMOUNT,
+        ..Default::default()
+    };
+    let (nodes, _) = create_n_nodes_network_with_params(&[((0, 1), params)], 3, None).await;
+    let [payer, trampoline, recipient] = nodes.try_into().expect("3 nodes");
+    wait_until_node_supports_trampoline_routing(&payer, &trampoline).await;
+    set_test_trampoline_settlement_paused(&trampoline, true).await;
+    let (invoice, _) = recipient.gen_basic_invoice(1_000);
+    let payment_hash = payer
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            max_fee_amount: Some(1_000),
+            trampoline_hops: Some(vec![trampoline.get_public_key()]),
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .payment_hash;
+    wait_until_async_timeout(|| async {
+        trampoline
+            .store
+            .get_payment_session(payment_hash)
+            .is_some_and(|session| session.status == PaymentStatus::Failed)
+            && trampoline.get_inflight_payment_count().await == 0
+    })
+    .await;
+    assert_eq!(
+        payer.get_payment_result(payment_hash).await.status,
+        PaymentStatus::Inflight,
+        "errors after session creation must use the existing settlement lifecycle"
+    );
+    let mut existing = trampoline.store.get_payment_session(payment_hash).unwrap();
+    let data = &existing.request;
+    let context = data.trampoline_context.as_ref().unwrap();
+    let request = TrampolineForwardingRequest {
+        payment_hash,
+        next_node_id: data.target_pubkey,
+        amount_to_forward: data.amount,
+        hash_algorithm: context.hash_algorithm,
+        build_max_fee_amount: data.max_fee_amount.unwrap(),
+        tlc_expiry_delta: data.final_tlc_expiry_delta,
+        tlc_expiry_limit: data.tlc_expiry_limit,
+        max_parts: data.max_parts,
+        udt_type_script: data.udt_type_script.clone(),
+        remaining_trampoline_onion: context.remaining_trampoline_onion.clone(),
+        previous_tlc: context.previous_tlcs[0],
+        max_outgoing_tlc_expiry: context.max_outgoing_tlc_expiry.unwrap(),
+    };
+    // Model a different execution of this hash. The buffered caller must receive
+    // the rejection without the payment actor independently failing its upstream.
+    existing.status = PaymentStatus::Success;
+    existing
+        .request
+        .trampoline_context
+        .as_mut()
+        .unwrap()
+        .previous_tlcs[0]
+        .prev_tlc_id += 1;
+    trampoline.store.insert_payment_session(existing);
+    let result = call!(trampoline.network_actor, |reply| {
+        NetworkActorMessage::new_command(FiberActorCommand::DispatchBufferedTrampoline {
+            request,
+            reply,
+        })
+    })
+    .unwrap();
+    assert!(matches!(
+        result,
+        Err(crate::fiber::delivery::DeliveryDispatchError::Temporary { .. })
+    ));
+    assert!(
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            payer.wait_until_failed(payment_hash)
+        )
+        .await
+        .is_err(),
+        "buffered rejection must leave upstream failure/retry to the LSP caller"
+    );
+    assert_eq!(
+        payer.get_payment_result(payment_hash).await.status,
+        PaymentStatus::Inflight
+    );
+    assert_eq!(
+        trampoline
+            .store
+            .get_payment_session(payment_hash)
+            .unwrap()
+            .status,
+        PaymentStatus::Success
+    );
+}
+
+#[tokio::test]
+async fn test_trampoline_same_trampoline_second_payer_same_invoice() {
+    init_tracing();
+    // A(0) -> T(1) -> C(3), B(2) -> T(1): both payers share a payment-session store at T.
+    let params = || ChannelParameters {
+        public: true,
+        node_a_funding_amount: HUGE_CKB_AMOUNT,
+        node_b_funding_amount: HUGE_CKB_AMOUNT,
+        ..Default::default()
+    };
+    let (nodes, _) = create_n_nodes_network_with_params(
+        &[((0, 1), params()), ((2, 1), params()), ((1, 3), params())],
+        4,
+        None,
+    )
+    .await;
+    let [node_a, node_t, node_b, node_c] = nodes.try_into().expect("4 nodes");
+    wait_until_node_supports_trampoline_routing(&node_a, &node_t).await;
+    wait_until_node_supports_trampoline_routing(&node_b, &node_t).await;
+    let amount = 1_000;
+    let (invoice, _) = node_c.gen_basic_invoice(amount);
+    let command = |invoice: String| SendPaymentCommand {
+        invoice: Some(invoice),
+        max_fee_amount: Some(amount),
+        trampoline_hops: Some(vec![node_t.get_public_key()]),
+        ..Default::default()
+    };
+    let first = node_a
+        .send_payment(command(invoice.to_string()))
+        .await
+        .expect("first payer starts");
+    node_a.wait_until_success(first.payment_hash).await;
+
+    let second = node_b
+        .send_payment(command(invoice.to_string()))
+        .await
+        .expect("second payer starts");
+    let failed = tokio::time::timeout(
+        Duration::from_secs(15),
+        node_b.wait_until_failed(second.payment_hash),
+    )
+    .await;
+    assert!(
+        failed.is_ok(),
+        "second payment must fail promptly, current status: {:?}",
+        node_b.get_payment_result(second.payment_hash).await.status
+    );
+    assert_eq!(
+        node_b
+            .get_payment_result(second.payment_hash)
+            .await
+            .failed_error_code,
+        Some(TlcErrorCode::IncorrectOrUnknownPaymentDetails)
+    );
+    assert_eq!(
+        node_t.get_payment_result(first.payment_hash).await.status,
+        PaymentStatus::Success,
+        "rejecting a duplicate must preserve the original successful payment"
+    );
+    let (fresh, _) = node_c.gen_basic_invoice(amount);
+    let retry = node_b
+        .send_payment(command(fresh.to_string()))
+        .await
+        .expect("duplicate rejection must not disable the trampoline route");
+    node_b.wait_until_success(retry.payment_hash).await;
+}
+
+#[tokio::test]
 async fn test_trampoline_routing_race_same_invoice() {
     init_tracing();
 

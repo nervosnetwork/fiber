@@ -107,8 +107,9 @@ use crate::fiber::onchain_tlc_reconcile::{
 #[cfg(not(target_arch = "wasm32"))]
 use crate::fiber::payment::PaymentSessionExt;
 use crate::fiber::payment::{
-    PaymentActor, PaymentActorArguments, PaymentActorMessage, PaymentTlcRemoveContext,
-    SendPaymentCommand, SendPaymentWithRouterCommand,
+    PaymentActor, PaymentActorArguments, PaymentActorMessage, PaymentStartError,
+    PaymentStartResult, PaymentTlcRemoveContext, SendPaymentCommand, SendPaymentData,
+    SendPaymentWithRouterCommand,
 };
 use crate::fiber::peer_message_policy::{PeerMessageAdmission, PeerMessagePolicy};
 use crate::fiber::types::{
@@ -3581,13 +3582,7 @@ where
                     }
                 };
 
-                let _ = self
-                    .start_payment_actor(
-                        myself,
-                        state,
-                        payment_request.payment_hash,
-                        PaymentActorMessage::SendPayment(payment_request, reply),
-                    )
+                self.start_payment_with_rpc_reply(state, payment_request, reply)
                     .await;
             }
             FiberActorCommand::SendPaymentWithRouter(payment_request, reply) => {
@@ -3601,13 +3596,7 @@ where
                             return Ok(());
                         }
                     };
-                let _ = self
-                    .start_payment_actor(
-                        myself,
-                        state,
-                        payment_request.payment_hash,
-                        PaymentActorMessage::SendPayment(payment_request, reply),
-                    )
+                self.start_payment_with_rpc_reply(state, payment_request, reply)
                     .await;
             }
             FiberActorCommand::BuildPaymentRouter(build_payment_router, reply) => {
@@ -3651,8 +3640,28 @@ where
             }
             #[cfg(not(target_arch = "wasm32"))]
             FiberActorCommand::DispatchBufferedTrampoline { request, reply } => {
-                let result = self.try_dispatch_trampoline_payment(state, request).await;
-                let _ = reply.send(result);
+                match self.try_dispatch_trampoline_payment(state, request).await {
+                    Ok(receiver) => {
+                        crate::tasks::spawn(async move {
+                            let result = match receiver.await {
+                                Ok(result) => result.map(|_| ()).map_err(|error| {
+                                    DeliveryDispatchError::Temporary {
+                                        reason: error.message,
+                                    }
+                                }),
+                                Err(error) => Err(DeliveryDispatchError::Temporary {
+                                    reason: format!(
+                                        "payment actor dropped its startup reply: {error}"
+                                    ),
+                                }),
+                            };
+                            let _ = reply.send(result);
+                        });
+                    }
+                    Err(error) => {
+                        let _ = reply.send(Err(error));
+                    }
+                }
             }
             #[cfg(not(target_arch = "wasm32"))]
             FiberActorCommand::ReconcileBufferedTrampolineSettlement {
@@ -5300,19 +5309,50 @@ where
         state: &mut FiberActorState<S, C>,
         request: TrampolineForwardingRequest,
     ) -> Result<(), TlcErr> {
-        self.try_dispatch_trampoline_payment(state, request)
+        let payment_hash = request.payment_hash;
+        let receiver = self
+            .try_dispatch_trampoline_payment(state, request)
             .await
             .map_err(|error| {
                 error!("Failed to start trampoline payment: {error}");
                 TlcErr::new_node_fail(TlcErrorCode::TemporaryNodeFailure, state.get_public_key())
-            })
+            })?;
+        let network = state.network.clone();
+        let source = state.get_public_key();
+        // The payment actor calls back into NetworkActor while starting its first send.
+        crate::tasks::spawn(async move {
+            match receiver.await {
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => {
+                    for (previous_tlc, error_code) in error.rejected_tlcs {
+                        let error = TlcErr::new_node_fail(error_code, source);
+                        let _ = network.send_message(FiberActorMessage::Event(
+                            FiberActorEvent::AddTlcResult(
+                                payment_hash,
+                                None,
+                                Err((
+                                    ProcessingChannelError::TlcForwardingError(error.clone()),
+                                    error,
+                                )),
+                                Some(previous_tlc),
+                            ),
+                        ));
+                    }
+                }
+                Err(error) => {
+                    // A dropped reply does not establish whether downstream TLCs were sent.
+                    warn!(%payment_hash, %error, "Payment actor dropped its startup reply");
+                }
+            }
+        });
+        Ok(())
     }
 
     async fn try_dispatch_trampoline_payment(
         &self,
         state: &mut FiberActorState<S, C>,
         request: TrampolineForwardingRequest,
-    ) -> Result<(), DeliveryDispatchError> {
+    ) -> Result<oneshot::Receiver<PaymentStartResult>, DeliveryDispatchError> {
         let payment_hash = request.payment_hash;
         let payment_data = request.into_send_payment_data().map_err(|reason| {
             DeliveryDispatchError::Permanent {
@@ -5320,23 +5360,18 @@ where
                 error_code: TlcErrorCode::InvalidOnionPayload,
             }
         })?;
-        let (send, _recv) = oneshot::channel();
-        let rpc_reply = RpcReplyPort::from(send);
-
-        match self
-            .start_payment_actor(
-                state.network.clone(),
-                state,
-                payment_hash,
-                PaymentActorMessage::SendPayment(payment_data, rpc_reply),
-            )
-            .await
-        {
-            Ok(()) => Ok(()),
-            Err(error) => Err(DeliveryDispatchError::Temporary {
-                reason: format!("failed to start hosted payment: {error}"),
-            }),
-        }
+        let (send, receiver) = oneshot::channel();
+        self.start_payment_actor(
+            state.network.clone(),
+            state,
+            payment_hash,
+            PaymentActorMessage::SendPayment(payment_data, RpcReplyPort::from(send)),
+        )
+        .await
+        .map_err(|error| DeliveryDispatchError::Temporary {
+            reason: format!("failed to start hosted payment: {error}"),
+        })?;
+        Ok(receiver)
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -5674,6 +5709,35 @@ where
         }
     }
 
+    async fn start_payment_with_rpc_reply(
+        &self,
+        state: &mut FiberActorState<S, C>,
+        payment_data: SendPaymentData,
+        reply: RpcReplyPort<Result<SendPaymentResponse, String>>,
+    ) {
+        let payment_hash = payment_data.payment_hash;
+        let (send, receiver) = oneshot::channel();
+        if let Err(error) = self
+            .start_payment_actor(
+                state.network.clone(),
+                state,
+                payment_hash,
+                PaymentActorMessage::SendPayment(payment_data, RpcReplyPort::from(send)),
+            )
+            .await
+        {
+            let _ = reply.send(Err(error));
+            return;
+        }
+        crate::tasks::spawn(async move {
+            let result = match receiver.await {
+                Ok(result) => result.map_err(|error| error.message),
+                Err(error) => Err(format!("payment actor dropped its startup reply: {error}")),
+            };
+            let _ = reply.send(result);
+        });
+    }
+
     async fn start_payment_actor(
         &self,
         myself: FiberActorRef,
@@ -5685,9 +5749,10 @@ where
             error!("Already had a payment actor with the same hash {payment_hash:?}");
 
             if let PaymentActorMessage::SendPayment(_, reply) = init_command {
-                let _ = reply.send(Err(format!(
-                    "Payment session already exists, stop start new payment actor for {payment_hash:?}"
-                )));
+                let _ = reply.send(Err(PaymentStartError {
+                    message: format!("Payment session already exists, stop start new payment actor for {payment_hash:?}"),
+                    rejected_tlcs: Vec::new(),
+                }));
             }
             return Err(format!(
                 "Payment session already exists for {payment_hash:?}"

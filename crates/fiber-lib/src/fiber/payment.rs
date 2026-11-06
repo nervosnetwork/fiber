@@ -30,9 +30,10 @@ pub use fiber_types::PaymentSession;
 pub use fiber_types::SendPaymentData;
 use fiber_types::{
     Attempt, AttemptStatus, BasicMppPaymentData, EntityHex, Hash256, HashAlgorithm, HopHint,
-    PaymentCustomRecords, PaymentHopData, PaymentStatus, PeeledPaymentOnionPacket, Privkey, Pubkey,
-    RemoveTlcReason, RouterHop, TlcErr, TlcErrData, TlcErrPacket, TlcErrorCode, TrampolineContext,
-    DEFAULT_MAX_PARTS, DEFAULT_PAYMENT_MPP_ATTEMPT_TRY_LIMIT, USER_CUSTOM_RECORDS_MAX_INDEX,
+    PaymentCustomRecords, PaymentHopData, PaymentStatus, PeeledPaymentOnionPacket, PrevTlcInfo,
+    Privkey, Pubkey, RemoveTlcReason, RouterHop, TlcErr, TlcErrData, TlcErrPacket, TlcErrorCode,
+    TrampolineContext, DEFAULT_MAX_PARTS, DEFAULT_PAYMENT_MPP_ATTEMPT_TRY_LIMIT,
+    USER_CUSTOM_RECORDS_MAX_INDEX,
 };
 use ractor::{call_t, Actor, ActorProcessingErr};
 use ractor::{concurrency::Duration, ActorRef, RpcReplyPort};
@@ -831,13 +832,62 @@ pub struct PaymentTlcRemoveContext {
     pub tried_times: u32,
 }
 
+/// Result of initializing a payment and beginning its first send attempt.
+pub type PaymentStartResult = Result<SendPaymentResponse, PaymentStartError>;
+
+/// Startup failure with the upstream TLCs rejected before creating this session.
+#[derive(Debug)]
+pub struct PaymentStartError {
+    /// Error returned to the caller.
+    pub message: String,
+    /// Unowned upstream TLCs and their rejection codes, captured at validation time.
+    pub rejected_tlcs: Vec<(PrevTlcInfo, TlcErrorCode)>,
+}
+
+impl From<Error> for PaymentStartError {
+    fn from(error: Error) -> Self {
+        Self {
+            message: error.to_string(),
+            rejected_tlcs: Vec::new(),
+        }
+    }
+}
+
+impl PaymentStartError {
+    fn rejected(
+        request: &SendPaymentData,
+        existing: Option<&PaymentSession>,
+        error_code: TlcErrorCode,
+        error: Error,
+    ) -> Self {
+        let owned = existing
+            .and_then(|session| session.request.trampoline_context.as_ref())
+            .map(|context| context.previous_tlcs.as_slice())
+            .unwrap_or_default();
+        let rejected_tlcs = request
+            .trampoline_context
+            .as_ref()
+            .into_iter()
+            .flat_map(|context| &context.previous_tlcs)
+            .filter(|previous| {
+                !owned.iter().any(|tlc| {
+                    tlc.prev_channel_id == previous.prev_channel_id
+                        && tlc.prev_tlc_id == previous.prev_tlc_id
+                })
+            })
+            .map(|previous| (*previous, error_code))
+            .collect();
+        Self {
+            message: error.to_string(),
+            rejected_tlcs,
+        }
+    }
+}
+
 #[derive(Debug, AsRefStr)]
 pub enum PaymentActorMessage {
     // SendPayment
-    SendPayment(
-        SendPaymentData,
-        RpcReplyPort<Result<SendPaymentResponse, String>>,
-    ),
+    SendPayment(SendPaymentData, RpcReplyPort<PaymentStartResult>),
     RetrySendPayment(Option<u64>),
     OnAddTlcResultEvent {
         attempt_id: Option<u64>,
@@ -1077,8 +1127,8 @@ where
                         self.check_payment_final(myself, state);
                     }
                     Err(e) => {
-                        error!("Failed to send payment: {:?}", e);
-                        let _ = reply.send(Err(e.to_string()));
+                        error!("Failed to send payment: {}", e.message);
+                        let _ = reply.send(Err(e));
 
                         // stop actor
                         myself.stop(Some("Failed to send payment".to_string()));
@@ -2168,7 +2218,7 @@ where
         myself: ActorRef<PaymentActorMessage>,
         state: &mut PaymentActorState,
         payment_data: SendPaymentData,
-    ) -> Result<SendPaymentResponse, Error> {
+    ) -> PaymentStartResult {
         #[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
         let payment_hash = payment_data.payment_hash;
         #[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
@@ -2200,25 +2250,40 @@ where
         myself: ActorRef<PaymentActorMessage>,
         state: &mut PaymentActorState,
         payment_data: SendPaymentData,
-    ) -> Result<SendPaymentResponse, Error> {
+    ) -> PaymentStartResult {
         // initialize the payment session in db and begin the payment process lifecycle
         if let Some(payment_session) = self.store.get_payment_session(payment_data.payment_hash) {
             // we only allow retrying payment session with status failed
             if payment_session.status != PaymentStatus::Failed {
-                return Err(Error::InvalidParameter(format!(
-                    "Payment session already exists: {} with payment session status: {:?}",
-                    payment_data.payment_hash, payment_session.status
-                )));
+                let error_code = if payment_session.status == PaymentStatus::Success {
+                    TlcErrorCode::IncorrectOrUnknownPaymentDetails
+                } else {
+                    TlcErrorCode::TemporaryNodeFailure
+                };
+                return Err(PaymentStartError::rejected(
+                    &payment_data,
+                    Some(&payment_session),
+                    error_code,
+                    Error::InvalidParameter(format!(
+                        "Payment session already exists: {} with payment session status: {:?}",
+                        payment_data.payment_hash, payment_session.status
+                    )),
+                ));
             } else {
                 // even if the payment session is failed, we still need to check whether
                 // some attempts are still flight state, this means some middle hops
                 // haven't send back the result of the onion packet, so we can not retry the payment session
                 // otherwise, we are sure it's safe to cleanup all the previous attempts
                 if payment_session.attempts().any(|a| a.is_inflight()) {
-                    return Err(Error::InvalidParameter(format!(
-                        "Payment session {} has attempts that are in flight state, can not retry",
-                        payment_data.payment_hash
-                    )));
+                    return Err(PaymentStartError::rejected(
+                        &payment_data,
+                        Some(&payment_session),
+                        TlcErrorCode::TemporaryNodeFailure,
+                        Error::InvalidParameter(format!(
+                            "Payment session {} has attempts that are in flight state, can not retry",
+                            payment_data.payment_hash
+                        )),
+                    ));
                 }
                 if !payment_data.dry_run {
                     self.store.delete_attempts(payment_data.payment_hash);
@@ -2238,7 +2303,12 @@ where
             (payment_data.max_parts() as u32)
                 .checked_mul(DEFAULT_PAYMENT_MPP_ATTEMPT_TRY_LIMIT)
                 .ok_or_else(|| {
-                    Error::InvalidParameter("MPP payment try limit overflows".to_string())
+                    PaymentStartError::rejected(
+                        &payment_data,
+                        None,
+                        TlcErrorCode::TemporaryNodeFailure,
+                        Error::InvalidParameter("MPP payment try limit overflows".to_string()),
+                    )
                 })?
         } else {
             DEFAULT_PAYMENT_TRY_LIMIT
