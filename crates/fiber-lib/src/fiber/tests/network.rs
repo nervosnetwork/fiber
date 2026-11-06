@@ -3464,14 +3464,14 @@ async fn test_malicious_open_channel_excessive_funding_fee_rate_rejected_before_
         funding_pubkey: gen_rand_fiber_public_key(),
         tlc_basepoint: gen_rand_fiber_public_key(),
         next_commitment_nonce: rand_nonce.clone(),
-        next_revocation_nonce: rand_nonce,
+        next_revocation_nonce: rand_nonce.clone(),
         channel_announcement_nonce: None,
     };
 
     node.network_actor
         .send_message(NetworkActorMessage::Event(NetworkActorEvent::FiberMessage(
             peer.pubkey,
-            FiberMessage::ChannelInitialization(open_channel),
+            crate::fiber::session_v2::opening_message(open_channel, rand_nonce),
             None,
         )))
         .expect("network actor alive");
