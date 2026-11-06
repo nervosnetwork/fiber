@@ -1371,13 +1371,26 @@ where
             if external && !state.ephemeral_config.external_funding.signed_submitted {
                 // Waiting for local funding submission owes no peer response.
                 state.reestablishing = false;
+                if let Some(outgoing) = state.session_v2.as_ref().and_then(|s| s.outgoing.clone()) {
+                    // A lost bootstrap CS must still be replayed while the wallet waits.
+                    state.send_v2_message(FiberMessage::commitment_signed_v2(
+                        CommitmentSignedV2::try_from(outgoing.request)
+                            .map_err(|e| invalid(e.to_string()))?,
+                    ));
+                } else if state
+                    .session_v2
+                    .as_ref()
+                    .is_some_and(|s| s.incoming.is_some())
+                {
+                    self.send_commitment_v2(myself, state).await?;
+                    if !state.is_acceptor {
+                        self.return_unsigned_external_funding_tx(state)?;
+                    }
+                }
                 return Ok(());
             }
-            if let (true, Some(tx)) = (external, state.funding_tx.clone()) {
-                state.send_v2_message(FiberMessage::tx_update(crate::fiber::types::TxUpdate {
-                    channel_id: state.id,
-                    tx,
-                }));
+            if external && !state.is_acceptor {
+                self.release_external_funding_signed_tx(state)?;
             }
             if let Some(pending) = state
                 .session_v2
@@ -1425,6 +1438,11 @@ where
             let replay_initial = peer.next_commitment_number == INITIAL_COMMITMENT_NUMBER + 1;
             state.recovery_peer_v2 = Some(peer);
             self.replay_effects_v2(state);
+            if state.ephemeral_config.external_funding.signed_submitted && !state.is_acceptor {
+                // The peer may still be waiting for the signed TxUpdate, even
+                // though this side has already advanced to funding signatures.
+                self.release_external_funding_signed_tx(state)?;
+            }
             if replay_initial {
                 let outgoing = state
                     .session_v2
@@ -1935,14 +1953,20 @@ where
             state.maybe_transfer_to_tx_signatures(flags)?;
         }
         self.apply_settled_remove_tlcs(myself, state, true).await;
-        let external_reply = state.ephemeral_config.external_funding.signed_submitted
+        let external_reply = state.ephemeral_config.external_funding.enabled
             && matches!(state.state, ChannelState::SigningCommitment(flags) if !flags.contains(SigningCommitmentFlags::OUR_COMMITMENT_SIGNED_SENT));
+        let return_unsigned = external_reply
+            && !state.is_acceptor
+            && !state.ephemeral_config.external_funding.signed_submitted;
         state.finish_recovery_v2(myself);
         if (needs_cs || external_reply)
             && !state.tlc_state.waiting_ack
             && (!state.reestablishing || (flags.is_some() && state.recovery_peer_v2.is_some()))
         {
             self.send_commitment_v2(myself, state).await?;
+        }
+        if return_unsigned {
+            self.return_unsigned_external_funding_tx(state)?;
         }
         Ok(())
     }

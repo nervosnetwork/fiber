@@ -120,14 +120,14 @@ pub use fiber_types::HopRequire;
 #[cfg(any(debug_assertions, test, feature = "bench"))]
 use fiber_types::SessionRoute;
 use fiber_types::{
-    blake2b_hash_with_salt, AddTlcCommand, AppliedFlags, AwaitingTxSignaturesFlags,
-    ChannelFeatures, ChannelOpenRecord, ChannelOpeningStatus, ChannelState, ChannelTlcInfo,
-    CloseFlags, EcdsaSignature, EntityHex, FeatureVector, Hash256, NodeAnnouncement,
-    PaymentCustomRecords, PaymentStatus, PeeledPaymentOnionPacket, PersistentNetworkActorState,
-    PrevTlcInfo, Privkey, Pubkey, PublicChannelInfo, RemoveTlcFulfill, RemoveTlcReason,
-    RetryableTlcOperation, RevocationData, RouterHop, SettlementData, ShutdownSettlementRecord,
-    ShuttingDownFlags, TLCId, TlcErr, TlcErrPacket, TlcErrorCode, TrampolineContext, UdtCfgInfos,
-    NO_SHARED_SECRET,
+    blake2b_hash_with_salt, AddTlcCommand, AppliedFlags, AwaitingChannelReadyFlags,
+    AwaitingTxSignaturesFlags, ChannelFeatures, ChannelOpenRecord, ChannelOpeningStatus,
+    ChannelState, ChannelTlcInfo, CloseFlags, EcdsaSignature, EntityHex, FeatureVector, Hash256,
+    NodeAnnouncement, PaymentCustomRecords, PaymentStatus, PeeledPaymentOnionPacket,
+    PersistentNetworkActorState, PrevTlcInfo, Privkey, Pubkey, PublicChannelInfo, RemoveTlcFulfill,
+    RemoveTlcReason, RetryableTlcOperation, RevocationData, RouterHop, SettlementData,
+    ShutdownSettlementRecord, ShuttingDownFlags, TLCId, TlcErr, TlcErrPacket, TlcErrorCode,
+    TrampolineContext, UdtCfgInfos, NO_SHARED_SECRET,
 };
 
 pub const FIBER_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
@@ -827,6 +827,7 @@ pub struct SendOnionPacketCommand {
 #[cfg(test)]
 #[derive(Debug)]
 pub enum TestFiberMessageKind {
+    TxUpdate,
     TxSignatures,
     AddTlc,
     CommitmentSigned,
@@ -867,6 +868,9 @@ impl TestFiberMessageHold {
                     | FiberChannelMessage::CommitmentSignedV2(_)
                     | FiberChannelMessage::RevokeAndAck(_)
                     | FiberChannelMessage::RevokeAndAckV2(_)
+            ) | (
+                TestFiberMessageKind::TxUpdate,
+                FiberChannelMessage::TxUpdate(_)
             ) | (
                 TestFiberMessageKind::TxSignatures,
                 FiberChannelMessage::TxSignatures(_)
@@ -1372,6 +1376,10 @@ pub enum NetworkActorEvent {
 
     /// Both parties are now able to broadcast a valid funding transaction.
     FundingTransactionPending(Transaction, OutPoint, Hash256),
+
+    /// An externally signed funding transaction was released to the peer. Watch
+    /// for confirmation without broadcasting it before signatures are complete.
+    ExternalFundingTransactionSubmitted(OutPoint, Hash256),
 
     /// A funding transaction has been confirmed. The transaction was included in the
     /// block with the given transaction index, and the timestamp in the block header.
@@ -1990,6 +1998,18 @@ where
                 state
                     .on_funding_transaction_pending(channel_id, transaction, outpoint)
                     .await;
+            }
+            NetworkActorEvent::ExternalFundingTransactionSubmitted(outpoint, channel_id) => {
+                state.pending_channels.insert(outpoint.clone(), channel_id);
+                if let Err(err) = state
+                    .trace_tx(
+                        outpoint.tx_hash().into(),
+                        InFlightCkbTxKind::Funding(channel_id),
+                    )
+                    .await
+                {
+                    error!("Failed to watch external funding transaction: {}", err);
+                }
             }
             NetworkActorEvent::FundingTransactionConfirmed(
                 outpoint,
@@ -3658,8 +3678,8 @@ where
                 {
                     Ok((_channel_actor, temp_channel_id)) => {
                         // Channel is now in NegotiatingFunding state waiting for AcceptChannel.
-                        // Store the reply port - we'll send the response when the peer accepts
-                        // and we build the unsigned funding tx.
+                        // Return the unsigned tx after the acceptor's commitment
+                        // signature has been verified and persisted locally.
                         state
                             .pending_external_funding_replies
                             .insert(temp_channel_id, reply);
@@ -6690,6 +6710,16 @@ where
 
     pub async fn abandon_channel(&mut self, channel_id: Hash256) -> ProcessingChannelResult {
         if let Some(channel_actor_state) = self.store.get_channel_actor_state(&channel_id) {
+            if channel_actor_state
+                .ephemeral_config
+                .external_funding
+                .signed_submitted
+            {
+                return Err(ProcessingChannelError::InvalidParameter(format!(
+                    "Channel {} has released a signed external funding transaction and cannot be abandoned",
+                    channel_id
+                )));
+            }
             match channel_actor_state.state {
                 ChannelState::ChannelReady
                 | ChannelState::ShuttingDown(_)
@@ -6995,6 +7025,23 @@ where
                                         "Handling force shutdown command in ShuttingDown state, flags: {:?}",
                                         &flags
                                     );
+                                }
+                                ChannelState::AwaitingChannelReady(flags)
+                                    if flags
+                                        .contains(AwaitingChannelReadyFlags::OUR_CHANNEL_READY)
+                                        && state.latest_commitment_transaction.is_some() =>
+                                {
+                                    debug!(
+                                        "Handling force shutdown command in AwaitingChannelReady state, flags: {:?}",
+                                        &flags
+                                    );
+                                }
+                                ChannelState::AwaitingTxSignatures(_)
+                                    if state.ephemeral_config.external_funding.signed_submitted
+                                        && state.funding_tx_confirmed_at.is_some()
+                                        && state.latest_commitment_transaction.is_some() =>
+                                {
+                                    debug!("Handling force shutdown after early external funding confirmation");
                                 }
                                 _ => {
                                     let error = Error::ChannelError(
