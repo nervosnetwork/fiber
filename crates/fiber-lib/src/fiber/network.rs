@@ -1368,6 +1368,9 @@ pub enum NetworkActorEvent {
     // A payment actor stopped event.
     PaymentActorStopped(Hash256, Option<TlcErrPacket>),
 
+    // Resolve the incoming TLC after a downstream preimage or during recovery.
+    ResolveTrampolinePayment(Hash256),
+
     // Channel settlement check completed - channel is fully settled on-chain.
     ChannelSettlementCompleted(Hash256),
 
@@ -2150,6 +2153,9 @@ where
                 state
                     .on_payment_actor_stopped(payment_hash, last_error_packet)
                     .await;
+            }
+            NetworkActorEvent::ResolveTrampolinePayment(payment_hash) => {
+                state.resolve_trampoline_upstream(payment_hash, None).await;
             }
             NetworkActorEvent::ChannelSettlementCompleted(channel_id) => {
                 if let Some(channel_actor) = state.channels.get(&channel_id) {
@@ -4886,17 +4892,15 @@ where
             }
 
             if attempt.is_success() && attempt.preimage == Some(payment_preimage) {
-                let aggregate_is_fully_paid = self
-                    .store
-                    .get_payment_session(payment_hash)
-                    .is_some_and(|session| {
-                        session
-                            .attempts()
-                            .filter(|attempt| attempt.is_success())
-                            .map(|attempt| attempt.route.receiver_amount())
-                            .sum::<u128>()
-                            >= session.request.amount
-                    });
+                let session = self.store.get_payment_session(payment_hash);
+                let aggregate_is_fully_paid = session.as_ref().is_some_and(|session| {
+                    session
+                        .attempts()
+                        .filter(|attempt| attempt.is_success())
+                        .map(|attempt| attempt.route.receiver_amount())
+                        .sum::<u128>()
+                        >= session.request.amount
+                });
                 let persisted_status = self.store.get_persisted_payment_status(payment_hash);
 
                 // Per-attempt acknowledgement is independent of the aggregate payment. A
@@ -4905,6 +4909,19 @@ where
                 // the full amount, however, a non-Success session is the crash window between the
                 // attempt and session writes and must still be repaired through PaymentActor.
                 if !aggregate_is_fully_paid || persisted_status == Some(PaymentStatus::Success) {
+                    if session
+                        .as_ref()
+                        .is_some_and(|session| session.request.trampoline_context.is_some())
+                    {
+                        state
+                            .network
+                            .send_message(NetworkActorMessage::new_event(
+                                NetworkActorEvent::ResolveTrampolinePayment(payment_hash),
+                            ))
+                            .map_err(|err| {
+                                format!("failed to resume trampoline upstream settlement for {payment_hash:?}: {err}")
+                            })?;
+                    }
                     if persisted_status == Some(PaymentStatus::Success) {
                         // This also closes the crash window between persisting the final session
                         // and removing the retry index. Clearing an already-empty index is harmless.
@@ -7463,92 +7480,153 @@ where
             error!("Can't find inflight payment actor");
         }
 
-        // If this payment has associated previous TLCs,
-        // meaning it's a trampoline forwarding payment,
-        // we need to resolve those upstream TLCs based on the payment outcome.
+        self.resolve_trampoline_upstream(payment_hash, last_error_packet.as_ref())
+            .await;
+    }
+
+    async fn resolve_trampoline_upstream(
+        &mut self,
+        payment_hash: Hash256,
+        last_error_packet: Option<&TlcErrPacket>,
+    ) {
         let Some(session) = self.store.get_payment_session(payment_hash) else {
             return;
         };
-        let trampoline_context = session.request.trampoline_context.as_ref();
+        let Some(context) = session.request.trampoline_context.as_ref() else {
+            return;
+        };
 
-        if let Some(context) = trampoline_context {
-            match session.status {
-                PaymentStatus::Success => {
-                    let preimage = session
-                        .attempts()
-                        .find(|a| a.is_success())
-                        .and_then(|a| a.preimage);
+        let has_successful_attempt = session.attempts().any(|attempt| attempt.is_success());
+        let preimage = session
+            .attempts()
+            .filter(|attempt| attempt.is_success())
+            .filter_map(|attempt| attempt.preimage)
+            // The channel stores a validated preimage before the payment actor
+            // necessarily records the attempt outcome.
+            .chain(self.store.get_preimage(&payment_hash))
+            .find(|preimage| {
+                let hash: Hash256 = context.hash_algorithm.hash(*preimage).into();
+                hash == payment_hash
+            });
 
-                    if let Some(preimage) = preimage {
-                        self.store.insert_preimage(payment_hash, preimage);
-                        for prev_tlc in &context.previous_tlcs {
-                            let (send, _recv) = oneshot::channel();
-                            let rpc_reply = RpcReplyPort::from(send);
-                            let command = ChannelCommand::RemoveTlc(
-                                RemoveTlcCommand {
-                                    id: prev_tlc.prev_tlc_id,
-                                    reason: RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
-                                        payment_preimage: preimage,
-                                    }),
-                                },
-                                rpc_reply,
-                            );
-                            if let Err(e) = self
-                                .send_command_to_channel(prev_tlc.prev_channel_id, command)
-                                .await
-                            {
-                                error!("Failed to send fulfillment to upstream channel: {:?}", e);
-                            }
-                        }
-                    } else {
-                        error!("Payment success but no preimage found for {payment_hash}");
-                    }
-                }
-                PaymentStatus::Failed => {
-                    let error_code = session
-                        .last_error_code
-                        .unwrap_or(TlcErrorCode::TemporaryNodeFailure);
-                    for prev_tlc in &context.previous_tlcs {
-                        let (send, _recv) = oneshot::channel();
-                        let rpc_reply = RpcReplyPort::from(send);
-                        let Some(shared_secret) = prev_tlc.shared_secret else {
-                            error!(
-                                "Can't fail upstream trampoline TLC without shared secret: payment_hash={:?}, channel_id={:?}, tlc_id={:?}",
-                                payment_hash, prev_tlc.prev_channel_id, prev_tlc.prev_tlc_id
-                            );
+        if let Some(preimage) = preimage {
+            // A valid preimage settles the incoming TLC even if other outgoing
+            // MPP parts fail. Persist it before asking the channel to fulfill.
+            self.store.insert_preimage(payment_hash, preimage);
+            for prev_tlc in &context.previous_tlcs {
+                if let Some(channel) = self
+                    .store
+                    .get_channel_actor_state(&prev_tlc.prev_channel_id)
+                {
+                    let Some(tlc) = channel
+                        .tlc_state
+                        .get(&TLCId::Received(prev_tlc.prev_tlc_id))
+                    else {
+                        continue;
+                    };
+                    match tlc.removed_reason.as_ref() {
+                        Some(RemoveTlcReason::RemoveTlcFulfill(_)) => continue,
+                        Some(RemoveTlcReason::RemoveTlcFail(_)) => {
+                            error!("Upstream trampoline TLC was failed after a downstream preimage was learned: payment_hash={payment_hash}, channel_id={:?}, tlc_id={:?}", prev_tlc.prev_channel_id, prev_tlc.prev_tlc_id);
                             continue;
-                        };
-                        let inner_error_packet = last_error_packet
-                            .as_ref()
-                            .map(|packet| packet.onion_packet.clone())
-                            .unwrap_or_else(|| {
-                                TlcErrPacket::new(TlcErr::new(error_code), &shared_secret)
-                                    .onion_packet
-                            });
-                        let wrapper_packet = TlcErrPacket::new_trampoline_failed(
-                            error_code,
-                            self.get_public_key(),
-                            inner_error_packet,
-                            &shared_secret,
-                        );
-                        let command = ChannelCommand::RemoveTlc(
-                            RemoveTlcCommand {
-                                id: prev_tlc.prev_tlc_id,
-                                reason: RemoveTlcReason::RemoveTlcFail(wrapper_packet),
-                            },
-                            rpc_reply,
-                        );
-                        if let Err(e) = self
-                            .send_command_to_channel(prev_tlc.prev_channel_id, command)
-                            .await
-                        {
-                            error!("Failed to send failure to upstream channel: {:?}", e);
                         }
+                        None => {}
                     }
                 }
-                _ => {
-                    warn!("Trampoline payment stopped with unknown state for {payment_hash}");
+                let (send, _recv) = oneshot::channel();
+                let command = ChannelCommand::RemoveTlc(
+                    RemoveTlcCommand {
+                        id: prev_tlc.prev_tlc_id,
+                        reason: RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+                            payment_preimage: preimage,
+                        }),
+                    },
+                    RpcReplyPort::from(send),
+                );
+                if let Err(err) = self
+                    .send_command_to_channel(prev_tlc.prev_channel_id, command)
+                    .await
+                {
+                    error!("Failed to send fulfillment to upstream channel: {err:?}");
                 }
+            }
+            return;
+        }
+
+        // A successful attempt must never be converted into an upstream failure
+        // merely because its preimage is temporarily missing from the session.
+        if has_successful_attempt {
+            error!("Trampoline attempt succeeded but no valid preimage is available for {payment_hash}");
+            return;
+        }
+
+        if session.status != PaymentStatus::Failed {
+            return;
+        }
+
+        // A payment session can become Failed before every first-hop TLC has a
+        // final channel outcome. Any such TLC can still reveal the preimage.
+        let outgoing_unresolved = session.attempts().any(|attempt| {
+            attempt.is_inflight()
+                || attempt
+                    .first_hop_channel_outpoint()
+                    .and_then(|outpoint| self.store.get_channel_state_by_outpoint(outpoint))
+                    .is_some_and(|channel| channel.owns_payment_attempt(payment_hash, attempt.id))
+        });
+        if outgoing_unresolved {
+            warn!("Deferring upstream trampoline failure while outgoing TLCs are unresolved: {payment_hash}");
+            return;
+        }
+
+        let error_code = session
+            .last_error_code
+            .unwrap_or(TlcErrorCode::TemporaryNodeFailure);
+        for prev_tlc in &context.previous_tlcs {
+            if let Some(channel) = self
+                .store
+                .get_channel_actor_state(&prev_tlc.prev_channel_id)
+            {
+                let Some(tlc) = channel
+                    .tlc_state
+                    .get(&TLCId::Received(prev_tlc.prev_tlc_id))
+                else {
+                    continue;
+                };
+                if tlc.removed_reason.is_some() {
+                    continue;
+                }
+            }
+            let Some(shared_secret) = prev_tlc.shared_secret else {
+                error!(
+                    "Can't fail upstream trampoline TLC without shared secret: payment_hash={:?}, channel_id={:?}, tlc_id={:?}",
+                    payment_hash, prev_tlc.prev_channel_id, prev_tlc.prev_tlc_id
+                );
+                continue;
+            };
+            let inner_error_packet = last_error_packet
+                .map(|packet| packet.onion_packet.clone())
+                .unwrap_or_else(|| {
+                    TlcErrPacket::new(TlcErr::new(error_code), &shared_secret).onion_packet
+                });
+            let wrapper_packet = TlcErrPacket::new_trampoline_failed(
+                error_code,
+                self.get_public_key(),
+                inner_error_packet,
+                &shared_secret,
+            );
+            let (send, _recv) = oneshot::channel();
+            let command = ChannelCommand::RemoveTlc(
+                RemoveTlcCommand {
+                    id: prev_tlc.prev_tlc_id,
+                    reason: RemoveTlcReason::RemoveTlcFail(wrapper_packet),
+                },
+                RpcReplyPort::from(send),
+            );
+            if let Err(err) = self
+                .send_command_to_channel(prev_tlc.prev_channel_id, command)
+                .await
+            {
+                error!("Failed to send failure to upstream channel: {err:?}");
             }
         }
     }
@@ -8051,6 +8129,35 @@ where
 
         // Trigger hold tlc fulfill retry and timeout checks at startup.
         self.retry_hold_tlc_sets(&myself);
+        // A crash after persisting an attempt outcome but before delivering its
+        // upstream removal must not lose the forwarding decision.
+        for session in self.store.get_all_payment_sessions() {
+            let Some(context) = session.request.trampoline_context.as_ref() else {
+                continue;
+            };
+            let upstream_pending = context.previous_tlcs.iter().any(|prev_tlc| {
+                self.store
+                    .get_channel_actor_state(&prev_tlc.prev_channel_id)
+                    .and_then(|channel| {
+                        channel
+                            .tlc_state
+                            .get(&TLCId::Received(prev_tlc.prev_tlc_id))
+                            .map(|tlc| tlc.removed_reason.is_none())
+                    })
+                    .unwrap_or(false)
+            });
+            if upstream_pending
+                && (session.status.is_final()
+                    || session.attempts().any(|attempt| attempt.is_success())
+                    || self.store.get_preimage(&session.payment_hash()).is_some())
+            {
+                myself
+                    .send_message(NetworkActorMessage::new_event(
+                        NetworkActorEvent::ResolveTrampolinePayment(session.payment_hash()),
+                    ))
+                    .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+            }
+        }
         debug_event!(myself, "network actor started");
         Ok(())
     }

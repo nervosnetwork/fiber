@@ -1959,6 +1959,15 @@ where
                                 .clear_attempts_channel_index(session.payment_hash());
                         }
                     }
+                    if session.request.trampoline_context.is_some() {
+                        // The incoming TLC is protected by this preimage even if
+                        // other MPP parts later make the aggregate session fail.
+                        self.network
+                            .send_message(NetworkActorMessage::new_event(
+                                NetworkActorEvent::ResolveTrampolinePayment(payment_hash),
+                            ))
+                            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                    }
                 }
                 RemoveTlcReason::RemoveTlcFail(reason) => {
                     let (tlc_error, route_index) = if let Some(local_error) = local_error {
@@ -2114,6 +2123,14 @@ where
                 self.store
                     .clear_attempts_channel_index(session.payment_hash());
             }
+        }
+
+        if session.request.trampoline_context.is_some() {
+            self.network
+                .send_message(NetworkActorMessage::new_event(
+                    NetworkActorEvent::ResolveTrampolinePayment(payment_hash),
+                ))
+                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
         }
 
         Ok(())
