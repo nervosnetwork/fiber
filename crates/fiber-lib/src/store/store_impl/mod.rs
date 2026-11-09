@@ -304,24 +304,6 @@ pub fn check_validate<P: AsRef<Path>>(path: P) -> Result<(), String> {
             PREIMAGE_PREFIX => {
                 check_deserialization::<Hash256>(&value, "PREIMAGE_PREFIX", &mut errors);
             }
-            PAYMENT_CLAIM_PREFIX => {
-                check_deserialization::<Hash256>(&value, "PAYMENT_CLAIM_PREFIX", &mut errors);
-            }
-            TRAMPOLINE_RESOLUTION_PREFIX => {
-                check_deserialization::<fiber_types::TrampolineResolution>(
-                    &value,
-                    "TRAMPOLINE_RESOLUTION_PREFIX",
-                    &mut errors,
-                );
-            }
-            PAYMENT_TLC_RESULT_PREFIX => {
-                check_deserialization::<fiber_types::PaymentTlcResult>(
-                    &value,
-                    "PAYMENT_TLC_RESULT_PREFIX",
-                    &mut errors,
-                );
-            }
-
             CKB_INVOICE_STATUS_PREFIX => {
                 check_deserialization::<CkbInvoiceStatus>(
                     &value,
@@ -1031,81 +1013,6 @@ impl NetworkActorStateStore for Store {
 }
 
 impl ChannelActorStateStore for Store {
-    fn get_payment_tlc_results(&self, payment_hash: Hash256) -> Vec<fiber_types::PaymentTlcResult> {
-        self.collect_by_prefix(&[&[PAYMENT_TLC_RESULT_PREFIX], payment_hash.as_ref()].concat())
-            .into_iter()
-            .map(|kv| deserialize_from(&kv.value, "PaymentTlcResult"))
-            .collect()
-    }
-
-    fn insert_channel_actor_state_with_payment_result(
-        &self,
-        state: ChannelActorState,
-        result: fiber_types::PaymentTlcResult,
-    ) {
-        let mut batch = self.batch();
-        let kv = KeyValue::ChannelActorState(state.id, state);
-        batch.put(kv.key(), kv.value());
-        let key = [
-            &[PAYMENT_TLC_RESULT_PREFIX],
-            result.payment_hash.as_ref(),
-            result.channel_id.as_ref(),
-            &u64::from(result.tlc_id).to_le_bytes(),
-        ]
-        .concat();
-        batch.put(key, serialize_to_vec(&result, "PaymentTlcResult"));
-        batch.commit();
-    }
-
-    fn delete_payment_tlc_result(&self, result: &fiber_types::PaymentTlcResult) {
-        self.delete(
-            [
-                &[PAYMENT_TLC_RESULT_PREFIX],
-                result.payment_hash.as_ref(),
-                result.channel_id.as_ref(),
-                &u64::from(result.tlc_id).to_le_bytes(),
-            ]
-            .concat(),
-        );
-    }
-
-    fn get_payment_claim(&self, payment_hash: Hash256) -> Option<Hash256> {
-        self.get([&[PAYMENT_CLAIM_PREFIX], payment_hash.as_ref()].concat())
-            .map(|value| deserialize_from(&value, "PaymentClaim"))
-    }
-
-    fn insert_payment_claim(&self, payment_hash: Hash256, preimage: Hash256) {
-        self.put(
-            [&[PAYMENT_CLAIM_PREFIX], payment_hash.as_ref()].concat(),
-            serialize_to_vec(&preimage, "PaymentClaim"),
-        );
-    }
-
-    fn get_trampoline_resolutions(
-        &self,
-        payment_hash: Hash256,
-    ) -> Vec<fiber_types::TrampolineResolution> {
-        self.collect_by_prefix(&[&[TRAMPOLINE_RESOLUTION_PREFIX], payment_hash.as_ref()].concat())
-            .into_iter()
-            .map(|kv| deserialize_from(&kv.value, "TrampolineResolution"))
-            .collect()
-    }
-
-    fn insert_trampoline_resolution(
-        &self,
-        payment_hash: Hash256,
-        resolution: fiber_types::TrampolineResolution,
-    ) {
-        let key = [
-            &[TRAMPOLINE_RESOLUTION_PREFIX],
-            payment_hash.as_ref(),
-            resolution.channel_id.as_ref(),
-            &resolution.tlc_id.to_le_bytes(),
-        ]
-        .concat();
-        self.put(key, serialize_to_vec(&resolution, "TrampolineResolution"));
-    }
-
     fn has_trampoline_payment_for_tlc(
         &self,
         payment_hash: Hash256,
@@ -1603,7 +1510,7 @@ impl NetworkGraphStateStore for Store {
             .into_iter()
             .filter_map(|kv| {
                 let session: PaymentSession = deserialize_from(kv.value.as_ref(), "PaymentSession");
-                // A legacy Failed record can contain an already-fulfilled MPP part.
+                // A legacy failed session can contain a successfully claimed MPP shard.
                 if session.status.is_final()
                     && session.status != status
                     && !(session.status == PaymentStatus::Failed
@@ -1637,9 +1544,10 @@ impl NetworkGraphStateStore for Store {
         iter.filter_map(|(_key, value)| {
             let session: PaymentSession = deserialize_from(&value, "PaymentSession");
             if session.status.is_final()
-                && status.is_some_and(|s| {
-                    session.status != s
-                        && !(session.status == PaymentStatus::Failed && s == PaymentStatus::Success)
+                && status.is_some_and(|status| {
+                    session.status != status
+                        && !(session.status == PaymentStatus::Failed
+                            && status == PaymentStatus::Success)
                 })
             {
                 return None;
@@ -1657,16 +1565,7 @@ impl NetworkGraphStateStore for Store {
     fn insert_payment_session(&self, session: PaymentSession) {
         let payment_hash = session.payment_hash();
         let session_clone = session.clone();
-        let payment_preimage = (session.status == PaymentStatus::Success)
-            .then(|| {
-                self.get_payment_claim(payment_hash).or_else(|| {
-                    session
-                        .attempts()
-                        .filter(|attempt| attempt.is_success())
-                        .find_map(|attempt| attempt.preimage)
-                })
-            })
-            .flatten();
+        let payment_preimage = session.payment_preimage();
         let mut batch = self.batch();
         let kv = KeyValue::PaymentSession(payment_hash, session);
         batch.put(kv.key(), kv.value());
@@ -1809,11 +1708,9 @@ impl NetworkGraphStateStore for Store {
             .map(|kv| deserialize_from(kv.value.as_ref(), "Attempt"))
             .collect();
 
-        // Only delete channel index entries, keep the attempts themselves
+        // Keep wake-up ownership until each remaining TLC has finished.
         for attempt in attempts {
-            if !attempt.status.is_final()
-                || crate::fiber::payment::payment_attempt_is_owned(self, &attempt)
-            {
+            if !attempt.status.is_final() {
                 continue;
             }
             if let Some(outpoint) = attempt.first_hop_channel_outpoint() {

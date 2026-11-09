@@ -8,6 +8,7 @@ use crate::fiber::gossip::get_gossip_actor_name;
 use crate::fiber::gossip::GossipActorMessage;
 use crate::fiber::graph::NetworkGraphStateStore;
 use crate::fiber::network::*;
+use crate::fiber::payment::PaymentSessionExt;
 use crate::fiber::payment::SendPaymentCommand;
 use crate::fiber::payment::SendPaymentWithRouterCommand;
 use crate::fiber::types::FiberMessage;
@@ -1428,21 +1429,22 @@ impl NetworkNode {
         .await;
     }
 
-    /// Wait for successful proof and the durable completion of every existing TLC.
-    pub async fn wait_until_claimed(&self, payment_hash: Hash256) {
+    /// Wait until the successful payment's existing attempts and TLCs have finished.
+    pub async fn wait_until_payment_finished(&self, payment_hash: Hash256) {
         self.wait_until_success(payment_hash).await;
         tokio::time::timeout(Duration::from_secs(DEFAULT_WAIT_UNTIL_TIME), async {
             loop {
-                if self.get_payment_result(payment_hash).await.claim_status
-                    == Some(fiber_types::PaymentClaimStatus::Claimed)
-                {
+                let session = self
+                    .get_payment_session(payment_hash)
+                    .expect("payment exists");
+                if !session.has_pending_payment_work(&self.store) {
                     return;
                 }
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
         })
         .await
-        .expect("Successful payment did not finish claiming its TLCs");
+        .expect("Successful payment still has pending TLCs");
     }
 
     pub async fn wait_until_failed(&self, payment_hash: Hash256) {

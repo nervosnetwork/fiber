@@ -590,99 +590,6 @@ impl SendPaymentDataExt for SendPaymentData {
     }
 }
 
-pub(crate) fn payment_attempt_is_owned(
-    store: &impl ChannelActorStateStore,
-    attempt: &Attempt,
-) -> bool {
-    if store
-        .get_payment_tlc_results(attempt.payment_hash)
-        .iter()
-        .any(|result| result.attempt_id == attempt.id && result.tried_times == attempt.tried_times)
-    {
-        return true;
-    }
-    let Some(channel_outpoint) = attempt.first_hop_channel_outpoint() else {
-        return false;
-    };
-    store
-        .get_channel_state_by_outpoint(channel_outpoint)
-        .is_some_and(|channel_state| {
-            let owns_update = if attempt.is_retrying()
-                && matches!(channel_state.state, fiber_types::ChannelState::Closed(_))
-            {
-                // Closed queued Adds only deliver failure; they can no longer execute this retry.
-                channel_state.tlc_state.all_tlcs().any(|tlc| {
-                    !tlc.applied_flags
-                        .contains(fiber_types::AppliedFlags::REMOVE)
-                        && tlc.payment_hash == attempt.payment_hash
-                        && tlc.attempt_id == Some(attempt.id)
-                })
-            } else {
-                channel_state.owns_payment_attempt(attempt.payment_hash, attempt.id)
-            };
-            owns_update
-                || channel_state.session_v2.iter().any(|session| {
-                    session.remove_effects.iter().any(|(tlc, execution)| {
-                        tlc.payment_hash == attempt.payment_hash
-                            && tlc.attempt_id == Some(attempt.id)
-                            && (attempt.status == AttemptStatus::Created
-                                || execution.is_none_or(|number| number == attempt.tried_times))
-                    })
-                })
-        })
-}
-
-/// Whether any issued TLC, queued Add, or unacknowledged result still owns this payment.
-pub(crate) fn payment_has_pending_channel_work(
-    store: &impl ChannelActorStateStore,
-    hash: Hash256,
-) -> bool {
-    let channel_work = store
-        .get_channel_states(None)
-        .into_iter()
-        .any(|(_, id, _)| {
-            store.get_channel_actor_state(&id).is_some_and(|channel| {
-                let pending_tlc = channel.tlc_state.offered_tlcs.tlcs.iter().any(|tlc| {
-                    tlc.payment_hash == hash
-                        && tlc.attempt_id.is_some()
-                        && !tlc
-                            .applied_flags
-                            .contains(fiber_types::AppliedFlags::REMOVE)
-                });
-                let queued_add = channel.retryable_tlc_operations.iter().any(|operation| {
-                    matches!(operation, fiber_types::RetryableTlcOperation::AddTlc(command)
-                        if command.payment_hash == hash
-                            && command.attempt_id.is_some()
-                            && command.previous_tlc.is_none())
-                });
-                let pending_result = channel.session_v2.as_ref().is_some_and(|session| {
-                    session
-                        .remove_effects
-                        .iter()
-                        .any(|(tlc, _)| tlc.payment_hash == hash && tlc.attempt_id.is_some())
-                });
-                pending_tlc || queued_add || pending_result
-            })
-        });
-    channel_work || !store.get_payment_tlc_results(hash).is_empty()
-}
-
-/// Derive settlement progress from durable attempts and their exact channel owners.
-pub(crate) fn payment_claim_status(
-    session: &PaymentSession,
-    store: &impl ChannelActorStateStore,
-) -> Option<fiber_types::PaymentClaimStatus> {
-    (session.status == PaymentStatus::Success).then(|| {
-        if payment_has_pending_channel_work(store, session.payment_hash())
-            || session.attempts().any(|attempt| !attempt.status.is_final())
-        {
-            fiber_types::PaymentClaimStatus::Claiming
-        } else {
-            fiber_types::PaymentClaimStatus::Claimed
-        }
-    })
-}
-
 pub trait PaymentSessionExt {
     fn new_session(
         store: &impl NetworkGraphStateStore,
@@ -691,9 +598,34 @@ pub trait PaymentSessionExt {
     ) -> PaymentSession;
     fn init_attempts(self, store: &impl NetworkGraphStateStore) -> PaymentSession;
     fn flush_attempts(&mut self, store: &impl NetworkGraphStateStore);
+    /// Whether existing attempts or their channel TLCs still need an outcome.
+    fn has_pending_payment_work(&self, store: &impl ChannelActorStateStore) -> bool;
 }
 
 impl PaymentSessionExt for PaymentSession {
+    fn has_pending_payment_work(&self, store: &impl ChannelActorStateStore) -> bool {
+        self.attempts().any(|attempt| {
+            !attempt.status.is_final()
+                || attempt
+                    .first_hop_channel_outpoint()
+                    .and_then(|outpoint| store.get_channel_state_by_outpoint(outpoint))
+                    .is_some_and(|channel| {
+                        channel.owns_payment_attempt(self.payment_hash(), attempt.id)
+                            || (attempt.preimage.is_none()
+                                && channel.session_v2.as_ref().is_some_and(|session| {
+                                    session.remove_effects.iter().any(|(tlc, _)| {
+                                        tlc.payment_hash == self.payment_hash()
+                                            && tlc.attempt_id == Some(attempt.id)
+                                            && matches!(
+                                                tlc.removed_reason,
+                                                Some(RemoveTlcReason::RemoveTlcFulfill(_))
+                                            )
+                                    })
+                                }))
+                    })
+        })
+    }
+
     fn new_session(
         store: &impl NetworkGraphStateStore,
         request: SendPaymentData,
@@ -721,9 +653,6 @@ impl PaymentSessionExt for PaymentSession {
     fn flush_attempts(&mut self, store: &impl NetworkGraphStateStore) {
         self.cached_attempts = store.get_attempts(self.request.payment_hash);
         self.status = self.calc_payment_status();
-        if store.get_payment_claim(self.payment_hash()).is_some() {
-            self.status = PaymentStatus::Success;
-        }
         if self.status == PaymentStatus::Success {
             self.last_error = None;
             self.last_error_code = None;
@@ -735,10 +664,7 @@ impl From<PaymentSession> for SendPaymentResponse {
     fn from(session: PaymentSession) -> Self {
         let status = session.status;
         let fee = session.fee_paid();
-        let payment_preimage = session
-            .attempts()
-            .filter(|attempt| attempt.is_success())
-            .find_map(|attempt| attempt.preimage);
+        let payment_preimage = session.payment_preimage();
         let mut all_attempts = session
             .attempts()
             .map(|a| {
@@ -763,13 +689,6 @@ impl From<PaymentSession> for SendPaymentResponse {
             payment_hash: session.request.payment_hash,
             payment_preimage,
             status,
-            claim_status: (status == PaymentStatus::Success).then(|| {
-                if session.attempts().any(|attempt| !attempt.status.is_final()) {
-                    fiber_types::PaymentClaimStatus::Claiming
-                } else {
-                    fiber_types::PaymentClaimStatus::Claimed
-                }
-            }),
             failed_error: session.last_error.clone(),
             created_at: session.created_at,
             last_updated_at: session.last_updated_at,
@@ -928,6 +847,8 @@ pub struct PaymentTlcRemoveContext {
 
 #[derive(Debug, AsRefStr)]
 pub enum PaymentActorMessage {
+    /// Observe a channel outcome and keep existing payment work available.
+    TlcUpdated,
     // SendPayment
     SendPayment(
         SendPaymentData,
@@ -1177,6 +1098,7 @@ where
         command: PaymentActorMessage,
     ) -> crate::Result<()> {
         match command {
+            PaymentActorMessage::TlcUpdated => self.check_payment_final(myself, state),
             PaymentActorMessage::SendPayment(payment_request, reply) => {
                 match self
                     .on_send_payment(myself.clone(), state, payment_request)
@@ -1299,10 +1221,11 @@ where
         myself: ActorRef<PaymentActorMessage>,
         state: &mut PaymentActorState,
     ) {
+        self.check_payment_final(myself.clone(), state);
         let payment_hash = state.payment_hash;
         if let Some(session) = self.store.get_payment_session(payment_hash) {
             if session.status.is_final() {
-                self.check_payment_final(myself, state);
+                return;
             } else {
                 // Payment is still not final, log the current status for debugging
                 let active_attempts = session.active_attempts().len();
@@ -1345,45 +1268,91 @@ where
         myself: ActorRef<PaymentActorMessage>,
         state: &mut PaymentActorState,
     ) {
-        if let Some(session) = self.store.get_payment_session(state.payment_hash) {
-            if session.status.is_final() {
-                for attempt in session
-                    .attempts()
-                    .filter(|attempt| !attempt.status.is_final())
-                {
-                    if !attempt.is_inflight() && !self.channel_owns_attempt(attempt) {
-                        let mut attempt = attempt.clone();
-                        attempt.set_failed_status(
-                            "Payment finished before this attempt was issued",
-                            false,
-                        );
-                        self.store.insert_attempt(attempt);
-                    }
-                }
-                let session = self
-                    .store
-                    .get_payment_session(state.payment_hash)
-                    .expect("existing session");
-                self.store.insert_payment_session(session.clone());
-                self.store.clear_attempts_channel_index(state.payment_hash);
-                let drained = if session.status == PaymentStatus::Success {
-                    payment_claim_status(&session, &self.store)
-                        == Some(fiber_types::PaymentClaimStatus::Claimed)
-                } else {
-                    session.attempts().all(|attempt| {
-                        attempt.status.is_final() && !self.channel_owns_attempt(attempt)
-                    })
-                };
-                if drained {
-                    myself.stop(Some(format!(
-                        "Payment complete with status {:?}",
-                        session.status
-                    )));
-                }
-            }
-        } else {
+        let Some(mut session) = self.store.get_payment_session(state.payment_hash) else {
             error!("Can't find payment session");
             myself.stop(Some("Can't find payment session".to_string()));
+            return;
+        };
+        let unclaimed_attempts: Vec<_> = session
+            .attempts()
+            .filter(|attempt| attempt.preimage.is_none())
+            .cloned()
+            .collect();
+        for mut attempt in unclaimed_attempts {
+            let Some(outpoint) = attempt.first_hop_channel_outpoint() else {
+                continue;
+            };
+            let Some(channel) = self.store.get_channel_state_by_outpoint(outpoint) else {
+                continue;
+            };
+            let preimage = channel
+                .tlc_state
+                .offered_tlcs
+                .tlcs
+                .iter()
+                .chain(
+                    channel
+                        .session_v2
+                        .iter()
+                        .flat_map(|session| session.remove_effects.iter().map(|(tlc, _)| tlc)),
+                )
+                .find_map(|tlc| {
+                    if tlc.payment_hash != state.payment_hash
+                        || tlc.attempt_id != Some(attempt.id)
+                        || tlc.forwarding_tlc.is_some()
+                    {
+                        return None;
+                    }
+                    match &tlc.removed_reason {
+                        Some(RemoveTlcReason::RemoveTlcFulfill(fulfill)) => {
+                            Some(fulfill.payment_preimage)
+                        }
+                        _ => None,
+                    }
+                });
+            if let Some(preimage) = preimage {
+                if Hash256::from(session.request.hash_algorithm().hash(preimage))
+                    == state.payment_hash
+                {
+                    attempt.preimage = Some(preimage);
+                    self.store.insert_attempt(attempt.clone());
+                    session.update_with_attempt(attempt);
+                    session.set_success_status();
+                }
+            }
+        }
+        if !session.status.is_final() {
+            return;
+        }
+        if session.status == PaymentStatus::Success {
+            self.network
+                .send_message(NetworkActorMessage::new_command(
+                    NetworkActorCommand::PaymentTlcUpdated(state.payment_hash),
+                ))
+                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        }
+        for attempt in session
+            .attempts()
+            .filter(|attempt| !attempt.status.is_final())
+        {
+            if !attempt.is_inflight() && !self.channel_owns_attempt(attempt) {
+                let mut attempt = attempt.clone();
+                attempt.set_failed_status("Payment finished before this attempt was issued", false);
+                self.store.insert_attempt(attempt);
+            }
+        }
+        let session = self
+            .store
+            .get_payment_session(state.payment_hash)
+            .expect("existing session");
+        let pending = session.has_pending_payment_work(&self.store);
+        self.store.insert_payment_session(session.clone());
+        if !pending {
+            self.store.clear_attempts_channel_index(state.payment_hash);
+            myself.stop(Some(format!(
+                "Payment complete with status {:?}",
+                session.status
+            )));
         }
     }
 
@@ -1802,14 +1771,6 @@ where
         .expect(ASSUME_NETWORK_ACTOR_ALIVE)
         {
             Err(error_detail) => {
-                if self
-                    .store
-                    .get_payment_claim(session.payment_hash())
-                    .is_some()
-                {
-                    session.set_success_status();
-                    return Ok(());
-                }
                 self.update_graph_with_tlc_fail(&self.network, &error_detail)
                     .await;
                 let need_to_retry = self.network_graph.write().await.record_attempt_fail(
@@ -1842,13 +1803,7 @@ where
         error: &str,
         error_code: Option<TlcErrorCode>,
     ) {
-        if session.status == PaymentStatus::Success
-            || self
-                .store
-                .get_payment_claim(session.payment_hash())
-                .is_some()
-        {
-            session.set_success_status();
+        if session.status == PaymentStatus::Success {
             return;
         }
         session.set_failed_status(error);
@@ -1871,13 +1826,6 @@ where
         error: &str,
         retryable: bool,
     ) {
-        if self
-            .store
-            .get_payment_claim(session.payment_hash())
-            .is_some()
-        {
-            session.set_success_status();
-        }
         if !retryable && !session.active_attempts().iter().any(|a| a.id != attempt.id) {
             self.set_payment_fail_with_error(session, error, error_code);
         }
@@ -1889,7 +1837,35 @@ where
     }
 
     fn channel_owns_attempt(&self, attempt: &Attempt) -> bool {
-        payment_attempt_is_owned(&self.store, attempt)
+        let Some(channel_outpoint) = attempt.first_hop_channel_outpoint() else {
+            return false;
+        };
+        self.store
+            .get_channel_state_by_outpoint(channel_outpoint)
+            .is_some_and(|channel_state| {
+                let owns_update = if attempt.is_retrying()
+                    && matches!(channel_state.state, fiber_types::ChannelState::Closed(_))
+                {
+                    // Closed queued Adds only deliver failure; they can no longer execute this retry.
+                    channel_state.tlc_state.all_tlcs().any(|tlc| {
+                        !tlc.applied_flags
+                            .contains(fiber_types::AppliedFlags::REMOVE)
+                            && tlc.payment_hash == attempt.payment_hash
+                            && tlc.attempt_id == Some(attempt.id)
+                    })
+                } else {
+                    channel_state.owns_payment_attempt(attempt.payment_hash, attempt.id)
+                };
+                owns_update
+                    || channel_state.session_v2.iter().any(|session| {
+                        session.remove_effects.iter().any(|(tlc, execution)| {
+                            tlc.payment_hash == attempt.payment_hash
+                                && tlc.attempt_id == Some(attempt.id)
+                                && (attempt.status == AttemptStatus::Created
+                                    || execution.is_none_or(|number| number == attempt.tried_times))
+                        })
+                    })
+            })
     }
 
     async fn send_attempt(
@@ -1899,32 +1875,7 @@ where
         session: &mut PaymentSession,
         attempt: &mut Attempt,
     ) -> Result<(), Error> {
-        if self
-            .store
-            .get_payment_claim(session.payment_hash())
-            .is_some()
-        {
-            session.set_success_status();
-            if !self.channel_owns_attempt(attempt) {
-                self.set_attempt_fail_with_error(
-                    session,
-                    attempt,
-                    None,
-                    "Payment already succeeded",
-                    false,
-                );
-            }
-            return Ok(());
-        }
         if let Err(err) = self.send_payment_onion_packet(session, attempt).await {
-            if self
-                .store
-                .get_payment_claim(session.payment_hash())
-                .is_some()
-            {
-                session.set_success_status();
-                return Ok(());
-            }
             let need_retry = matches!(err, Error::FirstHopError(_, true));
             if need_retry {
                 debug!("Retrying payment attempt due to first hop error: {:?}", err);
@@ -2182,11 +2133,6 @@ where
         if attempt.status.is_final() {
             return;
         }
-        if session.status == PaymentStatus::Success && add_tlc_result.is_err() {
-            attempt.set_failed_status("Payment already succeeded", false);
-            self.store.insert_attempt(attempt);
-            return;
-        }
         match add_tlc_result {
             Ok(_) => {
                 attempt.set_inflight_status();
@@ -2273,17 +2219,15 @@ where
         }
 
         if let RemoveTlcReason::RemoveTlcFulfill(fulfill) = &reason {
-            let hash: Hash256 = session
-                .request
-                .hash_algorithm()
-                .hash(fulfill.payment_preimage)
-                .into();
-            if hash != payment_hash {
+            if Hash256::from(
+                session
+                    .request
+                    .hash_algorithm()
+                    .hash(fulfill.payment_preimage),
+            ) != payment_hash
+            {
                 return Err("Invalid payment fulfillment preimage".to_owned());
             }
-            self.store
-                .insert_payment_claim(payment_hash, fulfill.payment_preimage);
-            session.set_success_status();
             already_processed = attempt.is_success();
         }
         let mut retry = already_processed && attempt.is_retrying();
@@ -2393,16 +2337,7 @@ where
                 .processed_onchain_removals
                 .insert((completion.channel_id, completion.tlc_id));
         }
-        if session.status == PaymentStatus::Success {
-            self.store.insert_payment_session(session.clone());
-            retry = false;
-        }
-        self.network
-            .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::ResolveTrampolinePayment(payment_hash),
-            ))
-            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-        Ok(retry)
+        Ok(retry && session.status != PaymentStatus::Success)
     }
 
     /// Apply an on-chain-confirmed fulfill to one exact payment attempt.
@@ -2434,18 +2369,11 @@ where
             }
         }
 
-        let hash: Hash256 = session
-            .request
-            .hash_algorithm()
-            .hash(payment_preimage)
-            .into();
-        if hash != payment_hash {
+        if Hash256::from(session.request.hash_algorithm().hash(payment_preimage)) != payment_hash {
             return Err(Error::InvalidParameter(
                 "Invalid on-chain payment preimage".to_owned(),
             ));
         }
-        self.store
-            .insert_payment_claim(payment_hash, payment_preimage);
         let attempt_changed = !attempt.is_success() || attempt.preimage.is_none();
         if attempt_changed {
             self.network_graph
@@ -2655,93 +2583,6 @@ mod closed_add_tests {
         ) -> Result<(), ActorProcessingErr> {
             Ok(())
         }
-    }
-
-    #[tokio::test]
-    async fn test_startup_repairs_drained_legacy_partial_payment_proof() {
-        use super::{PaymentSessionExt, SendPaymentDataBuilder};
-        let mut node = crate::tests::test_utils::NetworkNode::new().await;
-        let preimage = crate::gen_rand_sha256_hash();
-        let hash = fiber_types::Hash256::from(fiber_types::HashAlgorithm::CkbHash.hash(preimage));
-        let request = SendPaymentDataBuilder::new(node.pubkey, 1000, hash)
-            .max_fee_amount(Some(1000))
-            .build()
-            .unwrap();
-        let mut session = fiber_types::PaymentSession::new_session(&node.store, request, 3);
-        let mut attempt = session.new_attempt(
-            1,
-            node.pubkey,
-            node.pubkey,
-            vec![fiber_types::PaymentHopData {
-                amount: 600,
-                ..Default::default()
-            }],
-        );
-        attempt.set_success_status();
-        attempt.preimage = Some(preimage);
-        node.store.insert_attempt(attempt);
-        session.set_failed_status("legacy partial MPP failure");
-        node.store.insert_payment_session(session);
-        assert_eq!(node.store.get_payment_claim(hash), None);
-        node.restart().await;
-        assert_eq!(node.store.get_payment_claim(hash), Some(preimage));
-        assert_eq!(
-            node.store.get_persisted_payment_status(hash),
-            Some(fiber_types::PaymentStatus::Success)
-        );
-        let payment = node.get_payment_result(hash).await;
-        assert_eq!(payment.status, fiber_types::PaymentStatus::Success);
-        assert_eq!(
-            payment.claim_status,
-            Some(fiber_types::PaymentClaimStatus::Claimed)
-        );
-        assert_eq!(payment.failed_error, None);
-    }
-
-    #[tokio::test]
-    async fn test_payer_proof_cancels_unsent_work_with_stale_session_snapshot() {
-        use super::{PaymentSessionExt, SendPaymentDataBuilder};
-        let mut node = crate::tests::test_utils::NetworkNode::new().await;
-        let preimage = crate::gen_rand_sha256_hash();
-        let hash = fiber_types::Hash256::from(fiber_types::HashAlgorithm::CkbHash.hash(preimage));
-        let request = SendPaymentDataBuilder::new(node.pubkey, 1000, hash)
-            .max_fee_amount(Some(1000))
-            .build()
-            .unwrap();
-        let mut session = fiber_types::PaymentSession::new_session(&node.store, request, 3);
-        let mut attempt = session.new_attempt(
-            1,
-            node.pubkey,
-            node.pubkey,
-            vec![fiber_types::PaymentHopData {
-                amount: 1000,
-                ..Default::default()
-            }],
-        );
-        node.store.insert_payment_session(session.clone());
-        node.store.insert_payment_claim(hash, preimage);
-        let actor = PaymentActor::new(
-            node.store.clone(),
-            node.network_graph.clone(),
-            node.network_actor.clone(),
-        );
-        let mut state = PaymentActorState::new(PaymentActorArguments {
-            payment_hash: hash,
-            init_command: PaymentActorMessage::CheckPaymentStatus,
-        });
-        // A send through the stopped transport would fail. A learned proof must bypass it.
-        node.stop().await;
-        let (mailbox, task) = Actor::spawn(None, RetryMailbox, ()).await.unwrap();
-        actor
-            .send_attempt(mailbox.clone(), &mut state, &mut session, &mut attempt)
-            .await
-            .unwrap();
-        mailbox.stop(None);
-        task.await.unwrap();
-        assert_eq!(session.status, fiber_types::PaymentStatus::Success);
-        assert_eq!(attempt.status, AttemptStatus::Failed);
-        assert_eq!(attempt.tried_times, 1);
-        assert!(!actor.payment_need_more_retry(&mut session).unwrap());
     }
 
     #[tokio::test]

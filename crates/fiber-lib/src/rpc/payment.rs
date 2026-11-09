@@ -144,7 +144,6 @@ fn send_payment_response_to_json(
         payment_hash: response.payment_hash.into(),
         payment_preimage: response.payment_preimage.map(Into::into),
         status: response.status.into(),
-        claim_status: response.claim_status.map(Into::into),
         created_at: response.created_at,
         last_updated_at: response.last_updated_at,
         failed_error: response.failed_error.clone(),
@@ -335,12 +334,7 @@ where
         let payments: Vec<GetPaymentCommandResult> = sessions
             .into_iter()
             .map(|session| {
-                let claim_status =
-                    crate::fiber::payment::payment_claim_status(&session, &self.store);
-                let preimage = self.store.get_payment_claim(session.payment_hash());
-                let mut response: crate::fiber::network::SendPaymentResponse = session.into();
-                response.claim_status = claim_status;
-                response.payment_preimage = response.payment_preimage.or(preimage);
+                let response: crate::fiber::network::SendPaymentResponse = session.into();
                 send_payment_response_to_json(&response)
             })
             .collect();

@@ -652,7 +652,7 @@ async fn test_trampoline_keysend_when_trampoline_use_default_fee() {
     let response_1 = res.unwrap();
     let payment_hash = response_1.payment_hash;
     debug!("Payment 1 response fee: {}", response_1.fee);
-    node_a.wait_until_claimed(payment_hash).await;
+    node_a.wait_until_payment_finished(payment_hash).await;
 
     // Verify balances after first payment (default fee calculation)
     let node_a_final_1 = node_a.get_local_balance_from_channel(channels[0]);
@@ -739,7 +739,7 @@ async fn test_trampoline_keysend_when_trampoline_use_default_fee() {
     let response_2 = res.unwrap();
     let payment_hash = response_2.payment_hash;
     debug!("Payment 2 response fee: {}", response_2.fee);
-    node_a.wait_until_claimed(payment_hash).await;
+    node_a.wait_until_payment_finished(payment_hash).await;
 
     // Verify balances after second payment (with max_fee_amount = 2000)
     let node_a_final_2 = node_a.get_local_balance_from_channel(channels[0]);
@@ -1236,7 +1236,7 @@ async fn test_trampoline_single_hop_long_public_path() {
     let response = res.unwrap();
     let payment_hash = response.payment_hash;
 
-    node_a.wait_until_claimed(payment_hash).await;
+    node_a.wait_until_payment_finished(payment_hash).await;
 
     // Capture balances after payment and calculate changes
     let balances_after = capture_balances(&all_nodes, &channels);
@@ -1344,7 +1344,7 @@ async fn test_trampoline_routing_four_hops_with_public_paths_between_trampolines
     let response = res.unwrap();
     let payment_hash = response.payment_hash;
 
-    node_a.wait_until_claimed(payment_hash).await;
+    node_a.wait_until_payment_finished(payment_hash).await;
 
     // Capture balances after payment and calculate changes
     let balances_after = capture_balances(&all_nodes, &channels);
@@ -1501,7 +1501,9 @@ async fn test_trampoline_forwarding_prefers_better_channel_private_vs_public() {
         .await;
     assert!(res.is_ok());
 
-    node_a.wait_until_claimed(res.unwrap().payment_hash).await;
+    node_a
+        .wait_until_payment_finished(res.unwrap().payment_hash)
+        .await;
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
     // Assert: the public channel was NOT used, and the private channel WAS used.
@@ -3736,7 +3738,7 @@ async fn test_trampoline_node_restart() {
 
     debug!("Waiting for success on Node A...");
     // Wait for A to succeed.
-    node_a.wait_until_claimed(payment_hash).await;
+    node_a.wait_until_payment_finished(payment_hash).await;
     wait_until_timeout(5000, || {
         node_b.get_local_balance_from_channel(channels[0]) == upstream_balance + upstream_amount
             && node_b.get_local_balance_from_channel(channels[1]) == downstream_balance - amount
@@ -4150,21 +4152,21 @@ async fn test_trampoline_partial_mpp_preimage_settles_upstream() {
 }
 
 #[tokio::test]
-async fn test_trampoline_claiming_drains_remaining_failure() {
-    assert_trampoline_claiming_drains_remaining_tlc(false, false).await;
+async fn test_trampoline_success_drains_remaining_failure() {
+    assert_trampoline_success_drains_remaining_tlc(false, false).await;
 }
 
 #[tokio::test]
-async fn test_trampoline_claiming_survives_restart() {
-    assert_trampoline_claiming_drains_remaining_tlc(true, false).await;
+async fn test_trampoline_success_survives_restart() {
+    assert_trampoline_success_drains_remaining_tlc(true, false).await;
 }
 
 #[tokio::test]
-async fn test_trampoline_claiming_legacy_drains_remaining_failure() {
-    assert_trampoline_claiming_drains_remaining_tlc(false, true).await;
+async fn test_trampoline_success_legacy_drains_remaining_failure() {
+    assert_trampoline_success_drains_remaining_tlc(false, true).await;
 }
 
-async fn assert_trampoline_claiming_drains_remaining_tlc(restart: bool, legacy: bool) {
+async fn assert_trampoline_success_drains_remaining_tlc(restart: bool, legacy: bool) {
     init_tracing();
 
     // A funds one incoming TLC at B; B must split it across two channels to C.
@@ -4334,22 +4336,20 @@ async fn assert_trampoline_claiming_drains_remaining_tlc(restart: bool, legacy: 
             .get_payment_session(payment_hash)
             .is_some_and(|session| {
                 session.status == PaymentStatus::Success
-                    && crate::fiber::payment::payment_claim_status(&session, &node_b.store)
-                        == Some(fiber_types::PaymentClaimStatus::Claiming)
+                    && session.attempts().any(|attempt| attempt.is_success())
+                    && session.attempts().any(|attempt| attempt.is_inflight())
             })
     })
     .await;
     let attempts = node_b.store.get_attempts(payment_hash);
     assert_eq!(attempts.len(), 2);
     if restart {
-        node_b.restart().await;
+        node_b.stop().await;
+        node_c.discard_held_fiber_messages().await;
+        node_b.start().await;
         assert_eq!(
             node_b.get_payment_result(payment_hash).await.status,
             PaymentStatus::Success
-        );
-        assert_eq!(
-            node_b.get_payment_result(payment_hash).await.claim_status,
-            Some(fiber_types::PaymentClaimStatus::Claiming)
         );
     }
 
@@ -4358,26 +4358,30 @@ async fn assert_trampoline_claiming_drains_remaining_tlc(restart: bool, legacy: 
         payment_hash,
         node_b.network_actor.get_name()
     );
-    let claiming_actor =
-        ractor::registry::where_is(actor_name).expect("claiming actor is retained");
-    node_c.wait_for_held_fiber_messages(1).await;
+    if !restart {
+        assert!(
+            ractor::registry::where_is(actor_name.clone()).is_some(),
+            "payment actor is retained"
+        );
+    }
     if restart {
         node_b.connect_to(&mut node_c).await;
+    } else {
+        node_c.wait_for_held_fiber_messages(1).await;
+        node_c.release_held_fiber_messages().await;
     }
-    node_c.release_held_fiber_messages().await;
 
     wait_until_timeout(30_000, || {
         node_b
             .get_payment_session(payment_hash)
             .is_some_and(|session| {
                 session.status == PaymentStatus::Success
-                    && crate::fiber::payment::payment_claim_status(&session, &node_b.store)
-                        == Some(fiber_types::PaymentClaimStatus::Claimed)
+                    && session.attempts().all(|attempt| attempt.status.is_final())
             })
     })
     .await;
     wait_until_timeout(5_000, || {
-        claiming_actor.get_status() == ractor::ActorStatus::Stopped
+        ractor::registry::where_is(actor_name.clone()).is_none()
     })
     .await;
     let settled = node_b.store.get_attempts(payment_hash);
@@ -4646,7 +4650,9 @@ async fn test_trampoline_routing_dry_run_basic() {
     assert!(actual_res.is_ok(), "Actual payment should succeed");
     let actual_payment_hash = actual_res.unwrap().payment_hash;
 
-    node_a.wait_until_claimed(actual_payment_hash).await;
+    node_a
+        .wait_until_payment_finished(actual_payment_hash)
+        .await;
 
     // Verify the actual payment was processed successfully
     let final_payment = node_a.get_payment_result(actual_payment_hash).await;
@@ -4779,7 +4785,9 @@ async fn test_trampoline_routing_dry_run_get_default_fee() {
     assert!(actual_res.is_ok(), "Actual payment should succeed");
     let actual_payment_hash = actual_res.unwrap().payment_hash;
 
-    node_a.wait_until_claimed(actual_payment_hash).await;
+    node_a
+        .wait_until_payment_finished(actual_payment_hash)
+        .await;
 
     // Verify the actual payment was processed successfully
     let final_payment = node_a.get_payment_result(actual_payment_hash).await;
@@ -5234,7 +5242,7 @@ async fn assert_trampoline_forward_ignores_local_invoice(
         .settle_invoice(&payment_hash, preimage)
         .await
         .expect("C settles its invoice");
-    node_a.wait_until_claimed(payment_hash).await;
+    node_a.wait_until_payment_finished(payment_hash).await;
     // B's balances move once both removals are committed.
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     while b_balance() < b_balance_before && std::time::Instant::now() < deadline {

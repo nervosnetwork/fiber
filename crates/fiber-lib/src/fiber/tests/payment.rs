@@ -64,6 +64,69 @@ use std::panic;
 use std::time::{Duration, SystemTime};
 use tracing::{debug, error, info};
 
+#[tokio::test]
+async fn test_payer_preimage_succeeds_before_tlc_finishes_after_restart() {
+    init_tracing();
+    let (mut payer, mut payee, channel) =
+        create_nodes_with_established_channel(100000000000, 11800000000, false).await;
+    let preimage = gen_rand_sha256_hash();
+    let invoice = payee.build_basic_invoice(1000, preimage);
+    let hash = *invoice.payment_hash();
+    payee.insert_invoice(invoice.clone(), None);
+    payer
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    wait_until_timeout(5000, || {
+        payee.store.get_payment_hold_tlcs(hash).len() == 1
+            && payee
+                .get_channel_actor_state(channel)
+                .tlc_state
+                .received_tlcs
+                .tlcs
+                .iter()
+                .any(|tlc| tlc.inbound_status() == fiber_types::InboundTlcStatus::Committed)
+    })
+    .await;
+    payee
+        .hold_next_fiber_messages(
+            payer.pubkey,
+            channel,
+            TestFiberMessageKind::CommitmentOrAck,
+            16,
+        )
+        .await;
+    payee.settle_invoice(&hash, preimage).await.unwrap();
+    payee.wait_for_held_fiber_messages(1).await;
+    tokio::time::timeout(Duration::from_secs(5), payer.wait_until_success(hash))
+        .await
+        .expect("the valid preimage establishes success before the held commitment");
+    let session = payer.get_payment_session(hash).unwrap();
+    assert_eq!(session.payment_preimage(), Some(preimage));
+    assert!(session.attempts().any(|attempt| attempt.is_inflight()));
+    assert!(session.has_pending_payment_work(&payer.store));
+
+    payer.stop().await;
+    // Messages held on the old connection are lost. Reestablishment replays its own intents.
+    payee.discard_held_fiber_messages().await;
+    payer.start().await;
+    assert_eq!(
+        payer.get_payment_result(hash).await.status,
+        PaymentStatus::Success
+    );
+    payer.connect_to(&mut payee).await;
+    tokio::time::timeout(
+        Duration::from_secs(15),
+        payer.wait_until_payment_finished(hash),
+    )
+    .await
+    .expect("the existing TLC must finish after reestablishment");
+    assert_eq!(payer.get_payment_session(hash).unwrap().attempts_count(), 1);
+}
+
 #[cfg(feature = "watchtower")]
 fn insert_onchain_preimage<S: WatchtowerStore + ChannelActorStateStore>(
     store: &S,
@@ -984,7 +1047,7 @@ async fn test_send_payment_for_direct_channel_and_dry_run() {
     eprintln!("res: {:?}", res);
     assert!(res.is_ok());
     let payment_hash = res.unwrap().payment_hash;
-    source_node.wait_until_claimed(payment_hash).await;
+    source_node.wait_until_payment_finished(payment_hash).await;
 
     let node_0_balance = source_node.get_local_balance_from_channel(channel);
     let node_1_balance = node_1.get_local_balance_from_channel(channel);
@@ -1023,7 +1086,7 @@ async fn test_send_payment_prefer_newer_channels() {
     eprintln!("res: {:?}", res);
     assert!(res.is_ok());
     let payment_hash = res.unwrap().payment_hash;
-    source_node.wait_until_claimed(payment_hash).await;
+    source_node.wait_until_payment_finished(payment_hash).await;
 
     // We are using the second (newer) channel, so the first channel's balances are unchanged.
     let node_0_balance = source_node.get_local_balance_from_channel(channels[0]);
@@ -1080,7 +1143,7 @@ async fn test_send_payment_keysend_without_max_fee() {
         .await
         .unwrap();
     let payment_hash = res.payment_hash;
-    source_node.wait_until_claimed(payment_hash).await;
+    source_node.wait_until_payment_finished(payment_hash).await;
     let payment = source_node.get_payment_result(payment_hash).await;
 
     eprintln!("payment info: {:?}", payment);
@@ -1118,7 +1181,7 @@ async fn test_send_payment_prefer_channels_with_larger_balance() {
     eprintln!("res: {:?}", res);
     assert!(res.is_ok());
     let payment_hash = res.unwrap().payment_hash;
-    source_node.wait_until_claimed(payment_hash).await;
+    source_node.wait_until_payment_finished(payment_hash).await;
 
     // We are using the second channel (with larger balance), so the first channel's balances are unchanged.
     let node_0_balance = source_node.get_local_balance_from_channel(channels[0]);
@@ -1335,7 +1398,7 @@ async fn test_send_payment_for_pay_self() {
 
     let res = res.unwrap();
     let payment_hash = res.payment_hash;
-    node_0.wait_until_claimed(payment_hash).await;
+    node_0.wait_until_payment_finished(payment_hash).await;
     node_0
         .assert_payment_status(payment_hash, PaymentStatus::Success, Some(1))
         .await;
@@ -1402,7 +1465,7 @@ async fn test_send_payment_for_pay_self_with_two_nodes() {
 
     let res = res.unwrap();
     let payment_hash = res.payment_hash;
-    node_0.wait_until_claimed(payment_hash).await;
+    node_0.wait_until_payment_finished(payment_hash).await;
     node_0
         .assert_payment_status(payment_hash, PaymentStatus::Success, Some(1))
         .await;
@@ -1489,7 +1552,7 @@ async fn test_send_payment_for_pay_self_with_invoice() {
 
     let res = res.unwrap();
     let payment_hash = res.payment_hash;
-    node_0.wait_until_claimed(payment_hash).await;
+    node_0.wait_until_payment_finished(payment_hash).await;
     let node_0_sent = old_node_0_balance1 - node_0.get_local_balance_from_channel(channels[0]);
     let node_0_received = node_0.get_local_balance_from_channel(channels[2]) - old_node_0_balance2;
     let fee = res.fee;
@@ -1596,7 +1659,7 @@ async fn test_send_payment_with_more_capacity_for_payself() {
     // sleep for a while
     let res = res.unwrap();
     let payment_hash = res.payment_hash;
-    node_0.wait_until_claimed(payment_hash).await;
+    node_0.wait_until_payment_finished(payment_hash).await;
     node_0
         .assert_payment_status(payment_hash, PaymentStatus::Success, Some(1))
         .await;
@@ -1883,7 +1946,7 @@ async fn check_invoice_network_at_payment_entrypoint(with_router: bool) {
                 let response = result.expect("matching-network invoice must be accepted");
                 assert_eq!(response.payment_hash, payment_hash);
                 if !dry_run {
-                    payer.wait_until_claimed(payment_hash).await;
+                    payer.wait_until_payment_finished(payment_hash).await;
                     continue;
                 }
             }
@@ -2808,7 +2871,7 @@ async fn test_send_payment_with_route_to_self_with_specified_router() {
 
     let res = res.unwrap();
     let payment_hash = res.payment_hash;
-    node_0.wait_until_claimed(payment_hash).await;
+    node_0.wait_until_payment_finished(payment_hash).await;
     node_0
         .assert_payment_status(payment_hash, PaymentStatus::Success, Some(1))
         .await;
@@ -3411,7 +3474,7 @@ async fn test_send_payment_two_nodes_with_router_and_multiple_channels() {
     assert_eq!(used_channels[0], channel_1_funding_tx);
     assert_eq!(used_channels[1], channel_3_funding_tx);
 
-    node_0.wait_until_claimed(payment_hash).await;
+    node_0.wait_until_payment_finished(payment_hash).await;
     assert_eq!(node_0.get_inflight_payment_count().await, 0);
 
     let balance = node_0.get_local_balance_from_channel(channels[1]);
@@ -3572,7 +3635,7 @@ async fn test_network_send_payment_randomly_send_each_other() {
     // wait for all payments to be settled
     for (a_send, _, payment_hash, _) in all_sent.iter() {
         let sender = if *a_send { &node_a } else { &node_b };
-        sender.wait_until_claimed(*payment_hash).await;
+        sender.wait_until_payment_finished(*payment_hash).await;
     }
 
     for (a_sent, amount, payment_hash, create_status) in all_sent {
@@ -3661,8 +3724,8 @@ async fn test_network_three_nodes_two_channels_send_each_other() {
     let fee2 = res.fee;
     eprintln!("payment_hash2: {:?}", payment_hash2);
 
-    node_a.wait_until_claimed(payment_hash1).await;
-    node_c.wait_until_claimed(payment_hash2).await;
+    node_a.wait_until_payment_finished(payment_hash1).await;
+    node_c.wait_until_payment_finished(payment_hash2).await;
 
     let new_node_b_balance_channel_0 = node_b.get_local_balance_from_channel(channels[0]);
     let new_node_b_balance_channel_1 = node_b.get_local_balance_from_channel(channels[1]);
@@ -3726,8 +3789,8 @@ async fn test_network_three_nodes_send_each_other() {
     let fee2 = res.fee;
     eprintln!("payment_hash2: {:?}", payment_hash2);
 
-    node_a.wait_until_claimed(payment_hash1).await;
-    node_c.wait_until_claimed(payment_hash2).await;
+    node_a.wait_until_payment_finished(payment_hash1).await;
+    node_c.wait_until_payment_finished(payment_hash2).await;
 
     let new_node_b_balance_channel_0 = node_b.get_local_balance_from_channel(channels[0]);
     let new_node_b_balance_channel_1 = node_b.get_local_balance_from_channel(channels[1]);
@@ -3924,7 +3987,7 @@ async fn test_send_payment_three_nodes_send_each_other_no_wait() {
     loop {
         for (node_index, payment_hash) in all_sent.clone().iter() {
             let node = &nodes[*node_index];
-            node.wait_until_claimed(*payment_hash).await;
+            node.wait_until_payment_finished(*payment_hash).await;
             all_sent.retain(|x| x.1 != *payment_hash);
         }
         if all_sent.is_empty() {
@@ -4020,7 +4083,7 @@ async fn test_send_payment_three_nodes_bench_test() {
     loop {
         for (node_index, payment_hash, fee) in all_sent.clone().iter() {
             nodes[*node_index - 1]
-                .wait_until_claimed(*payment_hash)
+                .wait_until_payment_finished(*payment_hash)
                 .await;
             all_sent.remove(&(*node_index, *payment_hash, *fee));
         }
@@ -4110,7 +4173,7 @@ async fn test_send_payment_middle_hop_stopped() {
     eprintln!("res: {:?}", res);
     assert_eq!(res.fee, 3);
 
-    node_0.wait_until_claimed(res.payment_hash).await;
+    node_0.wait_until_payment_finished(res.payment_hash).await;
 
     assert_eq!(node_0.get_inflight_payment_count().await, 0);
 }
@@ -4165,7 +4228,7 @@ async fn test_send_payment_middle_hop_stopped_retry_longer_path() {
     eprintln!("res: {:?}", res);
     assert_eq!(res.fee, 3);
 
-    node_0.wait_until_claimed(res.payment_hash).await;
+    node_0.wait_until_payment_finished(res.payment_hash).await;
 
     let payment = node_0.get_payment_result(res.payment_hash).await;
     eprintln!("payment: {:?}", payment);
@@ -4254,7 +4317,7 @@ async fn test_send_payment_max_value_in_flight_in_first_hop() {
         .unwrap();
 
     let payment_hash = res.payment_hash;
-    node_0.wait_until_claimed(payment_hash).await;
+    node_0.wait_until_payment_finished(payment_hash).await;
     node_0
         .expect_payment_used_channel(payment_hash, channel_id)
         .await;
@@ -4630,7 +4693,7 @@ async fn test_send_payment_self_with_two_nodes() {
     assert!(res.is_ok());
 
     let payment_hash = res.unwrap().payment_hash;
-    nodes[0].wait_until_claimed(payment_hash).await;
+    nodes[0].wait_until_payment_finished(payment_hash).await;
     let balance0 = nodes[0].get_local_balance_from_channel(channels[0]);
     let balance1 = nodes[0].get_local_balance_from_channel(channels[1]);
 
@@ -6172,7 +6235,7 @@ async fn test_mpp_payer_remote_removed_onchain_reconciliation_is_idempotent() {
 // the successful attempt but before writing the successful session, loading the session will
 // optimistically recompute Success from its attempts even though the durable session record is
 // still Inflight. Reconciliation must not mistake that computed value for a completed previous
-// run: startup must finish the session write before an idempotent reconciliation scan.
+// run: startup must finish the persisted session write through its payment actor.
 #[cfg(feature = "watchtower")]
 #[tokio::test]
 async fn test_mpp_payer_onchain_reconciliation_repairs_partial_session_commit_after_restart() {
@@ -6251,7 +6314,7 @@ async fn test_mpp_payer_onchain_reconciliation_repairs_partial_session_commit_af
     }
     assert_eq!(
         payment_actor_starts, 0,
-        "startup repaired the session before the idempotent chain scan"
+        "startup repairs the session before an idempotent chain scan"
     );
 }
 
@@ -9461,7 +9524,7 @@ async fn test_ckb_with_udt_mixed_routes_fail() {
             })
             .await
             .unwrap();
-        node_a.wait_until_claimed(res.payment_hash).await;
+        node_a.wait_until_payment_finished(res.payment_hash).await;
 
         let res = node_a
             .send_payment_with_router(SendPaymentWithRouterCommand {
@@ -9472,7 +9535,7 @@ async fn test_ckb_with_udt_mixed_routes_fail() {
             })
             .await
             .unwrap();
-        node_a.wait_until_claimed(res.payment_hash).await;
+        node_a.wait_until_payment_finished(res.payment_hash).await;
     }
 
     let after_udt2_balances = capture_balances(&[&node_a, &node_b, &node_c], &udt2_channels);
@@ -9919,7 +9982,7 @@ async fn test_send_payment_will_use_sent_amount_for_better_path_finding() {
         .unwrap()
         .payment_hash;
     let payment0_retry_times = node0.get_payment_session(payment0).unwrap().retry_times();
-    node0.wait_until_claimed(payment0).await;
+    node0.wait_until_payment_finished(payment0).await;
     assert_eq!(payment0_retry_times, 1);
 
     let payment1 = node0
@@ -9928,7 +9991,7 @@ async fn test_send_payment_will_use_sent_amount_for_better_path_finding() {
         .unwrap()
         .payment_hash;
 
-    node0.wait_until_claimed(payment1).await;
+    node0.wait_until_payment_finished(payment1).await;
     let payment1_retry_times = node0.get_payment_session(payment1).unwrap().retry_times();
 
     // sent_amount only track the amount inflight.
@@ -9941,7 +10004,7 @@ async fn test_send_payment_will_use_sent_amount_for_better_path_finding() {
         .unwrap()
         .payment_hash;
 
-    node0.wait_until_claimed(payment2).await;
+    node0.wait_until_payment_finished(payment2).await;
     let payment2_retry_times = node0.get_payment_session(payment2).unwrap().retry_times();
     // sent_amount only track the amount inflight.
     assert_eq!(payment2_retry_times, 2);
@@ -10641,7 +10704,7 @@ async fn test_send_two_node_send_each_other_multiple_time() {
         assert!(res.is_ok());
         let payment_hash = res.unwrap().payment_hash;
         eprintln!("begin to wait for payment: {} success ...", payment_hash);
-        node_0.wait_until_claimed(payment_hash).await;
+        node_0.wait_until_payment_finished(payment_hash).await;
 
         let payment_session = node_0.get_payment_session(payment_hash).unwrap();
         dbg!(&payment_session.status, &payment_session.attempts_count());
@@ -10656,7 +10719,7 @@ async fn test_send_two_node_send_each_other_multiple_time() {
         assert!(res.is_ok());
         let payment_hash = res.unwrap().payment_hash;
         eprintln!("begin to wait for payment: {} success ...", payment_hash);
-        node_1.wait_until_claimed(payment_hash).await;
+        node_1.wait_until_payment_finished(payment_hash).await;
 
         let payment_session = node_1.get_payment_session(payment_hash).unwrap();
         dbg!(&payment_session.status, &payment_session.attempts_count());
@@ -10671,7 +10734,7 @@ async fn test_send_two_node_send_each_other_multiple_time() {
     assert!(res.is_ok());
     let payment_hash = res.unwrap().payment_hash;
     eprintln!("begin to wait for payment: {} success ...", payment_hash);
-    node_0.wait_until_claimed(payment_hash).await;
+    node_0.wait_until_payment_finished(payment_hash).await;
 
     let payment_session = node_0.get_payment_session(payment_hash).unwrap();
     dbg!(&payment_session.status, &payment_session.attempts_count());

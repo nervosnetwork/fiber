@@ -227,15 +227,6 @@ impl From<JsonPaymentStatus> for fiber_types::PaymentStatus {
     }
 }
 
-impl From<fiber_types::PaymentClaimStatus> for crate::PaymentClaimStatus {
-    fn from(status: fiber_types::PaymentClaimStatus) -> Self {
-        match status {
-            fiber_types::PaymentClaimStatus::Claiming => Self::Claiming,
-            fiber_types::PaymentClaimStatus::Claimed => Self::Claimed,
-        }
-    }
-}
-
 // ─── Currency Conversions ───────────────────────────────────────────────────
 
 impl From<fiber_types::Currency> for JsonCurrency {

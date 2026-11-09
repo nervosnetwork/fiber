@@ -37,9 +37,6 @@ pub(crate) struct MockStore {
     preimages: RefCell<HashMap<Hash256, Hash256>>,
     hold_tlcs: RefCell<HashMap<Hash256, Vec<HoldTlc>>>,
     channel_states: RefCell<HashMap<Hash256, ChannelActorState>>,
-    claims: RefCell<HashMap<Hash256, Hash256>>,
-    payment_results: RefCell<Vec<fiber_types::PaymentTlcResult>>,
-    resolutions: RefCell<HashMap<Hash256, Vec<fiber_types::TrampolineResolution>>>,
     pub(crate) channel_state_writes: Cell<usize>,
     pub(crate) preimage_removal_writes: RefCell<Vec<usize>>,
     pub(crate) onchain_settlements: RefCell<HashMap<(Hash256, TLCId), StoredOnChainTlcSettlement>>,
@@ -55,9 +52,6 @@ impl MockStore {
             preimages: RefCell::new(HashMap::new()),
             hold_tlcs: RefCell::new(HashMap::new()),
             channel_states: RefCell::new(HashMap::new()),
-            claims: RefCell::new(HashMap::new()),
-            payment_results: RefCell::new(Vec::new()),
-            resolutions: RefCell::new(HashMap::new()),
             channel_state_writes: Cell::new(0),
             preimage_removal_writes: RefCell::new(Vec::new()),
             onchain_settlements: RefCell::new(HashMap::new()),
@@ -237,53 +231,6 @@ impl PreimageStore for MockStore {
 }
 
 impl ChannelActorStateStore for MockStore {
-    fn get_payment_tlc_results(&self, hash: Hash256) -> Vec<fiber_types::PaymentTlcResult> {
-        self.payment_results
-            .borrow()
-            .iter()
-            .filter(|result| result.payment_hash == hash)
-            .cloned()
-            .collect()
-    }
-    fn insert_channel_actor_state_with_payment_result(
-        &self,
-        state: ChannelActorState,
-        result: fiber_types::PaymentTlcResult,
-    ) {
-        self.insert_channel_actor_state(state);
-        self.payment_results.borrow_mut().push(result);
-    }
-    fn delete_payment_tlc_result(&self, result: &fiber_types::PaymentTlcResult) {
-        self.payment_results
-            .borrow_mut()
-            .retain(|pending| pending != result);
-    }
-
-    fn get_payment_claim(&self, hash: Hash256) -> Option<Hash256> {
-        self.claims.borrow().get(&hash).copied()
-    }
-    fn insert_payment_claim(&self, hash: Hash256, preimage: Hash256) {
-        self.claims.borrow_mut().insert(hash, preimage);
-    }
-    fn get_trampoline_resolutions(&self, hash: Hash256) -> Vec<fiber_types::TrampolineResolution> {
-        self.resolutions
-            .borrow()
-            .get(&hash)
-            .cloned()
-            .unwrap_or_default()
-    }
-    fn insert_trampoline_resolution(
-        &self,
-        hash: Hash256,
-        resolution: fiber_types::TrampolineResolution,
-    ) {
-        self.resolutions
-            .borrow_mut()
-            .entry(hash)
-            .or_default()
-            .push(resolution);
-    }
-
     fn has_trampoline_payment_for_tlc(
         &self,
         _payment_hash: Hash256,

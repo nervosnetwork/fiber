@@ -97,8 +97,9 @@ use crate::fiber::onchain_tlc_reconcile::{
     verify_and_select_settlement_data, OnChainTimeoutTlcRole,
 };
 use crate::fiber::payment::{
-    PaymentActor, PaymentActorArguments, PaymentActorMessage, PaymentTlcRemoveContext,
-    SendPaymentCommand, SendPaymentDataBuilder, SendPaymentDataExt, SendPaymentWithRouterCommand,
+    PaymentActor, PaymentActorArguments, PaymentActorMessage, PaymentSessionExt,
+    PaymentTlcRemoveContext, SendPaymentCommand, SendPaymentDataBuilder,
+    SendPaymentWithRouterCommand,
 };
 use crate::fiber::peer_message_policy::{PeerMessageAdmission, PeerMessagePolicy};
 use crate::fiber::types::{
@@ -769,8 +770,6 @@ pub struct SendPaymentResponse {
     /// The preimage learned from a successful attempt, if the payment completed.
     pub payment_preimage: Option<Hash256>,
     pub status: PaymentStatus,
-    /// Progress of existing payment TLCs after a valid preimage is learned.
-    pub claim_status: Option<fiber_types::PaymentClaimStatus>,
     pub created_at: u64,
     pub last_updated_at: u64,
     pub failed_error: Option<String>,
@@ -922,21 +921,8 @@ pub enum OnChainTlcRemoveCompletion {
 /// an optional RpcReplyPort in the of the definition of this message.
 #[derive(Debug, AsRefStr)]
 pub enum NetworkActorCommand {
-    /// Replay an exact settled V1 payer outcome until its durable receipt arrives.
-    ReplayPaymentTlcResult(fiber_types::PaymentTlcResult),
-    /// Re-evaluate the durable upstream decision after validated payment evidence changes.
-    ResolveTrampolinePayment(Hash256),
-    /// Deliver a previously persisted decision through the acknowledged removal path.
-    DeliverTrampolineResolution {
-        payment_hash: Hash256,
-        resolution: fiber_types::TrampolineResolution,
-    },
-    /// Completion of an upstream decision delivery.
-    TrampolineResolutionCompleted {
-        payment_hash: Hash256,
-        resolution: fiber_types::TrampolineResolution,
-        result: Result<(), ProcessingChannelError>,
-    },
+    /// Observe existing payer TLC proof and resolve any upstream trampoline payment.
+    PaymentTlcUpdated(Hash256),
     /// Explicit legacy-only test fixture; unavailable in production builds.
     #[cfg(test)]
     TestEnableLegacyFixture(RpcReplyPort<()>),
@@ -2999,7 +2985,23 @@ where
                 }
 
                 self.retry_hold_tlc_sets(&myself);
-                self.maintain_payment_claims(myself.clone(), state).await;
+            }
+            NetworkActorCommand::PaymentTlcUpdated(payment_hash) => {
+                if self
+                    .store
+                    .get_payment_session(payment_hash)
+                    .is_some_and(|session| session.status == PaymentStatus::Success)
+                {
+                    state.resolve_trampoline_upstream(payment_hash, None).await;
+                } else {
+                    self.resume_payment_actor_and_send_command(
+                        myself,
+                        state,
+                        payment_hash,
+                        PaymentActorMessage::TlcUpdated,
+                    )
+                    .await;
+                }
             }
             NetworkActorCommand::SettleHoldTlcSet(payment_hash) => {
                 self.settle_hold_tlc_set(myself, state, payment_hash);
@@ -3197,28 +3199,6 @@ where
                 reason,
                 completion,
             } => {
-                if matches!(completion, OnChainTlcRemoveCompletion::Payer) {
-                    if let Some(result) = self
-                        .store
-                        .get_payment_tlc_results(payment_hash)
-                        .into_iter()
-                        .find(|result| {
-                            result.channel_id == downstream_channel_id
-                                && result.tlc_id == downstream_tlc_id
-                                && result.reason == reason
-                        })
-                    {
-                        self.store.delete_payment_tlc_result(&result);
-                        self.resume_payment_actor_and_send_command(
-                            myself,
-                            state,
-                            payment_hash,
-                            PaymentActorMessage::CheckPaymentStatus,
-                        )
-                        .await;
-                        return Ok(());
-                    }
-                }
                 let delivered = match completion {
                     OnChainTlcRemoveCompletion::Payer => self
                         .store
@@ -3298,110 +3278,6 @@ where
                             )
                             .await;
                         }
-                    }
-                }
-            }
-            NetworkActorCommand::ReplayPaymentTlcResult(result) => {
-                state.claiming_payments.insert(result.payment_hash);
-                if !self
-                    .store
-                    .get_payment_tlc_results(result.payment_hash)
-                    .contains(&result)
-                {
-                    return Ok(());
-                }
-                let Some(source) = self.store.get_channel_actor_state(&result.channel_id) else {
-                    return Ok(());
-                };
-                let Some(channel_outpoint) = source.get_funding_transaction_outpoint() else {
-                    return Ok(());
-                };
-                self.on_remove_tlc_event(
-                    myself,
-                    state,
-                    result.payment_hash,
-                    Some(result.attempt_id),
-                    result.reason,
-                    None,
-                    Some(PaymentTlcRemoveContext {
-                        channel_id: result.channel_id,
-                        tlc_id: result.tlc_id,
-                        channel_outpoint,
-                        tried_times: result.tried_times,
-                    }),
-                )
-                .await;
-            }
-            NetworkActorCommand::ResolveTrampolinePayment(payment_hash) => {
-                state.claiming_payments.insert(payment_hash);
-                state.resolve_trampoline_upstream(payment_hash, None).await;
-                if self
-                    .store
-                    .get_payment_session(payment_hash)
-                    .is_some_and(|session| session.status.is_final())
-                {
-                    self.resume_payment_actor_and_send_command(
-                        myself,
-                        state,
-                        payment_hash,
-                        PaymentActorMessage::CheckPaymentStatus,
-                    )
-                    .await;
-                }
-            }
-            NetworkActorCommand::DeliverTrampolineResolution {
-                payment_hash,
-                resolution,
-            } => {
-                if !self
-                    .store
-                    .get_trampoline_resolutions(payment_hash)
-                    .contains(&resolution)
-                {
-                    return Ok(());
-                }
-                self.forward_remove_tlc_to_channel(
-                    myself,
-                    state,
-                    resolution.channel_id,
-                    RemoveTlcCommand {
-                        id: resolution.tlc_id,
-                        reason: resolution.reason.clone(),
-                    },
-                    move |result| NetworkActorCommand::TrampolineResolutionCompleted {
-                        payment_hash,
-                        resolution: resolution.clone(),
-                        result,
-                    },
-                );
-            }
-            NetworkActorCommand::TrampolineResolutionCompleted {
-                payment_hash,
-                resolution,
-                result,
-            } => {
-                state
-                    .pending_remove_tlcs
-                    .remove(&(resolution.channel_id, resolution.tlc_id));
-                if let Err(error) = result {
-                    if !matches!(error, ProcessingChannelError::WaitingTlcAck)
-                        && !self
-                            .store
-                            .get_channel_actor_state(&resolution.channel_id)
-                            .is_some_and(|channel| {
-                                channel
-                                    .tlc_state
-                                    .get(&TLCId::Received(resolution.tlc_id))
-                                    .is_none_or(|tlc| {
-                                        tlc.removed_reason.as_ref() == Some(&resolution.reason)
-                                    })
-                            })
-                    {
-                        warn!(
-                            ?payment_hash,
-                            ?error,
-                            "Will retry durable trampoline resolution"
-                        );
                     }
                 }
             }
@@ -3911,64 +3787,6 @@ where
             }
         };
         Ok(())
-    }
-
-    async fn maintain_payment_claims(
-        &self,
-        myself: ActorRef<NetworkActorMessage>,
-        state: &mut NetworkActorState<S, C>,
-    ) {
-        for hash in state.claiming_payments.clone() {
-            let Some(session) = self.store.get_payment_session(hash) else {
-                state.claiming_payments.remove(&hash);
-                continue;
-            };
-            for result in self.store.get_payment_tlc_results(hash) {
-                myself
-                    .send_message(NetworkActorMessage::new_command(
-                        NetworkActorCommand::ReplayPaymentTlcResult(result),
-                    ))
-                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-            }
-            if crate::fiber::payment::payment_claim_status(&session, &self.store)
-                == Some(fiber_types::PaymentClaimStatus::Claiming)
-            {
-                self.resume_payment_actor_and_send_command(
-                    myself.clone(),
-                    state,
-                    hash,
-                    PaymentActorMessage::CheckPaymentStatus,
-                )
-                .await;
-            }
-            if session.request.trampoline_context.is_some() {
-                state.resolve_trampoline_upstream(hash, None).await;
-            }
-            let upstream_pending =
-                session
-                    .request
-                    .trampoline_context
-                    .as_ref()
-                    .is_some_and(|context| {
-                        context.previous_tlcs.iter().any(|previous| {
-                            self.store
-                                .get_channel_actor_state(&previous.prev_channel_id)
-                                .is_some_and(|channel| {
-                                    channel
-                                        .tlc_state
-                                        .get(&TLCId::Received(previous.prev_tlc_id))
-                                        .is_some_and(|tlc| tlc.removed_reason.is_none())
-                                })
-                        })
-                    });
-            if !upstream_pending
-                && self.store.get_payment_tlc_results(hash).is_empty()
-                && crate::fiber::payment::payment_claim_status(&session, &self.store)
-                    != Some(fiber_types::PaymentClaimStatus::Claiming)
-            {
-                state.claiming_payments.remove(&hash);
-            }
-        }
     }
 
     fn forward_remove_tlc_to_channel<F>(
@@ -5425,17 +5243,13 @@ where
                 }
             }
 
-            // Both records must be durable before an already-reconciled shard can skip
-            // its consumer. A partial MPP preimage repairs the session just like any fulfill.
-            if attempt.is_success()
-                && attempt.preimage == Some(payment_preimage)
-                && self.store.get_payment_claim(payment_hash) == Some(payment_preimage)
-                && self.store.get_persisted_payment_status(payment_hash)
-                    == Some(PaymentStatus::Success)
-            {
-                state.resolve_trampoline_upstream(payment_hash, None).await;
-                self.store.clear_attempts_channel_index(payment_hash);
-                return Ok(());
+            if attempt.is_success() && attempt.preimage == Some(payment_preimage) {
+                let persisted_status = self.store.get_persisted_payment_status(payment_hash);
+                if persisted_status == Some(PaymentStatus::Success) {
+                    state.resolve_trampoline_upstream(payment_hash, None).await;
+                    self.store.clear_attempts_channel_index(payment_hash);
+                    return Ok(());
+                }
             }
         }
 
@@ -5476,15 +5290,7 @@ where
 
     fn on_get_payment(&self, payment_hash: &Hash256) -> Result<SendPaymentResponse, Error> {
         match self.store.get_payment_session(*payment_hash) {
-            Some(session_state) => {
-                let claim_status =
-                    crate::fiber::payment::payment_claim_status(&session_state, &self.store);
-                let preimage = self.store.get_payment_claim(*payment_hash);
-                let mut response: SendPaymentResponse = session_state.into();
-                response.claim_status = claim_status;
-                response.payment_preimage = response.payment_preimage.or(preimage);
-                Ok(response)
-            }
+            Some(session_state) => Ok(session_state.into()),
             None => Err(Error::InvalidParameter(format!(
                 "Payment session not found: {:?}",
                 payment_hash
@@ -6037,8 +5843,6 @@ pub struct NetworkActorState<S, C> {
     pending_channel_ready_retry_scans: HashSet<OutPoint>,
     // RemoveTlc commands awaiting a live ChannelActor response.
     pending_remove_tlcs: HashSet<(Hash256, u64)>,
-    // Runtime retry set rebuilt from durable payment and upstream records at startup.
-    claiming_payments: HashSet<Hash256>,
     // Active in-flight CKB tx tracers by tx_hash. Stores actor refs so
     // send_tx can upgrade a trace-only actor with the actual transaction.
     inflight_tracers: HashMap<Hash256, ActorRef<InFlightCkbTxActorMessage>>,
@@ -7196,25 +7000,6 @@ where
             }
         }
 
-        if let Some(decision) = self
-            .store
-            .get_trampoline_resolutions(
-                state
-                    .tlc_state
-                    .get(&TLCId::Received(remove_tlc.id))
-                    .map(|tlc| tlc.payment_hash)
-                    .unwrap_or_default(),
-            )
-            .into_iter()
-            .find(|decision| decision.channel_id == channel_id && decision.tlc_id == remove_tlc.id)
-        {
-            if decision.reason != remove_tlc.reason {
-                return false;
-            }
-            state.retryable_tlc_operations.retain(|operation| {
-                !matches!(operation, RetryableTlcOperation::RemoveTlc(id, _) if *id == TLCId::Received(remove_tlc.id))
-            });
-        }
         let operation = RetryableTlcOperation::RemoveTlc(
             TLCId::Received(remove_tlc.id),
             remove_tlc.reason.clone(),
@@ -8097,95 +7882,132 @@ where
         let Some(context) = session.request.trampoline_context.as_ref() else {
             return;
         };
-        self.claiming_payments.insert(payment_hash);
-        let mut decisions = self.store.get_trampoline_resolutions(payment_hash);
-        let preimage = self.store.get_payment_claim(payment_hash).or_else(|| {
-            session
-                .attempts()
-                .filter(|attempt| attempt.is_success())
-                .filter_map(|attempt| attempt.preimage)
-                .find(|preimage| {
-                    Hash256::from(context.hash_algorithm.hash(*preimage)) == payment_hash
-                })
-        });
-        let can_fail = session.status == PaymentStatus::Failed
-            && preimage.is_none()
-            && !session.attempts().any(|attempt| attempt.is_success())
-            && !session.attempts().any(|attempt| attempt.is_inflight())
-            && !crate::fiber::payment::payment_has_pending_channel_work(&self.store, payment_hash);
-        for previous in &context.previous_tlcs {
-            let Some(channel) = self
-                .store
-                .get_channel_actor_state(&previous.prev_channel_id)
-            else {
-                continue;
-            };
-            let Some(tlc) = channel
-                .tlc_state
-                .get(&TLCId::Received(previous.prev_tlc_id))
-            else {
-                continue;
-            };
-            if tlc.payment_hash != payment_hash || tlc.removed_reason.is_some() {
-                continue;
-            }
-            let resolution = if let Some(decision) = decisions.iter().find(|decision| {
-                decision.channel_id == previous.prev_channel_id
-                    && decision.tlc_id == previous.prev_tlc_id
-            }) {
-                if preimage.is_some()
-                    && matches!(decision.reason, RemoveTlcReason::RemoveTlcFail(_))
+
+        let has_successful_attempt = session.attempts().any(|attempt| attempt.is_success());
+        let preimage = session
+            .payment_preimage()
+            .or_else(|| {
+                has_successful_attempt
+                    .then(|| self.store.get_preimage(&payment_hash))
+                    .flatten()
+            })
+            .filter(|preimage| {
+                Hash256::from(context.hash_algorithm.hash(*preimage)) == payment_hash
+            });
+
+        if let Some(preimage) = preimage {
+            // A valid preimage settles the incoming TLC even if other outgoing
+            // MPP parts fail. Persist it before asking the channel to fulfill.
+            self.store.insert_preimage(payment_hash, preimage);
+            for prev_tlc in &context.previous_tlcs {
+                if let Some(channel) = self
+                    .store
+                    .get_channel_actor_state(&prev_tlc.prev_channel_id)
                 {
-                    error!(
-                        ?payment_hash,
-                        "Payer preimage conflicts with final trampoline failure decision"
-                    );
-                }
-                decision.clone()
-            } else {
-                let reason = if let Some(preimage) = preimage {
-                    RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
-                        payment_preimage: preimage,
-                    })
-                } else if can_fail {
-                    let Some(secret) = previous.shared_secret else {
+                    let Some(tlc) = channel
+                        .tlc_state
+                        .get(&TLCId::Received(prev_tlc.prev_tlc_id))
+                    else {
                         continue;
                     };
-                    let code = session
-                        .last_error_code
-                        .unwrap_or(TlcErrorCode::TemporaryNodeFailure);
-                    let inner = last_error_packet
-                        .map(|packet| packet.onion_packet.clone())
-                        .unwrap_or_else(|| {
-                            TlcErrPacket::new(TlcErr::new(code), &secret).onion_packet
-                        });
-                    RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new_trampoline_failed(
-                        code,
-                        self.get_public_key(),
-                        inner,
-                        &secret,
-                    ))
-                } else {
+                    match tlc.removed_reason.as_ref() {
+                        Some(RemoveTlcReason::RemoveTlcFulfill(_)) => continue,
+                        Some(RemoveTlcReason::RemoveTlcFail(_)) => {
+                            error!("Upstream trampoline TLC was failed after a downstream preimage was learned: payment_hash={payment_hash}, channel_id={:?}, tlc_id={:?}", prev_tlc.prev_channel_id, prev_tlc.prev_tlc_id);
+                            continue;
+                        }
+                        None => {}
+                    }
+                }
+                let (send, _recv) = oneshot::channel();
+                let command = ChannelCommand::RemoveTlc(
+                    RemoveTlcCommand {
+                        id: prev_tlc.prev_tlc_id,
+                        reason: RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+                            payment_preimage: preimage,
+                        }),
+                    },
+                    RpcReplyPort::from(send),
+                );
+                if let Err(err) = self
+                    .send_command_to_channel(prev_tlc.prev_channel_id, command)
+                    .await
+                {
+                    error!("Failed to send fulfillment to upstream channel: {err:?}");
+                }
+            }
+            return;
+        }
+
+        // A successful attempt must never be converted into an upstream failure
+        // merely because its preimage is temporarily missing from the session.
+        if has_successful_attempt {
+            error!("Trampoline attempt succeeded but no valid preimage is available for {payment_hash}");
+            return;
+        }
+
+        if session.status != PaymentStatus::Failed {
+            return;
+        }
+
+        // A payment session can become Failed before every first-hop TLC has a
+        // final channel outcome. Any such TLC can still reveal the preimage.
+        let outgoing_unresolved = session.has_pending_payment_work(&self.store);
+        if outgoing_unresolved {
+            warn!("Deferring upstream trampoline failure while outgoing TLCs are unresolved: {payment_hash}");
+            return;
+        }
+
+        let error_code = session
+            .last_error_code
+            .unwrap_or(TlcErrorCode::TemporaryNodeFailure);
+        for prev_tlc in &context.previous_tlcs {
+            if let Some(channel) = self
+                .store
+                .get_channel_actor_state(&prev_tlc.prev_channel_id)
+            {
+                let Some(tlc) = channel
+                    .tlc_state
+                    .get(&TLCId::Received(prev_tlc.prev_tlc_id))
+                else {
                     continue;
                 };
-                let decision = fiber_types::TrampolineResolution {
-                    channel_id: previous.prev_channel_id,
-                    tlc_id: previous.prev_tlc_id,
-                    reason,
-                };
-                self.store
-                    .insert_trampoline_resolution(payment_hash, decision.clone());
-                decisions.push(decision.clone());
-                decision
+                if tlc.removed_reason.is_some() {
+                    continue;
+                }
+            }
+            let Some(shared_secret) = prev_tlc.shared_secret else {
+                error!(
+                    "Can't fail upstream trampoline TLC without shared secret: payment_hash={:?}, channel_id={:?}, tlc_id={:?}",
+                    payment_hash, prev_tlc.prev_channel_id, prev_tlc.prev_tlc_id
+                );
+                continue;
             };
-            self.network
-                .send_message(NetworkActorMessage::new_command(
-                    NetworkActorCommand::DeliverTrampolineResolution {
-                        payment_hash,
-                        resolution,
-                    },
-                ))
-                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+            let inner_error_packet = last_error_packet
+                .map(|packet| packet.onion_packet.clone())
+                .unwrap_or_else(|| {
+                    TlcErrPacket::new(TlcErr::new(error_code), &shared_secret).onion_packet
+                });
+            let wrapper_packet = TlcErrPacket::new_trampoline_failed(
+                error_code,
+                self.get_public_key(),
+                inner_error_packet,
+                &shared_secret,
+            );
+            let (send, _recv) = oneshot::channel();
+            let command = ChannelCommand::RemoveTlc(
+                RemoveTlcCommand {
+                    id: prev_tlc.prev_tlc_id,
+                    reason: RemoveTlcReason::RemoveTlcFail(wrapper_packet),
+                },
+                RpcReplyPort::from(send),
+            );
+            if let Err(err) = self
+                .send_command_to_channel(prev_tlc.prev_channel_id, command)
+                .await
+            {
+                error!("Failed to send failure to upstream channel: {err:?}");
+            }
         }
     }
 
@@ -8616,7 +8438,6 @@ where
             last_channel_ready_scan: Default::default(),
             pending_channel_ready_retry_scans: Default::default(),
             pending_remove_tlcs: Default::default(),
-            claiming_payments: Default::default(),
             inflight_tracers: Default::default(),
             #[cfg(test)]
             test_fiber_message_hold: None,
@@ -8688,37 +8509,49 @@ where
 
         // Trigger hold tlc fulfill retry and timeout checks at startup.
         self.retry_hold_tlc_sets(&myself);
+        // A crash after persisting an attempt outcome but before delivering its
+        // upstream removal must not lose the forwarding decision.
         for session in self.store.get_all_payment_sessions() {
-            let hash = session.payment_hash();
-            if self.store.get_payment_claim(hash).is_none() {
-                if let Some(preimage) = session
-                    .attempts()
-                    .filter(|attempt| attempt.is_success())
-                    .filter_map(|attempt| attempt.preimage)
-                    .find(|preimage| {
-                        Hash256::from(session.request.hash_algorithm().hash(*preimage)) == hash
-                    })
-                {
-                    self.store.insert_payment_claim(hash, preimage);
-                }
+            if session.has_pending_payment_work(&self.store) {
+                myself
+                    .send_message(NetworkActorMessage::new_command(
+                        NetworkActorCommand::PaymentTlcUpdated(session.payment_hash()),
+                    ))
+                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
             }
             if session.status == PaymentStatus::Success
-                && self.store.get_payment_claim(hash).is_some()
-                && self.store.get_persisted_payment_status(hash) != Some(PaymentStatus::Success)
+                && session.has_pending_payment_work(&self.store)
             {
-                // Repair the crash window even when every channel outcome was already drained.
-                self.store.insert_payment_session(session.clone());
-                self.store.clear_attempts_channel_index(hash);
+                self.resume_payment_actor_and_send_command(
+                    myself.clone(),
+                    state,
+                    session.payment_hash(),
+                    PaymentActorMessage::TlcUpdated,
+                )
+                .await;
             }
-            if session.request.trampoline_context.is_some()
-                || !self.store.get_payment_tlc_results(hash).is_empty()
-                || crate::fiber::payment::payment_claim_status(&session, &self.store)
-                    == Some(fiber_types::PaymentClaimStatus::Claiming)
+            let Some(context) = session.request.trampoline_context.as_ref() else {
+                continue;
+            };
+            let upstream_pending = context.previous_tlcs.iter().any(|prev_tlc| {
+                self.store
+                    .get_channel_actor_state(&prev_tlc.prev_channel_id)
+                    .and_then(|channel| {
+                        channel
+                            .tlc_state
+                            .get(&TLCId::Received(prev_tlc.prev_tlc_id))
+                            .map(|tlc| tlc.removed_reason.is_none())
+                    })
+                    .unwrap_or(false)
+            });
+            if upstream_pending
+                && (session.status.is_final() || session.payment_preimage().is_some())
             {
-                state.claiming_payments.insert(hash);
+                state
+                    .resolve_trampoline_upstream(session.payment_hash(), None)
+                    .await;
             }
         }
-        self.maintain_payment_claims(myself.clone(), state).await;
         debug_event!(myself, "network actor started");
         Ok(())
     }

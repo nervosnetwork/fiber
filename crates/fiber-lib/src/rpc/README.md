@@ -90,7 +90,6 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Type `InvoiceData`](#type-invoicedata)
     * [Type `NodeInfo`](#type-nodeinfo)
     * [Type `OutboundTlcStatus`](#type-outboundtlcstatus)
-    * [Type `PaymentClaimStatus`](#type-paymentclaimstatus)
     * [Type `PaymentCustomRecords`](#type-paymentcustomrecords)
     * [Type `PaymentStatus`](#type-paymentstatus)
     * [Type `PeerInfo`](#type-peerinfo)
@@ -852,11 +851,10 @@ Sends a payment to a peer.
 * `payment_hash` - <em>[Hash256](#type-hash256)</em>, The payment hash of the payment
 * `payment_preimage` - <em>Option<[Hash256](#type-hash256)></em>, The preimage learned from a successful payment attempt.
 * `status` - <em>[PaymentStatus](#type-paymentstatus)</em>, The status of the payment
-* `claim_status` - <em>Option<[PaymentClaimStatus](#type-paymentclaimstatus)></em>, Settlement progress after success. Absent before a preimage is learned.
 * `created_at` - <em>`u64`</em>, The time the payment was created at, in milliseconds from UNIX epoch
 * `last_updated_at` - <em>`u64`</em>, The time the payment was last updated at, in milliseconds from UNIX epoch
 * `failed_error` - <em>`Option<String>`</em>, The error message if the payment failed
-* `fee` - <em>`u128`</em>, Fees of successful attempts after success. Final once `claim_status` is `Claimed`.
+* `fee` - <em>`u128`</em>, fee paid for the payment
 * `custom_records` - <em>Option<[PaymentCustomRecords](#type-paymentcustomrecords)></em>, The custom records to be included in the payment.
 * `routers` - <em>Vec<[SessionRoute](#type-sessionroute)></em>, The router is a list of nodes that the payment will go through.
  We store in the payment session and then will use it to track the payment history.
@@ -883,11 +881,10 @@ Retrieves a payment.
 * `payment_hash` - <em>[Hash256](#type-hash256)</em>, The payment hash of the payment
 * `payment_preimage` - <em>Option<[Hash256](#type-hash256)></em>, The preimage learned from a successful payment attempt.
 * `status` - <em>[PaymentStatus](#type-paymentstatus)</em>, The status of the payment
-* `claim_status` - <em>Option<[PaymentClaimStatus](#type-paymentclaimstatus)></em>, Settlement progress after success. Absent before a preimage is learned.
 * `created_at` - <em>`u64`</em>, The time the payment was created at, in milliseconds from UNIX epoch
 * `last_updated_at` - <em>`u64`</em>, The time the payment was last updated at, in milliseconds from UNIX epoch
 * `failed_error` - <em>`Option<String>`</em>, The error message if the payment failed
-* `fee` - <em>`u128`</em>, Fees of successful attempts after success. Final once `claim_status` is `Claimed`.
+* `fee` - <em>`u128`</em>, fee paid for the payment
 * `custom_records` - <em>Option<[PaymentCustomRecords](#type-paymentcustomrecords)></em>, The custom records to be included in the payment.
 * `routers` - <em>Vec<[SessionRoute](#type-sessionroute)></em>, The router is a list of nodes that the payment will go through.
  We store in the payment session and then will use it to track the payment history.
@@ -976,11 +973,10 @@ Sends a payment to a peer with specified router.
 * `payment_hash` - <em>[Hash256](#type-hash256)</em>, The payment hash of the payment
 * `payment_preimage` - <em>Option<[Hash256](#type-hash256)></em>, The preimage learned from a successful payment attempt.
 * `status` - <em>[PaymentStatus](#type-paymentstatus)</em>, The status of the payment
-* `claim_status` - <em>Option<[PaymentClaimStatus](#type-paymentclaimstatus)></em>, Settlement progress after success. Absent before a preimage is learned.
 * `created_at` - <em>`u64`</em>, The time the payment was created at, in milliseconds from UNIX epoch
 * `last_updated_at` - <em>`u64`</em>, The time the payment was last updated at, in milliseconds from UNIX epoch
 * `failed_error` - <em>`Option<String>`</em>, The error message if the payment failed
-* `fee` - <em>`u128`</em>, Fees of successful attempts after success. Final once `claim_status` is `Claimed`.
+* `fee` - <em>`u128`</em>, fee paid for the payment
 * `custom_records` - <em>Option<[PaymentCustomRecords](#type-paymentcustomrecords)></em>, The custom records to be included in the payment.
 * `routers` - <em>Vec<[SessionRoute](#type-sessionroute)></em>, The router is a list of nodes that the payment will go through.
  We store in the payment session and then will use it to track the payment history.
@@ -1464,11 +1460,10 @@ The result of a get_payment command, which includes the payment hash, status, ti
 * `payment_hash` - <em>[Hash256](#type-hash256)</em>, The payment hash of the payment
 * `payment_preimage` - <em>Option<[Hash256](#type-hash256)></em>, The preimage learned from a successful payment attempt.
 * `status` - <em>[PaymentStatus](#type-paymentstatus)</em>, The status of the payment
-* `claim_status` - <em>Option<[PaymentClaimStatus](#type-paymentclaimstatus)></em>, Settlement progress after success. Absent before a preimage is learned.
 * `created_at` - <em>`u64`</em>, The time the payment was created at, in milliseconds from UNIX epoch
 * `last_updated_at` - <em>`u64`</em>, The time the payment was last updated at, in milliseconds from UNIX epoch
 * `failed_error` - <em>`Option<String>`</em>, The error message if the payment failed
-* `fee` - <em>`u128`</em>, Fees of successful attempts after success. Final once `claim_status` is `Claimed`.
+* `fee` - <em>`u128`</em>, fee paid for the payment
 * `custom_records` - <em>Option<[PaymentCustomRecords](#type-paymentcustomrecords)></em>, The custom records to be included in the payment.
 * `routers` - <em>Vec<[SessionRoute](#type-sessionroute)></em>, The router is a list of nodes that the payment will go through.
  We store in the payment session and then will use it to track the payment history.
@@ -1612,18 +1607,6 @@ The status of an outbound tlc.
 * `RemoveAckConfirmed` - We have received the ACK for the RemoveTlc, it's safe to remove this tlc
 ---
 
-<a id="#type-paymentclaimstatus"></a>
-### Type `PaymentClaimStatus`
-
-Settlement progress of a successful payment.
-
-
-#### Enum with values of
-
-* `Claiming` - Existing TLCs, queued additions, or result receipts remain outstanding.
-* `Claimed` - All existing payment work has reached a durable terminal outcome.
----
-
 <a id="#type-paymentcustomrecords"></a>
 ### Type `PaymentCustomRecords`
 
@@ -1658,7 +1641,7 @@ The status of a payment, will update as the payment progresses.
 
 * `Created` - Initial status. A payment session is created, but no HTLC has been dispatched.
 * `Inflight` - The first hop AddTlc is sent successfully and waiting for the response.
-* `Success` - A valid preimage was learned. Remaining TLCs may still be claiming.
+* `Success` - A payment TLC was successfully claimed. Other attempts may still be pending.
 * `Failed` - The payment session has terminated.
 ---
 

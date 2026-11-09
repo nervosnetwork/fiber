@@ -3084,7 +3084,7 @@ where
     }
 }
 
-pub trait NetworkGraphStateStore: crate::fiber::channel::ChannelActorStateStore {
+pub trait NetworkGraphStateStore {
     fn get_payment_session(&self, payment_hash: Hash256) -> Option<PaymentSession>;
     /// Returns the payment status stored in the session record without recomputing it from
     /// separately persisted attempts.

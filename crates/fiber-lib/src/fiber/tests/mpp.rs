@@ -53,7 +53,7 @@ async fn test_send_mpp_basic_two_channels_one_time() {
 
     eprintln!("begin to wait for payment: {} success ...", payment_hash);
 
-    node_0.wait_until_claimed(payment_hash).await;
+    node_0.wait_until_payment_finished(payment_hash).await;
     let find_path_count = node_0
         .get_payment_find_path_count(payment_hash)
         .await
@@ -270,7 +270,7 @@ async fn test_send_mpp_amount_split() {
     eprintln!("res: {:?}", res);
     assert!(res.is_ok());
     let payment_hash = res.unwrap().payment_hash;
-    node_0.wait_until_claimed(payment_hash).await;
+    node_0.wait_until_payment_finished(payment_hash).await;
 
     let payment_session = node_0.get_payment_session(payment_hash).unwrap();
     dbg!(&payment_session.status, &payment_session.attempts_count());
@@ -2899,7 +2899,7 @@ async fn test_send_mpp_basic_two_channels_send_each_other_multiple_time() {
         assert!(res.is_ok());
         let payment_hash = res.unwrap().payment_hash;
         eprintln!("begin to wait for payment: {} success ...", payment_hash);
-        node_0.wait_until_claimed(payment_hash).await;
+        node_0.wait_until_payment_finished(payment_hash).await;
 
         let payment_session = node_0.get_payment_session(payment_hash).unwrap();
         dbg!(&payment_session.status, &payment_session.attempts_count());
@@ -2912,7 +2912,7 @@ async fn test_send_mpp_basic_two_channels_send_each_other_multiple_time() {
         assert!(res.is_ok());
         let payment_hash = res.unwrap().payment_hash;
         eprintln!("begin to wait for payment: {} success ...", payment_hash);
-        node_1.wait_until_claimed(payment_hash).await;
+        node_1.wait_until_payment_finished(payment_hash).await;
 
         let payment_session = node_1.get_payment_session(payment_hash).unwrap();
         dbg!(&payment_session.status, &payment_session.attempts_count());
@@ -2925,7 +2925,7 @@ async fn test_send_mpp_basic_two_channels_send_each_other_multiple_time() {
     assert!(res.is_ok());
     let payment_hash = res.unwrap().payment_hash;
     eprintln!("begin to wait for payment: {} success ...", payment_hash);
-    node_0.wait_until_claimed(payment_hash).await;
+    node_0.wait_until_payment_finished(payment_hash).await;
 
     let payment_session = node_0.get_payment_session(payment_hash).unwrap();
     dbg!(&payment_session.status, &payment_session.attempts_count());
@@ -2974,7 +2974,7 @@ async fn test_send_mpp_three_channels_send_each_other_multiple_time() {
         assert!(res.is_ok());
         let payment_hash = res.unwrap().payment_hash;
         eprintln!("begin to wait for payment: {} success ...", payment_hash);
-        node_0.wait_until_claimed(payment_hash).await;
+        node_0.wait_until_payment_finished(payment_hash).await;
 
         let payment_session = node_0.get_payment_session(payment_hash).unwrap();
         dbg!(&payment_session.status, &payment_session.attempts_count());
@@ -2989,7 +2989,7 @@ async fn test_send_mpp_three_channels_send_each_other_multiple_time() {
         assert!(res.is_ok());
         let payment_hash = res.unwrap().payment_hash;
         eprintln!("begin to wait for payment: {} success ...", payment_hash);
-        node_1.wait_until_claimed(payment_hash).await;
+        node_1.wait_until_payment_finished(payment_hash).await;
 
         let payment_session = node_1.get_payment_session(payment_hash).unwrap();
         dbg!(&payment_session.status, &payment_session.attempts_count());
@@ -3830,7 +3830,7 @@ async fn test_send_payment_tlc_expiry_soon_first_hop() {
         .expect("send payment success")
         .payment_hash;
 
-    node_0.wait_until_claimed(payment_hash).await;
+    node_0.wait_until_payment_finished(payment_hash).await;
     let mut payment_session = node_0.get_payment_session(payment_hash).unwrap();
     // Exercise an unpaid retry. The bootstrap payment's valid proof remains final.
     let payment_hash = *ckb_invoice.payment_hash();
@@ -3919,7 +3919,7 @@ async fn test_send_payment_tlc_expiry_soon() {
         .expect("send payment success")
         .payment_hash;
 
-    node_0.wait_until_claimed(payment_hash).await;
+    node_0.wait_until_payment_finished(payment_hash).await;
     let mut payment_session = node_0.get_payment_session(payment_hash).unwrap();
     // Exercise an unpaid retry. The bootstrap payment's valid proof remains final.
     let payment_hash = *ckb_invoice.payment_hash();
