@@ -11464,7 +11464,10 @@ impl ChannelActorState {
                 let confirmed_remove_reason = (info.outbound_status()
                     == OutboundTlcStatus::RemoveWaitAck
                     || info.outbound_status() == OutboundTlcStatus::RemoveAckConfirmed
-                    || (v2 && info.outbound_status() == OutboundTlcStatus::RemoveWaitPrevAck)
+                    // V1 local commitments omit this TLC; V2 omits it in both directions.
+                    // Apply the removal to balances whenever the TLC output is absent.
+                    || ((v2 || !for_remote)
+                        && info.outbound_status() == OutboundTlcStatus::RemoveWaitPrevAck)
                     || (info.outbound_status() == OutboundTlcStatus::RemoteRemoved && !for_remote))
                     .then(|| info.removed_reason.as_ref().unwrap());
                 match confirmed_remove_reason {
