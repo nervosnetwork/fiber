@@ -1428,6 +1428,23 @@ impl NetworkNode {
         .await;
     }
 
+    /// Wait for successful proof and the durable completion of every existing TLC.
+    pub async fn wait_until_claimed(&self, payment_hash: Hash256) {
+        self.wait_until_success(payment_hash).await;
+        tokio::time::timeout(Duration::from_secs(DEFAULT_WAIT_UNTIL_TIME), async {
+            loop {
+                if self.get_payment_result(payment_hash).await.claim_status
+                    == Some(fiber_types::PaymentClaimStatus::Claimed)
+                {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("Successful payment did not finish claiming its TLCs");
+    }
+
     pub async fn wait_until_failed(&self, payment_hash: Hash256) {
         self.wait_until_status(
             payment_hash,

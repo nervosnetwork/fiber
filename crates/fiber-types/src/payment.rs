@@ -14,17 +14,17 @@ use strum::{AsRefStr, EnumString};
 /// The status of a payment, will update as the payment progresses.
 /// The transfer path for payment status is `Created -> Inflight -> Success | Failed`.
 ///
-/// **MPP Behavior**: A single session may involve multiple attempts (HTLCs) to fulfill the total amount.
+/// **MPP Behavior**: A single session may involve multiple attempts (HTLCs). A validated
+/// preimage establishes success while the remaining attempts continue claiming.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum PaymentStatus {
     /// Initial status. A payment session is created, but no HTLC has been dispatched.
     Created,
     /// The first hop AddTlc is sent successfully and waiting for the response.
     ///
-    /// > **MPP Logic**: Status `Inflight` means at least one attempt is still not in `Success`, payment needs more retrying or waiting for HTLC settlement.
+    /// > **MPP Logic**: No valid fulfillment has been learned yet and payment work is pending.
     Inflight,
-    /// The payment is finished. All related HTLCs are successfully settled,
-    /// and the aggregate amount equals the total requested amount.
+    /// A valid preimage was learned from this payment. Remaining TLCs may still be claiming.
     Success,
     /// The payment session has terminated. HTLCs have failed and the target
     /// amount cannot be fulfilled after exhausting all retries.
@@ -35,6 +35,43 @@ impl PaymentStatus {
     pub fn is_final(&self) -> bool {
         matches!(self, PaymentStatus::Success | PaymentStatus::Failed)
     }
+}
+
+/// Settlement progress after a payment has learned its preimage.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum PaymentClaimStatus {
+    /// Existing TLCs, queued additions, or result receipts are still outstanding.
+    Claiming,
+    /// All existing payment work has reached a durable terminal outcome.
+    Claimed,
+}
+
+/// A settled V1 payer result retained until the payment actor acknowledges it.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PaymentTlcResult {
+    /// Source channel.
+    pub channel_id: Hash256,
+    /// Offered TLC identifier.
+    pub tlc_id: crate::TLCId,
+    /// Payment whose attempt owns this outcome.
+    pub payment_hash: Hash256,
+    /// Local payment attempt identifier.
+    pub attempt_id: u64,
+    /// Execution bound before applying the channel outcome.
+    pub tried_times: u32,
+    /// Settled outcome.
+    pub reason: crate::RemoveTlcReason,
+}
+
+/// A durable upstream decision for one trampoline TLC.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TrampolineResolution {
+    /// Incoming channel that owns the TLC.
+    pub channel_id: Hash256,
+    /// Received TLC identifier within the channel.
+    pub tlc_id: u64,
+    /// The one removal outcome to replay until the upstream channel applies it.
+    pub reason: crate::RemoveTlcReason,
 }
 
 /// 0 ~ 65535 is reserved for endpoint usage, index above 65535 is reserved for internal usage
@@ -992,16 +1029,21 @@ impl PaymentSession {
     }
 
     pub fn fee_paid(&self) -> u128 {
+        let attempts = self.attempts().filter(|attempt| {
+            if self.status == PaymentStatus::Success {
+                attempt.is_success()
+            } else {
+                attempt.is_active()
+            }
+        });
+        let routing_fee: u128 = attempts.clone().map(|attempt| attempt.route.fee()).sum();
         if self.request.use_trampoline_routing() {
-            let total_sent: u128 = self
-                .active_attempts()
-                .iter()
-                .map(|a| a.route.nodes.first().map_or(0, |n| n.amount))
+            let receiver_amount: u128 = attempts
+                .map(|attempt| attempt.route.receiver_amount())
                 .sum();
-            let total_received = self.request.amount;
-            total_sent.saturating_sub(total_received)
+            routing_fee.saturating_add(receiver_amount.saturating_sub(self.request.amount))
         } else {
-            self.active_attempts().iter().map(|a| a.route.fee()).sum()
+            routing_fee
         }
     }
 
@@ -1096,6 +1138,12 @@ impl PaymentSession {
     }
 
     pub fn calc_payment_status(&self) -> PaymentStatus {
+        if self
+            .attempts()
+            .any(|attempt| attempt.is_success() && attempt.preimage.is_some())
+        {
+            return PaymentStatus::Success;
+        }
         if self.cached_attempts.is_empty() || self.status.is_final() {
             return self.status;
         }

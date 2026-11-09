@@ -5424,6 +5424,212 @@ mod tests {
         task.await.unwrap();
     }
 
+    #[tokio::test]
+    async fn test_payer_proof_is_durable_before_remove_commitment_completes() {
+        let preimage = fiber_types::Hash256::from([71; 32]);
+        let hash = fiber_types::HashAlgorithm::CkbHash.hash(preimage).into();
+        let mut state = crate::fiber::tests::create_test_channel_state_with_tlc(
+            [72; 32].into(),
+            0,
+            100,
+            hash,
+            None,
+        );
+        let mut tlc = state.tlc_state.received_tlcs.tlcs.pop().unwrap();
+        tlc.tlc_id = fiber_types::TLCId::Offered(0);
+        tlc.status = fiber_types::TlcStatus::Outbound(fiber_types::OutboundTlcStatus::Committed);
+        tlc.attempt_id = Some(1);
+        state.tlc_state.offered_tlcs.tlcs.push(tlc);
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let (network, task) = Actor::spawn(None, CaptureNetwork, captured).await.unwrap();
+        state.network = Some(network.clone());
+        let actor = ChannelActor::new(
+            state.local_pubkey,
+            state.remote_pubkey,
+            network.clone(),
+            MockStore::new(),
+            None,
+        );
+        let id = state.id;
+        actor
+            .handle_remove_tlc_peer_message(
+                &mut state,
+                fiber_types::RemoveTlc {
+                    channel_id: id,
+                    tlc_id: 0,
+                    reason: fiber_types::RemoveTlcReason::RemoveTlcFulfill(
+                        fiber_types::RemoveTlcFulfill {
+                            payment_preimage: preimage,
+                        },
+                    ),
+                },
+            )
+            .unwrap();
+        assert_eq!(actor.store.get_payment_claim(hash), Some(preimage));
+        assert_eq!(
+            state
+                .tlc_state
+                .get(&fiber_types::TLCId::Offered(0))
+                .unwrap()
+                .outbound_status(),
+            fiber_types::OutboundTlcStatus::RemoteRemoved
+        );
+        network.stop(None);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_trampoline_decision_replaces_queued_failure() {
+        use fiber_types::{RemoveTlcFulfill, RemoveTlcReason, TLCId, TrampolineResolution};
+        let preimage = fiber_types::Hash256::from([71; 32]);
+        let hash = fiber_types::HashAlgorithm::CkbHash.hash(preimage).into();
+        let mut state = crate::fiber::tests::create_test_channel_state_with_tlc(
+            [72; 32].into(),
+            0,
+            100,
+            hash,
+            None,
+        );
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let (network, task) = Actor::spawn(None, CaptureNetwork, captured).await.unwrap();
+        let (myself, handle) = Actor::spawn(None, NoopChannelActor, ()).await.unwrap();
+        state.network = Some(network.clone());
+        state.reestablishing = true;
+        let store = MockStore::new();
+        let fail = RemoveTlcReason::RemoveTlcFail(fiber_types::TlcErrPacket::new(
+            fiber_types::TlcErr::new(fiber_types::TlcErrorCode::TemporaryNodeFailure),
+            &[42; 32],
+        ));
+        let fulfill = RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+            payment_preimage: preimage,
+        });
+        state
+            .retryable_tlc_operations
+            .push_back(fiber_types::RetryableTlcOperation::RemoveTlc(
+                TLCId::Received(0),
+                fail.clone(),
+            ));
+        store.insert_trampoline_resolution(
+            hash,
+            TrampolineResolution {
+                channel_id: state.id,
+                tlc_id: 0,
+                reason: fulfill.clone(),
+            },
+        );
+        let actor = ChannelActor::new(
+            state.local_pubkey,
+            state.remote_pubkey,
+            network.clone(),
+            store,
+            None,
+        );
+        let (reply, _receive) = tokio::sync::oneshot::channel();
+        let result = actor
+            .handle_command(
+                &myself,
+                &mut state,
+                super::super::ChannelCommand::RemoveTlc(
+                    RemoveTlcCommand {
+                        id: 0,
+                        reason: fulfill.clone(),
+                    },
+                    reply.into(),
+                ),
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(super::super::ProcessingChannelError::WaitingTlcAck)
+        ));
+        assert_eq!(state.retryable_tlc_operations.len(), 1);
+        assert_eq!(
+            state.retryable_tlc_operations.front(),
+            Some(&fiber_types::RetryableTlcOperation::RemoveTlc(
+                TLCId::Received(0),
+                fulfill.clone()
+            ))
+        );
+        state.reestablishing = false;
+        state.remote_revocation_nonce_for_send =
+            Some(musig2::SecNonce::build([73; 32]).build().public_nonce());
+        state.remote_revocation_nonce_for_verify = state.remote_revocation_nonce_for_send.clone();
+        assert!(actor
+            .remove_tlc_update(
+                &mut state,
+                RemoveTlcCommand {
+                    id: 0,
+                    reason: fail
+                }
+            )
+            .is_err());
+        actor
+            .remove_tlc_update(
+                &mut state,
+                RemoveTlcCommand {
+                    id: 0,
+                    reason: fulfill.clone(),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            state
+                .tlc_state
+                .get(&TLCId::Received(0))
+                .unwrap()
+                .removed_reason
+                .as_ref(),
+            Some(&fulfill)
+        );
+        assert!(state.retryable_tlc_operations.is_empty());
+        handle.abort();
+        network.stop(None);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_claimed_payment_cancels_queued_add_without_allocating_tlc() {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let (network, task) = Actor::spawn(None, CaptureNetwork, captured).await.unwrap();
+        let (myself, handle) = Actor::spawn(None, NoopChannelActor, ()).await.unwrap();
+        let mut command = retry_batch_add(71, 100);
+        command.attempt_id = Some(1);
+        let mut state = crate::fiber::tests::create_test_channel_state_with_tlc(
+            [72; 32].into(),
+            0,
+            100,
+            command.payment_hash,
+            None,
+        );
+        state.network = Some(network.clone());
+        state.funding_tx = Some(
+            ckb_types::core::TransactionBuilder::default()
+                .build()
+                .data(),
+        );
+        state.reestablishing = true;
+        state
+            .retryable_tlc_operations
+            .push_back(fiber_types::RetryableTlcOperation::AddTlc(command.clone()));
+        let store = MockStore::new();
+        store.insert_payment_claim(command.payment_hash, [73; 32].into());
+        let actor = ChannelActor::new(
+            state.local_pubkey,
+            state.remote_pubkey,
+            network.clone(),
+            store,
+            None,
+        );
+        let next_id = state.tlc_state.offered_tlcs.next_tlc_id;
+        actor.cancel_claimed_payment_adds(&myself, &mut state);
+        assert!(state.retryable_tlc_operations.is_empty());
+        assert_eq!(state.tlc_state.offered_tlcs.next_tlc_id, next_id);
+        assert!(actor.add_tlc_update(&mut state, &command).is_err());
+        handle.abort();
+        network.stop(None);
+        task.await.unwrap();
+    }
+
     fn retry_batch_add(tag: u8, amount: u128) -> fiber_types::AddTlcCommand {
         fiber_types::AddTlcCommand {
             amount,
@@ -6017,7 +6223,7 @@ mod tests {
             );
             assert_eq!(
                 a.get_payment_session(hash).unwrap().status,
-                fiber_types::PaymentStatus::Inflight
+                fiber_types::PaymentStatus::Success
             );
             myself.stop(None);
             handle.await.unwrap();
@@ -7339,7 +7545,7 @@ mod tests {
         let (mut a, mut b, id) =
             create_nodes_with_established_channel(100000000000, 11800000000, false).await;
         let payment = a.send_payment_keysend(&b, 1000, false).await.unwrap();
-        a.wait_until_success(payment.payment_hash).await;
+        a.wait_until_claimed(payment.payment_hash).await;
         let usable = a
             .get_channel_actor_state(id)
             .get_latest_commitment_transaction()
@@ -7369,6 +7575,15 @@ mod tests {
         )
         .await;
         b.wait_for_held_fiber_messages(2).await;
+        // Observing B's outbound messages does not mean A has processed its Shutdown yet.
+        crate::tests::test_utils::wait_until_timeout(5000, || {
+            a.get_channel_actor_state(id)
+                .session_v2
+                .as_ref()
+                .and_then(|session| session.closing.as_ref())
+                .is_some_and(|close| close.remote_shutdown.is_some())
+        })
+        .await;
         let mut retained = a.get_channel_actor_state(id);
         let close = retained
             .session_v2
@@ -8199,6 +8414,7 @@ mod tests {
         })
         .await
         .unwrap();
+        a.wait_until_claimed(hash).await;
         let attempt = a.store.get_attempt(hash, tlc.attempt_id.unwrap()).unwrap();
         tlc.removed_reason = Some(fiber_types::RemoveTlcReason::RemoveTlcFulfill(
             fiber_types::RemoveTlcFulfill {

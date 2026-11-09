@@ -2225,6 +2225,10 @@ where
         }
         state
             .check_remove_tlc_with_reason(TLCId::Offered(remove_tlc.tlc_id), &remove_tlc.reason)?;
+        let is_payer_tlc = state
+            .tlc_state
+            .get(&TLCId::Offered(remove_tlc.tlc_id))
+            .is_some_and(|tlc| tlc.forwarding_tlc.is_none() && tlc.attempt_id.is_some());
         let payment_hash = state
             .tlc_state
             .set_offered_tlc_removed(remove_tlc.tlc_id, remove_tlc.reason.clone());
@@ -2236,6 +2240,16 @@ where
             // so we can send setttlement transaction to get money when necessary
             // the preimage must be valid since we have checked it in check_remove_tlc_with_reason
             self.store_preimage(payment_hash, payment_preimage);
+            if is_payer_tlc {
+                // Proof of payment is independent of the remaining commitment handshake.
+                self.store
+                    .insert_payment_claim(payment_hash, payment_preimage);
+                self.network
+                    .send_message(NetworkActorMessage::new_command(
+                        NetworkActorCommand::ResolveTrampolinePayment(payment_hash),
+                    ))
+                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+            }
             debug_event!(
                 self.network,
                 &format!("store payment_preimage for: {:?}", payment_hash)
@@ -2308,6 +2322,38 @@ where
         tlc_id: TLCId,
     ) -> ProcessingChannelResult {
         let was_waiting_forward = state.is_waiting_forward_result_for_received_tlc(tlc_id);
+        let mut legacy_result = None;
+        if state.session_v2.is_none() && tlc_id.is_offered() {
+            let tlc = state.tlc_state.get(&tlc_id).expect("settled TLC");
+            if let Some(attempt_id) = tlc.attempt_id.filter(|_| tlc.forwarding_tlc.is_none()) {
+                let execution = ractor::call_t!(
+                    self.network,
+                    |reply| {
+                        NetworkActorMessage::new_command(
+                            NetworkActorCommand::GetV2PaymentExecution(
+                                tlc.payment_hash,
+                                Some(attempt_id),
+                                reply,
+                            ),
+                        )
+                    },
+                    V2_PAYMENT_EFFECT_LOOKUP_TIMEOUT_MS
+                )
+                .map_err(|error| {
+                    ProcessingChannelError::PaymentEffectUnavailable(error.to_string())
+                })?;
+                if let Some(tried_times) = execution {
+                    legacy_result = Some(fiber_types::PaymentTlcResult {
+                        channel_id: state.id,
+                        tlc_id,
+                        payment_hash: tlc.payment_hash,
+                        attempt_id,
+                        tried_times,
+                        reason: tlc.removed_reason.clone().expect("settled reason"),
+                    });
+                }
+            }
+        }
         if state.session_v2.is_some() && tlc_id.is_offered() {
             let tlc = state.tlc_state.get(&tlc_id).expect("settled TLC").clone();
             if !state
@@ -2379,6 +2425,16 @@ where
             }
         }
 
+        if let Some(result) = legacy_result {
+            self.store
+                .insert_channel_actor_state_with_payment_result(state.clone(), result.clone());
+            self.network
+                .send_message(NetworkActorMessage::new_command(
+                    NetworkActorCommand::ReplayPaymentTlcResult(result),
+                ))
+                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+            return Ok(());
+        }
         if tlc_info.is_offered() {
             if let Some(session) = &state.session_v2 {
                 // Do not include a later intent whose local application may fail.
@@ -2592,6 +2648,14 @@ where
         state: &mut ChannelActorState,
         command: &AddTlcCommand,
     ) -> Result<u64, ProcessingChannelError> {
+        if command.previous_tlc.is_none()
+            && command.attempt_id.is_some()
+            && self.store.get_payment_claim(command.payment_hash).is_some()
+        {
+            return Err(ProcessingChannelError::InvalidState(
+                "Payment already succeeded".to_owned(),
+            ));
+        }
         state.check_for_tlc_update(TlcUpdateAction::AddTlcCommand {
             amount: command.amount,
         })?;
@@ -2656,8 +2720,36 @@ where
         state: &mut ChannelActorState,
         command: RemoveTlcCommand,
     ) -> ProcessingChannelResult {
+        if let Some(tlc) = state.tlc_state.get(&TLCId::Received(command.id)) {
+            // The payer proof can precede NetworkActor's durable decision message.
+            if matches!(command.reason, RemoveTlcReason::RemoveTlcFail(_))
+                && self.store.get_payment_claim(tlc.payment_hash).is_some()
+                && self
+                    .store
+                    .has_trampoline_payment_for_tlc(tlc.payment_hash, state.id, command.id)
+            {
+                return Err(ProcessingChannelError::RepeatedProcessing(
+                    "Trampoline payer has already learned its preimage".to_owned(),
+                ));
+            }
+            if let Some(decision) = self
+                .store
+                .get_trampoline_resolutions(tlc.payment_hash)
+                .into_iter()
+                .find(|decision| decision.channel_id == state.id && decision.tlc_id == command.id)
+            {
+                if decision.reason != command.reason {
+                    return Err(ProcessingChannelError::RepeatedProcessing(
+                        "Removal conflicts with durable trampoline decision".to_owned(),
+                    ));
+                }
+            }
+        }
         state.check_for_tlc_update(TlcUpdateAction::RemoveTlcCommand)?;
         state.check_remove_tlc_with_reason(TLCId::Received(command.id), &command.reason)?;
+        state.retryable_tlc_operations.retain(|operation| {
+            !matches!(operation, RetryableTlcOperation::RemoveTlc(id, _) if *id == TLCId::Received(command.id))
+        });
         let reason = command.reason;
         let payment_hash = state
             .tlc_state
@@ -2883,6 +2975,23 @@ where
         // When channel reestablishing, tlc ops will be deferred to protect channel state
         // To avoid lost preimage we store it immediately.
         self.persist_retryable_remove_tlc_preimage(state, tlc_id, &reason);
+        if let Some(tlc) = state.tlc_state.get(&tlc_id) {
+            if let Some(decision) = self
+                .store
+                .get_trampoline_resolutions(tlc.payment_hash)
+                .into_iter()
+                .find(|decision| {
+                    decision.channel_id == state.id && decision.tlc_id == u64::from(tlc_id)
+                })
+            {
+                if decision.reason != reason {
+                    return;
+                }
+                state.retryable_tlc_operations.retain(|operation| {
+                    !matches!(operation, RetryableTlcOperation::RemoveTlc(id, _) if *id == tlc_id)
+                });
+            }
+        }
         let remove_tlc = RetryableTlcOperation::RemoveTlc(tlc_id, reason);
         self.register_retryable_tlc_operation(myself, state, remove_tlc);
     }
@@ -3015,12 +3124,49 @@ where
         Ok(())
     }
 
+    fn cancel_claimed_payment_adds(
+        &self,
+        myself: &ActorRef<ChannelActorMessage>,
+        state: &mut ChannelActorState,
+    ) {
+        let mut cancelled = Vec::new();
+        state.retryable_tlc_operations.retain(|operation| {
+            if let RetryableTlcOperation::AddTlc(command) = operation {
+                if command.previous_tlc.is_none()
+                    && command.attempt_id.is_some()
+                    && self.store.get_payment_claim(command.payment_hash).is_some()
+                {
+                    cancelled.push(command.clone());
+                    return false;
+                }
+            }
+            true
+        });
+        if cancelled.is_empty() {
+            return;
+        }
+        self.store.insert_channel_actor_state(state.clone());
+        for command in cancelled {
+            let existing = state.tlc_state.offered_tlcs.tlcs.iter().find(|tlc| {
+                tlc.payment_hash == command.payment_hash
+                    && tlc.attempt_id == command.attempt_id
+                    && tlc.onion_packet == command.onion_packet
+                    && tlc.expiry == command.expiry
+            });
+            let result = existing.map(|tlc| u64::from(tlc.tlc_id)).ok_or_else(|| {
+                ProcessingChannelError::InvalidState("Payment already succeeded".to_owned())
+            });
+            self.post_add_tlc_command(myself, state, command, &result);
+        }
+    }
+
     pub async fn apply_retryable_tlc_operations(
         &self,
         myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
         trigger_next: bool,
     ) {
+        self.cancel_claimed_payment_adds(myself, state);
         if state.is_closed() {
             self.finalize_closed_retryable_tlc_operations(myself, state)
                 .await;
@@ -4756,6 +4902,7 @@ where
                 }
             }
             ChannelEvent::MaintainChannelTlcs => {
+                self.cancel_claimed_payment_adds(myself, state);
                 if state.ephemeral_config.external_funding.signed_submitted
                     && state.funding_tx_confirmed_at.is_none()
                 {
@@ -4784,9 +4931,9 @@ where
                 // explicit TLC commands.
                 if let Some(session) = &state.session_v2 {
                     state.pending_remove_effects_v2 = session.remove_effects.len();
-                    self.apply_settled_remove_tlcs(myself, state, true).await;
-                    self.apply_settled_remove_tlcs(myself, state, false).await;
                 }
+                self.apply_settled_remove_tlcs(myself, state, true).await;
+                self.apply_settled_remove_tlcs(myself, state, false).await;
                 let now = now_timestamp_as_millis_u64();
                 if state.is_revocation_nonce_ledger_stalled(now) {
                     error!(
@@ -4848,10 +4995,24 @@ where
                             tlc.tlc_id == tlc_id && tlc.removed_reason.as_ref() == Some(&reason)
                         })
                         .map(|(tlc, _)| tlc.payment_hash);
+                    let payer_result = session.remove_effects.iter().any(|(tlc, _)| {
+                        tlc.tlc_id == tlc_id
+                            && tlc.removed_reason.as_ref() == Some(&reason)
+                            && tlc.forwarding_tlc.is_none()
+                            && tlc.attempt_id.is_some()
+                    });
                     session.remove_effects.retain(|(tlc, _)| {
                         tlc.tlc_id != tlc_id || tlc.removed_reason.as_ref() != Some(&reason)
                     });
                     if let Some(hash) = payment_hash {
+                        if payer_result {
+                            self.store.insert_channel_actor_state(state.clone());
+                            self.network
+                                .send_message(NetworkActorMessage::new_command(
+                                    NetworkActorCommand::ResolveTrampolinePayment(hash),
+                                ))
+                                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                        }
                         let retain_invoice_preimage = self.store.has_invoice_preimage(&hash)
                             && self.store.get_invoice_status(&hash) == Some(CkbInvoiceStatus::Open);
                         if matches!(reason, RemoveTlcReason::RemoveTlcFulfill(_))
@@ -5838,6 +5999,7 @@ where
                 ))
                 .expect(ASSUME_NETWORK_ACTOR_ALIVE);
         }
+        self.cancel_claimed_payment_adds(&myself, state);
         // A forward dispatched before the process exit has no in-memory result left, and
         // reestablishment does not replay it. Resolve it from the persisted downstream link.
         self.finalize_closed_retryable_tlc_operations(&myself, state)
@@ -11883,6 +12045,33 @@ where
 }
 
 pub trait ChannelActorStateStore {
+    /// Settled V1 payer results that have not been acknowledged yet.
+    fn get_payment_tlc_results(&self, payment_hash: Hash256) -> Vec<fiber_types::PaymentTlcResult>;
+    /// Atomically retain a V1 payer result with its applied channel state.
+    fn insert_channel_actor_state_with_payment_result(
+        &self,
+        state: ChannelActorState,
+        result: fiber_types::PaymentTlcResult,
+    );
+    /// Acknowledge an exact durable V1 payer result.
+    fn delete_payment_tlc_result(&self, result: &fiber_types::PaymentTlcResult);
+
+    /// Returns the preimage learned from a validated payer fulfillment.
+    fn get_payment_claim(&self, payment_hash: Hash256) -> Option<Hash256>;
+    /// Persist payer proof before acknowledging its source or stopping retries.
+    fn insert_payment_claim(&self, payment_hash: Hash256, preimage: Hash256);
+    /// Returns the durable upstream decisions for this payment.
+    fn get_trampoline_resolutions(
+        &self,
+        payment_hash: Hash256,
+    ) -> Vec<fiber_types::TrampolineResolution>;
+    /// Persist a decision before issuing an upstream removal.
+    fn insert_trampoline_resolution(
+        &self,
+        payment_hash: Hash256,
+        resolution: fiber_types::TrampolineResolution,
+    );
+
     /// Whether a persisted trampoline payment owns this exact upstream TLC.
     fn has_trampoline_payment_for_tlc(
         &self,

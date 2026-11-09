@@ -606,6 +606,7 @@ impl Actor for MockNetworkActor {
                         *state.send_payment_status.lock().unwrap()
                     };
                     let response = SendPaymentResponse {
+                        claim_status: None,
                         payment_hash,
                         payment_preimage: None,
                         status,

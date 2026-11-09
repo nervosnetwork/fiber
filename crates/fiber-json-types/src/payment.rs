@@ -19,10 +19,19 @@ pub enum PaymentStatus {
     Created,
     /// The first hop AddTlc is sent successfully and waiting for the response.
     Inflight,
-    /// The payment is finished. All related HTLCs are successfully settled.
+    /// A valid preimage was learned. Remaining TLCs may still be claiming.
     Success,
     /// The payment session has terminated.
     Failed,
+}
+
+/// Settlement progress of a successful payment.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub enum PaymentClaimStatus {
+    /// Existing TLCs, queued additions, or result receipts remain outstanding.
+    Claiming,
+    /// All existing payment work has reached a durable terminal outcome.
+    Claimed,
 }
 
 /// Parameters for getting a payment.
@@ -67,6 +76,9 @@ pub struct GetPaymentCommandResult {
     pub payment_preimage: Option<Hash256>,
     /// The status of the payment
     pub status: PaymentStatus,
+    /// Settlement progress after success. Absent before a preimage is learned.
+    #[serde(default)]
+    pub claim_status: Option<PaymentClaimStatus>,
     #[serde_as(as = "U64Hex")]
     #[schemars(schema_with = "schema_as_uint_hex")]
     /// The time the payment was created at, in milliseconds from UNIX epoch
@@ -77,7 +89,7 @@ pub struct GetPaymentCommandResult {
     pub last_updated_at: u64,
     /// The error message if the payment failed
     pub failed_error: Option<String>,
-    /// fee paid for the payment
+    /// Fees of successful attempts after success. Final once `claim_status` is `Claimed`.
     #[serde_as(as = "U128Hex")]
     #[schemars(schema_with = "schema_as_uint_hex")]
     pub fee: u128,

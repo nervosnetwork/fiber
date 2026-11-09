@@ -1804,7 +1804,9 @@ fn test_payment_status_queries_skip_attempts_for_mismatched_terminal_sessions() 
             PaymentStatus::Success,
             PaymentStatus::Failed,
         ] {
-            if status == terminal_status {
+            if status == terminal_status
+                || (terminal_status == PaymentStatus::Failed && status == PaymentStatus::Success)
+            {
                 continue;
             }
             assert!(store.get_payment_sessions_with_status(status).is_empty());
@@ -1813,6 +1815,54 @@ fn test_payment_status_queries_skip_attempts_for_mismatched_terminal_sessions() 
                 .is_empty());
         }
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_legacy_partial_mpp_proof_is_success_in_all_payment_queries() {
+    let (store, _dir) = generate_store();
+    let source = gen_rand_fiber_public_key();
+    let target = gen_rand_fiber_public_key();
+    let preimage = gen_rand_sha256_hash();
+    let hash = Hash256::from(HashAlgorithm::CkbHash.hash(preimage));
+    let request = SendPaymentDataBuilder::new(target, 100, hash)
+        .max_fee_amount(Some(1000))
+        .build()
+        .unwrap();
+    let mut session = PaymentSession::new_session(&store, request, 1);
+    let mut attempt = session.new_attempt(
+        1,
+        source,
+        target,
+        vec![PaymentHopData {
+            amount: 60,
+            ..Default::default()
+        }],
+    );
+    attempt.set_success_status();
+    attempt.preimage = Some(preimage);
+    store.insert_attempt(attempt);
+    session.set_failed_status("legacy partial MPP failure");
+    store.insert_payment_session(session);
+    assert_eq!(
+        store.get_payment_session(hash).unwrap().status,
+        PaymentStatus::Success
+    );
+    assert_eq!(
+        store
+            .get_payment_sessions_with_status(PaymentStatus::Success)
+            .len(),
+        1
+    );
+    assert_eq!(
+        store
+            .get_payment_sessions_with_limit(1, None, Some(PaymentStatus::Success))
+            .len(),
+        1
+    );
+    assert!(store
+        .get_payment_sessions_with_status(PaymentStatus::Failed)
+        .is_empty());
 }
 
 #[cfg(not(target_arch = "wasm32"))]
