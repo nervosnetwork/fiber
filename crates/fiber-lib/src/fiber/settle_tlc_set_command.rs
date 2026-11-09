@@ -321,6 +321,9 @@ where
         tlcs: Vec<TlcSettlementContext>,
         error_code: TlcErrorCode,
     ) -> Vec<TlcSettlement> {
+        if tlcs.is_empty() {
+            return Vec::new();
+        }
         tracing::error!(
             "Remove TLCs for payment hash {} because of error {:?}",
             self.payment_hash,
