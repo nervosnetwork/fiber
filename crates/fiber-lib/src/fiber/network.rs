@@ -921,7 +921,7 @@ pub enum OnChainTlcRemoveCompletion {
 /// an optional RpcReplyPort in the of the definition of this message.
 #[derive(Debug, AsRefStr)]
 pub enum NetworkActorCommand {
-    /// Observe existing payer TLC proof and resolve any upstream trampoline payment.
+    /// Ask the payer actor to observe persisted TLC fulfillment proof.
     PaymentTlcUpdated(Hash256),
     /// Explicit legacy-only test fixture; unavailable in production builds.
     #[cfg(test)]
@@ -1426,6 +1426,8 @@ pub enum NetworkActorEvent {
 
     // A payment actor stopped event.
     PaymentActorStopped(Hash256, Option<TlcErrPacket>),
+    /// A newly persisted success can settle trampoline upstream before actor exit.
+    PaymentSucceeded(Hash256),
 
     // Channel settlement check completed - channel is fully settled on-chain.
     ChannelSettlementCompleted(Hash256),
@@ -2265,6 +2267,9 @@ where
                 }
                 state.on_channel_actor_stopped(channel_id, reason).await;
             }
+            NetworkActorEvent::PaymentSucceeded(payment_hash) => {
+                state.resolve_trampoline_upstream(payment_hash, None).await;
+            }
             NetworkActorEvent::PaymentActorStopped(payment_hash, last_error_packet) => {
                 state
                     .on_payment_actor_stopped(payment_hash, last_error_packet)
@@ -2990,10 +2995,10 @@ where
                 if self
                     .store
                     .get_payment_session(payment_hash)
-                    .is_some_and(|session| session.status == PaymentStatus::Success)
+                    .is_some_and(|session| {
+                        !session.status.is_final() || session.has_pending_payment_work(&self.store)
+                    })
                 {
-                    state.resolve_trampoline_upstream(payment_hash, None).await;
-                } else {
                     self.resume_payment_actor_and_send_command(
                         myself,
                         state,
@@ -8509,17 +8514,6 @@ where
                         NetworkActorCommand::PaymentTlcUpdated(session.payment_hash()),
                     ))
                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-            }
-            if session.status == PaymentStatus::Success
-                && session.has_pending_payment_work(&self.store)
-            {
-                self.resume_payment_actor_and_send_command(
-                    myself.clone(),
-                    state,
-                    session.payment_hash(),
-                    PaymentActorMessage::TlcUpdated,
-                )
-                .await;
             }
             let Some(context) = session.request.trampoline_context.as_ref() else {
                 continue;

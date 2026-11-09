@@ -111,9 +111,19 @@ async fn test_payer_preimage_succeeds_before_tlc_finishes_after_restart() {
     assert_eq!(payer.get_inflight_payment_count().await, 1);
 
     payer.stop().await;
+    // Replay the crash window after channel persistence but before the payer observed its proof.
+    let mut unobserved_attempt = session.attempts().next().unwrap().clone();
+    unobserved_attempt.preimage = None;
+    payer.store.insert_attempt(unobserved_attempt);
+    let mut unobserved_session = session;
+    unobserved_session.status = PaymentStatus::Inflight;
+    payer.store.insert_payment_session(unobserved_session);
     // Messages held on the old connection are lost. Reestablishment replays its own intents.
     payee.discard_held_fiber_messages().await;
     payer.start().await;
+    tokio::time::timeout(Duration::from_secs(5), payer.wait_until_success(hash))
+        .await
+        .expect("startup must recover the channel proof before resuming old work");
     assert_eq!(
         payer.get_payment_result(hash).await.status,
         PaymentStatus::Success

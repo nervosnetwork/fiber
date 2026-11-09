@@ -1708,9 +1708,14 @@ impl NetworkGraphStateStore for Store {
             .map(|kv| deserialize_from(kv.value.as_ref(), "Attempt"))
             .collect();
 
-        // Keep wake-up ownership until each remaining TLC has finished.
+        let finished = self
+            .get_payment_session(payment_hash)
+            .is_some_and(|session| {
+                session.status.is_final() && !session.has_pending_payment_work(self)
+            });
+        // Keep wake-up ownership for pending TLCs, but release unissued attempts at completion.
         for attempt in attempts {
-            if !attempt.status.is_final() {
+            if !attempt.status.is_final() && !finished {
                 continue;
             }
             if let Some(outpoint) = attempt.first_hop_channel_outpoint() {
