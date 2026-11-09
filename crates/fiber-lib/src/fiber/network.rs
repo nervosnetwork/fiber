@@ -3609,16 +3609,7 @@ where
                 let _ = rpc.send(Ok(response));
             }
             NetworkActorCommand::GetInflightPaymentCount(reply) => {
-                let count = state
-                    .inflight_payments
-                    .keys()
-                    .filter(|hash| {
-                        self.store
-                            .get_payment_session(**hash)
-                            .is_none_or(|session| !session.status.is_final())
-                    })
-                    .count();
-                let _ = reply.send(Ok(count as u32));
+                let _ = reply.send(Ok(state.inflight_payments.len() as u32));
             }
             NetworkActorCommand::ListPeers(_, rpc) => {
                 let peers = state

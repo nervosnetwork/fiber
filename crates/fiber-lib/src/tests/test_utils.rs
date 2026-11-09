@@ -1203,6 +1203,11 @@ impl NetworkNode {
         0
     }
 
+    /// Wait until all payment actors have exited and the network has removed them.
+    pub async fn wait_until_no_inflight_payments(&self) {
+        wait_until_async_timeout(|| async { self.get_inflight_payment_count().await == 0 }).await;
+    }
+
     pub async fn get_inflight_payment_count(&self) -> u32 {
         let message = |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::GetInflightPaymentCount(rpc_reply))

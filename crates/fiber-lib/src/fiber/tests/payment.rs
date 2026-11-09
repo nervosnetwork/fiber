@@ -108,6 +108,7 @@ async fn test_payer_preimage_succeeds_before_tlc_finishes_after_restart() {
     assert_eq!(session.payment_preimage(), Some(preimage));
     assert!(session.attempts().any(|attempt| attempt.is_inflight()));
     assert!(session.has_pending_payment_work(&payer.store));
+    assert_eq!(payer.get_inflight_payment_count().await, 1);
 
     payer.stop().await;
     // Messages held on the old connection are lost. Reestablishment replays its own intents.
@@ -124,6 +125,7 @@ async fn test_payer_preimage_succeeds_before_tlc_finishes_after_restart() {
     )
     .await
     .expect("the existing TLC must finish after reestablishment");
+    payer.wait_until_no_inflight_payments().await;
     assert_eq!(payer.get_payment_session(hash).unwrap().attempts_count(), 1);
 }
 
@@ -789,7 +791,7 @@ async fn test_send_payment_custom_records() {
         .expect("custom records");
     assert_eq!(got_custom_records, custom_records);
 
-    assert_eq!(source_node.get_inflight_payment_count().await, 0);
+    source_node.wait_until_no_inflight_payments().await;
 }
 
 #[tokio::test]
@@ -843,7 +845,7 @@ async fn test_send_payment_custom_records_with_limit_error() {
         .get_payment_custom_records(&payment_hash)
         .expect("custom records");
     assert_eq!(got_custom_records, custom_records);
-    assert_eq!(source_node.get_inflight_payment_count().await, 0);
+    source_node.wait_until_no_inflight_payments().await;
 }
 
 #[tokio::test]
@@ -902,6 +904,8 @@ async fn test_send_payment_with_router_custom_records() {
         .get_payment_custom_records(&payment_hash)
         .expect("custom records should be delivered to the final hop");
     assert_eq!(got_custom_records, custom_records);
+
+    node_0.wait_until_no_inflight_payments().await;
 
     // Router payments are subject to the same size limit as `send_payment`.
     let long_value = "a".repeat(MAX_CUSTOM_RECORDS_SIZE + 1);
@@ -1055,7 +1059,7 @@ async fn test_send_payment_for_direct_channel_and_dry_run() {
     // A -> B: 10000000000 use the first channel
     assert_eq!(node_0_balance, 0);
     assert_eq!(node_1_balance, 10000000000);
-    assert_eq!(source_node.get_inflight_payment_count().await, 0);
+    source_node.wait_until_no_inflight_payments().await;
 }
 
 #[tokio::test]
@@ -1099,7 +1103,7 @@ async fn test_send_payment_prefer_newer_channels() {
     let node_1_balance = node_1.get_local_balance_from_channel(channels[1]);
     assert_eq!(node_0_balance, 0);
     assert_eq!(node_1_balance, 10000000000);
-    assert_eq!(source_node.get_inflight_payment_count().await, 0);
+    source_node.wait_until_no_inflight_payments().await;
 }
 
 #[tokio::test]
@@ -1194,7 +1198,7 @@ async fn test_send_payment_prefer_channels_with_larger_balance() {
     let node_1_balance = node_1.get_local_balance_from_channel(channels[1]);
     assert_eq!(node_0_balance, 5000000000);
     assert_eq!(node_1_balance, 5000000000);
-    assert_eq!(source_node.get_inflight_payment_count().await, 0);
+    source_node.wait_until_no_inflight_payments().await;
 }
 
 #[tokio::test]
@@ -1286,7 +1290,7 @@ async fn test_send_payment_fee_rate() {
     assert_eq!(nodes[0].amount, 40_000_000);
     let payment_hash = res.payment_hash;
     node_0.wait_until_success(payment_hash).await;
-    assert_eq!(node_0.get_inflight_payment_count().await, 0);
+    node_0.wait_until_no_inflight_payments().await;
 
     let res = node_2
         .send_payment(SendPaymentCommand {
@@ -1310,7 +1314,7 @@ async fn test_send_payment_fee_rate() {
 
     let payment_hash = res.payment_hash;
     node_2.wait_until_success(payment_hash).await;
-    assert_eq!(node_2.get_inflight_payment_count().await, 0);
+    node_2.wait_until_no_inflight_payments().await;
 }
 
 #[tokio::test]
@@ -1356,7 +1360,7 @@ async fn test_send_payment_over_private_channel() {
         } else {
             assert!(res.is_err());
         }
-        assert_eq!(source_node.get_inflight_payment_count().await, 0);
+        source_node.wait_until_no_inflight_payments().await;
     }
 
     test(10000000000, true).await;
@@ -1435,7 +1439,7 @@ async fn test_send_payment_for_pay_self() {
 
     eprintln!("res: {:?}", res);
     assert_eq!(res.unwrap().fee, 0);
-    assert_eq!(node_0.get_inflight_payment_count().await, 0);
+    node_0.wait_until_no_inflight_payments().await;
 }
 
 #[tokio::test]
@@ -1483,7 +1487,7 @@ async fn test_send_payment_for_pay_self_with_two_nodes() {
         - (node_1_channel1_balance - new_node_1_channel1_balance);
     eprintln!("fee: {:?}", res.fee);
     assert_eq!(node1_fee, res.fee);
-    assert_eq!(node_0.get_inflight_payment_count().await, 0);
+    node_0.wait_until_no_inflight_payments().await;
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1561,7 +1565,7 @@ async fn test_send_payment_for_pay_self_with_invoice() {
         node_0_received + fee,
         "node_0 balance should be changed by fee only"
     );
-    assert_eq!(node_0.get_inflight_payment_count().await, 0);
+    node_0.wait_until_no_inflight_payments().await;
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1606,7 +1610,7 @@ async fn test_send_payment_with_normal_invoice_workflow() {
     let res = res.unwrap();
     let payment_hash = res.payment_hash;
     node_0.wait_until_success(payment_hash).await;
-    assert_eq!(node_0.get_inflight_payment_count().await, 0);
+    node_0.wait_until_no_inflight_payments().await;
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1703,7 +1707,7 @@ async fn test_send_payment_with_more_capacity_for_payself() {
             - (node_2_channel1_balance - node_2_new_channel1_balance)
     };
     assert_eq!(node1_fee + node2_fee, res.fee);
-    assert_eq!(node_0.get_inflight_payment_count().await, 0);
+    node_0.wait_until_no_inflight_payments().await;
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1762,7 +1766,7 @@ async fn test_send_payment_with_private_channel_hints() {
             source_node.wait_until_failed(payment_hash).await;
         }
 
-        assert_eq!(source_node.get_inflight_payment_count().await, 0);
+        source_node.wait_until_no_inflight_payments().await;
     }
 
     test(10000000000, true).await;
@@ -2121,7 +2125,7 @@ async fn test_send_payment_hophint_for_middle_channels_does_not_work() {
     let res = node1.get_payment_result(payment_hash).await;
     eprintln!("res: {:?}", res);
     assert!(res.failed_error.unwrap().contains("InvalidOnionError"));
-    assert_eq!(node1.get_inflight_payment_count().await, 0);
+    node1.wait_until_no_inflight_payments().await;
 }
 
 #[tokio::test]
@@ -2249,7 +2253,7 @@ async fn test_send_payment_with_private_channel_hints_fallback() {
     source_node
         .assert_payment_status(payment_hash, PaymentStatus::Success, Some(2))
         .await;
-    assert_eq!(source_node.get_inflight_payment_count().await, 0);
+    source_node.wait_until_no_inflight_payments().await;
 }
 
 #[tokio::test]
@@ -2371,7 +2375,7 @@ async fn test_send_payment_with_private_multiple_channel_hints_fallback() {
     source_node.wait_until_success(payment_hash).await;
     let payment_session = source_node.get_payment_session(payment_hash).unwrap();
     assert_eq!(payment_session.retry_times(), 2);
-    assert_eq!(source_node.get_inflight_payment_count().await, 0);
+    source_node.wait_until_no_inflight_payments().await;
 }
 
 #[tokio::test]
@@ -3241,7 +3245,7 @@ async fn test_send_payment_with_route_will_not_consider_prob() {
     assert!(res.is_ok());
     let payment_hash = res.unwrap().payment_hash;
     node_0.wait_until_success(payment_hash).await;
-    assert_eq!(node_0.get_inflight_payment_count().await, 0);
+    node_0.wait_until_no_inflight_payments().await;
 }
 
 #[tokio::test]
@@ -3475,7 +3479,7 @@ async fn test_send_payment_two_nodes_with_router_and_multiple_channels() {
     assert_eq!(used_channels[1], channel_3_funding_tx);
 
     node_0.wait_until_payment_finished(payment_hash).await;
-    assert_eq!(node_0.get_inflight_payment_count().await, 0);
+    node_0.wait_until_no_inflight_payments().await;
 
     let balance = node_0.get_local_balance_from_channel(channels[1]);
     assert_eq!(balance, old_balance - 60000000 - res.fee);
@@ -3572,7 +3576,7 @@ async fn test_send_payment_send_with_wrong_hop() {
         .unwrap();
 
     node_3.wait_until_success(res.payment_hash).await;
-    assert_eq!(node_3.get_inflight_payment_count().await, 0);
+    node_3.wait_until_no_inflight_payments().await;
 
     // pay the above router with node_1 will failed
     let res = node_1
@@ -4175,7 +4179,7 @@ async fn test_send_payment_middle_hop_stopped() {
 
     node_0.wait_until_payment_finished(res.payment_hash).await;
 
-    assert_eq!(node_0.get_inflight_payment_count().await, 0);
+    node_0.wait_until_no_inflight_payments().await;
 }
 
 #[tokio::test]
@@ -4250,7 +4254,7 @@ async fn test_send_payment_middle_hop_stopped_retry_longer_path() {
     assert_eq!(res.fee, 5);
 
     node_0.wait_until_failed(res.payment_hash).await;
-    assert_eq!(node_0.get_inflight_payment_count().await, 0);
+    node_0.wait_until_no_inflight_payments().await;
 }
 
 #[tokio::test]
@@ -4321,7 +4325,7 @@ async fn test_send_payment_max_value_in_flight_in_first_hop() {
     node_0
         .expect_payment_used_channel(payment_hash, channel_id)
         .await;
-    assert_eq!(node_0.get_inflight_payment_count().await, 0);
+    node_0.wait_until_no_inflight_payments().await;
 }
 
 #[tokio::test]
@@ -4667,7 +4671,7 @@ async fn run_complex_network_with_params(
             nodes[i].wait_until_success(res.payment_hash).await;
         }
 
-        assert_eq!(nodes[i].get_inflight_payment_count().await, 0);
+        nodes[i].wait_until_no_inflight_payments().await;
     }
 
     result
@@ -4897,7 +4901,7 @@ async fn test_send_payment_with_invalid_tlc_expiry() {
         .await;
     assert!(res.is_ok());
     nodes[0].wait_until_success(res.unwrap().payment_hash).await;
-    assert_eq!(nodes[0].get_inflight_payment_count().await, 0);
+    nodes[0].wait_until_no_inflight_payments().await;
 }
 
 #[tokio::test]
@@ -6409,6 +6413,8 @@ async fn test_mpp_payer_partial_onchain_reconciliation_does_not_restart_payment_
         1,
         "exactly one real MPP shard must still be in flight"
     );
+
+    assert_eq!(fixture.payer.get_inflight_payment_count().await, 1);
 
     let payment_actor_name = format!(
         "Payment-{} Node({:?})",
