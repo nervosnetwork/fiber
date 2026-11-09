@@ -1,6 +1,7 @@
 mod actor;
 mod error;
 mod funding;
+pub(crate) mod held_cells;
 mod jsonrpc_types_convert;
 pub mod signer;
 mod tx_tracing_actor;
@@ -18,7 +19,9 @@ pub(crate) use funding::{
 };
 pub use funding::{FundingRequest, FundingTx};
 pub use signer::LocalSigner;
-pub(crate) use tx_tracing_actor::is_permanent_send_tx_error;
+pub(crate) use tx_tracing_actor::{
+    is_permanent_send_tx_error, is_pool_conflict, is_pool_conflict_code,
+};
 pub use tx_tracing_actor::{CkbTxTracer, CkbTxTracingMask, CkbTxTracingResult};
 
 #[cfg(test)]

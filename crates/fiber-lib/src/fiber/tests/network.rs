@@ -2,6 +2,7 @@ use crate::fiber::channel::{
     ChannelActorMessage, ChannelCommand, ChannelOpenRecordStore, DEFAULT_COMMITMENT_FEE_RATE,
     DEFAULT_FEE_RATE, MAX_TLC_NUMBER_IN_FLIGHT, MIN_COMMITMENT_DELAY_EPOCHS,
 };
+use crate::fiber::fee::MAX_FUNDING_FEE_RATE;
 use crate::fiber::network::get_chain_hash;
 use crate::fiber::network::onchain_upstream_removed_reason_matches;
 use crate::fiber::tests::settle_tlc_set_command_tests::create_test_channel_state_with_tlc;
@@ -67,11 +68,11 @@ fn get_test_pub_key() -> Pubkey {
 }
 
 #[tokio::test]
-async fn test_reject_legacy_channel_open_without_full_hash_feature() {
+async fn test_reject_legacy_channel_open_without_channel_v2_feature() {
     let mut node_a = NetworkNode::new().await;
     let mut legacy_peer = NetworkNode::new().await;
     let mut features = legacy_peer.node_info().await.features;
-    features.unset_onchain_full_payment_hash_optional();
+    features.unset_channel_v2_optional();
     legacy_peer.update_node_features_and_wait(features).await;
     node_a.connect_to(&mut legacy_peer).await;
 
@@ -107,7 +108,7 @@ async fn test_reject_legacy_external_funding_channel_open() {
     let mut node = NetworkNode::new().await;
     let mut legacy_peer = NetworkNode::new().await;
     let mut features = legacy_peer.node_info().await.features;
-    features.unset_onchain_full_payment_hash_optional();
+    features.unset_channel_v2_optional();
     legacy_peer.update_node_features_and_wait(features).await;
     node.connect_to(&mut legacy_peer).await;
 
@@ -147,7 +148,7 @@ async fn test_reject_legacy_inbound_open_before_creating_pending_record() {
     let mut node = NetworkNode::new().await;
     let mut legacy_peer = NetworkNode::new().await;
     let mut features = legacy_peer.node_info().await.features;
-    features.unset_onchain_full_payment_hash_optional();
+    features.unset_channel_v2_optional();
     legacy_peer.update_node_features_and_wait(features).await;
     node.connect_to(&mut legacy_peer).await;
 
@@ -188,14 +189,13 @@ async fn test_reject_legacy_inbound_open_before_creating_pending_record() {
 }
 
 #[tokio::test]
-async fn test_existing_channel_reestablishes_when_peer_drops_full_hash_feature() {
+async fn test_existing_channel_reestablishes_when_peer_drops_channel_v2_feature() {
     let (mut node, mut peer, channel_id, _) =
         NetworkNode::new_2_nodes_with_established_channel(100_000_000_000, 100_000_000_000, false)
             .await;
     assert_eq!(
-        node.get_channel_actor_state(channel_id)
-            .commitment_contract_features,
-        fiber_types::CommitmentContractFeatures::ONCHAIN_FULL_PAYMENT_HASH
+        node.get_channel_actor_state(channel_id).channel_features,
+        fiber_types::ChannelFeatures::V2
     );
 
     let before_restart = node.send_payment_keysend(&peer, 1_000, true).await;
@@ -205,7 +205,7 @@ async fn test_existing_channel_reestablishes_when_peer_drops_full_hash_feature()
     );
 
     let mut features = peer.node_info().await.features;
-    features.unset_onchain_full_payment_hash_optional();
+    features.unset_channel_v2_optional();
     peer.update_node_features_and_wait(features).await;
     node.restart().await;
     node.connect_to(&mut peer).await;
@@ -222,8 +222,8 @@ async fn test_existing_channel_reestablishes_when_peer_drops_full_hash_feature()
 
     let state_after = node.get_channel_actor_state(channel_id);
     assert_eq!(
-        state_after.commitment_contract_features,
-        fiber_types::CommitmentContractFeatures::ONCHAIN_FULL_PAYMENT_HASH
+        state_after.channel_features,
+        fiber_types::ChannelFeatures::V2
     );
     let payment = node.send_payment_keysend(&peer, 1_000, true).await;
     assert!(
@@ -792,6 +792,102 @@ fn test_send_payment_data_trampoline_hops_validation_errors() {
     )
     .unwrap_err();
     assert!(err.contains("must not contain duplicates"), "{err}");
+}
+
+#[tokio::test]
+async fn test_network_shutdown_marks_channels_offline_after_final_child_write() {
+    use crate::fiber::channel::{ChannelActorState, ChannelActorStateStore};
+    use crate::fiber::ChannelConnectivityState;
+    use crate::store::Store;
+    use tokio::sync::oneshot;
+
+    struct FinalChannelWriter;
+    struct FinalWriteState {
+        channel: ractor::ActorCell,
+        store: Store,
+        snapshot: Option<ChannelActorState>,
+        started: Option<oneshot::Sender<()>>,
+        release: Option<oneshot::Receiver<()>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Actor for FinalChannelWriter {
+        type Msg = ();
+        type State = FinalWriteState;
+        type Arguments = FinalWriteState;
+
+        async fn pre_start(
+            &self,
+            _: ActorRef<Self::Msg>,
+            state: Self::Arguments,
+        ) -> Result<Self::State, ActorProcessingErr> {
+            Ok(state)
+        }
+
+        async fn post_stop(
+            &self,
+            _: ActorRef<Self::Msg>,
+            state: &mut Self::State,
+        ) -> Result<(), ActorProcessingErr> {
+            state
+                .channel
+                .wait(Some(Duration::from_secs(5)))
+                .await
+                .unwrap();
+            state.started.take().unwrap().send(()).unwrap();
+            state.release.take().unwrap().await.unwrap();
+            state
+                .store
+                .insert_channel_actor_state(state.snapshot.take().unwrap());
+            Ok(())
+        }
+    }
+
+    let (node, _peer, id) =
+        create_nodes_with_established_channel(100000000000, 11800000000, false).await;
+    let mut latest = node.get_channel_actor_state(id);
+    assert_eq!(latest.connectivity_state, ChannelConnectivityState::Online);
+    latest.tlc_state.offered_tlcs.next_tlc_id = 1765;
+    let (started_tx, started_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let (_writer, writer_task) = Actor::spawn_linked(
+        None,
+        FinalChannelWriter,
+        FinalWriteState {
+            channel: node.get_channel_actor(id).await.unwrap().get_cell(),
+            store: node.store.clone(),
+            snapshot: Some(latest),
+            started: Some(started_tx),
+            release: Some(release_rx),
+        },
+        node.network_actor.get_cell(),
+    )
+    .await
+    .unwrap();
+    let network = node.network_actor.clone();
+    let shutdown = tokio::spawn(async move { network.stop_and_wait(None, None).await.unwrap() });
+    tokio::time::timeout(Duration::from_secs(5), started_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    let before_final_write = node.get_channel_actor_state(id);
+    let marked_offline_early =
+        before_final_write.connectivity_state == ChannelConnectivityState::Offline;
+    release_tx.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), shutdown)
+        .await
+        .unwrap()
+        .unwrap();
+    writer_task.await.unwrap();
+
+    assert!(
+        !marked_offline_early,
+        "do not race the channel's final write"
+    );
+    let stored = node.get_channel_actor_state(id);
+    assert_eq!(stored.tlc_state.offered_tlcs.next_tlc_id, 1765);
+    assert_eq!(stored.connectivity_state, ChannelConnectivityState::Offline);
+    assert!(stored.reestablishing);
 }
 
 #[tokio::test]
@@ -3314,14 +3410,14 @@ async fn test_malicious_open_channel_reserved_overflow_rejected_before_pending_a
         funding_pubkey: gen_rand_fiber_public_key(),
         tlc_basepoint: gen_rand_fiber_public_key(),
         next_commitment_nonce: rand_nonce.clone(),
-        next_revocation_nonce: rand_nonce,
+        next_revocation_nonce: rand_nonce.clone(),
         channel_announcement_nonce: None,
     };
 
     node.network_actor
         .send_message(NetworkActorMessage::Event(NetworkActorEvent::FiberMessage(
             peer.pubkey,
-            FiberMessage::ChannelInitialization(open_channel),
+            crate::fiber::session_v2::opening_message(open_channel, rand_nonce),
             None,
         )))
         .expect("network actor alive");
@@ -3336,6 +3432,60 @@ async fn test_malicious_open_channel_reserved_overflow_rejected_before_pending_a
     assert!(
         pending.is_empty(),
         "malicious OpenChannel must not enter pending accept list: {pending:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_malicious_open_channel_excessive_funding_fee_rate_rejected_before_pending_accept() {
+    let mut node = NetworkNode::new().await;
+    let mut peer = NetworkNode::new().await;
+    node.connect_to(&mut peer).await;
+
+    let rand_privkey = gen_rand_fiber_private_key();
+    let rand_nonce = SecNonce::build(rand_privkey.as_ref())
+        .build()
+        .public_nonce();
+    let open_channel = OpenChannel {
+        chain_hash: get_chain_hash(),
+        channel_id: gen_rand_sha256_hash(),
+        funding_udt_type_script: None,
+        funding_amount: 100_000_000_000,
+        shutdown_script: Default::default(),
+        reserved_ckb_amount: 100_000_000_000,
+        funding_fee_rate: MAX_FUNDING_FEE_RATE + 1,
+        commitment_fee_rate: DEFAULT_COMMITMENT_FEE_RATE,
+        commitment_delay_epoch: EpochNumberWithFraction::new(MIN_COMMITMENT_DELAY_EPOCHS, 0, 1)
+            .full_value(),
+        max_tlc_value_in_flight: 0,
+        max_tlc_number_in_flight: MAX_TLC_NUMBER_IN_FLIGHT,
+        channel_flags: ChannelFlags::empty(),
+        first_per_commitment_point: gen_rand_fiber_public_key(),
+        second_per_commitment_point: gen_rand_fiber_public_key(),
+        funding_pubkey: gen_rand_fiber_public_key(),
+        tlc_basepoint: gen_rand_fiber_public_key(),
+        next_commitment_nonce: rand_nonce.clone(),
+        next_revocation_nonce: rand_nonce.clone(),
+        channel_announcement_nonce: None,
+    };
+
+    node.network_actor
+        .send_message(NetworkActorMessage::Event(NetworkActorEvent::FiberMessage(
+            peer.pubkey,
+            crate::fiber::session_v2::opening_message(open_channel, rand_nonce),
+            None,
+        )))
+        .expect("network actor alive");
+
+    node.expect_debug_event("ChannelPendingToBeRejected").await;
+
+    let pending = call!(node.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::GetPendingAcceptChannels(rpc_reply))
+    })
+    .expect("network actor alive")
+    .expect("pending channels");
+    assert!(
+        pending.is_empty(),
+        "an OpenChannel with an excessive funding fee rate must not enter the pending accept list: {pending:?}"
     );
 }
 

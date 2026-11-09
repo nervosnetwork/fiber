@@ -50,7 +50,8 @@ serde_yaml = "0.9.32"
 strum = { version = "0.28", features = ["derive"] }
 tempfile = { version = "3.10.1", optional = true }
 thiserror = "1.0.58"
-tokio-util = { version = "0.7.10", features = ["rt"] }
+# shortcut: tokio-util 0.7.20 breaks tentacle-secio's Sink inference; lift after its upstream fix.
+tokio-util = { version = ">=0.7.10, <0.7.20", features = ["rt"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
@@ -126,9 +127,12 @@ metrics = ["dep:metrics", "tentacle/metrics", "tokio-metrics", "metrics-exporter
 pprof = ["dep:pprof"]
 
 [dev-dependencies]
+jsonrpc-core = "18"
 ciborium = "0.2.2"
 ckb-testtool = "1"
 fiber-types = { path = "../fiber-types", features = ["sample"] }
+fiber-types-0100 = { package = "fiber-types", version = "0.10.0-rc1", features = ["sample", "watchtower"] }
+fiber-types-090 = { package = "fiber-types", version = "0.9.1", features = ["sample", "watchtower"] }
 futures = "0.3.31"
 tempfile = "3.10.1"
 

@@ -7,7 +7,6 @@ use crate::{
     fiber::{
         channel::{
             ChannelActorMessage, ChannelActorStateStore, ChannelCommand, ChannelCommandWithId,
-            ReloadParams,
         },
         config::{
             CKB_SHANNONS, DEFAULT_FINAL_TLC_EXPIRY_DELTA, DEFAULT_TLC_EXPIRY_DELTA,
@@ -1144,9 +1143,10 @@ async fn test_mpp_tlc_set_total_amount_should_be_consistent() {
     let payment_hash = *ckb_invoice.payment_hash();
     let hash_algorithm = HashAlgorithm::CkbHash;
 
-    // Tlc 1 is set to 20000000000, but tlc2 is set to 20000000001
-    // both should valid since there are greater than invoice amount
-    // but payment will fail because the total_amount is inconsistent
+    // Tlc 1 declares the invoice amount; tlc2 declares invoice amount + 1.
+    // The inflated tlc2 is rejected when the final hop validates total_amount.
+    // Tlc 1 is then held, so cancel the invoice to fail it instead of waiting
+    // for TLC expiry.
     // tlc1 records
     let mut custom_records_1 = PaymentCustomRecords::default();
     let record = BasicMppPaymentData::new(payment_secret, 20000000000);
@@ -1235,6 +1235,17 @@ async fn test_mpp_tlc_set_total_amount_should_be_consistent() {
     .expect("node alive")
     .expect("tlc");
 
+    // tlc2 is rejected at acceptance; wait for that rejection first.
+    while source_node
+        .get_tlc(channels[1], TLCId::Offered(add_tlc_result_2.tlc_id))
+        .is_some_and(|tlc| tlc.removed_reason.is_none())
+    {
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    }
+
+    // Fail the held tlc1 via cancellation instead of waiting for expiry.
+    node_1.cancel_invoice(&payment_hash);
+
     // wait tlc 1 is fail
     while source_node
         .get_tlc(channels[0], TLCId::Offered(add_tlc_result_1.tlc_id))
@@ -1284,6 +1295,115 @@ async fn test_mpp_tlc_set_total_amount_should_be_consistent() {
     let node_1_balance = node_1.get_local_balance_from_channel(channels[1]);
     assert_eq!(node_0_balance, 10000000000);
     assert_eq!(node_1_balance, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_mpp_single_tlc_with_inflated_total_amount_is_rejected() {
+    init_tracing();
+
+    let invoice_amount = 20000000000u128;
+    let (nodes, channels) = create_n_nodes_network(
+        &[(
+            (0, 1),
+            (MIN_RESERVED_CKB + invoice_amount, MIN_RESERVED_CKB),
+        )],
+        2,
+    )
+    .await;
+    let [mut node_0, node_1] = nodes.try_into().expect("2 nodes");
+    let source_node = &mut node_0;
+    let target_pubkey = node_1.pubkey;
+
+    let preimage = gen_rand_sha256_hash();
+    let payment_secret = gen_rand_sha256_hash();
+    let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(invoice_amount))
+        .payment_preimage(preimage)
+        .payee_pub_key(target_pubkey.into())
+        .allow_mpp(true)
+        .payment_secret(payment_secret)
+        .build()
+        .expect("build invoice success");
+
+    node_1.insert_invoice(ckb_invoice.clone(), Some(preimage));
+    let payment_hash = *ckb_invoice.payment_hash();
+    let hash_algorithm = HashAlgorithm::CkbHash;
+
+    // The payer sends the exact invoice amount but declares an inflated MPP total.
+    let mut custom_records = PaymentCustomRecords::default();
+    BasicMppPaymentData::new(payment_secret, invoice_amount + 1).write(&mut custom_records);
+
+    let expiry =
+        now_timestamp_as_millis_u64() + DEFAULT_FINAL_TLC_EXPIRY_DELTA + DEFAULT_TLC_EXPIRY_DELTA;
+    let packet = PeeledPaymentOnionPacket::create(
+        source_node.get_private_key().clone(),
+        vec![
+            PaymentHopData {
+                amount: invoice_amount,
+                expiry,
+                next_hop: Some(target_pubkey),
+                hash_algorithm,
+                custom_records: Some(custom_records.clone()),
+                ..Default::default()
+            },
+            PaymentHopData {
+                amount: invoice_amount,
+                expiry,
+                hash_algorithm,
+                custom_records: Some(custom_records),
+                ..Default::default()
+            },
+        ],
+        Some(payment_hash.as_ref().to_vec()),
+        SECP256K1,
+    )
+    .expect("create peeled packet");
+
+    let add_tlc_result = ractor::call!(source_node.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: channels[0],
+                command: ChannelCommand::AddTlc(
+                    AddTlcCommand {
+                        amount: invoice_amount,
+                        hash_algorithm,
+                        payment_hash,
+                        expiry,
+                        onion_packet: packet.next.clone(),
+                        shared_secret: packet.shared_secret,
+                        is_trampoline_hop: false,
+                        previous_tlc: None,
+                        attempt_id: None,
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("node alive")
+    .expect("tlc");
+
+    // The inflated total_amount must be rejected at the final hop instead of
+    // leaving the full-amount TLC held until expiry.
+    while source_node
+        .get_tlc(channels[0], TLCId::Offered(add_tlc_result.tlc_id))
+        .is_some_and(|tlc| tlc.removed_reason.is_none())
+    {
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    }
+    let offered = source_node
+        .get_tlc(channels[0], TLCId::Offered(add_tlc_result.tlc_id))
+        .expect("offered tlc exists");
+    assert!(matches!(
+        offered.removed_reason,
+        Some(RemoveTlcReason::RemoveTlcFail(..))
+    ));
+
+    // The inflated TLC must not settle the invoice.
+    assert_ne!(
+        node_1.get_invoice_status(&payment_hash),
+        Some(CkbInvoiceStatus::Paid)
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -3980,16 +4100,32 @@ async fn test_mpp_waiting_ack_settlement_hands_off_to_durable_retry_queue() {
     // Deterministically exercise the durable handoff midpoint: neither fulfill can be applied
     // until the outstanding commitment is acknowledged, so both must enter the channel retry
     // queue.
-    let mut payee_channel_state = node_2.get_channel_actor_state(payee_channel_id);
-    payee_channel_state.tlc_state.set_waiting_ack(true);
-    node_2
-        .update_channel_actor_state(
-            payee_channel_state,
-            Some(ReloadParams {
-                notify_changes: false,
-            }),
+    node_1
+        .hold_next_fiber_messages(
+            node_2.pubkey,
+            payee_channel_id,
+            crate::fiber::network::TestFiberMessageKind::RevokeAndAck,
+            1,
         )
         .await;
+    node_2
+        .network_actor
+        .send_message(NetworkActorMessage::new_command(
+            NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+                channel_id: payee_channel_id,
+                command: ChannelCommand::CommitmentSigned(None),
+            }),
+        ))
+        .expect("network actor alive");
+    node_1.wait_for_held_fiber_messages(1).await;
+    let payee_channel_state = node_2.get_channel_actor_state(payee_channel_id);
+    assert!(payee_channel_state.tlc_state.waiting_ack);
+    assert!(payee_channel_state
+        .session_v2
+        .as_ref()
+        .unwrap()
+        .outgoing
+        .is_some());
     let payee_channel_actor = node_2
         .get_channel_actor(payee_channel_id)
         .await

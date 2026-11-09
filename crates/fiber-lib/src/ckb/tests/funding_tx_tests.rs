@@ -4,8 +4,15 @@ use crate::ckb::funding::{
     SECP_SIGHASH_PLACEHOLDER_SIGNATURE_BYTES,
 };
 use crate::ckb::{is_secp_sighash_placeholder_witness, FundingError, FundingRequest, FundingTx};
+use ckb_sdk::{
+    traits::{
+        dummy_impls::{DummyCellCollector, DummyHeaderDepResolver},
+        OffchainCellDepResolver, OffchainTransactionDependencyProvider,
+    },
+    tx_builder::{CapacityBalancer, TxBuilder},
+};
 use ckb_types::{
-    core::{Capacity, TransactionView},
+    core::{Capacity, FeeRate, TransactionView},
     packed::{self, CellInput, Script},
     prelude::*,
 };
@@ -108,6 +115,7 @@ fn test_verify_peer_funding_contribution_rejects_insufficient_ckb_inputs() {
         &local_tx,
         &remote_tx,
         &[peer_input_cell(149, None, packed::Bytes::default())],
+        0,
     );
     assert!(matches!(result, Err(FundingError::InvalidPeerFundingTx)));
 
@@ -115,6 +123,7 @@ fn test_verify_peer_funding_contribution_rejects_insufficient_ckb_inputs() {
         &local_tx,
         &remote_tx,
         &[peer_input_cell(150, None, packed::Bytes::default())],
+        0,
     )
     .expect("peer inputs cover funding cell and change");
 }
@@ -142,6 +151,7 @@ fn test_verify_peer_funding_contribution_rejects_excess_udt_change() {
             Some(udt_type_script.clone()),
             1999u128.to_le_bytes().pack(),
         )],
+        0,
     );
     assert!(matches!(result, Err(FundingError::InvalidPeerFundingTx)));
 
@@ -153,8 +163,136 @@ fn test_verify_peer_funding_contribution_rejects_excess_udt_change() {
             Some(udt_type_script),
             2000u128.to_le_bytes().pack(),
         )],
+        0,
     )
     .expect("peer UDT inputs cover funding cell and UDT change");
+}
+
+#[test]
+fn test_verify_peer_funding_contribution_rejects_underpaid_funding_fee() {
+    let local_tx = test_tx(vec![], vec![]);
+    let remote_tx = test_tx(vec![test_output(100, None)], vec![packed::Bytes::default()]);
+
+    let result = verify_peer_funding_contribution(
+        &local_tx,
+        &remote_tx,
+        &[peer_input_cell(100, None, packed::Bytes::default())],
+        1_000,
+    );
+
+    assert!(matches!(
+        result,
+        Err(FundingError::PeerFundingFeeTooLow { .. })
+    ));
+}
+
+#[test]
+fn test_verify_peer_funding_contribution_accepts_funding_fee_at_declared_rate() {
+    let local_tx = test_tx(vec![], vec![]);
+    let remote_tx = test_tx(vec![test_output(100, None)], vec![packed::Bytes::default()]);
+    let tx_size = remote_tx.data().serialized_size_in_block() as u64;
+    let fee = FeeRate::from_u64(1_000).fee(tx_size).as_u64();
+
+    verify_peer_funding_contribution(
+        &local_tx,
+        &remote_tx,
+        &[peer_input_cell(100 + fee, None, packed::Bytes::default())],
+        1_000,
+    )
+    .expect("peer fee at the declared rate must be accepted");
+}
+
+#[test]
+fn test_verify_peer_funding_contribution_fee_check_skips_non_initial_tx() {
+    let local_tx = test_tx(vec![test_output(100, None)], vec![packed::Bytes::default()]);
+    let remote_tx = test_tx(
+        vec![test_output(100, None), test_output(50, None)],
+        vec![packed::Bytes::default(), packed::Bytes::default()],
+    );
+
+    verify_peer_funding_contribution(
+        &local_tx,
+        &remote_tx,
+        &[peer_input_cell(50, None, packed::Bytes::default())],
+        1_000,
+    )
+    .expect("the fee check only applies to the initial peer funding tx");
+}
+
+#[tokio::test]
+async fn test_external_funding_extra_deps_are_included_before_fee_balancing() {
+    let first_dep = packed::CellDep::new_builder()
+        .out_point(out_point(1, 0))
+        .build();
+    let extra_dep = packed::CellDep::new_builder()
+        .out_point(out_point(2, 0))
+        .build();
+    let context = FundingContext {
+        funding_source_lock_script_cell_deps: vec![
+            first_dep.clone(),
+            extra_dep.clone(),
+            first_dep.clone(),
+        ],
+        ..dummy_funding_context()
+    };
+    let input_out_point = out_point(3, 0);
+    let input_cell = peer_input_cell(30_000_000_000, None, packed::Bytes::default());
+    let mut provider = OffchainTransactionDependencyProvider::default();
+    provider.cells.insert(
+        (input_out_point.tx_hash().unpack(), 0),
+        (input_cell.output.clone(), input_cell.data.clone()),
+    );
+    let resolver = OffchainCellDepResolver::default();
+    let header_resolver = DummyHeaderDepResolver;
+    let mut collector = DummyCellCollector;
+
+    for fee_rate in [1_000, 100_000] {
+        let request = FundingRequest {
+            local_amount: 10_000_000_000,
+            funding_fee_rate: fee_rate,
+            ..FundingRequest::default()
+        };
+        let builder = dummy_funding_builder(FundingTx::new(), request, context.clone());
+        let base_tx = builder
+            .build_base_async(&mut collector, &resolver, &header_resolver, &provider)
+            .await
+            .expect("build external funding base transaction");
+
+        // Supply a known input so the real SDK balancer can calculate the fee
+        // and change without querying a live CKB node.
+        let base_tx = base_tx
+            .as_advanced_builder()
+            .input(CellInput::new(input_out_point.clone(), 0))
+            .build();
+        let mut balancer = CapacityBalancer::new_simple(
+            context.funding_source_lock_script.clone(),
+            secp_sighash_placeholder_witness(),
+            fee_rate,
+        );
+        let tx = balancer
+            .balance_tx_capacity_async(
+                &base_tx,
+                &mut collector,
+                &provider,
+                &resolver,
+                &header_resolver,
+            )
+            .await
+            .expect("balance external funding transaction");
+
+        assert_eq!(tx.cell_deps().len(), 2, "include each dependency once");
+        assert_eq!(
+            tx.cell_deps().into_iter().collect::<HashSet<_>>(),
+            HashSet::from([first_dep.clone(), extra_dep.clone()])
+        );
+        verify_peer_funding_contribution(
+            &packed::Transaction::default().into_view(),
+            &tx,
+            std::slice::from_ref(&input_cell),
+            fee_rate,
+        )
+        .expect("initial funding fee covers all external dependencies");
+    }
 }
 
 #[test]

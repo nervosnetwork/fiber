@@ -39,6 +39,16 @@ pub struct CkbChainState {
     live_cells_exclusion_map: LiveCellsExclusionMap,
 }
 
+impl CkbChainState {
+    /// Lets the watchtower see this actor's funding inputs (`held_cells`).
+    fn publish_held(&self) {
+        super::held_cells::hold_funding(
+            self.live_cells_exclusion_map.holder(),
+            self.live_cells_exclusion_map.input_out_points(),
+        );
+    }
+}
+
 #[derive(Debug, AsRefStr)]
 pub enum CkbChainMessage {
     Fund(
@@ -62,6 +72,7 @@ pub enum CkbChainMessage {
         funding_cell_lock_script: packed::Script,
         funding_udt_type_script: Option<packed::Script>,
         funding_source_lock_script: Option<packed::Script>,
+        funding_fee_rate: u64,
         reply: RpcReplyPort<Result<(), FundingError>>,
     },
     /// Add funding tx. This is used to reestablish a channel that is not ready yet.
@@ -119,6 +130,15 @@ impl Actor for CkbChainActor {
         })
     }
 
+    async fn post_stop(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        super::held_cells::hold_funding(state.live_cells_exclusion_map.holder(), vec![]);
+        Ok(())
+    }
+
     async fn handle(
         &self,
         myself: ActorRef<Self::Msg>,
@@ -156,6 +176,7 @@ impl Actor for CkbChainActor {
                     }
                     Some(shell_script) => fund_via_shell(shell_script, tx, request, context).await,
                 };
+                state.publish_held();
                 match &result {
                     Ok(funding_tx) => debug!(
                         "[{}] Funding request succeeded: tx_hash={:?}",
@@ -201,6 +222,7 @@ impl Actor for CkbChainActor {
                         &mut state.live_cells_exclusion_map,
                     )
                     .await;
+                state.publish_held();
                 if let Err(ref err) = result {
                     debug!(
                         "[{}] BuildUnsignedFundingTx failed: {}",
@@ -216,6 +238,7 @@ impl Actor for CkbChainActor {
                 funding_cell_lock_script,
                 funding_udt_type_script,
                 funding_source_lock_script,
+                funding_fee_rate,
                 reply,
             } => {
                 let local_tx_hash = local_tx.calc_tx_hash();
@@ -233,7 +256,7 @@ impl Actor for CkbChainActor {
                     funding_source_lock_script,
                 );
                 let result = funding_tx
-                    .update_for_peer(remote_tx.into_view(), context)
+                    .update_for_peer(remote_tx.into_view(), context, funding_fee_rate)
                     .await;
                 match &result {
                     Ok(()) => {
@@ -243,6 +266,7 @@ impl Actor for CkbChainActor {
                         state
                             .live_cells_exclusion_map
                             .migrate_funding_tx(&local_tx_hash, &funding_tx);
+                        state.publish_held();
                     }
                     Err(err) => {
                         debug!(
@@ -257,9 +281,11 @@ impl Actor for CkbChainActor {
             }
             CkbChainMessage::AddFundingTx(tx) => {
                 state.live_cells_exclusion_map.add_funding_tx(&tx);
+                state.publish_held();
             }
             CkbChainMessage::RemoveFundingTx(tx_hash) => {
                 state.live_cells_exclusion_map.remove(&tx_hash.into());
+                state.publish_held();
             }
             CkbChainMessage::CommitFundingTx(tx_hash, commit_block_number) => {
                 state
@@ -314,15 +340,26 @@ impl Actor for CkbChainActor {
                     Err(err) => {
                         //FIXME(yukang): RBF or duplicated transaction handling
                         match err {
-                            RpcError::Rpc(e)
-                                if (e.code.code() == -1107 || e.code.code() == -1111) =>
-                            {
+                            RpcError::Rpc(e) if e.code.code() == -1107 => {
                                 tracing::warn!(
                                     "[{}] transaction { } already in pool",
                                     myself.get_name().unwrap_or_default(),
                                     tx.hash(),
                                 );
                                 Ok(())
+                            }
+                            // PoolRejectedRBF: another transaction in the pool spends an input of
+                            // this one, and this one cannot replace it. It was taken for "already
+                            // in pool", so a funding that lost its input waited for its own
+                            // timeout (LSP2, 2026-10-28).
+                            RpcError::Rpc(ref e) if super::is_pool_conflict_code(e.code.code()) => {
+                                tracing::error!(
+                                    "[{}] transaction {} conflicts with one in the pool: {:?}",
+                                    myself.get_name().unwrap_or_default(),
+                                    tx.hash(),
+                                    err
+                                );
+                                Err(err)
                             }
                             _ => {
                                 tracing::error!(

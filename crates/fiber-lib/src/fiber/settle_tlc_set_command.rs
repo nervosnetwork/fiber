@@ -189,10 +189,14 @@ where
             return Vec::new();
         };
 
-        let total_amount = first_tlc.total_amount_or_amount();
-        if total_amount < invoice.amount.unwrap_or_default() {
+        let declared_total_amount = first_tlc.total_amount_or_amount();
+        if declared_total_amount < invoice.amount.unwrap_or_default() {
             return self.reject_all(TlcErrorCode::IncorrectOrUnknownPaymentDetails);
         }
+        // The invoice amount is authoritative when present. A payer-declared total
+        // that exceeds it must not be able to block settlement, including for TLCs
+        // persisted before acceptance-time validation was added.
+        let total_amount = invoice.amount.unwrap_or(declared_total_amount);
 
         let mut accumulated_amount = 0;
         // Remove overpaid TLCs

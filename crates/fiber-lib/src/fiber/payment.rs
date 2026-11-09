@@ -827,6 +827,15 @@ pub enum PaymentActorMessage {
         RpcReplyPort<Result<SendPaymentResponse, String>>,
     ),
     RetrySendPayment(Option<u64>),
+    /// Resume startup work unless this actor already scheduled or handled this attempt.
+    ResumeAfterClosedChannel(u64),
+    /// Acknowledge a closed source only after its queued Add's outcome is persisted.
+    CompleteClosedLocalAdd {
+        channel_id: Hash256,
+        channel_outpoint: OutPoint,
+        command: Box<fiber_types::AddTlcCommand>,
+        reply: RpcReplyPort<Result<(), String>>,
+    },
     OnAddTlcResultEvent {
         attempt_id: Option<u64>,
         add_tlc_result: Result<(Hash256, u64), (ProcessingChannelError, TlcErr)>,
@@ -862,6 +871,10 @@ pub struct PaymentActorState {
     // Deduplicate only replayed on-chain removal notifications in this actor lifetime.
     // A fresh actor must be able to recover a persisted retry whose timer was lost.
     processed_onchain_removals: HashSet<(Hash256, fiber_types::TLCId)>,
+    // A fresh actor must re-arm a persisted retry, but duplicate receipts must not add timers.
+    processed_closed_adds: HashSet<(Hash256, u64)>,
+    // Startup must not race an outbox callback's already-scheduled retry.
+    attempts_with_retry_work: HashSet<u64>,
 }
 
 impl PaymentActorState {
@@ -876,6 +889,8 @@ impl PaymentActorState {
             last_error_packet: None,
             retry_send_payment_count: 0,
             processed_onchain_removals: HashSet::new(),
+            processed_closed_adds: HashSet::new(),
+            attempts_with_retry_work: HashSet::new(),
         }
     }
 }
@@ -1073,10 +1088,36 @@ where
                     }
                 }
             }
+            PaymentActorMessage::ResumeAfterClosedChannel(attempt_id) => {
+                if state.attempts_with_retry_work.insert(attempt_id) {
+                    let _ = self
+                        .resume_payment_session(myself.clone(), state, Some(attempt_id))
+                        .await;
+                    self.check_payment_final(myself, state);
+                }
+            }
             PaymentActorMessage::RetrySendPayment(attempt_id) => {
                 let _ = self
                     .resume_payment_session(myself.clone(), state, attempt_id)
                     .await;
+                self.check_payment_final(myself, state);
+            }
+            PaymentActorMessage::CompleteClosedLocalAdd {
+                channel_id,
+                channel_outpoint,
+                command,
+                reply,
+            } => {
+                let result = self
+                    .complete_closed_local_add(
+                        myself.clone(),
+                        state,
+                        channel_id,
+                        channel_outpoint,
+                        &command,
+                    )
+                    .await;
+                let _ = reply.send(result);
                 self.check_payment_final(myself, state);
             }
             PaymentActorMessage::OnAddTlcResultEvent {
@@ -1326,7 +1367,14 @@ where
 
         let mut channel_stats = GraphChannelStat::new(Some(channel_stats));
         let amount_low_bound = Some(1);
-        let mut attempt_id = session.attempts_count() as u64;
+        // Derive the next id from the highest retained id: a retried session can
+        // keep settled attempts, so ids may not be contiguous and `attempts_count`
+        // could collide with an existing settled attempt.
+        let mut attempt_id = session
+            .attempts()
+            .map(|attempt| attempt.id)
+            .max()
+            .unwrap_or(0);
         let mut target_amount = remain_amount;
         let mut single_path_max = None;
         let mut iteration = 0_u64;
@@ -1691,7 +1739,28 @@ where
         self.store
             .get_channel_state_by_outpoint(channel_outpoint)
             .is_some_and(|channel_state| {
-                channel_state.owns_payment_attempt(attempt.payment_hash, attempt.id)
+                let owns_update = if attempt.is_retrying()
+                    && matches!(channel_state.state, fiber_types::ChannelState::Closed(_))
+                {
+                    // Closed queued Adds only deliver failure; they can no longer execute this retry.
+                    channel_state.tlc_state.all_tlcs().any(|tlc| {
+                        !tlc.applied_flags
+                            .contains(fiber_types::AppliedFlags::REMOVE)
+                            && tlc.payment_hash == attempt.payment_hash
+                            && tlc.attempt_id == Some(attempt.id)
+                    })
+                } else {
+                    channel_state.owns_payment_attempt(attempt.payment_hash, attempt.id)
+                };
+                owns_update
+                    || channel_state.session_v2.iter().any(|session| {
+                        session.remove_effects.iter().any(|(tlc, execution)| {
+                            tlc.payment_hash == attempt.payment_hash
+                                && tlc.attempt_id == Some(attempt.id)
+                                && (attempt.status == AttemptStatus::Created
+                                    || execution.is_none_or(|number| number == attempt.tried_times))
+                        })
+                    })
             })
     }
 
@@ -1774,9 +1843,13 @@ where
         let Some(attempt_id) = attempt_id else {
             return Ok(());
         };
+        state.attempts_with_retry_work.insert(attempt_id);
 
         match self.store.get_attempt(session.payment_hash(), attempt_id) {
             Some(mut attempt) if attempt.is_retrying() => {
+                if self.channel_owns_attempt(&attempt) {
+                    return Ok(());
+                }
                 match self
                     .resend_payment_attempt(myself, state, session, &mut attempt)
                     .await
@@ -1844,6 +1917,93 @@ where
             attempt_id.and_then(|attempt_id| self.store.get_attempt(payment_hash, attempt_id));
 
         (payment_session, attempt)
+    }
+
+    async fn complete_closed_local_add(
+        &self,
+        myself: ActorRef<PaymentActorMessage>,
+        state: &mut PaymentActorState,
+        channel_id: Hash256,
+        channel_outpoint: OutPoint,
+        command: &fiber_types::AddTlcCommand,
+    ) -> Result<(), String> {
+        let attempt_id = command.attempt_id.ok_or("Closed Add has no attempt ID")?;
+        if command.payment_hash != state.payment_hash {
+            return Err("Closed Add payment identity mismatch".to_owned());
+        }
+        let (Some(session), Some(attempt)) =
+            self.get_payment_session_with_attempt(state.payment_hash, Some(attempt_id))
+        else {
+            return Err("Closed Add payment or attempt not found".to_owned());
+        };
+        if !attempt.first_hop_channel_outpoint_eq(&channel_outpoint) {
+            return Ok(());
+        }
+        if !session.status.is_final()
+            && matches!(
+                attempt.status,
+                AttemptStatus::Created | AttemptStatus::Retrying
+            )
+        {
+            let packet = command
+                .onion_packet
+                .clone()
+                .ok_or("Closed Add has no execution packet")?
+                .into_sphinx_onion_packet()
+                .map_err(|e| e.to_string())?;
+            let key = secp256k1::SecretKey::from_byte_array(&attempt.session_key)
+                .map_err(|e| e.to_string())?;
+            // A retry gets a new onion key, so an old queued command cannot fail the new execution.
+            if packet.public_key != key.public_key(&Secp256k1::signing_only()) {
+                return Ok(());
+            }
+            if state.processed_closed_adds.insert((channel_id, attempt_id)) {
+                let local_node = self.network_graph.read().await.get_source_pubkey();
+                let failure = TlcErr::new_channel_fail(
+                    TlcErrorCode::PermanentChannelFailure,
+                    local_node,
+                    channel_outpoint,
+                    None,
+                );
+                if attempt.status == AttemptStatus::Created {
+                    self.handle_add_tlc_result_event(
+                        myself,
+                        state,
+                        Some(attempt_id),
+                        Err((
+                            ProcessingChannelError::InvalidState(
+                                "Channel closed before AddTlc execution".to_owned(),
+                            ),
+                            failure,
+                        )),
+                    )
+                    .await;
+                } else {
+                    // Retrying is already a durable failed outcome; re-arm it without counting failure twice.
+                    self.update_graph_with_tlc_fail(&self.network, &failure)
+                        .await;
+                    self.register_payment_retry(myself, state, Some(attempt_id));
+                }
+            }
+        }
+        let session = self
+            .store
+            .get_payment_session(state.payment_hash)
+            .ok_or("Closed Add payment disappeared")?;
+        let current = self
+            .store
+            .get_attempt(state.payment_hash, attempt_id)
+            .ok_or("Closed Add attempt disappeared")?;
+        if current.status == AttemptStatus::Created && !session.status.is_final() {
+            return Err("Closed Add outcome is not persisted".to_owned());
+        }
+        if !session.is_dry_run() {
+            self.store.insert_payment_session(session.clone());
+            if session.status.is_final() {
+                self.store.clear_attempts_channel_index(state.payment_hash);
+            }
+        }
+        Ok(())
     }
 
     async fn handle_add_tlc_result_event(
@@ -1920,9 +2080,20 @@ where
 
         let mut already_processed = false;
         if let Some(completion) = completion {
-            if !attempt.first_hop_channel_outpoint_eq(&completion.channel_outpoint)
-                || attempt.is_success()
-            {
+            if !attempt.first_hop_channel_outpoint_eq(&completion.channel_outpoint) {
+                return Ok(false);
+            }
+            if attempt.is_success() {
+                // The attempt and aggregate session are separate writes. Recovery
+                // can repeat delivery after the attempt write but before the session
+                // write; repair the aggregate before acknowledging the source outbox.
+                session.update_with_attempt(attempt);
+                if !session.is_dry_run() {
+                    self.store.insert_payment_session(session.clone());
+                    if session.status.is_final() {
+                        self.store.clear_attempts_channel_index(payment_hash);
+                    }
+                }
                 return Ok(false);
             }
             let same_execution = attempt.tried_times == completion.tried_times;
@@ -1958,15 +2129,6 @@ where
                             self.store
                                 .clear_attempts_channel_index(session.payment_hash());
                         }
-                    }
-                    if session.request.trampoline_context.is_some() {
-                        // The incoming TLC is protected by this preimage even if
-                        // other MPP parts later make the aggregate session fail.
-                        self.network
-                            .send_message(NetworkActorMessage::new_event(
-                                NetworkActorEvent::ResolveTrampolinePayment(payment_hash),
-                            ))
-                            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                     }
                 }
                 RemoveTlcReason::RemoveTlcFail(reason) => {
@@ -2125,14 +2287,6 @@ where
             }
         }
 
-        if session.request.trampoline_context.is_some() {
-            self.network
-                .send_message(NetworkActorMessage::new_event(
-                    NetworkActorEvent::ResolveTrampolinePayment(payment_hash),
-                ))
-                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-        }
-
         Ok(())
     }
 
@@ -2169,6 +2323,9 @@ where
             error!("retry payment delay overflow");
             return;
         };
+        if let Some(id) = attempt_id {
+            state.attempts_with_retry_work.insert(id);
+        }
         myself.send_after(Duration::from_millis(delay), move || {
             PaymentActorMessage::RetrySendPayment(attempt_id)
         });
@@ -2232,7 +2389,12 @@ where
                     )));
                 }
                 if !payment_data.dry_run {
-                    self.store.delete_attempts(payment_data.payment_hash);
+                    // Keep successfully settled attempts: MPP payments can settle some
+                    // parts and fail others. Deleting all attempts would make the
+                    // rebuilt session forget the delivered amount and re-dispatch the
+                    // full payment amount on retry, allowing overpayment.
+                    self.store
+                        .delete_unsettled_attempts(payment_data.payment_hash);
                 }
             }
         }
@@ -2255,11 +2417,156 @@ where
             DEFAULT_PAYMENT_TRY_LIMIT
         };
         let mut payment_session = PaymentSession::new_session(&self.store, payment_data, try_limit);
-        assert!(payment_session.attempts_count() == 0);
+        // Unsettled attempts are removed above; any attempt that survives is a
+        // settled MPP part that the rebuilt session must keep accounting for.
+        assert!(payment_session
+            .attempts()
+            .all(|attempt| attempt.is_success()));
         self.store.insert_payment_session(payment_session.clone());
 
         self.resume_payment_session(myself, state, None).await?;
         payment_session.flush_attempts(&self.store);
         return Ok(payment_session.into());
+    }
+}
+
+#[cfg(test)]
+mod closed_add_tests {
+    use fiber_types::AttemptStatus;
+    use ractor::{Actor, ActorProcessingErr, ActorRef};
+
+    use crate::fiber::{
+        channel::ChannelActorStateStore, graph::NetworkGraphStateStore,
+        network::TestFiberMessageKind,
+    };
+    use crate::tests::test_utils::create_nodes_with_established_channel;
+
+    use super::{PaymentActor, PaymentActorArguments, PaymentActorMessage, PaymentActorState};
+
+    struct RetryMailbox;
+
+    #[async_trait::async_trait]
+    impl Actor for RetryMailbox {
+        type Msg = PaymentActorMessage;
+        type State = ();
+        type Arguments = ();
+        async fn pre_start(&self, _: ActorRef<Self::Msg>, _: ()) -> Result<(), ActorProcessingErr> {
+            Ok(())
+        }
+        async fn handle(
+            &self,
+            _: ActorRef<Self::Msg>,
+            _: Self::Msg,
+            _: &mut (),
+        ) -> Result<(), ActorProcessingErr> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_retrying_add_respects_live_owner_but_not_closed_failure_queue() {
+        let (mut a, mut b, id) =
+            create_nodes_with_established_channel(100000000000, 11800000000, false).await;
+        a.hold_next_fiber_messages(b.pubkey, id, TestFiberMessageKind::CommitmentSigned, 1)
+            .await;
+        let hash = a
+            .send_payment_keysend(&b, 1000, false)
+            .await
+            .unwrap()
+            .payment_hash;
+        a.wait_for_held_fiber_messages(1).await;
+        let mut attempt = a.store.get_attempts(hash).pop().unwrap();
+        b.stop().await;
+        a.stop().await;
+        let actor = PaymentActor::new(
+            a.store.clone(),
+            a.network_graph.clone(),
+            a.network_actor.clone(),
+        );
+        let mut source = a.get_channel_actor_state(id);
+        let mut tlc = source.tlc_state.offered_tlcs.tlcs[0].clone();
+        source.tlc_state.offered_tlcs.tlcs.clear();
+        source
+            .retryable_tlc_operations
+            .push_back(fiber_types::RetryableTlcOperation::AddTlc(
+                fiber_types::AddTlcCommand {
+                    amount: tlc.amount,
+                    payment_hash: tlc.payment_hash,
+                    attempt_id: tlc.attempt_id,
+                    expiry: tlc.expiry,
+                    hash_algorithm: tlc.hash_algorithm,
+                    onion_packet: tlc.onion_packet.clone(),
+                    shared_secret: tlc.shared_secret,
+                    previous_tlc: None,
+                    is_trampoline_hop: tlc.is_trampoline_hop,
+                },
+            ));
+        a.store.insert_channel_actor_state(source.clone());
+        attempt.status = AttemptStatus::Retrying;
+        attempt.tried_times = 1;
+        assert!(actor.channel_owns_attempt(&attempt));
+        source.state = fiber_types::ChannelState::Closed(fiber_types::CloseFlags::COOPERATIVE);
+        a.store.insert_channel_actor_state(source.clone());
+        assert!(
+            !actor.channel_owns_attempt(&attempt),
+            "a closed failure notification cannot execute the retry"
+        );
+        attempt.status = AttemptStatus::Created;
+        assert!(
+            actor.channel_owns_attempt(&attempt),
+            "Created must still wait for the durable failure handoff"
+        );
+        attempt.status = AttemptStatus::Retrying;
+        tlc.applied_flags.insert(fiber_types::AppliedFlags::REMOVE);
+        source
+            .session_v2
+            .as_mut()
+            .unwrap()
+            .remove_effects
+            .push((tlc, Some(attempt.tried_times)));
+        a.store.insert_channel_actor_state(source.clone());
+        assert!(
+            actor.channel_owns_attempt(&attempt),
+            "the current execution's outbox must prevent a duplicate retry"
+        );
+        source.session_v2.as_mut().unwrap().remove_effects[0].1 = Some(attempt.tried_times - 1);
+        a.store.insert_channel_actor_state(source.clone());
+        assert!(
+            !actor.channel_owns_attempt(&attempt),
+            "an older failed execution must not prevent retrying"
+        );
+        source.session_v2.as_mut().unwrap().remove_effects[0].1 = None;
+        a.store.insert_channel_actor_state(source.clone());
+        assert!(
+            actor.channel_owns_attempt(&attempt),
+            "an unbound result must be resolved before retrying"
+        );
+        source.retryable_tlc_operations.clear();
+        source.session_v2.as_mut().unwrap().remove_effects.clear();
+        a.store.insert_channel_actor_state(source);
+        attempt.last_error = Some("persisted failure awaiting retry".to_owned());
+        a.store.insert_attempt(attempt.clone());
+        let (mailbox, task) = Actor::spawn(None, RetryMailbox, ()).await.unwrap();
+        let mut state = PaymentActorState::new(PaymentActorArguments {
+            payment_hash: hash,
+            init_command: PaymentActorMessage::RetrySendPayment(None),
+        });
+        actor.register_payment_retry(mailbox.clone(), &mut state, Some(attempt.id));
+        // The stopped transport is intentional: a duplicate startup claim must do no network work.
+        actor
+            .handle_command(
+                mailbox.clone(),
+                &mut state,
+                PaymentActorMessage::ResumeAfterClosedChannel(attempt.id),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            a.store.get_attempt(hash, attempt.id).unwrap().status,
+            AttemptStatus::Retrying,
+            "startup must not dispatch again while a live callback's retry is scheduled"
+        );
+        mailbox.stop(None);
+        task.await.unwrap();
     }
 }

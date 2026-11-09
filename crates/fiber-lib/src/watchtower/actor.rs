@@ -11,7 +11,7 @@ use ckb_hash::new_blake2b;
 use ckb_jsonrpc_types::{Either, Status};
 use ckb_sdk::{
     rpc::ckb_indexer::{Cell, Order, ScriptType, SearchKey, SearchKeyFilter, SearchMode},
-    traits::{CellCollector, CellQueryOptions, DefaultCellCollector, ValueRangeOption},
+    traits::{CellCollector, CellQueryOptions, ValueRangeOption},
     transaction::builder::FeeCalculator,
     util::blake160,
     CkbRpcClient, RpcError, Since, SinceType,
@@ -57,8 +57,8 @@ use crate::{
     },
 };
 use fiber_types::{
-    ChannelData, CommitmentContractFeatures, Hash256, HashAlgorithm, NodeId, Privkey, Pubkey,
-    RevocationData, SettlementData,
+    ChannelData, ChannelFeatures, Hash256, HashAlgorithm, NodeId, Privkey, Pubkey, RevocationData,
+    SettlementData,
 };
 
 use super::WatchtowerStore;
@@ -115,7 +115,7 @@ pub enum WatchtowerMessage {
         Pubkey,
         Pubkey,
         SettlementData,
-        CommitmentContractFeatures,
+        ChannelFeatures,
     ),
     RemoveChannel(Hash256),
     UpdateRevocation(Hash256, RevocationData, SettlementData),
@@ -177,7 +177,7 @@ where
                 local_funding_pubkey,
                 remote_funding_pubkey,
                 settlement_data,
-                commitment_contract_features,
+                channel_features,
             ) => self.store.insert_watch_channel_with_features(
                 NodeId::local(),
                 channel_id,
@@ -187,7 +187,7 @@ where
                 local_funding_pubkey,
                 remote_funding_pubkey,
                 settlement_data,
-                commitment_contract_features,
+                channel_features,
             ),
             WatchtowerMessage::RemoveChannel(channel_id) => {
                 self.store.remove_watch_channel(NodeId::local(), channel_id)
@@ -271,13 +271,27 @@ fn run_periodic_check<S>(store: S, _node_id: NodeId, signer: LocalSigner, rpc_ur
 where
     S: WatchtowerStore + Send + Sync + 'static,
 {
-    let mut cell_collector = new_default_cell_collector(&rpc_url);
+    // Each cell it picks is held at once, so an opening cannot pick it meanwhile (`held_cells`).
+    let mut cell_collector = crate::ckb::held_cells::TakingCollector::new(
+        new_default_cell_collector(&rpc_url),
+        crate::ckb::held_cells::Taker::Watchtower,
+        rpc_url.clone(),
+    );
+    // Not the cells an opening put in its funding, nor those of this watchtower's own
+    // transactions still in the pool (`held_cells`).
+    if let Err(err) =
+        crate::ckb::held_cells::lock_held(&mut cell_collector, crate::now_timestamp_as_millis_u64())
+    {
+        error!("Failed to lock held cells: {:?}", err);
+    }
 
+    // One client for the round: building one loads the TLS root store, about 6 ms of CPU, and it
+    // was built for every watched channel.
+    let ckb_client = CkbRpcClient::with_builder(&rpc_url, |builder| {
+        builder.timeout(CKB_RPC_TIMEOUT).no_proxy()
+    })
+    .expect("create ckb rpc client should not fail");
     for (channel_node_id, channel_data) in store.get_watch_channels_with_nodes() {
-        let ckb_client = CkbRpcClient::with_builder(&rpc_url, |builder| {
-            builder.timeout(CKB_RPC_TIMEOUT).no_proxy()
-        })
-        .expect("create ckb rpc client should not fail");
         let tx_hash = match crate::ckb::client::find_first_input_tx_hash(
             &ckb_client,
             &channel_data_funding_tx_lock(&channel_data),
@@ -354,8 +368,13 @@ where
                                                                 ) {
                                                                     Ok(tx_hash) => {
                                                                         info!("Revocation tx: {:?} sent, tx_hash: {:?}", tx, tx_hash);
+                                                                        hold_sent(
+                                                                            &tx,
+                                                                            &mut cell_collector,
+                                                                        );
                                                                     }
                                                                     Err(err) => {
+                                                                        crate::ckb::held_cells::release_for_watchtower(tx.input_pts_iter());
                                                                         error!("Failed to send revocation tx: {:?}, error: {:?}", tx, err);
                                                                     }
                                                                 }
@@ -375,7 +394,7 @@ where
                                             try_settle_commitment_tx(
                                                 commitment_lock,
                                                 first_commitment_tx_out_point,
-                                                ckb_client,
+                                                &ckb_client,
                                                 channel_data,
                                                 true,
                                                 &signer,
@@ -390,7 +409,7 @@ where
                                     try_settle_commitment_tx(
                                         commitment_lock,
                                         first_commitment_tx_out_point,
-                                        ckb_client,
+                                        &ckb_client,
                                         channel_data,
                                         false,
                                         &signer,
@@ -426,12 +445,27 @@ where
     }
 }
 
+/// Holds the cells `tx` spends (`held_cells`), and locks them in `cell_collector` for the rest of
+/// this round.
+fn hold_sent(tx: &TransactionView, cell_collector: &mut dyn CellCollector) {
+    let cells: Vec<OutPoint> = tx.input_pts_iter().collect();
+    crate::ckb::held_cells::hold_for_watchtower(
+        cells.iter().cloned(),
+        crate::now_timestamp_as_millis_u64(),
+    );
+    for cell in cells {
+        if let Err(err) = cell_collector.lock_cell(cell, u64::MAX) {
+            error!("Failed to lock a sent cell: {:?}", err);
+        }
+    }
+}
+
 fn build_revocation_tx(
     commitment_tx_out_point: OutPoint,
     revocation_data: RevocationData,
     x_only_aggregated_pubkey: [u8; 32],
     signer: &LocalSigner,
-    cell_collector: &mut DefaultCellCollector,
+    cell_collector: &mut impl CellCollector,
 ) -> Result<TransactionView, Box<dyn std::error::Error>> {
     let witness = [
         XUDT_COMPATIBLE_WITNESS.to_vec(),
@@ -488,7 +522,7 @@ fn build_revocation_tx(
     query.secondary_script_len_range = Some(ValueRangeOption::new_exact(0));
     query.data_len_range = Some(ValueRangeOption::new_exact(0));
     query.min_total_capacity = min_total_capacity;
-    let (cells, _total_capacity) = cell_collector.collect_live_cells(&query, false)?;
+    let (cells, _total_capacity) = cell_collector.collect_live_cells(&query, true)?;
     let mut inputs_capacity = 0u64;
     for cell in cells {
         let input_capacity: u64 = cell.output.capacity().unpack();
@@ -537,11 +571,11 @@ fn build_revocation_tx(
 fn try_settle_commitment_tx<S: WatchtowerStore>(
     commitment_lock: Script,
     first_commitment_tx_out_point: OutPoint,
-    ckb_client: CkbRpcClient,
+    ckb_client: &CkbRpcClient,
     channel_data: ChannelData,
     for_remote: bool,
     signer: &LocalSigner,
-    cell_collector: &mut DefaultCellCollector,
+    cell_collector: &mut impl CellCollector,
     store: &S,
     self_node_id: NodeId,
     first_commitment_block_number: u64,
@@ -565,11 +599,8 @@ fn try_settle_commitment_tx<S: WatchtowerStore>(
         return;
     }
     let lock_args = commitment_lock.args().raw_data();
-    let initial_tlcs = tracked_settlement_tlcs(
-        settlement_data,
-        for_remote,
-        channel_data.commitment_contract_features,
-    );
+    let initial_tlcs =
+        tracked_settlement_tlcs(settlement_data, for_remote, channel_data.channel_features);
     let script = commitment_lock
         .as_builder()
         .args(lock_args[0..36].to_vec().pack())
@@ -619,14 +650,14 @@ fn try_settle_commitment_tx<S: WatchtowerStore>(
 
     let settlement_scan = scan_watched_settlement_txs(
         search_key.clone(),
-        &ckb_client,
+        ckb_client,
         &script,
         first_commitment_tx_out_point.clone(),
         initial_tlcs,
         &channel_data.channel_id,
         store,
         &self_node_id,
-        channel_data.commitment_contract_features,
+        channel_data.channel_features,
     );
 
     // the live cells number should be 1 or 0 for normal case.
@@ -702,8 +733,7 @@ fn try_settle_commitment_tx<S: WatchtowerStore>(
                                                     {
                                                         SettlementWitness::build_from_witness(
                                                             &witness[16..],
-                                                            channel_data
-                                                                .commitment_contract_features,
+                                                            channel_data.channel_features,
                                                         )
                                                     } else {
                                                         warn!("Found a commitment tx, but the witness is invalid: {:?}", commitment_tx_hash);
@@ -757,8 +787,10 @@ fn try_settle_commitment_tx<S: WatchtowerStore>(
                         Ok(Some(tx)) => match ckb_client.send_transaction(tx.data().into(), None) {
                             Ok(tx_hash) => {
                                 info!("Settlement tx: {:?} sent, tx_hash: {:#x}", tx, tx_hash);
+                                hold_sent(&tx, cell_collector);
                             }
                             Err(err) => {
+                                crate::ckb::held_cells::release_for_watchtower(tx.input_pts_iter());
                                 error!("Failed to send settlement tx: {:?}, error: {:?}", tx, err);
                             }
                         },
@@ -794,7 +826,7 @@ fn scan_watched_settlement_txs<S: WatchtowerStore>(
     channel_id: &Hash256,
     store: &S,
     self_node_id: &NodeId,
-    commitment_contract_features: CommitmentContractFeatures,
+    channel_features: ChannelFeatures,
 ) -> WatchedSettlementScan {
     let mut watched_outpoints = HashMap::from([(first_commitment_tx_out_point, initial_tlcs)]);
     let mut settlement_witness_input_indices = HashMap::new();
@@ -868,7 +900,7 @@ fn scan_watched_settlement_txs<S: WatchtowerStore>(
                 channel_id,
                 store,
                 self_node_id,
-                commitment_contract_features,
+                channel_features,
             ) {
                 settlement_witness_input_indices.insert(tx_hash, witness_index);
                 progress = true;
@@ -909,7 +941,7 @@ fn process_watched_settlement_tx<S: WatchtowerStore>(
         channel_id,
         store,
         self_node_id,
-        CommitmentContractFeatures::LEGACY,
+        ChannelFeatures::LEGACY,
     )
 }
 
@@ -922,7 +954,7 @@ fn process_watched_settlement_tx_with_features<S: WatchtowerStore>(
     channel_id: &Hash256,
     store: &S,
     self_node_id: &NodeId,
-    commitment_contract_features: CommitmentContractFeatures,
+    channel_features: ChannelFeatures,
 ) -> Option<usize> {
     let tx_hash = tx.calc_tx_hash();
     if processed_tx_hashes.contains(&tx_hash) {
@@ -956,7 +988,7 @@ fn process_watched_settlement_tx_with_features<S: WatchtowerStore>(
         self_node_id,
         &tracked_tlcs,
         terminal,
-        commitment_contract_features,
+        channel_features,
     )?;
     processed_tx_hashes.insert(tx_hash.clone());
     watched_outpoints.remove(&watched_outpoint);
@@ -989,7 +1021,7 @@ fn reconcile_settlement_witness<S: WatchtowerStore>(
     self_node_id: &NodeId,
     tracked_tlcs: &[TrackedSettlementTlc],
     terminal: bool,
-    commitment_contract_features: CommitmentContractFeatures,
+    channel_features: ChannelFeatures,
 ) -> Option<Vec<TrackedSettlementTlc>> {
     let Some(witness) = tx.witnesses().get(witness_index) else {
         warn!(
@@ -1007,7 +1039,7 @@ fn reconcile_settlement_witness<S: WatchtowerStore>(
         return None;
     }
     let Some(settlement_witness) =
-        SettlementWitness::build_from_witness(&witness[16..], commitment_contract_features)
+        SettlementWitness::build_from_witness(&witness[16..], channel_features)
     else {
         warn!(
             "Cannot decode settlement witness for tx {:?}",
@@ -1146,14 +1178,14 @@ fn verified_watch_preimage<S: WatchtowerStore>(
 fn first_settlement_witness(
     settlement_data: &SettlementData,
     for_remote: bool,
-    commitment_contract_features: CommitmentContractFeatures,
+    channel_features: ChannelFeatures,
     local_settlement_key: Privkey,
     remote_settlement_key: Pubkey,
 ) -> Vec<u8> {
     settlement_data_to_witness(
         settlement_data,
         for_remote,
-        commitment_contract_features,
+        channel_features,
         local_settlement_key,
         remote_settlement_key,
     )
@@ -1443,7 +1475,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
                         settlement_tlc_to_witness(
                             settlement_tlc,
                             for_remote,
-                            channel_data.commitment_contract_features,
+                            channel_data.channel_features,
                         ) != tracked_tlc.witness
                     },
                 )
@@ -1545,7 +1577,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
                     first_settlement_witness(
                         settlement_data,
                         for_remote,
-                        channel_data.commitment_contract_features,
+                        channel_data.channel_features,
                         channel_data.local_settlement_key.clone(),
                         channel_data.remote_settlement_key,
                     ),
@@ -1560,7 +1592,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
     let new_script_hash = {
         let mut sw = SettlementWitness::build_from_witness(
             &[&[0x01], new_settlement_witness.as_slice()].concat(),
-            channel_data.commitment_contract_features,
+            channel_data.channel_features,
         )
         .expect("valid data");
         sw.unlocks.push(unlock.clone());
@@ -1683,7 +1715,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
         if min_total_capacity > 0 {
             query.min_total_capacity = min_total_capacity;
         }
-        let (cells, _total_capacity) = cell_collector.collect_live_cells(&query, false)?;
+        let (cells, _total_capacity) = cell_collector.collect_live_cells(&query, true)?;
         let mut inputs_capacity = capacity;
         let since = if unlock.unlock_type < 0xFE && !unlock.with_preimage {
             Since::new(SinceType::Timestamp, current_time / 1000, false).value()
@@ -1911,7 +1943,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
         query.secondary_script_len_range = Some(ValueRangeOption::new_exact(0));
         query.data_len_range = Some(ValueRangeOption::new_exact(0));
         query.min_total_capacity = min_total_capacity;
-        let (cells, _total_capacity) = cell_collector.collect_live_cells(&query, false)?;
+        let (cells, _total_capacity) = cell_collector.collect_live_cells(&query, true)?;
         let mut inputs_capacity = commitment_cell.output.capacity.value();
         let since = if unlock.unlock_type < 0xFE && !unlock.with_preimage {
             Since::new(SinceType::Timestamp, current_time / 1000, false).value()
@@ -2239,11 +2271,8 @@ impl Unlock {
 }
 
 impl SettlementWitness {
-    pub fn build_from_witness(
-        witness: &[u8],
-        commitment_contract_features: CommitmentContractFeatures,
-    ) -> Option<Self> {
-        let payment_hash_len = commitment_contract_features.payment_hash_len();
+    pub fn build_from_witness(witness: &[u8], channel_features: ChannelFeatures) -> Option<Self> {
+        let payment_hash_len = channel_features.payment_hash_len();
         let htlc_script_len = 65 + payment_hash_len;
         let mut reader = WitnessReader::new(witness);
         let _unlock_count = reader.take_u8()?;
@@ -2372,7 +2401,7 @@ mod tests {
     struct TestWatchtowerStore {
         settlements: Mutex<Vec<(Hash256, TLCId, OnChainTlcSettlement)>>,
         preimages: Mutex<Vec<(NodeId, Hash256, Hash256)>>,
-        registered_features: Mutex<Vec<CommitmentContractFeatures>>,
+        registered_features: Mutex<Vec<ChannelFeatures>>,
     }
 
     impl TestWatchtowerStore {
@@ -2414,7 +2443,7 @@ mod tests {
             self.registered_features
                 .lock()
                 .expect("lock poisoned")
-                .push(CommitmentContractFeatures::LEGACY);
+                .push(ChannelFeatures::LEGACY);
         }
 
         fn insert_watch_channel_with_features(
@@ -2427,12 +2456,12 @@ mod tests {
             _local_funding_pubkey: Pubkey,
             _remote_funding_pubkey: Pubkey,
             _settlement_data: SettlementData,
-            commitment_contract_features: CommitmentContractFeatures,
+            channel_features: ChannelFeatures,
         ) {
             self.registered_features
                 .lock()
                 .expect("lock poisoned")
-                .push(commitment_contract_features);
+                .push(channel_features);
         }
 
         fn remove_watch_channel(&self, _node_id: NodeId, _channel_id: Hash256) {}
@@ -2560,7 +2589,7 @@ mod tests {
             payment_hash: payment_hash.into(),
             hash_algorithm: HashAlgorithm::CkbHash,
             witness: test_htlc(payment_hash_prefix).to_witness(),
-            commitment_contract_features: CommitmentContractFeatures::LEGACY,
+            channel_features: ChannelFeatures::LEGACY,
         }
     }
 
@@ -2702,12 +2731,8 @@ mod tests {
             tlc_id: settlement_tlc.tlc_id.flip(),
             payment_hash: settlement_tlc.payment_hash,
             hash_algorithm: settlement_tlc.hash_algorithm,
-            witness: settlement_tlc_to_witness(
-                &settlement_tlc,
-                false,
-                CommitmentContractFeatures::LEGACY,
-            ),
-            commitment_contract_features: CommitmentContractFeatures::LEGACY,
+            witness: settlement_tlc_to_witness(&settlement_tlc, false, ChannelFeatures::LEGACY),
+            channel_features: ChannelFeatures::LEGACY,
         }];
         let settlement_data = SettlementData {
             local_amount: 100_000_000_000,
@@ -2725,7 +2750,7 @@ mod tests {
             pending_remote_settlement_data: settlement_data.clone(),
             local_settlement_data: settlement_data.clone(),
             revocation_data: None,
-            commitment_contract_features: CommitmentContractFeatures::LEGACY,
+            channel_features: ChannelFeatures::LEGACY,
         };
         let settlement_witness = SettlementWitness::build_from_witness(
             &[
@@ -2733,14 +2758,14 @@ mod tests {
                 settlement_data_to_witness(
                     &settlement_data,
                     false,
-                    CommitmentContractFeatures::LEGACY,
+                    ChannelFeatures::LEGACY,
                     local_settlement_key,
                     remote_settlement_key,
                 )
                 .as_slice(),
             ]
             .concat(),
-            CommitmentContractFeatures::LEGACY,
+            ChannelFeatures::LEGACY,
         )
         .expect("settlement witness");
 
@@ -2826,11 +2851,8 @@ mod tests {
             &payment_hash,
         ]
         .concat();
-        let parsed = SettlementWitness::build_from_witness(
-            &v1_witness,
-            CommitmentContractFeatures::ONCHAIN_FULL_PAYMENT_HASH,
-        )
-        .expect("V1 settlement witness");
+        let parsed = SettlementWitness::build_from_witness(&v1_witness, ChannelFeatures::V2)
+            .expect("V1 settlement witness");
         assert_eq!(parsed.pending_htlcs[0].payment_hash, payment_hash);
         assert_eq!(parsed.unlocks[0].witness_len(), 99);
 
@@ -2843,11 +2865,8 @@ mod tests {
                 preimage: None,
             },
         );
-        let parsed = SettlementWitness::build_from_witness(
-            &legacy[16..],
-            CommitmentContractFeatures::LEGACY,
-        )
-        .expect("legacy settlement witness");
+        let parsed = SettlementWitness::build_from_witness(&legacy[16..], ChannelFeatures::LEGACY)
+            .expect("legacy settlement witness");
         assert_eq!(parsed.pending_htlcs[0].payment_hash, vec![1u8; 20]);
         assert_eq!(parsed.unlocks[0].witness_len(), 67);
     }
@@ -2877,13 +2896,13 @@ mod tests {
         let witness = first_settlement_witness(
             &settlement_data,
             false,
-            CommitmentContractFeatures::ONCHAIN_FULL_PAYMENT_HASH,
+            ChannelFeatures::V2,
             Privkey::from(&[3u8; 32]),
             Privkey::from(&[4u8; 32]).pubkey(),
         );
         let parsed = SettlementWitness::build_from_witness(
             &[&[0u8], witness.as_slice()].concat(),
-            CommitmentContractFeatures::ONCHAIN_FULL_PAYMENT_HASH,
+            ChannelFeatures::V2,
         )
         .expect("V1 first settlement witness");
 
@@ -2907,12 +2926,12 @@ mod tests {
             Privkey::from(&[3u8; 32]).pubkey(),
             Privkey::from(&[4u8; 32]).pubkey(),
             settlement_data,
-            CommitmentContractFeatures::ONCHAIN_FULL_PAYMENT_HASH,
+            ChannelFeatures::V2,
         );
 
         assert_eq!(
             *store.registered_features.lock().expect("lock poisoned"),
-            vec![CommitmentContractFeatures::ONCHAIN_FULL_PAYMENT_HASH]
+            vec![ChannelFeatures::V2]
         );
     }
 
@@ -3498,12 +3517,12 @@ mod tests {
             pending_remote_settlement_data: pending,
             local_settlement_data: preceding.clone(),
             revocation_data: None,
-            commitment_contract_features: CommitmentContractFeatures::LEGACY,
+            channel_features: ChannelFeatures::LEGACY,
         };
         let witness = settlement_data_to_witness(
             &preceding,
             true,
-            CommitmentContractFeatures::LEGACY,
+            ChannelFeatures::LEGACY,
             channel_data.local_settlement_key.clone(),
             channel_data.remote_settlement_key,
         );

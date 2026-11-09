@@ -80,8 +80,8 @@ pub mod server {
 
     use super::biscuit::BiscuitAuth;
     use crate::store::actor::StoreActorMessage;
-    use crate::store::store_impl::StoreChange;
-    use ractor::{ActorCell, OutputPort};
+    use crate::store::store_impl::StoreChangePort;
+    use ractor::ActorCell;
 
     #[cfg(feature = "watchtower")]
     pub trait RpcServerStore:
@@ -279,7 +279,7 @@ pub mod server {
         store_actor: Option<ActorRef<StoreActorMessage>>,
         network_graph: Option<Arc<RwLock<NetworkGraph<S>>>>,
         supervisor: ActorCell,
-        store_change_port: Option<Arc<OutputPort<StoreChange>>>,
+        store_change_port: Option<Arc<StoreChangePort>>,
         #[cfg(debug_assertions)] ckb_chain_actor: Option<ActorRef<CkbChainMessage>>,
         #[cfg(debug_assertions)] rpc_dev_module_commitment_txs: Option<
             Arc<RwLock<HashMap<(Hash256, u64), TransactionView>>>,
