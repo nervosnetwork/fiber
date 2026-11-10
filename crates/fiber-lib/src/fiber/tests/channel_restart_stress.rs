@@ -15,7 +15,8 @@ async fn test_zero_fee_ring_restart_preserves_each_nodes_balance() {
     use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
     use crate::invoice::{Currency, InvoiceBuilder};
     use crate::tests::test_utils::{
-        create_n_nodes_network_with_params, wait_until_timeout, ChannelParameters,
+        create_n_nodes_network_with_params, wait_until_async_timeout, wait_until_timeout,
+        ChannelParameters,
     };
     use fiber_types::{ChannelConnectivityState, ChannelState};
     use secp256k1::SECP256K1;
@@ -237,6 +238,12 @@ async fn test_zero_fee_ring_restart_preserves_each_nodes_balance() {
         );
     }
     for node in &nodes {
+        // ChannelReady is persisted before the separate routing graph processes its updates.
+        // Wait for routing admission without sending a payment, then require a real probe.
+        wait_until_async_timeout(|| async {
+            node.send_payment_keysend_to_self(1, true).await.is_ok()
+        })
+        .await;
         let probe = node.send_payment_keysend_to_self(1, false).await.unwrap();
         assert_eq!(probe.fee, 0);
         node.wait_until_success(probe.payment_hash).await;
