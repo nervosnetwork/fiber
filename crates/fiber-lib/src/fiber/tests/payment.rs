@@ -11556,3 +11556,167 @@ async fn test_local_remove_notification_reuses_retry_policy_without_double_failu
     );
     node.stop().await;
 }
+
+/// Records the ERROR events emitted on this thread while it is alive.
+struct ErrorEvents {
+    messages: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    _guard: tracing::dispatcher::DefaultGuard,
+    _second: tracing::Dispatch,
+}
+
+impl ErrorEvents {
+    fn capture() -> Self {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        struct Recorder(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+
+        struct Message(String);
+
+        impl tracing::field::Visit for Message {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "message" {
+                    self.0 = format!("{value:?}");
+                }
+            }
+        }
+
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Recorder {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _ctx: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                if *event.metadata().level() == tracing::Level::ERROR {
+                    let mut message = Message(String::new());
+                    event.record(&mut message);
+                    self.0.lock().unwrap().push(message.0);
+                }
+            }
+        }
+
+        let messages = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder =
+            tracing::Dispatch::new(tracing_subscriber::registry().with(Recorder(messages.clone())));
+        // tracing caches a callsite's interest when the callsite is first hit. While only one
+        // dispatcher is alive, it asks only the default of the thread that hits it, which can be
+        // another test's thread with no subscriber. A second live dispatcher makes it ask all.
+        let second = tracing::Dispatch::new(tracing_subscriber::registry());
+        Self {
+            messages,
+            _guard: tracing::dispatcher::set_default(&recorder),
+            _second: second,
+        }
+    }
+
+    fn messages(&self) -> Vec<String> {
+        self.messages.lock().unwrap().clone()
+    }
+}
+
+// A dry run stores no payment session, so it must not end with "Can't find payment session".
+#[tokio::test]
+async fn test_send_payment_dry_run_logs_no_error() {
+    init_tracing();
+
+    let (nodes, _channels) = create_n_nodes_network(
+        &[((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB))],
+        2,
+    )
+    .await;
+    let [node_0, node_1] = nodes.try_into().expect("2 nodes");
+
+    // The test runtime is single threaded, so the payment actor logs on this thread.
+    let errors = ErrorEvents::capture();
+    for _ in 0..3 {
+        let res = node_0
+            .send_payment_keysend(&node_1, 10000000000, true)
+            .await;
+        assert!(res.is_ok(), "dry run failed: {res:?}");
+        let payment_hash = res.unwrap().payment_hash;
+        assert!(node_0.get_payment_session(payment_hash).is_none());
+
+        // The payment actor of a dry run still stops by itself.
+        let mut inflight = node_0.get_inflight_payment_count().await;
+        for _ in 0..50 {
+            if inflight == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            inflight = node_0.get_inflight_payment_count().await;
+        }
+        assert_eq!(inflight, 0, "the dry run payment actor did not stop");
+    }
+    assert_eq!(errors.messages(), Vec::<String>::new());
+}
+
+// Only dry runs are skipped: a payment actor that finds no session for a real payment
+// still logs "Can't find payment session".
+#[tokio::test]
+async fn test_missing_payment_session_is_still_logged() {
+    struct Mailbox;
+
+    #[async_trait::async_trait]
+    impl ractor::Actor for Mailbox {
+        type Msg = PaymentActorMessage;
+        type State = ();
+        type Arguments = ();
+
+        async fn pre_start(
+            &self,
+            _: ractor::ActorRef<Self::Msg>,
+            _: (),
+        ) -> Result<(), ractor::ActorProcessingErr> {
+            Ok(())
+        }
+
+        async fn handle(
+            &self,
+            _: ractor::ActorRef<Self::Msg>,
+            _: Self::Msg,
+            _: &mut (),
+        ) -> Result<(), ractor::ActorProcessingErr> {
+            Ok(())
+        }
+    }
+
+    init_tracing();
+
+    let (nodes, _channels) = create_n_nodes_network(
+        &[((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB))],
+        2,
+    )
+    .await;
+    let node = &nodes[0];
+    let actor = PaymentActor::new(
+        node.store.clone(),
+        node.network_graph.clone(),
+        node.network_actor.clone(),
+    );
+    let payment_hash = gen_rand_sha256_hash();
+    let mut state = PaymentActorState::new(PaymentActorArguments {
+        payment_hash,
+        init_command: PaymentActorMessage::RetrySendPayment(None),
+    });
+    let (mailbox, task) = ractor::Actor::spawn(None, Mailbox, ())
+        .await
+        .expect("spawn mailbox");
+
+    let errors = ErrorEvents::capture();
+    actor
+        .handle_command(
+            mailbox,
+            &mut state,
+            PaymentActorMessage::RetrySendPayment(None),
+        )
+        .await
+        .expect("handle retry");
+    assert_eq!(
+        errors.messages(),
+        vec!["Can't find payment session".to_string()]
+    );
+    // check_payment_final stops the actor it was given.
+    tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .expect("the actor stops")
+        .expect("the actor ends cleanly");
+}
