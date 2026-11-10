@@ -72,7 +72,7 @@ use musig2::secp::{Point, Scalar};
 use musig2::KeyAggContext;
 use ractor::{call, Actor, ActorProcessingErr, ActorRef};
 use secp256k1::SECP256K1;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tracing::debug;
@@ -4771,29 +4771,14 @@ async fn test_restarted_offline_channel_force_closes_expired_offered_tlc() {
 }
 
 #[tokio::test]
-async fn test_received_tlc_claim_force_closes_after_offline_restart_v1() {
-    do_test_received_tlc_claim_force_closes_after_offline_restart(false).await;
-}
-
-#[tokio::test]
 async fn test_received_tlc_claim_force_closes_after_offline_restart_v2() {
-    do_test_received_tlc_claim_force_closes_after_offline_restart(true).await;
-}
-
-async fn do_test_received_tlc_claim_force_closes_after_offline_restart(v2: bool) {
     init_tracing();
-    let (mut payer, mut payee, channel_id) = if v2 {
-        create_nodes_with_established_channel(HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT, true).await
-    } else {
-        create_legacy_nodes_with_established_channel(HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT, true).await
-    };
-    assert_eq!(
-        payee
-            .get_channel_actor_state(channel_id)
-            .session_v2
-            .is_some(),
-        v2
-    );
+    let (mut payer, mut payee, channel_id) =
+        create_nodes_with_established_channel(HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT, true).await;
+    assert!(payee
+        .get_channel_actor_state(channel_id)
+        .session_v2
+        .is_some());
     let mut claims = Vec::new();
     for _ in 0..2 {
         let preimage = gen_rand_sha256_hash();
@@ -4887,15 +4872,27 @@ async fn do_test_received_tlc_claim_force_closes_after_offline_restart(v2: bool)
             .hash(),
         commitment_hash
     );
-    for (payment_hash, preimage, _) in claims {
-        assert_eq!(payee.get_payment_preimage(&payment_hash), Some(preimage));
-        payee
-            .expect_event(|event| {
-                matches!(event,
-            NetworkServiceEvent::PreimageCreated(hash, observed)
-                if *hash == payment_hash && *observed == preimage)
+    let mut pending_preimages: HashMap<_, _> = claims
+        .into_iter()
+        .map(|(payment_hash, preimage, _)| {
+            assert_eq!(payee.get_payment_preimage(&payment_hash), Some(preimage));
+            (payment_hash, preimage)
+        })
+        .collect();
+    // Deduplication does not promise notification order. Waiting for one hash at a time
+    // would discard another claim's earlier notification and then wait forever for it.
+    while !pending_preimages.is_empty() {
+        let (payment_hash, preimage) = payee
+            .expect_to_process_event(|event| match event {
+                NetworkServiceEvent::PreimageCreated(hash, preimage)
+                    if pending_preimages.contains_key(hash) =>
+                {
+                    Some((*hash, *preimage))
+                }
+                _ => None,
             })
             .await;
+        assert_eq!(pending_preimages.remove(&payment_hash), Some(preimage));
     }
 }
 
@@ -11713,7 +11710,7 @@ async fn test_reestablish_timeout_ignores_time_spent_offline() {
 /// watchdog before returning the error rather than later broadcasting that commitment.
 #[tokio::test]
 async fn test_reestablish_timeout_stops_after_rejected_handshake() {
-    let (mut node_a, mut node_b, channel_id) =
+    let (node_a, node_b, channel_id) =
         create_legacy_nodes_with_established_channel(50_000_000_000, 10_000_000_000, true).await;
     let mut state = node_a.get_channel_actor_state(channel_id);
     let myself = node_a.get_channel_actor(channel_id).await.unwrap();
@@ -11742,40 +11739,8 @@ async fn test_reestablish_timeout_stops_after_rejected_handshake() {
         .await
         .is_err());
     assert!(state.reestablishing);
-    assert_eq!(state.state, ChannelState::Stale);
     assert_eq!(state.reestablish_started_at, None);
     assert!(!state.is_reestablish_stalled(REESTABLISH_TIMEOUT + 1));
-
-    // A received-claim watchdog must not revive force-closing after another disconnect
-    // or restart. Store an expiring authorized claim alongside the rejected audit.
-    let preimage = gen_rand_sha256_hash();
-    let payment_hash = HashAlgorithm::CkbHash.hash(preimage).into();
-    let claim = super::create_test_channel_state_with_tlc(channel_id, 0, 1000, payment_hash, None);
-    state.tlc_state = claim.tlc_state.clone();
-    state.tlc_state.get_mut(&TLCId::Received(0)).unwrap().expiry = 0;
-    state
-        .retryable_tlc_operations
-        .push_back(RetryableTlcOperation::RemoveTlc(
-            TLCId::Received(0),
-            RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
-                payment_preimage: preimage,
-            }),
-        ));
-    state.mark_reestablishing_offline();
-    node_b.stop().await;
-    node_a.stop().await;
-    node_a.store.insert_channel_actor_state(state);
-    node_a.start().await;
-    assert_eq!(
-        node_a.get_channel_actor_state(channel_id).state,
-        ChannelState::Stale
-    );
-    notify_maintain_channel_tlcs(&node_a, channel_id);
-    assert!(node_a.send_shutdown(channel_id, true).await.is_err());
-    assert_eq!(
-        node_a.get_channel_actor_state(channel_id).state,
-        ChannelState::Stale
-    );
 }
 
 #[test]

@@ -601,20 +601,13 @@ where
                         state.on_peer_reconnected();
                         let pending_commit_diff =
                             self.store.get_pending_commit_diff(&state.get_id());
-                        let result = state
+                        state
                             .handle_reestablish_channel_message(
                                 myself,
                                 reestablish_channel,
                                 pending_commit_diff,
                             )
-                            .await;
-                        if result.is_err() && state.state == ChannelState::ChannelReady {
-                            // A rejected audit can mean our commitment is revoked. Persist this
-                            // uncertainty so independent TLC deadlines cannot force-close it,
-                            // including after another disconnect or a local restart.
-                            state.update_state(ChannelState::Stale);
-                        }
-                        result?;
+                            .await?;
                         if !state.reestablishing {
                             state.schedule_next_retry_task(myself);
                         }
@@ -2741,14 +2734,6 @@ where
                 }
             };
 
-            // Reestablishment can leave fulfills queued across a restart. Before any force
-            // close, restore and reveal every authorized received claim, including TLCs whose
-            // own expiry did not trigger the close. Watchtower notifications are replayable.
-            for tlc in &state.tlc_state.received_tlcs.tlcs {
-                if let Some(preimage) = state.pending_received_tlc_claim_preimage(tlc) {
-                    self.store_preimage(tlc.payment_hash, preimage);
-                }
-            }
             let transaction = state.get_latest_commitment_transaction().await?;
 
             if let Some(close) = state.session_v2.as_mut().and_then(|s| s.closing.as_mut()) {
@@ -3907,7 +3892,11 @@ where
     /// Move an authorized, unconfirmed received-TLC claim on-chain before its expiry window.
     /// The preimage is saved when the fulfill is queued, but a peer withholding reestablishment
     /// can keep that queue blocked without ever starting an ACK timeout.
-    fn force_close_expiring_received_tlc_claims(&self, state: &ChannelActorState, now: u64) {
+    async fn force_close_expiring_received_tlc_claims(
+        &self,
+        state: &mut ChannelActorState,
+        now: u64,
+    ) -> ProcessingChannelResult<bool> {
         let can_force_close = match state.state {
             ChannelState::ChannelReady => true,
             ChannelState::ShuttingDown(flags) => {
@@ -3915,8 +3904,11 @@ where
             }
             _ => false,
         };
-        if !can_force_close || state.ensure_v2_not_quarantined().is_err() {
-            return;
+        if state.session_v2.is_none()
+            || !can_force_close
+            || state.ensure_v2_not_quarantined().is_err()
+        {
+            return Ok(false);
         }
         let delay_epoch = EpochNumberWithFraction::from_full_value(state.commitment_delay_epoch);
         // Use the existing 2/3 commitment-delay safety window. A received preimage claim
@@ -3934,8 +3926,44 @@ where
                 expiry = tlc.expiry,
                 "Force closing channel to claim an expiring received TLC"
             );
-            self.notify_network_actor_shutdown_me(state);
+            // Closing affects every pending claim, including later-expiring ones. Replay
+            // once per payment hash to recover lost watchtower notifications after restart,
+            // without rewriting an already-stored preimage or re-emitting PutPreimage.
+            let preimages: HashMap<_, _> = state
+                .tlc_state
+                .received_tlcs
+                .tlcs
+                .iter()
+                .filter_map(|tlc| {
+                    state
+                        .pending_received_tlc_claim_preimage(tlc)
+                        .map(|preimage| (tlc.payment_hash, preimage))
+                })
+                .collect();
+            for (payment_hash, preimage) in preimages {
+                if self.store.get_preimage(&payment_hash).is_none() {
+                    self.store.insert_preimage(payment_hash, preimage);
+                }
+                self.network
+                    .send_message(NetworkActorMessage::new_notification(
+                        NetworkServiceEvent::PreimageCreated(payment_hash, preimage),
+                    ))
+                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+            }
+            // Decide and enter the closing state in this actor turn: a queued generic
+            // shutdown could otherwise race with a settled fulfill or another close.
+            self.handle_shutdown_command(
+                state,
+                ShutdownCommand {
+                    force: true,
+                    close_script: None,
+                    fee_rate: None,
+                },
+            )
+            .await?;
+            return Ok(true);
         }
+        Ok(false)
     }
 
     fn onchain_settlement_expect_expiry(state: &ChannelActorState, now: u64) -> Option<u64> {
@@ -4862,13 +4890,16 @@ where
                 } else if state.is_waiting_onchain_settlement() {
                     self.maintain_waiting_onchain_settlement_tlcs(state, now);
                 }
-                if matches!(
-                    state.state,
-                    ChannelState::ChannelReady | ChannelState::ShuttingDown(_)
-                ) {
+                if !self
+                    .force_close_expiring_received_tlc_claims(state, now)
+                    .await?
+                    && matches!(
+                        state.state,
+                        ChannelState::ChannelReady | ChannelState::ShuttingDown(_)
+                    )
+                {
                     self.force_close_expiring_offered_tlcs(myself, state, now);
                 }
-                self.force_close_expiring_received_tlc_claims(state, now);
                 // Only closed or shutting-down channels can have on-chain TLC settlement
                 // signals. Scanning all TLCs against the watchtower store every tick on a
                 // healthy ready channel degrades payment throughput (see the benchmark
@@ -12306,7 +12337,13 @@ mod tests {
 
     #[tokio::test]
     async fn received_tlc_claim_deadline_survives_connectivity_changes() {
-        struct CaptureClose;
+        use crate::store::{sample::StoreSample, store_impl::StoreChange};
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc, Mutex,
+        };
+
+        struct CaptureClose(Arc<Mutex<Vec<(Hash256, Hash256)>>>);
 
         #[async_trait::async_trait]
         impl Actor for CaptureClose {
@@ -12329,19 +12366,29 @@ mod tests {
                 count: &mut usize,
             ) -> Result<(), ActorProcessingErr> {
                 match message {
-                    NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
-                        ChannelCommandWithId {
-                            command: ChannelCommand::Shutdown(command, _),
-                            ..
-                        },
+                    NetworkActorMessage::Event(NetworkActorEvent::ClosingTransactionPending(
+                        _,
+                        _,
+                        _,
+                        force,
                     )) => {
-                        assert!(command.force);
+                        assert!(force);
                         *count += 1;
                     }
+                    NetworkActorMessage::Notification(NetworkServiceEvent::PreimageCreated(
+                        hash,
+                        preimage,
+                    )) => self.0.lock().unwrap().push((hash, preimage)),
                     NetworkActorMessage::Command(
                         NetworkActorCommand::GetTestHeldFiberMessageCount(reply),
                     ) => {
                         let _ = reply.send(std::mem::take(count));
+                    }
+                    // The fallback must publish directly, without queuing a shutdown command.
+                    NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(_)) => {
+                        panic!(
+                            "received claim queued a shutdown instead of entering closing state"
+                        );
                     }
                     _ => {}
                 }
@@ -12349,18 +12396,29 @@ mod tests {
             }
         }
 
-        use crate::store::sample::StoreSample;
-        let (network, task) = Actor::spawn(None, CaptureClose, ()).await.unwrap();
+        let notifications = Arc::new(Mutex::new(Vec::new()));
+        let (network, task) = Actor::spawn(None, CaptureClose(notifications.clone()), ())
+            .await
+            .unwrap();
         let mut state = channel_state_with_limits(
             ChannelConstraints::new(1_000_000, 10),
             ChannelConstraints::new(1_000_000, 10),
         );
         state.network = Some(network.clone());
+        state.latest_commitment_transaction = Some(Transaction::default());
+        let (mut store, _dir) = crate::tests::test_utils::generate_store();
+        let writes = Arc::new(AtomicUsize::new(0));
+        let observed_writes = writes.clone();
+        store.set_watcher(Arc::new(move |change| {
+            if matches!(change, StoreChange::PutPreimage { .. }) {
+                observed_writes.fetch_add(1, Ordering::SeqCst);
+            }
+        }));
         let actor = ChannelActor::new(
             state.local_pubkey,
             state.remote_pubkey,
             network.clone(),
-            crate::fiber::tests::MockStore::new(),
+            store.clone(),
             None,
         );
         let preimage = Hash256::from([7; 32]);
@@ -12375,45 +12433,103 @@ mod tests {
             now + tlc_expiry_delay(&EpochNumberWithFraction::from_full_value(
                 state.commitment_delay_epoch,
             )) + CHECK_CHANNELS_INTERVAL.as_millis() as u64;
-        state.tlc_state.received_tlcs.tlcs.push(tlc);
+        state.tlc_state.received_tlcs.tlcs.push(tlc.clone());
+        // Same-hash parts must not generate duplicate writes or watchtower notifications.
+        tlc.tlc_id = TLCId::Received(1);
+        state.tlc_state.received_tlcs.tlcs.push(tlc.clone());
+        // Closing must also protect authorized claims that expire later.
+        let later_preimage = Hash256::from([8; 32]);
+        tlc.tlc_id = TLCId::Received(2);
+        tlc.expiry = u64::MAX;
+        tlc.payment_hash = tlc.hash_algorithm.hash(later_preimage).into();
+        tlc.removed_reason = Some(RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+            payment_preimage: later_preimage,
+        }));
+        state.tlc_state.received_tlcs.tlcs.push(tlc.clone());
+        store.insert_preimage(tlc.payment_hash, later_preimage);
+        writes.store(0, Ordering::SeqCst);
+        let v2_session = ChannelActorState::samples(0).remove(2).session_v2.clone();
 
         for v2 in [false, true] {
-            state.session_v2 = v2.then(|| {
-                ChannelActorState::samples(0)
-                    .remove(2)
-                    .session_v2
-                    .clone()
-                    .unwrap()
-            });
+            state.session_v2 = if v2 { v2_session.clone() } else { None };
             for connectivity in [
                 ChannelConnectivityState::Online,
                 ChannelConnectivityState::Offline,
                 ChannelConnectivityState::Syncing,
             ] {
+                state.state = ChannelState::ChannelReady;
                 state.connectivity_state = connectivity;
                 state.reestablishing = connectivity != ChannelConnectivityState::Online;
                 state.reestablish_started_at = Some(now);
-                // The claim deadline stays fixed even if a reconnect just restarted its timer.
-                actor.force_close_expiring_received_tlc_claims(&state, now);
+                // A reconnect timer cannot move this deadline; its exact boundary is excluded.
+                assert!(!actor
+                    .force_close_expiring_received_tlc_claims(&mut state, now)
+                    .await
+                    .unwrap());
+                assert_eq!(
+                    actor
+                        .force_close_expiring_received_tlc_claims(&mut state, now + 1)
+                        .await
+                        .unwrap(),
+                    v2
+                );
+                if v2 {
+                    assert_eq!(
+                        state.state,
+                        ChannelState::ShuttingDown(
+                            ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION
+                        )
+                    );
+                    // Another maintenance pass must not republish or replay notifications.
+                    assert!(!actor
+                        .force_close_expiring_received_tlc_claims(&mut state, now + 1)
+                        .await
+                        .unwrap());
+                }
                 assert_eq!(
                     call!(network, |reply| NetworkActorMessage::new_command(
                         NetworkActorCommand::GetTestHeldFiberMessageCount(reply)
                     ))
                     .unwrap(),
-                    0
+                    usize::from(v2)
                 );
-                actor.force_close_expiring_received_tlc_claims(&state, now + 1);
-                assert_eq!(
-                    call!(network, |reply| NetworkActorMessage::new_command(
-                        NetworkActorCommand::GetTestHeldFiberMessageCount(reply)
-                    ))
-                    .unwrap(),
-                    1
-                );
+                let observed = std::mem::take(&mut *notifications.lock().unwrap());
+                assert_eq!(observed.len(), if v2 { 2 } else { 0 });
+                if v2 {
+                    assert!(observed
+                        .contains(&(state.tlc_state.received_tlcs.tlcs[0].payment_hash, preimage)));
+                    assert!(observed.contains(&(tlc.payment_hash, later_preimage)));
+                }
             }
         }
+        // Only the missing hash is inserted, once across all same-hash parts and closes.
+        assert_eq!(writes.load(Ordering::SeqCst), 1);
+        assert_eq!(store.get_preimage(&tlc.payment_hash), Some(later_preimage));
         state.state = ChannelState::ShuttingDown(ShuttingDownFlags::AWAITING_PENDING_TLCS);
-        actor.force_close_expiring_received_tlc_claims(&state, now + 1);
+        assert!(actor
+            .force_close_expiring_received_tlc_claims(&mut state, now + 1)
+            .await
+            .unwrap());
+        for excluded in [
+            ChannelState::ShuttingDown(ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION),
+            ChannelState::Stale,
+            ChannelState::Closed(CloseFlags::UNCOOPERATIVE_LOCAL),
+        ] {
+            state.state = excluded;
+            assert!(!actor
+                .force_close_expiring_received_tlc_claims(&mut state, now + 1)
+                .await
+                .unwrap());
+        }
+        // A fulfill confirmed before this check must not trigger a close.
+        state.state = ChannelState::ChannelReady;
+        for tlc in &mut state.tlc_state.received_tlcs.tlcs {
+            tlc.removed_confirmed_at = Some(1);
+        }
+        assert!(!actor
+            .force_close_expiring_received_tlc_claims(&mut state, now + 1)
+            .await
+            .unwrap());
         assert_eq!(
             call!(network, |reply| NetworkActorMessage::new_command(
                 NetworkActorCommand::GetTestHeldFiberMessageCount(reply)
@@ -12421,35 +12537,31 @@ mod tests {
             .unwrap(),
             1
         );
-        state.state =
-            ChannelState::ShuttingDown(ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION);
-        state.reestablish_started_at = Some(now);
-        actor.force_close_expiring_received_tlc_claims(&state, now + 1);
+        notifications.lock().unwrap().clear();
+        // Ordinary force closes must not acquire the fallback's preimage replay behavior.
+        for tlc in &mut state.tlc_state.received_tlcs.tlcs {
+            tlc.removed_confirmed_at = None;
+        }
+        actor
+            .handle_shutdown_command(
+                &mut state,
+                ShutdownCommand {
+                    force: true,
+                    close_script: None,
+                    fee_rate: None,
+                },
+            )
+            .await
+            .unwrap();
         assert_eq!(
             call!(network, |reply| NetworkActorMessage::new_command(
                 NetworkActorCommand::GetTestHeldFiberMessageCount(reply)
             ))
             .unwrap(),
-            0
+            1
         );
-        state.state = ChannelState::Stale;
-        actor.force_close_expiring_received_tlc_claims(&state, now + 1);
-        assert_eq!(
-            call!(network, |reply| NetworkActorMessage::new_command(
-                NetworkActorCommand::GetTestHeldFiberMessageCount(reply)
-            ))
-            .unwrap(),
-            0
-        );
-        state.session_v2 = None;
-        actor.force_close_expiring_received_tlc_claims(&state, now + 1);
-        assert_eq!(
-            call!(network, |reply| NetworkActorMessage::new_command(
-                NetworkActorCommand::GetTestHeldFiberMessageCount(reply)
-            ))
-            .unwrap(),
-            0
-        );
+        assert!(notifications.lock().unwrap().is_empty());
+        assert_eq!(writes.load(Ordering::SeqCst), 1);
         network.stop(None);
         task.await.unwrap();
     }
