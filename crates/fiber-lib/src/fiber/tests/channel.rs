@@ -4771,6 +4771,293 @@ async fn test_restarted_offline_channel_force_closes_expired_offered_tlc() {
 }
 
 #[tokio::test]
+async fn test_received_tlc_claim_force_closes_after_offline_restart_v1() {
+    do_test_received_tlc_claim_force_closes_after_offline_restart(false).await;
+}
+
+#[tokio::test]
+async fn test_received_tlc_claim_force_closes_after_offline_restart_v2() {
+    do_test_received_tlc_claim_force_closes_after_offline_restart(true).await;
+}
+
+async fn do_test_received_tlc_claim_force_closes_after_offline_restart(v2: bool) {
+    init_tracing();
+    let (mut payer, mut payee, channel_id) = if v2 {
+        create_nodes_with_established_channel(HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT, true).await
+    } else {
+        create_legacy_nodes_with_established_channel(HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT, true).await
+    };
+    assert_eq!(
+        payee
+            .get_channel_actor_state(channel_id)
+            .session_v2
+            .is_some(),
+        v2
+    );
+    let mut claims = Vec::new();
+    for _ in 0..2 {
+        let preimage = gen_rand_sha256_hash();
+        let payment_hash = HashAlgorithm::CkbHash.hash(preimage).into();
+        let invoice = InvoiceBuilder::new(Currency::Fibd)
+            .amount(Some(3_000_000))
+            .payment_hash(payment_hash)
+            .payee_pub_key(payee.pubkey.into())
+            .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &payee.private_key.0))
+            .expect("build hold invoice");
+        payee.insert_invoice(invoice.clone(), None);
+        payer
+            .send_payment(SendPaymentCommand {
+                invoice: Some(invoice.to_string()),
+                ..Default::default()
+            })
+            .await
+            .expect("pay hold invoice");
+        wait_until_timeout(5_000, || {
+            payee.get_invoice_status(&payment_hash) == Some(CkbInvoiceStatus::Received)
+        })
+        .await;
+        let tlc_id = payee
+            .get_channel_actor_state(channel_id)
+            .tlc_state
+            .received_tlcs
+            .tlcs
+            .iter()
+            .find(|tlc| tlc.payment_hash == payment_hash)
+            .unwrap()
+            .tlc_id;
+        claims.push((payment_hash, preimage, tlc_id));
+    }
+    let commitment_hash = payee
+        .get_channel_actor_state(channel_id)
+        .latest_commitment_transaction
+        .clone()
+        .unwrap()
+        .into_view()
+        .hash();
+
+    payer.stop().await;
+    wait_until(|| {
+        payee.get_channel_actor_state(channel_id).connectivity_state
+            == ChannelConnectivityState::Offline
+    })
+    .await;
+    for (payment_hash, preimage, tlc_id) in &claims {
+        payee
+            .settle_invoice(payment_hash, *preimage)
+            .await
+            .expect("settle hold invoice");
+        let fulfill = RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+            payment_preimage: *preimage,
+        });
+        wait_until_timeout(5_000, || {
+            payee
+                .get_channel_actor_state(channel_id)
+                .retryable_tlc_operations
+                .contains(&RetryableTlcOperation::RemoveTlc(*tlc_id, fulfill.clone()))
+        })
+        .await;
+    }
+    payee.stop().await;
+    let mut state = payee.get_channel_actor_state(channel_id);
+    // Only the first TLC enters its safety window. Closing the channel must also
+    // restore the second claim, whose watchtower notification could have been lost.
+    state.tlc_state.get_mut(&claims[0].2).unwrap().expiry = now_timestamp_as_millis_u64() + 5_000;
+    payee.store.insert_channel_actor_state(state);
+    for (payment_hash, _, _) in &claims {
+        crate::invoice::PreimageStore::remove_preimage(&payee.store, payment_hash);
+        assert_eq!(payee.get_payment_preimage(payment_hash), None);
+    }
+    payee.start().await;
+    notify_maintain_channel_tlcs(&payee, channel_id);
+    wait_until_timeout(5_000, || {
+        let state = payee.get_channel_actor_state(channel_id);
+        matches!(state.state, ChannelState::ShuttingDown(flags)
+            if flags.contains(ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION))
+            || matches!(state.state, ChannelState::Closed(flags)
+                if flags.contains(CloseFlags::UNCOOPERATIVE_LOCAL))
+    })
+    .await;
+    assert_eq!(
+        payee
+            .get_channel_actor_state(channel_id)
+            .latest_commitment_transaction
+            .clone()
+            .unwrap()
+            .into_view()
+            .hash(),
+        commitment_hash
+    );
+    for (payment_hash, preimage, _) in claims {
+        assert_eq!(payee.get_payment_preimage(&payment_hash), Some(preimage));
+        payee
+            .expect_event(|event| {
+                matches!(event,
+            NetworkServiceEvent::PreimageCreated(hash, observed)
+                if *hash == payment_hash && *observed == preimage)
+            })
+            .await;
+    }
+}
+
+#[tokio::test]
+async fn test_forwarded_received_tlc_claim_force_closes_upstream() {
+    init_tracing();
+    let (nodes, channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+        ],
+        3,
+    )
+    .await;
+    let [mut payer, relay, receiver] = nodes.try_into().expect("three nodes");
+    let upstream = channels[0];
+    let downstream = channels[1];
+    let preimage = gen_rand_sha256_hash();
+    let payment_hash = HashAlgorithm::CkbHash.hash(preimage).into();
+    let amount = 3_000_000;
+    let invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(amount))
+        .payment_hash(payment_hash)
+        .payee_pub_key(receiver.pubkey.into())
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &receiver.private_key.0))
+        .expect("build receiver hold invoice");
+    receiver.insert_invoice(invoice.clone(), None);
+    let downstream_balance = relay.get_channel_actor_state(downstream).to_local_amount;
+    let upstream_balance = relay.get_channel_actor_state(upstream).to_local_amount;
+    payer
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("send forwarded payment");
+    wait_until_timeout(10_000, || {
+        receiver.get_invoice_status(&payment_hash) == Some(CkbInvoiceStatus::Received)
+    })
+    .await;
+    let tlc_id = relay
+        .get_channel_actor_state(upstream)
+        .tlc_state
+        .received_tlcs
+        .tlcs
+        .iter()
+        .find(|tlc| tlc.payment_hash == payment_hash)
+        .unwrap()
+        .tlc_id;
+    assert!(relay
+        .get_channel_actor_state(upstream)
+        .tlc_state
+        .get(&tlc_id)
+        .unwrap()
+        .forwarding_tlc
+        .is_some());
+    payer.stop().await;
+    wait_until_timeout(5_000, || {
+        relay.get_channel_actor_state(upstream).connectivity_state
+            == ChannelConnectivityState::Offline
+    })
+    .await;
+    receiver
+        .settle_invoice(&payment_hash, preimage)
+        .await
+        .expect("settle downstream");
+    let fulfill = RetryableTlcOperation::RemoveTlc(
+        tlc_id,
+        RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+            payment_preimage: preimage,
+        }),
+    );
+    wait_until_timeout(5_000, || {
+        relay
+            .get_channel_actor_state(upstream)
+            .retryable_tlc_operations
+            .contains(&fulfill)
+    })
+    .await;
+    wait_until_timeout(5_000, || {
+        receiver.get_invoice_status(&payment_hash) == Some(CkbInvoiceStatus::Paid)
+    })
+    .await;
+    assert_eq!(
+        relay.get_channel_actor_state(downstream).to_local_amount,
+        downstream_balance - amount
+    );
+    assert_eq!(
+        relay.get_channel_actor_state(upstream).to_local_amount,
+        upstream_balance
+    );
+    assert_eq!(relay.get_payment_preimage(&payment_hash), Some(preimage));
+
+    let mut state = relay.get_channel_actor_state(upstream);
+    let commitment_hash = state
+        .get_latest_commitment_transaction()
+        .await
+        .expect("retained commitment with current cell deps")
+        .hash();
+    state.tlc_state.get_mut(&tlc_id).unwrap().expiry = now_timestamp_as_millis_u64() + 5_000;
+    relay
+        .update_channel_actor_state(
+            state,
+            Some(ReloadParams {
+                notify_changes: false,
+            }),
+        )
+        .await;
+    notify_maintain_channel_tlcs(&relay, upstream);
+    wait_until_timeout(5_000, || {
+        matches!(relay.get_channel_actor_state(upstream).state,
+        ChannelState::Closed(flags) if flags.contains(CloseFlags::UNCOOPERATIVE_LOCAL)
+            && flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT))
+    })
+    .await;
+    let closed = relay.get_channel_actor_state(upstream);
+    assert_eq!(
+        closed.shutdown_transaction_hash,
+        Some(commitment_hash.into())
+    );
+    assert_eq!(
+        relay.get_channel_actor_state(downstream).state,
+        ChannelState::ChannelReady
+    );
+
+    #[cfg(feature = "watchtower")]
+    {
+        // The test harness has no live watchtower. Feed back the exact on-chain proof
+        // it would write, and verify the already-queued claim is reconciled.
+        relay.store.insert_onchain_tlc_settlement(
+            &fiber_types::NodeId::local(),
+            &upstream,
+            tlc_id,
+            OnChainTlcSettlement {
+                payment_hash,
+                hash_algorithm: HashAlgorithm::CkbHash,
+                preimage: Some(preimage),
+                tx_hash: gen_rand_sha256_hash(),
+                tlc_index: 0,
+            },
+        );
+        notify_maintain_channel_tlcs(&relay, upstream);
+        wait_until_timeout(5_000, || {
+            relay
+                .get_channel_actor_state(upstream)
+                .tlc_state
+                .get(&tlc_id)
+                .is_some_and(|tlc| {
+                    matches!(tlc.removed_reason,
+                        Some(RemoveTlcReason::RemoveTlcFulfill(fulfill))
+                            if fulfill.payment_preimage == preimage)
+                })
+        })
+        .await;
+        assert_eq!(
+            relay.get_channel_actor_state(downstream).to_local_amount,
+            downstream_balance - amount
+        );
+    }
+}
+
+#[tokio::test]
 async fn test_cooperative_shutdown_force_closes_expiring_offered_tlc_v1() {
     do_test_cooperative_shutdown_force_closes_expiring_offered_tlc(false).await;
 }
@@ -11426,7 +11713,7 @@ async fn test_reestablish_timeout_ignores_time_spent_offline() {
 /// watchdog before returning the error rather than later broadcasting that commitment.
 #[tokio::test]
 async fn test_reestablish_timeout_stops_after_rejected_handshake() {
-    let (node_a, node_b, channel_id) =
+    let (mut node_a, mut node_b, channel_id) =
         create_legacy_nodes_with_established_channel(50_000_000_000, 10_000_000_000, true).await;
     let mut state = node_a.get_channel_actor_state(channel_id);
     let myself = node_a.get_channel_actor(channel_id).await.unwrap();
@@ -11455,8 +11742,40 @@ async fn test_reestablish_timeout_stops_after_rejected_handshake() {
         .await
         .is_err());
     assert!(state.reestablishing);
+    assert_eq!(state.state, ChannelState::Stale);
     assert_eq!(state.reestablish_started_at, None);
     assert!(!state.is_reestablish_stalled(REESTABLISH_TIMEOUT + 1));
+
+    // A received-claim watchdog must not revive force-closing after another disconnect
+    // or restart. Store an expiring authorized claim alongside the rejected audit.
+    let preimage = gen_rand_sha256_hash();
+    let payment_hash = HashAlgorithm::CkbHash.hash(preimage).into();
+    let claim = super::create_test_channel_state_with_tlc(channel_id, 0, 1000, payment_hash, None);
+    state.tlc_state = claim.tlc_state.clone();
+    state.tlc_state.get_mut(&TLCId::Received(0)).unwrap().expiry = 0;
+    state
+        .retryable_tlc_operations
+        .push_back(RetryableTlcOperation::RemoveTlc(
+            TLCId::Received(0),
+            RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+                payment_preimage: preimage,
+            }),
+        ));
+    state.mark_reestablishing_offline();
+    node_b.stop().await;
+    node_a.stop().await;
+    node_a.store.insert_channel_actor_state(state);
+    node_a.start().await;
+    assert_eq!(
+        node_a.get_channel_actor_state(channel_id).state,
+        ChannelState::Stale
+    );
+    notify_maintain_channel_tlcs(&node_a, channel_id);
+    assert!(node_a.send_shutdown(channel_id, true).await.is_err());
+    assert_eq!(
+        node_a.get_channel_actor_state(channel_id).state,
+        ChannelState::Stale
+    );
 }
 
 #[test]

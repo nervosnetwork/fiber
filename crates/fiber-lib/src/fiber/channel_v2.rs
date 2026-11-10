@@ -7369,6 +7369,16 @@ mod tests {
         )
         .await;
         b.wait_for_held_fiber_messages(2).await;
+        // B holding ClosingSigned only proves its own shutdown was sent. A's
+        // network/channel actors can still be processing that Shutdown message.
+        crate::tests::test_utils::wait_until_timeout(5_000, || {
+            a.get_channel_actor_state(id)
+                .session_v2
+                .as_ref()
+                .and_then(|session| session.closing.as_ref())
+                .is_some_and(|close| close.remote_shutdown.is_some())
+        })
+        .await;
         let mut retained = a.get_channel_actor_state(id);
         let close = retained
             .session_v2
