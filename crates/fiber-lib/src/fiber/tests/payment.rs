@@ -1961,6 +1961,7 @@ async fn check_invoice_network_at_payment_entrypoint(with_router: bool) {
                 assert_eq!(response.payment_hash, payment_hash);
                 if !dry_run {
                     payer.wait_until_payment_finished(payment_hash).await;
+                    payer.wait_until_no_inflight_payments().await;
                     continue;
                 }
             }
@@ -2989,6 +2990,7 @@ async fn test_send_payment_with_route_with_invalid_parameters() {
 
     assert!(res.is_ok());
     node_0.wait_until_success(res.unwrap().payment_hash).await;
+    node_0.wait_until_no_inflight_payments().await;
 
     // now we change the fee of the first channel
     let mut copy_router = router.clone();
@@ -4849,7 +4851,7 @@ async fn test_send_payment_self_with_mixed_channel() {
             ..Default::default()
         })
         .await;
-    assert_eq!(nodes[0].get_inflight_payment_count().await, 0);
+    nodes[0].wait_until_no_inflight_payments().await;
 }
 
 #[tokio::test]
