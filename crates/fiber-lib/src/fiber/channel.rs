@@ -2164,6 +2164,10 @@ where
 
     fn store_preimage(&self, payment_hash: Hash256, preimage: Hash256) {
         self.store.insert_preimage(payment_hash, preimage);
+        self.notify_preimage_created(payment_hash, preimage);
+    }
+
+    fn notify_preimage_created(&self, payment_hash: Hash256, preimage: Hash256) {
         self.network
             .send_message(NetworkActorMessage::new_notification(
                 NetworkServiceEvent::PreimageCreated(payment_hash, preimage),
@@ -3942,13 +3946,10 @@ where
                 .collect();
             for (payment_hash, preimage) in preimages {
                 if self.store.get_preimage(&payment_hash).is_none() {
-                    self.store.insert_preimage(payment_hash, preimage);
+                    self.store_preimage(payment_hash, preimage);
+                } else {
+                    self.notify_preimage_created(payment_hash, preimage);
                 }
-                self.network
-                    .send_message(NetworkActorMessage::new_notification(
-                        NetworkServiceEvent::PreimageCreated(payment_hash, preimage),
-                    ))
-                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
             }
             // Decide and enter the closing state in this actor turn: a queued generic
             // shutdown could otherwise race with a settled fulfill or another close.
