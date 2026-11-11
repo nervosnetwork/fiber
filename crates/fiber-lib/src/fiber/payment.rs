@@ -697,6 +697,11 @@ impl SendPaymentResponse {
         store: &impl ChannelActorStateStore,
     ) -> Self {
         let status = session.effective_status(store);
+        Self::from_session_with_status(session, status)
+    }
+
+    /// Build a response using a status already resolved by the list query.
+    pub(crate) fn from_session_with_status(session: PaymentSession, status: PaymentStatus) -> Self {
         let fee = session.fee_paid();
         let payment_preimage = session.payment_preimage();
         let mut all_attempts = session

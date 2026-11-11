@@ -3096,8 +3096,9 @@ pub trait NetworkGraphStateStore {
     /// Repair legacy route-index aliases and retire completed recovery keys at startup.
     /// Reads only indexed payments; returns their hashes for result/upstream recovery.
     fn reconcile_attempts_channel_index(&self) -> HashSet<Hash256>;
+    /// Returns list views with their resolved status; unindexed legacy failures do not probe channels.
     fn get_payment_sessions_with_status(&self, status: PaymentStatus) -> Vec<PaymentSession>;
-    /// Get payment sessions with pagination support.
+    /// Get payment list views with resolved status and pagination support.
     /// `limit`: maximum number of results to return.
     /// `after`: if provided, start after this payment_hash (exclusive cursor).
     /// `status`: optional status filter.

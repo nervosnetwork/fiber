@@ -2020,6 +2020,235 @@ fn test_payment_status_queries_skip_attempts_for_mismatched_terminal_sessions() 
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
+fn test_payment_list_skips_unneeded_channel_reads() {
+    use fiber_types::schema::{ATTEMPT_CHANNEL_INDEX_PREFIX, CHANNEL_ACTOR_STATE_PREFIX};
+    for indexed in [false, true] {
+        let (store, _dir) = generate_store();
+        let channel = sample_channel_actor_state(ChannelState::ChannelReady, None);
+        let outpoint = channel.must_get_funding_transaction_outpoint();
+        store.insert_channel_actor_state(channel.clone());
+        let mut originals = Vec::new();
+        for tag in 1u8..=32 {
+            let hash = Hash256::from([tag; 32]);
+            let request = SendPaymentDataBuilder::new(channel.remote_pubkey, 100, hash)
+                .max_fee_amount(Some(1000))
+                .build()
+                .unwrap();
+            let mut session = PaymentSession::new_session(&store, request, 1);
+            let mut attempt = session.new_attempt(
+                1,
+                channel.local_pubkey,
+                channel.remote_pubkey,
+                vec![PaymentHopData {
+                    amount: 100,
+                    funding_tx_hash: outpoint.tx_hash().into(),
+                    ..Default::default()
+                }],
+            );
+            attempt.set_failed_status("historical failure", false);
+            store.insert_attempt(attempt.clone());
+            session.set_failed_status("historical failure");
+            store.insert_payment_session(session);
+            if !indexed {
+                store.delete(
+                    [
+                        &[ATTEMPT_CHANNEL_INDEX_PREFIX],
+                        outpoint.as_slice(),
+                        hash.as_ref(),
+                        &attempt.id.to_le_bytes(),
+                    ]
+                    .concat(),
+                );
+            }
+            originals.push(attempt);
+        }
+        // Any channel deserialization now panics: list filtering must not read it.
+        store.put(
+            [&[CHANNEL_ACTOR_STATE_PREFIX], channel.id.as_ref()].concat(),
+            [],
+        );
+        assert!(store
+            .get_payment_sessions_with_status(PaymentStatus::Success)
+            .is_empty());
+        assert!(store
+            .get_payment_sessions_with_limit(10, None, Some(PaymentStatus::Success))
+            .is_empty());
+        if !indexed {
+            assert!(store
+                .get_payment_sessions_with_status(PaymentStatus::Inflight)
+                .is_empty());
+            assert!(store
+                .get_payment_sessions_with_limit(10, None, Some(PaymentStatus::Inflight))
+                .is_empty());
+            for filter in [None, Some(PaymentStatus::Failed)] {
+                let page = store.get_payment_sessions_with_limit(3, Some([1; 32].into()), filter);
+                assert_eq!(
+                    page.iter().map(|s| s.payment_hash()).collect::<Vec<_>>(),
+                    vec![[2; 32].into(), [3; 32].into(), [4; 32].into()]
+                );
+                for session in page {
+                    let status = session.status;
+                    let response =
+                        crate::fiber::network::SendPaymentResponse::from_session_with_status(
+                            session, status,
+                        );
+                    assert_eq!(response.status, PaymentStatus::Failed);
+                }
+            }
+            assert_eq!(
+                store
+                    .get_payment_sessions_with_status(PaymentStatus::Failed)
+                    .len(),
+                32
+            );
+        }
+        // Successful attempt evidence must remain visible despite the persisted Failed.
+        let mut success = originals[0].clone();
+        success.set_success_status();
+        store.insert_attempt(success);
+        for page in [
+            store.get_payment_sessions_with_status(PaymentStatus::Success),
+            store.get_payment_sessions_with_limit(1, None, Some(PaymentStatus::Success)),
+        ] {
+            assert_eq!(page.len(), 1);
+            assert_eq!(page[0].payment_hash(), originals[0].payment_hash);
+            assert_eq!(page[0].status, PaymentStatus::Success);
+        }
+        // An explicitly Inflight attempt needs neither an index nor channel reads.
+        if !indexed {
+            let mut inflight = originals[1].clone();
+            inflight.status = AttemptStatus::Inflight;
+            store.insert_attempt(inflight);
+            let page = store.get_payment_sessions_with_status(PaymentStatus::Inflight);
+            assert_eq!(page.len(), 1);
+            assert_eq!(page[0].status, PaymentStatus::Inflight);
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
+async fn test_payment_list_index_gate_does_not_change_settlement_status() {
+    use fiber_types::schema::{
+        ATTEMPT_CHANNEL_INDEX_PREFIX, ATTEMPT_PREFIX, PAYMENT_SESSION_PREFIX,
+    };
+    let (store, _dir) = generate_store();
+    let node = NetworkNode::new().await;
+    let rpc =
+        crate::rpc::payment::PaymentRpcServerImpl::new(node.network_actor.clone(), store.clone());
+
+    let mut channel = sample_channel_actor_state(ChannelState::ChannelReady, None);
+    let outpoint = channel.must_get_funding_transaction_outpoint();
+    let hash = gen_rand_sha256_hash();
+    let request = SendPaymentDataBuilder::new(channel.remote_pubkey, 100, hash)
+        .max_fee_amount(Some(1000))
+        .build()
+        .unwrap();
+    let mut session = PaymentSession::new_session(&store, request, 1);
+    let mut attempt = session.new_attempt(
+        1,
+        channel.local_pubkey,
+        channel.remote_pubkey,
+        vec![PaymentHopData {
+            amount: 100,
+            funding_tx_hash: outpoint.tx_hash().into(),
+            ..Default::default()
+        }],
+    );
+    attempt.set_failed_status("dispatch stopped", false);
+    store.insert_attempt(attempt);
+    session.set_failed_status("dispatch stopped");
+    store.insert_payment_session(session);
+    channel
+        .retryable_tlc_operations
+        .push_back(RetryableTlcOperation::AddTlc(AddTlcCommand {
+            amount: 100,
+            payment_hash: hash,
+            attempt_id: Some(1),
+            expiry: 0,
+            hash_algorithm: HashAlgorithm::CkbHash,
+            onion_packet: None,
+            shared_secret: [0; 32],
+            is_trampoline_hop: false,
+            previous_tlc: None,
+        }));
+    store.insert_channel_actor_state(channel);
+    let session_key = [&[PAYMENT_SESSION_PREFIX], hash.as_ref()].concat();
+    let attempt_key = [&[ATTEMPT_PREFIX], hash.as_ref(), &1u64.to_le_bytes()].concat();
+    let before = (store.get(&session_key), store.get(&attempt_key));
+    for indexed in [true, false] {
+        if !indexed {
+            store.delete(
+                [
+                    &[ATTEMPT_CHANNEL_INDEX_PREFIX],
+                    outpoint.as_slice(),
+                    hash.as_ref(),
+                    &1u64.to_le_bytes(),
+                ]
+                .concat(),
+            );
+        }
+        let expected = if indexed {
+            PaymentStatus::Inflight
+        } else {
+            PaymentStatus::Failed
+        };
+        let excluded = if indexed {
+            PaymentStatus::Failed
+        } else {
+            PaymentStatus::Inflight
+        };
+        assert!(store.get_payment_sessions_with_status(excluded).is_empty());
+        assert!(store
+            .get_payment_sessions_with_limit(1, None, Some(excluded))
+            .is_empty());
+        for page in [
+            store.get_payment_sessions_with_status(expected),
+            store.get_payment_sessions_with_limit(1, None, Some(expected)),
+            store.get_payment_sessions_with_limit(1, None, None),
+        ] {
+            assert_eq!(page.len(), 1);
+            let view = page.into_iter().next().unwrap();
+            assert_eq!(view.status, expected);
+            let response = crate::fiber::network::SendPaymentResponse::from_session_with_status(
+                view, expected,
+            );
+            assert_eq!(response.status, expected);
+        }
+        for filter in [None, Some(expected)] {
+            let response = rpc
+                .list_payments(crate::rpc::payment::ListPaymentsParams {
+                    status: filter.map(Into::into),
+                    limit: Some(1),
+                    after: None,
+                })
+                .await
+                .unwrap();
+            assert_eq!(response.payments.len(), 1);
+            assert_eq!(response.payments[0].status, expected.into());
+            assert_eq!(response.last_cursor, Some(hash.into()));
+            let next = rpc
+                .list_payments(crate::rpc::payment::ListPaymentsParams {
+                    status: filter.map(Into::into),
+                    limit: Some(1),
+                    after: response.last_cursor,
+                })
+                .await
+                .unwrap();
+            assert!(next.payments.is_empty());
+        }
+        let session = store.get_payment_session(hash).unwrap();
+        assert_eq!(session.effective_status(&store), PaymentStatus::Inflight);
+        assert_eq!(
+            crate::fiber::network::SendPaymentResponse::from_session(session, &store).status,
+            PaymentStatus::Inflight
+        );
+        assert_eq!((store.get(&session_key), store.get(&attempt_key)), before);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
 fn test_legacy_partial_mpp_proof_is_success_in_all_payment_queries() {
     let (store, _dir) = generate_store();
     let source = gen_rand_fiber_public_key();

@@ -23,7 +23,7 @@ use crate::{
         channel::{ChannelActorState, ChannelActorStateStore, ChannelOpenRecordStore, CommitDiff},
         graph::NetworkGraphStateStore,
         network::NetworkActorStateStore,
-        payment::PaymentSessionExt,
+        payment::{attempt_has_channel_work, PaymentSessionExt},
     },
     invoice::{CkbInvoice, CkbInvoiceStatus, InvoiceError, InvoiceStore, PreimageStore},
 };
@@ -100,6 +100,57 @@ impl std::fmt::Debug for Store {
 impl Store {
     fn restore_payment_session(&self, session: PaymentSession) -> PaymentSession {
         session.init_attempts(self)
+    }
+
+    /// Resolve a list view without probing channels for unindexed historical failures.
+    /// This compatibility shortcut is deliberately not used for settlement or notifications.
+    fn filter_payment_session(
+        &self,
+        session: PaymentSession,
+        status: Option<PaymentStatus>,
+    ) -> Option<PaymentSession> {
+        if session.status.is_final()
+            && status.is_some_and(|wanted| {
+                session.status != wanted
+                    && !(session.status == PaymentStatus::Failed
+                        && matches!(wanted, PaymentStatus::Success | PaymentStatus::Inflight))
+            })
+        {
+            return None;
+        }
+        let mut session = self.restore_payment_session(session);
+        // Channel work can only promote Failed to Inflight, never to Success.
+        if status.is_some_and(|wanted| {
+            session.status != wanted
+                && !(session.status == PaymentStatus::Failed && wanted == PaymentStatus::Inflight)
+        }) {
+            return None;
+        }
+        if session.status == PaymentStatus::Failed {
+            let pending = session.attempts().any(Attempt::is_inflight)
+                || session.attempts().any(|attempt| {
+                    attempt
+                        .first_hop_channel_outpoint()
+                        .is_some_and(|outpoint| {
+                            let key = KeyValue::AttemptChannelIndex((
+                                outpoint.clone(),
+                                attempt.payment_hash,
+                                attempt.id,
+                            ))
+                            .key();
+                            self.get(key).is_some() && attempt_has_channel_work(attempt, self)
+                        })
+                });
+            if pending {
+                // List views only: neither the session record nor its attempts are rewritten.
+                session.status = PaymentStatus::Inflight;
+            }
+        }
+        if status.is_some_and(|wanted| session.status != wanted) {
+            None
+        } else {
+            Some(session)
+        }
     }
 
     /// Shut down the browser database after all actors and background writes stop.
@@ -1579,20 +1630,7 @@ impl NetworkGraphStateStore for Store {
             .into_iter()
             .filter_map(|kv| {
                 let session: PaymentSession = deserialize_from(kv.value.as_ref(), "PaymentSession");
-                // A legacy failed session can contain a successfully claimed MPP shard.
-                if session.status.is_final()
-                    && session.status != status
-                    && !(session.status == PaymentStatus::Failed
-                        && matches!(status, PaymentStatus::Success | PaymentStatus::Inflight))
-                {
-                    return None;
-                }
-                let session = self.restore_payment_session(session);
-                if session.effective_status(self) == status {
-                    Some(session)
-                } else {
-                    None
-                }
+                self.filter_payment_session(session, Some(status))
             })
             .collect()
     }
@@ -1612,20 +1650,7 @@ impl NetworkGraphStateStore for Store {
 
         iter.filter_map(|(_key, value)| {
             let session: PaymentSession = deserialize_from(&value, "PaymentSession");
-            if session.status.is_final()
-                && status.is_some_and(|status| {
-                    session.status != status
-                        && !(session.status == PaymentStatus::Failed
-                            && matches!(status, PaymentStatus::Success | PaymentStatus::Inflight))
-                })
-            {
-                return None;
-            }
-            let session = self.restore_payment_session(session);
-            match status {
-                Some(ref s) if session.effective_status(self) != *s => None,
-                _ => Some(session),
-            }
+            self.filter_payment_session(session, status)
         })
         .take(limit)
         .collect()
