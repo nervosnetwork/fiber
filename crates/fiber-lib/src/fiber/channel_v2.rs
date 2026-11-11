@@ -3428,7 +3428,7 @@ mod tests {
             .payment_hash;
         crate::tests::test_utils::wait_until_timeout(5000, || a.get_channel_actor_state(id).retryable_tlc_operations.iter().any(|op| matches!(op, RetryableTlcOperation::AddTlc(command) if command.payment_hash == hash))).await;
         let attempt = a.store.get_attempts(hash).pop().unwrap();
-        assert_eq!(attempt.status, fiber_types::AttemptStatus::Inflight);
+        assert_eq!(attempt.status, fiber_types::AttemptStatus::Created);
         b.stop().await;
         a.stop().await;
         let mut source = a.get_channel_actor_state(id);
@@ -3460,7 +3460,7 @@ mod tests {
             .clone();
         assert_eq!(
             a.store.get_attempt(hash, attempt.id).unwrap().status,
-            fiber_types::AttemptStatus::Inflight
+            fiber_types::AttemptStatus::Created
         );
         // Drop the volatile request; restart must finish the durable handoff.
         myself.stop(None);
@@ -3620,7 +3620,7 @@ mod tests {
         .unwrap()
         .unwrap();
         let unchanged = a.store.get_attempt(hash, original.id).unwrap();
-        assert_eq!(unchanged.status, fiber_types::AttemptStatus::Inflight);
+        assert_eq!(unchanged.status, fiber_types::AttemptStatus::Created);
         assert_eq!(unchanged.tried_times, original.tried_times);
         let mut retrying = original;
         retrying.status = fiber_types::AttemptStatus::Retrying;

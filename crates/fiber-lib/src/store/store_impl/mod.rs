@@ -1576,16 +1576,22 @@ impl NetworkGraphStateStore for Store {
 
     fn insert_payment_session(&self, session: PaymentSession) {
         let payment_hash = session.payment_hash();
-        let mut session_clone = self.restore_payment_session(session.clone());
-        session_clone.status = session_clone.effective_status(self);
-        let payment_preimage = session_clone.payment_preimage();
         let mut batch = self.batch();
         let kv = KeyValue::PaymentSession(payment_hash, session);
         batch.put(kv.key(), kv.value());
         batch.commit();
+        self.publish_payment_result(payment_hash);
+    }
+
+    fn publish_payment_result(&self, payment_hash: Hash256) {
+        let Some(mut session) = self.get_payment_session(payment_hash) else {
+            return;
+        };
+        session.status = session.effective_status(self);
+        let payment_preimage = session.payment_preimage();
         self.notify(StoreChange::PutPaymentSession {
             payment_hash,
-            payment_session: session_clone,
+            payment_session: session,
             payment_preimage,
         });
     }

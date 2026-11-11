@@ -223,6 +223,9 @@ pub enum ChannelCommand {
     FundingTxSigned(Transaction, RpcReplyPort<Result<(), String>>),
     CommitmentSigned(Option<RpcReplyPort<Result<(), String>>>),
     AddTlc(AddTlcCommand, RpcReplyPort<Result<AddTlcResponse, TlcErr>>),
+    /// Acknowledge local handling after persisting any accepted TLC or queued Add.
+    /// AddTlcResult alone reports the outcome, including a local rejection.
+    AddTlcWithAdmission(AddTlcCommand, RpcReplyPort<()>),
     RemoveTlc(RemoveTlcCommand, RpcReplyPort<ProcessingChannelResult>),
     Shutdown(ShutdownCommand, RpcReplyPort<Result<(), String>>),
     BroadcastChannelUpdate(),
@@ -240,6 +243,9 @@ pub enum ChannelCommand {
     SetDeferPeerTlcUpdates(bool),
     #[cfg(any(test, feature = "bench"))]
     TestBarrier(RpcReplyPort<()>),
+    /// Pause local processing until the test releases the returned sender.
+    #[cfg(test)]
+    TestPause(RpcReplyPort<oneshot::Sender<()>>),
     /// Disable outbound TLCs in the actor without advertising the fixture change.
     #[cfg(any(test, feature = "bench"))]
     TestDisableTlc(RpcReplyPort<()>),
@@ -254,6 +260,7 @@ impl Display for ChannelCommand {
             ChannelCommand::FundingTxSigned(_, _) => write!(f, "FundingTxSigned"),
             ChannelCommand::CommitmentSigned(_) => write!(f, "CommitmentSigned"),
             ChannelCommand::AddTlc(_, _) => write!(f, "AddTlc"),
+            ChannelCommand::AddTlcWithAdmission(_, _) => write!(f, "AddTlcWithAdmission"),
             ChannelCommand::RemoveTlc(_, _) => write!(f, "RemoveTlc"),
             ChannelCommand::Shutdown(_, _) => write!(f, "Shutdown"),
             ChannelCommand::BroadcastChannelUpdate() => write!(f, "BroadcastChannelUpdate"),
@@ -268,6 +275,8 @@ impl Display for ChannelCommand {
             }
             #[cfg(any(test, feature = "bench"))]
             ChannelCommand::TestBarrier(_) => write!(f, "TestBarrier"),
+            #[cfg(test)]
+            ChannelCommand::TestPause(_) => write!(f, "TestPause"),
             #[cfg(any(test, feature = "bench"))]
             ChannelCommand::TestDisableTlc(_) => write!(f, "TestDisableTlc"),
             #[cfg(any(test, feature = "bench"))]
@@ -3600,6 +3609,22 @@ where
                     }
                 }
             }
+            ChannelCommand::AddTlcWithAdmission(command, reply) => {
+                let res = self.handle_add_tlc_command(myself, state, &command).await;
+                // WaitingTlcAck registers the Add in the existing retry queue.
+                // Persist that ownership before letting the payer continue dispatch.
+                let queued = matches!(res, Err(ProcessingChannelError::WaitingTlcAck))
+                    && command.onion_packet.is_some();
+                if queued {
+                    self.register_retryable_tlc_add(myself, state, command.clone());
+                }
+                self.persist_state_and_publish_pending_effects(state);
+                if !queued {
+                    self.post_add_tlc_command(myself, state, command, &res);
+                }
+                let _ = reply.send(());
+                res.map(|_| ())
+            }
             ChannelCommand::RemoveTlc(command, reply) => {
                 match self
                     .handle_remove_tlc_command(myself, state, command.clone())
@@ -3717,6 +3742,13 @@ where
             #[cfg(any(test, feature = "bench"))]
             ChannelCommand::TestBarrier(reply) => {
                 let _ = reply.send(());
+                Ok(())
+            }
+            #[cfg(test)]
+            ChannelCommand::TestPause(reply) => {
+                let (release, wait) = oneshot::channel();
+                let _ = reply.send(release);
+                let _ = wait.await;
                 Ok(())
             }
             #[cfg(any(test, feature = "bench"))]

@@ -3106,6 +3106,8 @@ pub trait NetworkGraphStateStore {
         status: Option<PaymentStatus>,
     ) -> Vec<PaymentSession>;
     fn insert_payment_session(&self, session: PaymentSession);
+    /// Publish the current effective result without rewriting the session record.
+    fn publish_payment_result(&self, payment_hash: Hash256);
     fn insert_payment_history_result(
         &mut self,
         channel_outpoint: OutPoint,

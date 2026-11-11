@@ -1910,6 +1910,64 @@ fn test_legacy_partial_mpp_proof_is_success_in_all_payment_queries() {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
+fn test_publish_payment_result_notifies_without_changing_persisted_stop() {
+    use std::sync::{Arc, Mutex};
+
+    let (mut store, _dir) = generate_store();
+    let hash = gen_rand_sha256_hash();
+    let source = gen_rand_fiber_public_key();
+    let target = gen_rand_fiber_public_key();
+    let request = SendPaymentDataBuilder::new(target, 100, hash)
+        .max_fee_amount(Some(1000))
+        .build()
+        .unwrap();
+    let mut session = PaymentSession::new_session(&store, request, 1);
+    session.set_failed_status("stop dispatch");
+    let mut attempt = session.new_attempt(
+        1,
+        source,
+        target,
+        vec![PaymentHopData {
+            amount: 100,
+            ..Default::default()
+        }],
+    );
+    attempt.status = AttemptStatus::Inflight;
+    store.insert_attempt(attempt.clone());
+    store.insert_payment_session(session);
+    let key = [
+        &[fiber_types::schema::PAYMENT_SESSION_PREFIX],
+        hash.as_ref(),
+    ]
+    .concat();
+    let persisted = store.get(&key).unwrap();
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let statuses = observed.clone();
+    store.set_watcher(Arc::new(move |change| {
+        if let crate::store::store_impl::StoreChange::PutPaymentSession {
+            payment_session, ..
+        } = change
+        {
+            statuses.lock().unwrap().push(payment_session.status);
+        }
+    }));
+    store.publish_payment_result(hash);
+    attempt.set_failed_status("last issued work completed", false);
+    store.insert_attempt(attempt);
+    store.publish_payment_result(hash);
+    assert_eq!(
+        *observed.lock().unwrap(),
+        vec![PaymentStatus::Inflight, PaymentStatus::Failed]
+    );
+    assert_eq!(store.get(key).unwrap(), persisted);
+    assert_eq!(
+        store.get_persisted_payment_status(hash),
+        Some(PaymentStatus::Failed)
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
 fn test_payment_status_queries_filter_hydrated_attempts_before_pagination() {
     let (store, _dir) = generate_store();
     let source = gen_rand_fiber_public_key();

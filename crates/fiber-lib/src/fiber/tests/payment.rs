@@ -65,16 +65,130 @@ use std::time::{Duration, SystemTime};
 use tracing::{debug, error, info};
 
 #[tokio::test]
-async fn test_restart_recovers_orphan_payment_admission() {
-    assert_orphan_payment_admission(false).await;
+async fn test_payment_waits_for_durable_channel_admission() {
+    for legacy in [false, true] {
+        assert_durable_channel_admission(legacy, false).await;
+    }
 }
 
 #[tokio::test]
-async fn test_restart_does_not_retry_stopped_orphan_payment_admission() {
-    assert_orphan_payment_admission(true).await;
+async fn test_queued_payment_admission_is_durable_before_send_returns() {
+    for legacy in [false, true] {
+        assert_durable_channel_admission(legacy, true).await;
+    }
 }
 
-async fn assert_orphan_payment_admission(stopped: bool) {
+async fn assert_durable_channel_admission(legacy: bool, queued: bool) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let (payer, payee, id) = if legacy {
+        create_legacy_nodes_with_established_channel(100000000000, 11800000000, false).await
+    } else {
+        create_nodes_with_established_channel(100000000000, 11800000000, false).await
+    };
+    let channel = payer.get_channel_actor(id).await.unwrap();
+    let mut preceding = None;
+    if queued {
+        payer
+            .hold_next_fiber_messages(payee.pubkey, id, TestFiberMessageKind::CommitmentSigned, 1)
+            .await;
+        let preimage = gen_rand_sha256_hash();
+        let invoice = payee.build_basic_invoice(1000, preimage);
+        let hash = *invoice.payment_hash();
+        payee.insert_invoice(invoice.clone(), None);
+        payer
+            .send_payment(SendPaymentCommand {
+                invoice: Some(invoice.to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        preceding = Some((hash, preimage));
+        payer.wait_for_held_fiber_messages(1).await;
+    }
+    let release = ractor::call_t!(
+        channel,
+        |reply| ChannelActorMessage::Command(ChannelCommand::TestPause(reply)),
+        5000
+    )
+    .unwrap();
+    let preimage = gen_rand_sha256_hash();
+    let invoice = payee.build_basic_invoice(1000, preimage);
+    let hash = *invoice.payment_hash();
+    payee.insert_invoice(invoice.clone(), None);
+    let returned = AtomicBool::new(false);
+    let send = async {
+        let response = payer
+            .send_payment(SendPaymentCommand {
+                invoice: Some(invoice.to_string()),
+                ..Default::default()
+            })
+            .await;
+        returned.store(true, Ordering::SeqCst);
+        response
+    };
+    let inspect_mailbox = async {
+        wait_until_timeout(5000, || payer.store.get_attempts(hash).len() == 1).await;
+        // NetworkActor must remain responsive while ChannelActor is paused.
+        let count = ractor::call_t!(
+            payer.network_actor,
+            |reply| {
+                NetworkActorMessage::new_command(NetworkActorCommand::GetInflightPaymentCount(
+                    reply,
+                ))
+            },
+            1000
+        )
+        .unwrap();
+        assert_eq!(count.unwrap(), if queued { 2 } else { 1 });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !returned.load(Ordering::SeqCst),
+            "mailbox delivery is not a durable admission"
+        );
+        let attempt = payer.store.get_attempts(hash).pop().unwrap();
+        assert_eq!(attempt.status, AttemptStatus::Created);
+        assert!(!payer
+            .get_channel_actor_state(id)
+            .owns_payment_attempt(hash, attempt.id));
+        release.send(()).unwrap();
+    };
+    let (response, ()) = tokio::join!(send, inspect_mailbox);
+    response.unwrap();
+    let attempt = payer.store.get_attempts(hash).pop().unwrap();
+    let persisted = payer.get_channel_actor_state(id);
+    assert!(persisted.owns_payment_attempt(hash, attempt.id));
+    if queued {
+        assert_eq!(attempt.status, AttemptStatus::Created);
+        assert!(persisted.retryable_tlc_operations.iter().any(|op| {
+            matches!(op, fiber_types::RetryableTlcOperation::AddTlc(add) if add.payment_hash == hash)
+        }));
+        payer.release_held_fiber_messages().await;
+    }
+    wait_until_timeout(5000, || payee.store.get_payment_hold_tlcs(hash).len() == 1).await;
+    if let Some((hash, preimage)) = preceding {
+        wait_until_timeout(5000, || payee.store.get_payment_hold_tlcs(hash).len() == 1).await;
+        payee.settle_invoice(&hash, preimage).await.unwrap();
+        payer.wait_until_payment_finished(hash).await;
+    }
+    payee.settle_invoice(&hash, preimage).await.unwrap();
+    payer.wait_until_payment_finished(hash).await;
+    payer.wait_until_no_inflight_payments().await;
+    assert_eq!(payer.store.get_attempts(hash).len(), 1);
+    assert_eq!(payer.store.get_attempts(hash)[0].tried_times, 1);
+}
+
+#[tokio::test]
+async fn test_restart_recovers_unadmitted_created_attempt() {
+    assert_unadmitted_created_attempt(false).await;
+}
+
+#[tokio::test]
+async fn test_restart_does_not_retry_stopped_created_attempt() {
+    assert_unadmitted_created_attempt(true).await;
+}
+
+async fn assert_unadmitted_created_attempt(stopped: bool) {
     init_tracing();
     let (mut payer, mut payee, _) =
         create_nodes_with_established_channel(100000000000, 11800000000, false).await;
@@ -90,7 +204,7 @@ async fn assert_orphan_payment_admission(stopped: bool) {
     let invoice = payee.build_basic_invoice(1000, preimage);
     let hash = *invoice.payment_hash();
     payee.insert_invoice(invoice.clone(), None);
-    // Reproduce admission persisted by the payer but not yet by the channel.
+    // Reproduce a crash before the channel accepted a planned attempt.
     let mut session = payer.store.get_payment_session(old_hash).unwrap();
     let mut attempt = session.cached_attempts[0].clone();
     session.request.payment_hash = hash;
@@ -106,7 +220,7 @@ async fn assert_orphan_payment_admission(stopped: bool) {
     session.cached_attempts.clear();
     attempt.payment_hash = hash;
     attempt.hash = hash;
-    attempt.status = AttemptStatus::Inflight;
+    attempt.status = AttemptStatus::Created;
     attempt.preimage = None;
     for hop in &mut attempt.route_hops {
         hop.payment_preimage = None;
@@ -119,13 +233,21 @@ async fn assert_orphan_payment_admission(stopped: bool) {
             .get_payment_session(hash)
             .unwrap()
             .effective_status(&payer.store),
-        PaymentStatus::Inflight
+        if stopped {
+            PaymentStatus::Failed
+        } else {
+            PaymentStatus::Created
+        }
     );
     payer.start().await;
     if stopped {
         payer.wait_until_failed(hash).await;
         payer.wait_until_no_inflight_payments().await;
         assert!(payee.store.get_payment_hold_tlcs(hash).is_empty());
+        assert_eq!(
+            payer.store.get_attempts(hash)[0].status,
+            AttemptStatus::Created
+        );
     } else {
         payer.connect_to(&mut payee).await;
         wait_until_timeout(5000, || payee.store.get_payment_hold_tlcs(hash).len() == 1).await;
