@@ -48,7 +48,8 @@ use fiber_types::schema::WATCHTOWER_TLC_SETTLED_PREFIX;
 #[cfg(not(target_arch = "wasm32"))]
 use fiber_types::{
     AddTlcCommand, AppliedFlags, ChannelFeatures, CommitmentNumbers, OutboundTlcStatus,
-    RetryableTlcOperation, SettlementTlc, TLCId, TlcInfo, TlcStatus,
+    RemoveTlcFulfill, RetryableTlcOperation, SettlementTlc, TLCId, TlcErrPacket, TlcErrorCode,
+    TlcInfo, TlcStatus,
 };
 use fiber_types::{
     Attempt, AttemptStatus, CloseFlags, HashAlgorithm, PaymentHopData, RouterHop, SessionRoute,
@@ -1906,6 +1907,123 @@ fn test_legacy_partial_mpp_proof_is_success_in_all_payment_queries() {
     assert!(store
         .get_payment_sessions_with_status(PaymentStatus::Failed)
         .is_empty());
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_review_settled_legacy_timeout_is_not_pending() {
+    let (store, _dir) = generate_store();
+    let hash = gen_rand_sha256_hash();
+    let mut channel = sample_channel_actor_state(ChannelState::ChannelReady, None);
+    let outpoint = channel.must_get_funding_transaction_outpoint();
+    let request = SendPaymentDataBuilder::new(gen_rand_fiber_public_key(), 100, hash)
+        .max_fee_amount(Some(1000))
+        .build()
+        .unwrap();
+    let mut session = PaymentSession::new_session(&store, request, 1);
+    let mut attempt = session.new_attempt(
+        1,
+        channel.local_pubkey,
+        channel.remote_pubkey,
+        vec![PaymentHopData {
+            amount: 100,
+            funding_tx_hash: outpoint.tx_hash().into(),
+            ..Default::default()
+        }],
+    );
+    attempt.set_failed_status("legacy chain timeout", false);
+    store.insert_attempt(attempt.clone());
+    session.set_failed_status("legacy chain timeout");
+    store.insert_payment_session(session);
+    channel.tlc_state.add_offered_tlc(TlcInfo {
+        status: TlcStatus::Outbound(OutboundTlcStatus::Committed),
+        tlc_id: TLCId::Offered(0),
+        amount: 100,
+        payment_hash: hash,
+        total_amount: None,
+        payment_secret: None,
+        attempt_id: Some(attempt.id),
+        expiry: 0,
+        hash_algorithm: HashAlgorithm::CkbHash,
+        onion_packet: None,
+        shared_secret: [0; 32],
+        is_trampoline_hop: false,
+        created_at: CommitmentNumbers::new(),
+        removed_reason: None,
+        forwarding_tlc: None,
+        removed_confirmed_at: None,
+        applied_flags: AppliedFlags::ADD,
+    });
+    // Released chain-timeout completion used this setter without applying REMOVE.
+    channel.tlc_state.set_offered_tlc_removed(
+        0,
+        RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+            TlcErr::new(TlcErrorCode::ExpiryTooSoon),
+            &[0; 32],
+        )),
+    );
+    channel.state = ChannelState::Closed(CloseFlags::UNCOOPERATIVE_LOCAL);
+    store.insert_channel_actor_state(channel.clone());
+    let session = store.get_payment_session(hash).unwrap();
+    let original = bincode::serialize(&channel.core).unwrap();
+    assert!(
+        !session.has_outstanding_channel_work(&store),
+        "a finalized legacy timeout cannot block explicit retries"
+    );
+    assert_eq!(session.effective_status(&store), PaymentStatus::Failed);
+    assert_eq!(
+        store
+            .get_payment_sessions_with_limit(1, None, Some(PaymentStatus::Failed))
+            .len(),
+        1
+    );
+    assert_eq!(
+        bincode::serialize(&store.get_channel_actor_state(&channel.id).unwrap().core).unwrap(),
+        original
+    );
+
+    channel
+        .retryable_tlc_operations
+        .push_back(RetryableTlcOperation::AddTlc(AddTlcCommand {
+            amount: 100,
+            payment_hash: hash,
+            attempt_id: Some(attempt.id),
+            expiry: DEFAULT_TLC_EXPIRY_DELTA,
+            hash_algorithm: HashAlgorithm::CkbHash,
+            onion_packet: None,
+            shared_secret: [0; 32],
+            is_trampoline_hop: false,
+            previous_tlc: None,
+        }));
+    store.insert_channel_actor_state(channel.clone());
+    assert!(
+        session.has_outstanding_channel_work(&store),
+        "a pending Add is still owned even when a historical TLC has finished"
+    );
+    channel.retryable_tlc_operations.clear();
+
+    channel.state = ChannelState::Closed(
+        CloseFlags::UNCOOPERATIVE_LOCAL | CloseFlags::WAITING_ONCHAIN_SETTLEMENT,
+    );
+    store.insert_channel_actor_state(channel.clone());
+    assert_eq!(
+        session.effective_status(&store),
+        PaymentStatus::Inflight,
+        "a reason alone is not final while settlement is pending"
+    );
+    channel.state = ChannelState::Closed(CloseFlags::UNCOOPERATIVE_LOCAL);
+    channel
+        .tlc_state
+        .get_mut(&TLCId::Offered(0))
+        .unwrap()
+        .removed_reason = Some(RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+        payment_preimage: gen_rand_sha256_hash(),
+    }));
+    store.insert_channel_actor_state(channel);
+    assert!(
+        session.has_outstanding_channel_work(&store),
+        "an unobserved fulfillment must still wake the payer"
+    );
 }
 
 #[cfg(not(target_arch = "wasm32"))]

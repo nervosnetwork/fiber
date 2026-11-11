@@ -10,7 +10,8 @@ use either::Either;
 use once_cell::sync::OnceCell;
 use ractor::concurrency::Duration;
 use ractor::{
-    call_t, forward, Actor, ActorCell, ActorProcessingErr, ActorRef, RpcReplyPort, SupervisionEvent,
+    call_t, forward, Actor, ActorCell, ActorId, ActorProcessingErr, ActorRef, RpcReplyPort,
+    SupervisionEvent,
 };
 use rand::seq::{IndexedRandom, IteratorRandom};
 use secp256k1::SECP256K1;
@@ -1095,6 +1096,8 @@ pub enum NetworkActorCommand {
     ),
     // Get the count of inflight payments
     GetInflightPaymentCount(RpcReplyPort<Result<u32, String>>),
+    #[cfg(test)]
+    GetPaymentActor(Hash256, RpcReplyPort<Option<ActorRef<PaymentActorMessage>>>),
 
     AddInvoice(
         CkbInvoice,
@@ -1426,7 +1429,7 @@ pub enum NetworkActorEvent {
     ChannelActorStopped(Hash256, StopReason),
 
     // A payment actor stopped event.
-    PaymentActorStopped(Hash256, Option<TlcErrPacket>),
+    PaymentActorStopped(Hash256, ActorId, Option<TlcErrPacket>),
     /// A newly persisted success can settle trampoline upstream before actor exit.
     PaymentSucceeded(Hash256),
 
@@ -2274,9 +2277,9 @@ where
             NetworkActorEvent::PaymentSucceeded(payment_hash) => {
                 state.resolve_trampoline_upstream(payment_hash, None).await;
             }
-            NetworkActorEvent::PaymentActorStopped(payment_hash, last_error_packet) => {
+            NetworkActorEvent::PaymentActorStopped(payment_hash, actor_id, last_error_packet) => {
                 state
-                    .on_payment_actor_stopped(payment_hash, last_error_packet)
+                    .on_payment_actor_stopped(payment_hash, actor_id, last_error_packet)
                     .await;
             }
             NetworkActorEvent::ChannelSettlementCompleted(channel_id) => {
@@ -3006,24 +3009,16 @@ where
                         self.store.publish_payment_result(payment_hash);
                     }
                 }
-                if let Some(actor) = state.inflight_payments.get(&payment_hash) {
-                    // The last durable channel acknowledgement must wake an existing
-                    // actor even when there is no remaining work to resume.
-                    if let Err(err) = actor.send_message(PaymentActorMessage::TlcUpdated) {
-                        debug!("Failed to wake payment {payment_hash}: {err}");
-                        // ActorStopped may still be queued behind this message.
-                        myself.send_after(Duration::from_millis(10), move || {
-                            NetworkActorMessage::new_command(
-                                NetworkActorCommand::PaymentTlcUpdated(payment_hash),
-                            )
-                        });
-                    }
-                } else if self
-                    .store
-                    .get_payment_session(payment_hash)
-                    .is_some_and(|session| {
-                        !session.status.is_final() || session.has_pending_payment_work(&self.store)
-                    })
+                // Wake a draining actor even after the last acknowledgement. The
+                // shared sender retires dead references instead of polling them.
+                if state.inflight_payments.contains_key(&payment_hash)
+                    || self
+                        .store
+                        .get_payment_session(payment_hash)
+                        .is_some_and(|session| {
+                            !session.status.is_final()
+                                || session.has_pending_payment_work(&self.store)
+                        })
                 {
                     self.resume_payment_actor_and_send_command(
                         myself,
@@ -3654,6 +3649,10 @@ where
             }
             NetworkActorCommand::GetInflightPaymentCount(reply) => {
                 let _ = reply.send(Ok(state.inflight_payments.len() as u32));
+            }
+            #[cfg(test)]
+            NetworkActorCommand::GetPaymentActor(hash, reply) => {
+                let _ = reply.send(state.inflight_payments.get(&hash).cloned());
             }
             NetworkActorCommand::ListPeers(_, rpc) => {
                 let peers = state
@@ -5382,23 +5381,27 @@ where
         payment_hash: Hash256,
         message: PaymentActorMessage,
     ) {
-        if let Some(actor) = state.inflight_payments.get(&payment_hash) {
-            if let Err(err) = actor.send_message(message) {
-                debug!(
-                    "PaymentActor message dropped because payment actor is likely stopping, error: {err}"
-                );
+        let message = if let Some(actor) = state.inflight_payments.get(&payment_hash) {
+            match actor.send_message(message) {
+                Ok(()) => return,
+                Err(ractor::MessagingErr::SendErr(message)) => {
+                    debug!("Retiring dead payment actor for {payment_hash:?}");
+                    state.inflight_payments.remove(&payment_hash);
+                    message
+                }
+                Err(err) => {
+                    warn!("Failed to send payment message for {payment_hash:?}: {err}");
+                    return;
+                }
             }
         } else {
-            debug!(
-                "Can't find inflight payment actor for {payment_hash:?}, start a new payment actor"
-            );
-
-            if let Err(e) = self
-                .start_payment_actor(myself, state, payment_hash, message)
-                .await
-            {
-                warn!("Failed to resume payment actor: {}", e);
-            }
+            message
+        };
+        if let Err(e) = self
+            .start_payment_actor(myself, state, payment_hash, message)
+            .await
+        {
+            warn!("Failed to resume payment actor: {}", e);
         }
     }
 
@@ -7947,12 +7950,21 @@ where
     async fn on_payment_actor_stopped(
         &mut self,
         payment_hash: Hash256,
+        actor_id: ActorId,
         last_error_packet: Option<TlcErrPacket>,
     ) {
-        debug!("Payment actor stopped {payment_hash}");
-        if self.inflight_payments.remove(&payment_hash).is_none() {
-            error!("Can't find inflight payment actor");
+        if self
+            .inflight_payments
+            .get(&payment_hash)
+            .is_some_and(|actor| actor.get_id() != actor_id)
+        {
+            // A channel update may already have replaced the stopped actor.
+            // Its delayed stop event must not remove or resolve the replacement.
+            debug!("Ignoring stale payment actor stop for {payment_hash:?}");
+            return;
         }
+        debug!("Payment actor stopped {payment_hash}");
+        self.inflight_payments.remove(&payment_hash);
 
         self.resolve_trampoline_upstream(payment_hash, last_error_packet.as_ref())
             .await;
@@ -8713,13 +8725,16 @@ where
         &self,
         _myself: ActorRef<Self::Msg>,
         message: SupervisionEvent,
-        _state: &mut Self::State,
+        state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
             SupervisionEvent::ActorTerminated(who, _state, reason) => {
                 debug!("Actor {:?} terminated with reason {:?}", who, reason);
             }
             SupervisionEvent::ActorFailed(who, err) => {
+                state
+                    .inflight_payments
+                    .retain(|_, actor| actor.get_id() != who.get_id());
                 log_actor_failed(who, err);
             }
             _ => {}

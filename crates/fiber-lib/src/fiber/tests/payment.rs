@@ -65,6 +65,85 @@ use std::time::{Duration, SystemTime};
 use tracing::{debug, error, info};
 
 #[tokio::test]
+async fn test_review_payment_actor_panic_does_not_loop() {
+    let (payer, payee, _) =
+        create_nodes_with_established_channel(100000000000, 11800000000, false).await;
+    let preimage = gen_rand_sha256_hash();
+    let invoice = payee.build_basic_invoice(1000, preimage);
+    let hash = *invoice.payment_hash();
+    payee.insert_invoice(invoice.clone(), None);
+    payer
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    wait_until_timeout(5000, || payee.store.get_payment_hold_tlcs(hash).len() == 1).await;
+    let old = ractor::call_t!(
+        payer.network_actor,
+        |reply| {
+            NetworkActorMessage::new_command(NetworkActorCommand::GetPaymentActor(hash, reply))
+        },
+        5000
+    )
+    .unwrap()
+    .unwrap();
+    old.send_message(PaymentActorMessage::TestPanic).unwrap();
+    wait_until_timeout(5000, || old.get_status() == ractor::ActorStatus::Stopped).await;
+    payer
+        .network_actor
+        .send_message(NetworkActorMessage::new_command(
+            NetworkActorCommand::PaymentTlcUpdated(hash),
+        ))
+        .unwrap();
+    let replacement = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let actor = ractor::call_t!(
+                payer.network_actor,
+                |reply| {
+                    NetworkActorMessage::new_command(NetworkActorCommand::GetPaymentActor(
+                        hash, reply,
+                    ))
+                },
+                1000
+            )
+            .unwrap();
+            if let Some(actor) = actor.filter(|actor| actor.get_id() != old.get_id()) {
+                break actor;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("a dead payer reference must be retired, not retried every 10ms forever");
+    assert_ne!(replacement.get_id(), old.get_id());
+    payer
+        .network_actor
+        .send_message(NetworkActorMessage::new_event(
+            NetworkActorEvent::PaymentActorStopped(hash, old.get_id(), None),
+        ))
+        .unwrap();
+    let current = ractor::call_t!(
+        payer.network_actor,
+        |reply| {
+            NetworkActorMessage::new_command(NetworkActorCommand::GetPaymentActor(hash, reply))
+        },
+        5000
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        current.get_id(),
+        replacement.get_id(),
+        "a late stop must not remove the replacement payer"
+    );
+    payee.settle_invoice(&hash, preimage).await.unwrap();
+    payer.wait_until_payment_finished(hash).await;
+    payer.wait_until_no_inflight_payments().await;
+}
+
+#[tokio::test]
 async fn test_payment_waits_for_durable_channel_admission() {
     for legacy in [false, true] {
         assert_durable_channel_admission(legacy, false).await;

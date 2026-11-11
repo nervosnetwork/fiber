@@ -525,19 +525,7 @@ where
     fn persist_state_and_publish_pending_effects(&self, state: &mut ChannelActorState) {
         let count = std::mem::take(&mut state.pending_remove_effects_v2);
         self.store.insert_channel_actor_state(state.clone());
-        let mut updated_payments = std::mem::take(&mut state.pending_payment_notifications);
-        for tlc in &state.tlc_state.offered_tlcs.tlcs {
-            if tlc.attempt_id.is_some()
-                && tlc.forwarding_tlc.is_none()
-                && (tlc.applied_flags.contains(AppliedFlags::REMOVE)
-                    || matches!(
-                        tlc.removed_reason,
-                        Some(RemoveTlcReason::RemoveTlcFulfill(_))
-                    ))
-            {
-                updated_payments.insert(tlc.payment_hash);
-            }
-        }
+        let updated_payments = std::mem::take(&mut state.pending_payment_notifications);
         for payment_hash in updated_payments {
             self.network
                 .send_message(NetworkActorMessage::new_command(
@@ -2262,6 +2250,13 @@ where
             // so we can send setttlement transaction to get money when necessary
             // the preimage must be valid since we have checked it in check_remove_tlc_with_reason
             self.store_preimage(payment_hash, payment_preimage);
+            if state
+                .tlc_state
+                .get(&TLCId::Offered(remove_tlc.tlc_id))
+                .is_some_and(|tlc| tlc.attempt_id.is_some() && tlc.forwarding_tlc.is_none())
+            {
+                state.pending_payment_notifications.insert(payment_hash);
+            }
             debug_event!(
                 self.network,
                 &format!("store payment_preimage for: {:?}", payment_hash)
@@ -2377,6 +2372,14 @@ where
         tlc.applied_flags |= AppliedFlags::REMOVE;
 
         let (tlc_info, remove_reason) = state.remove_tlc_with_reason(tlc_id)?;
+        if tlc_info.is_offered()
+            && tlc_info.attempt_id.is_some()
+            && tlc_info.forwarding_tlc.is_none()
+        {
+            state
+                .pending_payment_notifications
+                .insert(tlc_info.payment_hash);
+        }
 
         // The removal succeeded. A failed TLC stays in `tlc_state` until it is
         // cleaned up, so mark it applied to keep `apply_settled_remove_tlcs`
@@ -3252,13 +3255,24 @@ where
                 }
             };
             if done {
+                match &operation {
+                    RetryableTlcOperation::AddTlc(command)
+                        if command.previous_tlc.is_none() && command.attempt_id.is_some() =>
+                    {
+                        state
+                            .pending_payment_notifications
+                            .insert(command.payment_hash);
+                    }
+                    _ => {}
+                }
                 changed = true;
             } else {
                 state.retryable_tlc_operations.push_back(operation);
             }
         }
         if changed {
-            self.store.insert_channel_actor_state(state.clone());
+            // This also runs during startup, before any message-tail save.
+            self.persist_state_and_publish_pending_effects(state);
         }
         for command in local_failures {
             self.post_add_tlc_command(
@@ -4076,6 +4090,7 @@ where
                         self.store.insert_preimage(tlc.payment_hash, tlc.preimage);
                         state.tlc_state.set_offered_tlc_removed(id, fulfill.clone());
                         if let Some(attempt_id) = tlc.attempt_id {
+                            state.pending_payment_notifications.insert(tlc.payment_hash);
                             payer_effects_applied &= self
                                 .reconcile_onchain_payer_tlc(
                                     channel_id,
@@ -4104,6 +4119,7 @@ where
             if self.reconcile_onchain_payer_tlc(channel_id, tlc).await {
                 if confirm_onchain_payer_fulfill(state, tlc) {
                     self.store.insert_preimage(tlc.payment_hash, tlc.preimage);
+                    state.pending_payment_notifications.insert(tlc.payment_hash);
                 }
             } else {
                 payer_effects_applied = false;
@@ -4166,7 +4182,14 @@ where
             })
             .collect();
         for (id, reason) in offered_updates {
-            state.tlc_state.set_offered_tlc_removed(id, reason);
+            let hash = state.tlc_state.set_offered_tlc_removed(id, reason);
+            if state
+                .tlc_state
+                .get(&TLCId::Offered(id))
+                .is_some_and(|tlc| tlc.attempt_id.is_some() && tlc.forwarding_tlc.is_none())
+            {
+                state.pending_payment_notifications.insert(hash);
+            }
         }
 
         let received_updates: Vec<(u64, RemoveTlcReason)> = state
@@ -4901,6 +4924,7 @@ where
                         return Ok(());
                     }
                 }
+                let mut changed_payment = None;
                 if let TLCId::Offered(id) = tlc_id {
                     if state
                         .tlc_state
@@ -4918,8 +4942,17 @@ where
                         }
                         // Receipt of a peer fulfill alone does not prove upstream delivery.
                         // Only this durable relay acknowledgement completes its side effects.
+                        if !tlc.applied_flags.contains(AppliedFlags::REMOVE)
+                            && tlc.attempt_id.is_some()
+                            && tlc.forwarding_tlc.is_none()
+                        {
+                            changed_payment = Some(tlc.payment_hash);
+                        }
                         tlc.applied_flags.insert(AppliedFlags::REMOVE);
                     }
+                }
+                if let Some(hash) = changed_payment {
+                    state.pending_payment_notifications.insert(hash);
                 }
                 if state.is_waiting_onchain_settlement() && state.is_onchain_settlement_confirmed()
                 {
@@ -5022,6 +5055,13 @@ where
                 self.register_retryable_tlc_add(myself, state, command);
             }
             _ => {
+                if command.previous_tlc.is_none() && command.attempt_id.is_some() {
+                    // A rejected queued Add may have released the last owner.
+                    // Publish its changed queue only after the next persistence.
+                    state
+                        .pending_payment_notifications
+                        .insert(command.payment_hash);
+                }
                 let add_tlc_result = res
                     .as_ref()
                     .map(|tlc_id| (state.get_id(), *tlc_id))
@@ -11887,11 +11927,20 @@ impl ChannelActorState {
 
     pub(crate) fn owns_payment_attempt(&self, payment_hash: Hash256, attempt_id: u64) -> bool {
         let attempt_id = Some(attempt_id);
+        let settled_force_close = matches!(self.state, ChannelState::Closed(flags)
+            if flags.intersects(CloseFlags::UNCOOPERATIVE_LOCAL | CloseFlags::UNCOOPERATIVE_REMOTE)
+                && !flags.intersects(CloseFlags::WAITING_ONCHAIN_SETTLEMENT | CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED));
 
         self.tlc_state.all_tlcs().any(|tlc| {
             !tlc.applied_flags.contains(AppliedFlags::REMOVE)
                 && tlc.payment_hash == payment_hash
                 && tlc.attempt_id == attempt_id
+                // Released chain-timeout completion did not apply REMOVE. Once
+                // force-close settlement finished, its failed payer TLC is historical.
+                && !(settled_force_close
+                    && tlc.is_offered()
+                    && tlc.forwarding_tlc.is_none()
+                    && matches!(tlc.removed_reason, Some(RemoveTlcReason::RemoveTlcFail(_))))
         }) || self.retryable_tlc_operations.iter().any(|operation| {
             matches!(
                 operation,
@@ -12255,6 +12304,182 @@ mod tests {
     use super::*;
 
     use fiber_types::{HashAlgorithm, TlcState};
+
+    struct PaymentNoticeCounter;
+
+    #[async_trait::async_trait]
+    impl Actor for PaymentNoticeCounter {
+        type Msg = NetworkActorMessage;
+        type State = u32;
+        type Arguments = ();
+        async fn pre_start(
+            &self,
+            _: ActorRef<Self::Msg>,
+            _: (),
+        ) -> Result<u32, ActorProcessingErr> {
+            Ok(0)
+        }
+        async fn handle(
+            &self,
+            _: ActorRef<Self::Msg>,
+            message: Self::Msg,
+            count: &mut u32,
+        ) -> Result<(), ActorProcessingErr> {
+            match message {
+                NetworkActorMessage::Command(NetworkActorCommand::PaymentTlcUpdated(_)) => {
+                    *count += 1
+                }
+                NetworkActorMessage::Command(NetworkActorCommand::GetInflightPaymentCount(
+                    reply,
+                )) => {
+                    let _ = reply.send(Ok(*count));
+                }
+                NetworkActorMessage::Command(NetworkActorCommand::CompleteClosedLocalAdd {
+                    reply,
+                    ..
+                }) => {
+                    let _ = reply.send(Ok(()));
+                }
+                _ => {}
+            }
+            Ok(())
+        }
+    }
+
+    struct NoticeChannelMailbox;
+
+    #[async_trait::async_trait]
+    impl Actor for NoticeChannelMailbox {
+        type Msg = ChannelActorMessage;
+        type State = ();
+        type Arguments = ();
+        async fn pre_start(&self, _: ActorRef<Self::Msg>, _: ()) -> Result<(), ActorProcessingErr> {
+            Ok(())
+        }
+        async fn handle(
+            &self,
+            _: ActorRef<Self::Msg>,
+            _: Self::Msg,
+            _: &mut (),
+        ) -> Result<(), ActorProcessingErr> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_review_queued_add_owner_release_notifies_once() {
+        for closed in [false, true] {
+            let (store, _dir) = crate::tests::test_utils::generate_store();
+            let (network, task) = Actor::spawn(None, PaymentNoticeCounter, ()).await.unwrap();
+            let (myself, channel_task) =
+                Actor::spawn(None, NoticeChannelMailbox, ()).await.unwrap();
+            let mut state = channel_state_with_limits(
+                ChannelConstraints::default(),
+                ChannelConstraints::default(),
+            );
+            state.funding_tx = Some(ckb_types::packed::Transaction::default());
+            if closed {
+                state.state = ChannelState::Closed(
+                    CloseFlags::UNCOOPERATIVE_LOCAL | CloseFlags::WAITING_ONCHAIN_SETTLEMENT,
+                );
+            }
+            let command = AddTlcCommand {
+                amount: 100,
+                payment_hash: [7; 32].into(),
+                attempt_id: Some(1),
+                expiry: 0,
+                hash_algorithm: HashAlgorithm::CkbHash,
+                onion_packet: None,
+                shared_secret: [0; 32],
+                is_trampoline_hop: false,
+                previous_tlc: None,
+            };
+            state
+                .retryable_tlc_operations
+                .push_back(RetryableTlcOperation::AddTlc(command.clone()));
+            store.insert_channel_actor_state(state.clone());
+            let actor = ChannelActor::new(
+                state.local_pubkey,
+                state.remote_pubkey,
+                network.clone(),
+                store,
+                None,
+            );
+            if closed {
+                actor
+                    .finalize_closed_retryable_tlc_operations(&myself, &mut state)
+                    .await;
+            } else {
+                state.retryable_tlc_operations.pop_front();
+                actor.post_add_tlc_command(
+                    &myself,
+                    &mut state,
+                    command,
+                    &Err(ProcessingChannelError::InternalError(
+                        "queued Add rejected".to_owned(),
+                    )),
+                );
+            }
+            assert!(state.retryable_tlc_operations.is_empty());
+            actor.persist_state_and_publish_pending_effects(&mut state);
+            actor.persist_state_and_publish_pending_effects(&mut state);
+            let count = ractor::call_t!(
+                network,
+                |reply| NetworkActorMessage::new_command(
+                    NetworkActorCommand::GetInflightPaymentCount(reply)
+                ),
+                5000
+            )
+            .unwrap()
+            .unwrap();
+            myself.stop(None);
+            channel_task.await.unwrap();
+            network.stop(None);
+            task.await.unwrap();
+            assert_eq!(
+                count, 1,
+                "releasing the last queued Add owner must notify once (closed={closed})"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_review_unchanged_tlc_does_not_republish_payment() {
+        let (store, _dir) = crate::tests::test_utils::generate_store();
+        let (network, task) = Actor::spawn(None, PaymentNoticeCounter, ()).await.unwrap();
+        let mut state =
+            channel_state_with_limits(ChannelConstraints::default(), ChannelConstraints::default());
+        let mut tlc = failed_remove_ack_confirmed_tlc(TLCId::Offered(0), 100);
+        tlc.attempt_id = Some(1);
+        let hash = tlc.payment_hash;
+        state.tlc_state.add_offered_tlc(tlc);
+        let actor = ChannelActor::new(
+            state.local_pubkey,
+            state.remote_pubkey,
+            network.clone(),
+            store,
+            None,
+        );
+        state.pending_payment_notifications.insert(hash);
+        for _ in 0..3 {
+            actor.persist_state_and_publish_pending_effects(&mut state);
+        }
+        let count = ractor::call_t!(
+            network,
+            |reply| NetworkActorMessage::new_command(NetworkActorCommand::GetInflightPaymentCount(
+                reply
+            )),
+            5000
+        )
+        .unwrap()
+        .unwrap();
+        network.stop(None);
+        task.await.unwrap();
+        assert_eq!(
+            count, 1,
+            "unrelated channel messages must not republish a completed TLC"
+        );
+    }
 
     #[test]
     fn reestablish_timer_excludes_offline_time_and_preserves_remaining_budget() {

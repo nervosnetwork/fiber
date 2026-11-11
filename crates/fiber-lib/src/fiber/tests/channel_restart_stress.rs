@@ -10,6 +10,7 @@ use tracing::{debug, error};
 
 #[tokio::test]
 async fn test_zero_fee_ring_restart_preserves_each_nodes_balance() {
+    use crate::fiber::graph::NetworkGraphStateStore;
     use crate::fiber::network::{PeerDisconnectReason, TestFiberMessageKind};
     use crate::fiber::payment::SendPaymentCommand;
     use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
@@ -236,10 +237,51 @@ async fn test_zero_fee_ring_restart_preserves_each_nodes_balance() {
             a.tlc_state.received_tlcs.next_tlc_id
         );
     }
+    // Ledger drainage precedes payer cleanup and asynchronous routing updates.
+    // Check routing readiness before starting the next real-payment phase.
     for node in &nodes {
-        let probe = node.send_payment_keysend_to_self(1, false).await.unwrap();
+        node.wait_until_no_inflight_payments().await;
+    }
+    for (i, node) in nodes.iter().enumerate() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match node.send_payment_keysend_to_self(1, true).await {
+                    Ok(route) => {
+                        assert_eq!(route.fee, 0);
+                        break;
+                    }
+                    Err(error) if error.contains("no path found") => {
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                    Err(error) => panic!("ring routing readiness failed at node {i}: {error}"),
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("ring routing did not recover at node {i} within 10s"));
+        node.wait_until_no_inflight_payments().await;
+        let probe = match node.send_payment_keysend_to_self(1, false).await {
+            Ok(probe) => probe,
+            Err(error) => {
+                let graph = node.get_network_graph_channels().await;
+                let history = node.store.get_payment_history_results();
+                let owned_state = owned[i].map(|id| {
+                    let state = node.get_channel_actor_state(id);
+                    (
+                        id,
+                        state.state,
+                        state.connectivity_state,
+                        state.reestablishing,
+                        state.tlc_state.waiting_ack,
+                    )
+                });
+                panic!("ring probe failed at node {i}: {error}; owned={owned_state:?}; graph={graph:?}; history={history:?}");
+            }
+        };
         assert_eq!(probe.fee, 0);
         node.wait_until_success(probe.payment_hash).await;
+        node.wait_until_payment_finished(probe.payment_hash).await;
+        node.wait_until_no_inflight_payments().await;
     }
 }
 

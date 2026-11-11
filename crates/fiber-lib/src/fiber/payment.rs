@@ -918,6 +918,8 @@ pub enum PaymentActorMessage {
     },
     /// Periodic check to detect stuck payments and log status
     CheckPaymentStatus,
+    #[cfg(test)]
+    TestPanic,
 }
 
 pub struct PaymentActorState {
@@ -1030,6 +1032,7 @@ where
             .send_message(NetworkActorMessage::Event(
                 NetworkActorEvent::PaymentActorStopped(
                     state.payment_hash,
+                    myself.get_id(),
                     state.last_error_packet.clone(),
                 ),
             ))
@@ -1282,6 +1285,8 @@ where
             PaymentActorMessage::CheckPaymentStatus => {
                 self.handle_check_payment_status(myself, state);
             }
+            #[cfg(test)]
+            PaymentActorMessage::TestPanic => panic!("test payment actor failure"),
         };
         self.observe_tlc_preimages(state.payment_hash);
         self.advance_payment_result(state);
@@ -2678,7 +2683,10 @@ where
         self.advance_payment_result(state);
         payment_session.flush_attempts(&self.store);
         if let Err(error) = dispatch {
-            if payment_session.status != PaymentStatus::Success
+            // A lost admission reply leaves a recoverable attempt. Returning an RPC
+            // failure here would invite a new keysend while this payment can still send.
+            if !matches!(error, Error::PaymentAdmissionInterrupted(_))
+                && payment_session.status != PaymentStatus::Success
                 && state.pending_add_results.is_empty()
                 && !payment_session.has_outstanding_channel_work(&self.store)
             {
@@ -2754,6 +2762,53 @@ mod closed_add_tests {
             // Drop the reply without reporting acceptance or rejection.
             Ok(())
         }
+    }
+
+    #[tokio::test]
+    async fn test_review_lost_admission_returns_trackable_payment() {
+        use crate::fiber::{NetworkActorEvent, NetworkActorMessage, PaymentStatus};
+
+        let (a, b, _) =
+            create_nodes_with_established_channel(100000000000, 11800000000, false).await;
+        let request = super::SendPaymentCommand {
+            target_pubkey: Some(b.pubkey),
+            amount: Some(1000),
+            keysend: Some(true),
+            ..Default::default()
+        }
+        .build_send_payment_data(crate::invoice::Currency::Fibd)
+        .unwrap();
+        let hash = request.payment_hash;
+        let (network, network_task) = Actor::spawn(None, DropAdmissionReply, ()).await.unwrap();
+        let actor = PaymentActor::new(a.store.clone(), a.network_graph.clone(), network.clone());
+        let mut state = PaymentActorState::new(PaymentActorArguments {
+            payment_hash: hash,
+            init_command: PaymentActorMessage::TlcUpdated,
+        });
+        let (myself, task) = Actor::spawn(None, RetryMailbox, ()).await.unwrap();
+        let response = actor
+            .send_payment_with_payment_data(myself, &mut state, request)
+            .await;
+        task.await.unwrap();
+        network.stop(None);
+        network_task.await.unwrap();
+        let response = response
+            .expect("a retained payment must return a trackable response, not an RPC failure");
+        assert_eq!(response.payment_hash, hash);
+        assert_eq!(response.status, PaymentStatus::Created);
+        let attempts = a.store.get_attempts(hash);
+        assert_eq!(attempts.len(), 1);
+        let id = attempts[0].id;
+        a.network_actor
+            .send_message(NetworkActorMessage::new_event(
+                NetworkActorEvent::RetrySendPayment(hash, Some(id)),
+            ))
+            .unwrap();
+        a.wait_until_success(hash).await;
+        a.wait_until_payment_finished(hash).await;
+        a.wait_until_no_inflight_payments().await;
+        assert_eq!(a.store.get_attempts(hash).len(), 1);
+        assert_eq!(a.store.get_attempt(hash, id).unwrap().tried_times, 1);
     }
 
     #[tokio::test]
