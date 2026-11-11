@@ -126,9 +126,7 @@ impl Store {
 
     fn channel_owns_attempt(&self, channel_outpoint: &OutPoint, attempt: &Attempt) -> bool {
         self.get_channel_state_by_outpoint(channel_outpoint)
-            .is_some_and(|channel_state| {
-                channel_state.owns_payment_attempt(attempt.payment_hash, attempt.id)
-            })
+            .is_some_and(|channel_state| channel_state.owns_payment_attempt(attempt))
     }
 
     #[cfg(feature = "watchtower")]

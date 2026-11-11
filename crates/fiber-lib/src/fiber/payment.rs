@@ -615,7 +615,7 @@ pub(crate) fn attempt_has_channel_work(
         .first_hop_channel_outpoint()
         .and_then(|outpoint| store.get_channel_state_by_outpoint(outpoint))
         .is_some_and(|channel| {
-            channel.owns_payment_attempt(attempt.payment_hash, attempt.id)
+            channel.owns_payment_attempt(attempt)
                 || channel.session_v2.as_ref().is_some_and(|session| {
                     session.remove_effects.iter().any(|(tlc, execution)| {
                         tlc.payment_hash == attempt.payment_hash
@@ -1963,7 +1963,7 @@ where
                             && tlc.attempt_id == Some(attempt.id)
                     })
                 } else {
-                    channel_state.owns_payment_attempt(attempt.payment_hash, attempt.id)
+                    channel_state.owns_payment_attempt(attempt)
                 };
                 owns_update
                     || channel_state.session_v2.iter().any(|session| {
@@ -2080,6 +2080,9 @@ where
                     .resend_payment_attempt(myself, state, session, &mut attempt)
                     .await
                 {
+                    // An interrupted admission still owns its dispatch budget. Do not
+                    // fail this attempt or allocate replacement MPP parts for it.
+                    Err(err @ Error::PaymentAdmissionInterrupted(_)) => return Err(err),
                     Err(err) if session.allow_mpp() => {
                         // usually `resend_payment_route` will only try build a route with same amount,
                         // because most of the time, resend payment caused by the first hop
@@ -2857,6 +2860,64 @@ mod closed_add_tests {
         task.await.unwrap();
         network.stop(None);
         network_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_review_retry_lost_admission_preserves_attempt() {
+        use crate::fiber::PaymentStatus;
+        let (a, b, _) =
+            create_nodes_with_established_channel(100000000000, 11800000000, false).await;
+        let hash = a
+            .send_payment_keysend(&b, 1000, false)
+            .await
+            .unwrap()
+            .payment_hash;
+        a.wait_until_payment_finished(hash).await;
+        a.wait_until_no_inflight_payments().await;
+        for mpp in [false, true] {
+            let mut attempt = a.store.get_attempts(hash).pop().unwrap();
+            attempt.status = AttemptStatus::Retrying;
+            attempt.preimage = None;
+            attempt.last_error = None;
+            a.store.insert_attempt(attempt.clone());
+            let mut session = a.store.get_payment_session(hash).unwrap();
+            session.status = PaymentStatus::Created;
+            session.request.keysend = !mpp;
+            session.request.allow_mpp = mpp;
+            session.request.max_parts = Some(3);
+            a.store.insert_payment_session(session.clone());
+            let (network, network_task) = Actor::spawn(None, DropAdmissionReply, ()).await.unwrap();
+            let actor =
+                PaymentActor::new(a.store.clone(), a.network_graph.clone(), network.clone());
+            let mut state = PaymentActorState::new(PaymentActorArguments {
+                payment_hash: hash,
+                init_command: PaymentActorMessage::TlcUpdated,
+            });
+            let (myself, task) = Actor::spawn(None, RetryMailbox, ()).await.unwrap();
+            let result = actor
+                .retry_payment_attempt(myself, &mut state, &mut session, Some(attempt.id))
+                .await;
+            task.await.unwrap();
+            network.stop(None);
+            network_task.await.unwrap();
+            let preserved = a.store.get_attempt(hash, attempt.id).unwrap();
+            assert_eq!(
+                preserved.status,
+                AttemptStatus::Retrying,
+                "lost retry admission must not fail the attempt (mpp={mpp})"
+            );
+            assert!(matches!(
+                result,
+                Err(crate::Error::PaymentAdmissionInterrupted(_))
+            ));
+            assert_eq!(preserved.tried_times, attempt.tried_times);
+            assert_eq!(state.retry_send_payment_count, 0);
+            assert_eq!(a.store.get_attempts(hash).len(), 1);
+            assert_eq!(
+                a.store.get_persisted_payment_status(hash),
+                Some(PaymentStatus::Created)
+            );
+        }
     }
 
     #[tokio::test]

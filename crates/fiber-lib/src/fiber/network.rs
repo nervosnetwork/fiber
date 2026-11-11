@@ -95,7 +95,8 @@ use crate::fiber::onchain_tlc_reconcile::{
     collect_onchain_fulfilled_tlcs, collect_onchain_payer_failures,
     collect_onchain_received_timeout_settled_tlcs, collect_onchain_timeout_settled_tlcs,
     confirm_onchain_payer_fulfill, has_unresolved_onchain_tlcs, onchain_fulfilled_preimage,
-    recover_shutdown_settlement_data, verify_and_select_settlement_data, OnChainTimeoutTlcRole,
+    recover_shutdown_settlement_data, verify_and_select_settlement_data, OnChainConfirmedPayerTlc,
+    OnChainTimeoutTlcRole,
 };
 use crate::fiber::payment::{
     PaymentActor, PaymentActorArguments, PaymentActorMessage, PaymentSessionExt,
@@ -1098,6 +1099,8 @@ pub enum NetworkActorCommand {
     GetInflightPaymentCount(RpcReplyPort<Result<u32, String>>),
     #[cfg(test)]
     GetPaymentActor(Hash256, RpcReplyPort<Option<ActorRef<PaymentActorMessage>>>),
+    #[cfg(test)]
+    TestSetPaymentActor(Hash256, ActorRef<PaymentActorMessage>, RpcReplyPort<()>),
 
     AddInvoice(
         CkbInvoice,
@@ -3654,6 +3657,11 @@ where
             NetworkActorCommand::GetPaymentActor(hash, reply) => {
                 let _ = reply.send(state.inflight_payments.get(&hash).cloned());
             }
+            #[cfg(test)]
+            NetworkActorCommand::TestSetPaymentActor(hash, actor, reply) => {
+                assert!(state.inflight_payments.insert(hash, actor).is_none());
+                let _ = reply.send(());
+            }
             NetworkActorCommand::ListPeers(_, rpc) => {
                 let peers = state
                     .peer_session_map
@@ -4100,6 +4108,7 @@ where
             EpochNumberWithFraction::from_full_value(actor_state.commitment_delay_epoch);
         let expect_expiry = now.saturating_add(tlc_expiry_delay(&delay_epoch));
         let mut actor_state_changed = false;
+        let mut updated_payments = HashSet::new();
 
         // Resolve offered TLCs that have timed out on chain. Forwarded TLCs must first relay a
         // matching failure upstream; origin-payer TLCs can notify the local payment state directly.
@@ -4174,6 +4183,7 @@ where
                             .set_offered_tlc_removed(id, fulfill.clone());
                         actor_state_changed = true;
                         if let Some(attempt_id) = tlc.attempt_id {
+                            updated_payments.insert(tlc.payment_hash);
                             if let Err(err) = self
                                 .reconcile_onchain_payer_tlc(
                                     state,
@@ -4190,6 +4200,16 @@ where
                                     tlc.tlc_id, channel_id, err
                                 );
                                 payer_effects_applied = false;
+                            } else {
+                                confirm_onchain_payer_fulfill(
+                                    actor_state,
+                                    OnChainConfirmedPayerTlc {
+                                        tlc_id: tlc.tlc_id,
+                                        payment_hash: tlc.payment_hash,
+                                        attempt_id,
+                                        preimage: tlc.preimage,
+                                    },
+                                );
                             }
                         }
                     }
@@ -4227,6 +4247,7 @@ where
             } else if confirm_onchain_payer_fulfill(actor_state, tlc) {
                 self.store.insert_preimage(tlc.payment_hash, tlc.preimage);
                 actor_state_changed = true;
+                updated_payments.insert(tlc.payment_hash);
             }
         }
         invoice_hashes.extend(self.already_fulfilled_onchain_invoice_hashes(actor_state));
@@ -4342,6 +4363,13 @@ where
                     error!("Failed to request store backup after on-chain settlement finalization: {err}");
                 }
             }
+        }
+        // As in the live-channel path, wake the payer only after ownership changes
+        // are durable. Its reconciliation reply preceded this channel write.
+        for payment_hash in updated_payments {
+            let _ = state.network.send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::PaymentTlcUpdated(payment_hash),
+            ));
         }
     }
 
@@ -5384,11 +5412,7 @@ where
         let message = if let Some(actor) = state.inflight_payments.get(&payment_hash) {
             match actor.send_message(message) {
                 Ok(()) => return,
-                Err(ractor::MessagingErr::SendErr(message)) => {
-                    debug!("Retiring dead payment actor for {payment_hash:?}");
-                    state.inflight_payments.remove(&payment_hash);
-                    message
-                }
+                Err(ractor::MessagingErr::SendErr(message)) => message,
                 Err(err) => {
                     warn!("Failed to send payment message for {payment_hash:?}: {err}");
                     return;
@@ -5397,6 +5421,26 @@ where
         } else {
             message
         };
+        if matches!(
+            message,
+            PaymentActorMessage::TlcUpdated
+                | PaymentActorMessage::RetrySendPayment(_)
+                | PaymentActorMessage::ResumeAfterClosedChannel(_)
+        ) && self
+            .store
+            .get_payment_session(payment_hash)
+            .is_none_or(|session| {
+                session.status.is_final() && !session.has_pending_payment_work(&self.store)
+            })
+        {
+            // A normal stop may still be queued with the original downstream error.
+            // Pure wake-ups must neither replace it nor resurrect a completed payment.
+            // Actual outcomes and receipts still need delivery, even after success.
+            return;
+        }
+        if state.inflight_payments.remove(&payment_hash).is_some() {
+            debug!("Retiring dead payment actor for {payment_hash:?}");
+        }
         if let Err(e) = self
             .start_payment_actor(myself, state, payment_hash, message)
             .await
@@ -7308,8 +7352,7 @@ where
                     for attempt in attempts {
                         // The index retains the original hop; the payer rechecks the current route's owner.
                         let owned = attempt.first_hop_channel_outpoint_eq(&outpoint)
-                            && (channel_actor_state
-                                .owns_payment_attempt(attempt.payment_hash, attempt.id)
+                            && (channel_actor_state.owns_payment_attempt(&attempt)
                                 || channel_actor_state.session_v2.iter().any(|session| {
                                     session.remove_effects.iter().any(|(tlc, _)| {
                                         tlc.payment_hash == attempt.payment_hash

@@ -1913,7 +1913,8 @@ fn test_legacy_partial_mpp_proof_is_success_in_all_payment_queries() {
 #[test]
 fn test_review_settled_legacy_timeout_is_not_pending() {
     let (store, _dir) = generate_store();
-    let hash = gen_rand_sha256_hash();
+    let preimage = gen_rand_sha256_hash();
+    let hash = HashAlgorithm::CkbHash.hash(preimage).into();
     let mut channel = sample_channel_actor_state(ChannelState::ChannelReady, None);
     let outpoint = channel.must_get_funding_transaction_outpoint();
     let request = SendPaymentDataBuilder::new(gen_rand_fiber_public_key(), 100, hash)
@@ -2017,12 +2018,41 @@ fn test_review_settled_legacy_timeout_is_not_pending() {
         .get_mut(&TLCId::Offered(0))
         .unwrap()
         .removed_reason = Some(RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
-        payment_preimage: gen_rand_sha256_hash(),
+        payment_preimage: preimage,
     }));
-    store.insert_channel_actor_state(channel);
+    store.insert_channel_actor_state(channel.clone());
     assert!(
         session.has_outstanding_channel_work(&store),
         "an unobserved fulfillment must still wake the payer"
+    );
+    attempt.set_success_status();
+    attempt.preimage = Some(preimage);
+    store.insert_attempt(attempt.clone());
+    let session = store.get_payment_session(hash).unwrap();
+    let original = bincode::serialize(&channel.core).unwrap();
+    assert!(
+        !session.has_pending_payment_work(&store),
+        "an acknowledged historical on-chain fulfill must not retain a payer forever"
+    );
+    assert_eq!(
+        bincode::serialize(&store.get_channel_actor_state(&channel.id).unwrap().core).unwrap(),
+        original
+    );
+    channel.state = ChannelState::Closed(
+        CloseFlags::UNCOOPERATIVE_LOCAL | CloseFlags::WAITING_ONCHAIN_SETTLEMENT,
+    );
+    store.insert_channel_actor_state(channel.clone());
+    assert!(session.has_pending_payment_work(&store));
+    channel.state = ChannelState::Closed(CloseFlags::UNCOOPERATIVE_LOCAL);
+    attempt.preimage = Some(gen_rand_sha256_hash());
+    store.insert_attempt(attempt);
+    store.insert_channel_actor_state(channel);
+    assert!(
+        store
+            .get_payment_session(hash)
+            .unwrap()
+            .has_pending_payment_work(&store),
+        "a mismatched preimage must not retire historical work"
     );
 }
 

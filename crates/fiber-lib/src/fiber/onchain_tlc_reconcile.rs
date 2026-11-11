@@ -479,7 +479,8 @@ fn is_uncommitted_payer_failure(tlc: &TlcInfo) -> bool {
         && !tlc.applied_flags.contains(AppliedFlags::REMOVE)
 }
 
-/// Replace an uncommitted peer failure only after payer reconciliation has acknowledged it.
+/// Release an origin-payer TLC only after its on-chain fulfillment was acknowledged.
+/// Also replaces an uncommitted peer failure when the chain proves fulfillment.
 pub(crate) fn confirm_onchain_payer_fulfill(
     state: &mut ChannelActorState,
     fulfilled: OnChainConfirmedPayerTlc,
@@ -487,7 +488,17 @@ pub(crate) fn confirm_onchain_payer_fulfill(
     let Some(tlc) = state.tlc_state.get_mut(&fulfilled.tlc_id) else {
         return false;
     };
-    if !is_uncommitted_payer_failure(tlc) {
+    if !tlc.is_offered()
+        || tlc.forwarding_tlc.is_some()
+        || tlc.payment_hash != fulfilled.payment_hash
+        || tlc.attempt_id != Some(fulfilled.attempt_id)
+        || tlc.applied_flags.contains(AppliedFlags::REMOVE)
+        || Hash256::from(tlc.hash_algorithm.hash(fulfilled.preimage)) != tlc.payment_hash
+        || !(is_uncommitted_payer_failure(tlc)
+            || matches!(&tlc.removed_reason,
+                Some(RemoveTlcReason::RemoveTlcFulfill(reason))
+                    if reason.payment_preimage == fulfilled.preimage))
+    {
         return false;
     }
     tlc.removed_reason = Some(RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {

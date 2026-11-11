@@ -64,6 +64,163 @@ use std::panic;
 use std::time::{Duration, SystemTime};
 use tracing::{debug, error, info};
 
+// Hold the normal stop event outside NetworkActor so the late-update race is deterministic.
+struct StoppedPayerMailbox;
+
+#[async_trait::async_trait]
+impl ractor::Actor for StoppedPayerMailbox {
+    type Msg = PaymentActorMessage;
+    type State = ();
+    type Arguments = ();
+    async fn pre_start(
+        &self,
+        _: ractor::ActorRef<Self::Msg>,
+        _: (),
+    ) -> Result<(), ractor::ActorProcessingErr> {
+        Ok(())
+    }
+    async fn handle(
+        &self,
+        _: ractor::ActorRef<Self::Msg>,
+        _: Self::Msg,
+        _: &mut (),
+    ) -> Result<(), ractor::ActorProcessingErr> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn test_review_late_update_preserves_trampoline_error_packet() {
+    let (payer, relay, channel_id) =
+        create_nodes_with_established_channel(100000000000, 11800000000, false).await;
+    let invoice = relay.build_basic_invoice(1000, gen_rand_sha256_hash());
+    let hash = *invoice.payment_hash();
+    relay.insert_invoice(invoice.clone(), None);
+    payer
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    wait_for_tlc_sync(&payer, &relay, channel_id, 1).await;
+    let incoming = relay
+        .get_channel_actor_state(channel_id)
+        .tlc_state
+        .received_tlcs
+        .tlcs
+        .iter()
+        .find(|tlc| tlc.payment_hash == hash)
+        .unwrap()
+        .clone();
+    // Keep the upstream removal in the channel state until the packet is inspected.
+    let upstream_channel = payer.get_channel_actor(channel_id).await.unwrap();
+    let release = ractor::call!(upstream_channel, |reply| ChannelActorMessage::Command(
+        ChannelCommand::TestPause(reply)
+    ))
+    .unwrap();
+    let mut request = SendPaymentCommand {
+        target_pubkey: Some(payer.pubkey),
+        amount: Some(1000),
+        keysend: Some(true),
+        ..Default::default()
+    }
+    .build_send_payment_data(Currency::Fibd)
+    .unwrap();
+    request.payment_hash = hash;
+    request.trampoline_context = Some(TrampolineContext {
+        previous_tlcs: vec![PrevTlcInfo {
+            prev_channel_id: channel_id,
+            prev_tlc_id: incoming.id(),
+            forwarding_fee: 0,
+            shared_secret: Some(incoming.shared_secret),
+        }],
+        hash_algorithm: incoming.hash_algorithm,
+        ..Default::default()
+    });
+    let mut session = fiber_types::PaymentSession::new_session(&relay.store, request, 1);
+    let code = TlcErrorCode::PermanentChannelFailure;
+    session.set_failed_status("downstream failure");
+    session.last_error_code = Some(code);
+    relay.store.insert_payment_session(session);
+    let packet = TlcErrPacket::new(
+        TlcErr::new_channel_fail(code, payer.pubkey, gen_rand_channel_outpoint(), None),
+        &[9; 32],
+    );
+    let expected = TlcErrPacket::new_trampoline_failed(
+        code,
+        relay.pubkey,
+        packet.onion_packet.clone(),
+        &incoming.shared_secret,
+    );
+    let (old, task) = ractor::Actor::spawn(None, StoppedPayerMailbox, ())
+        .await
+        .unwrap();
+    old.stop(None);
+    task.await.unwrap();
+    ractor::call!(relay.network_actor, |reply| {
+        NetworkActorMessage::new_command(NetworkActorCommand::TestSetPaymentActor(
+            hash,
+            old.clone(),
+            reply,
+        ))
+    })
+    .unwrap();
+    let wakeups = || {
+        [
+            NetworkActorMessage::new_command(NetworkActorCommand::PaymentTlcUpdated(hash)),
+            NetworkActorMessage::new_event(NetworkActorEvent::RetrySendPayment(hash, Some(1))),
+            NetworkActorMessage::new_event(NetworkActorEvent::ResumePaymentAfterClosedChannel(
+                hash, 1,
+            )),
+        ]
+    };
+    for message in wakeups() {
+        relay.network_actor.send_message(message).unwrap();
+        let current = ractor::call!(relay.network_actor, |reply| {
+            NetworkActorMessage::new_command(NetworkActorCommand::GetPaymentActor(hash, reply))
+        })
+        .unwrap();
+        assert_eq!(
+            current.map(|actor| actor.get_id()),
+            Some(old.get_id()),
+            "a final payment must retain its pending normal stop, not spawn a replacement"
+        );
+    }
+    relay
+        .network_actor
+        .send_message(NetworkActorMessage::new_event(
+            NetworkActorEvent::PaymentActorStopped(hash, old.get_id(), Some(packet)),
+        ))
+        .unwrap();
+    wait_until(|| {
+        relay
+            .get_tlc(channel_id, incoming.tlc_id)
+            .is_some_and(|tlc| tlc.removed_reason.is_some())
+    })
+    .await;
+    assert_eq!(
+        relay
+            .get_tlc(channel_id, incoming.tlc_id)
+            .unwrap()
+            .removed_reason,
+        Some(RemoveTlcReason::RemoveTlcFail(expected))
+    );
+    relay.wait_until_no_inflight_payments().await;
+    for message in wakeups() {
+        relay.network_actor.send_message(message).unwrap();
+        let current = ractor::call!(relay.network_actor, |reply| {
+            NetworkActorMessage::new_command(NetworkActorCommand::GetPaymentActor(hash, reply))
+        })
+        .unwrap();
+        assert!(
+            current.is_none(),
+            "a wake-up must not resurrect a completed payment"
+        );
+    }
+    let _ = release.send(());
+}
+
 #[tokio::test]
 async fn test_review_payment_actor_panic_does_not_loop() {
     let (payer, payee, _) =
@@ -229,14 +386,14 @@ async fn assert_durable_channel_admission(legacy: bool, queued: bool) {
         assert_eq!(attempt.status, AttemptStatus::Created);
         assert!(!payer
             .get_channel_actor_state(id)
-            .owns_payment_attempt(hash, attempt.id));
+            .owns_payment_attempt(&attempt));
         release.send(()).unwrap();
     };
     let (response, ()) = tokio::join!(send, inspect_mailbox);
     response.unwrap();
     let attempt = payer.store.get_attempts(hash).pop().unwrap();
     let persisted = payer.get_channel_actor_state(id);
-    assert!(persisted.owns_payment_attempt(hash, attempt.id));
+    assert!(persisted.owns_payment_attempt(&attempt));
     if queued {
         assert_eq!(attempt.status, AttemptStatus::Created);
         assert!(persisted.retryable_tlc_operations.iter().any(|op| {
@@ -8358,12 +8515,18 @@ async fn test_payer_peer_fail_then_onchain_fulfill_offline() {
 }
 
 #[cfg(feature = "watchtower")]
+#[tokio::test]
+async fn test_review_onchain_fulfill_without_live_channel_finishes_payer() {
+    assert_payer_settlement_completion(false, true).await;
+}
+
+#[cfg(feature = "watchtower")]
 async fn assert_payer_settlement_completion(peer_failed: bool, offline: bool) {
     init_tracing();
 
     let (nodes, channels) =
         create_n_nodes_network(&[((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT))], 2).await;
-    let [node_0, node_1] = nodes.try_into().expect("2 nodes");
+    let [mut node_0, node_1] = nodes.try_into().expect("2 nodes");
 
     let hold_preimage = gen_rand_sha256_hash();
     let hold_invoice = InvoiceBuilder::new(Currency::Fibd)
@@ -8518,11 +8681,89 @@ async fn assert_payer_settlement_completion(peer_failed: bool, offline: bool) {
         .store
         .get_shutdown_settlement_record(&channels[0])
         .is_none());
-    if peer_failed {
-        assert!(tlc
-            .applied_flags
-            .contains(fiber_types::AppliedFlags::REMOVE));
-    }
+    assert!(
+        tlc.applied_flags
+            .contains(fiber_types::AppliedFlags::REMOVE),
+        "every acknowledged on-chain payer fulfillment must release the TLC"
+    );
+    node_0.wait_until_payment_finished(payment_hash).await;
+    node_0.wait_until_no_inflight_payments().await;
+    assert!(!node_0
+        .store
+        .get_payment_hashes_with_channel_index()
+        .contains(&payment_hash));
+    node_0.restart().await;
+    node_0.node_info().await;
+    assert_eq!(node_0.get_inflight_payment_count().await, 0);
+    assert!(!node_0
+        .store
+        .get_payment_hashes_with_channel_index()
+        .contains(&payment_hash));
+    // Also restore a released-layout fulfill without REMOVE. Keep the node stopped
+    // while checking synthetic queue/receipt ownership, then restart the historical record.
+    node_0.stop().await;
+    let mut legacy = finished.clone();
+    legacy
+        .tlc_state
+        .get_mut(&payer_tlc_id)
+        .unwrap()
+        .applied_flags
+        .remove(fiber_types::AppliedFlags::REMOVE);
+    let old_tlc = legacy.tlc_state.get(&payer_tlc_id).unwrap().clone();
+    node_0.store.insert_channel_actor_state(legacy.clone());
+    let session = node_0.store.get_payment_session(payment_hash).unwrap();
+    assert!(!session.has_pending_payment_work(&node_0.store));
+    legacy
+        .retryable_tlc_operations
+        .push_back(fiber_types::RetryableTlcOperation::AddTlc(AddTlcCommand {
+            amount: old_tlc.amount,
+            payment_hash,
+            attempt_id: old_tlc.attempt_id,
+            expiry: old_tlc.expiry,
+            hash_algorithm: old_tlc.hash_algorithm,
+            onion_packet: old_tlc.onion_packet.clone(),
+            shared_secret: old_tlc.shared_secret,
+            is_trampoline_hop: false,
+            previous_tlc: None,
+        }));
+    node_0.store.insert_channel_actor_state(legacy.clone());
+    assert!(
+        session.has_pending_payment_work(&node_0.store),
+        "historical fulfillment must not hide queued Adds"
+    );
+    legacy.retryable_tlc_operations.clear();
+    let execution = node_0
+        .store
+        .get_attempt(payment_hash, old_tlc.attempt_id.unwrap())
+        .unwrap()
+        .tried_times;
+    legacy
+        .session_v2
+        .as_mut()
+        .unwrap()
+        .remove_effects
+        .push((old_tlc, Some(execution)));
+    node_0.store.insert_channel_actor_state(legacy.clone());
+    assert!(
+        session.has_pending_payment_work(&node_0.store),
+        "historical fulfillment must not hide V2 receipts"
+    );
+    legacy.session_v2.as_mut().unwrap().remove_effects.clear();
+    node_0.store.insert_channel_actor_state(legacy);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    node_0.start().await;
+    node_0
+        .network_actor
+        .send_message(NetworkActorMessage::new_command(
+            NetworkActorCommand::PaymentTlcUpdated(payment_hash),
+        ))
+        .unwrap();
+    node_0.node_info().await;
+    assert_eq!(
+        node_0.get_inflight_payment_count().await,
+        0,
+        "an acknowledged historical fulfillment must not respawn a payer"
+    );
     // Recovery must persist the ordinary preimage, not depend on the watchtower fallback.
     let record = crate::store::store_impl::KeyValue::Preimage(payment_hash, hold_preimage);
     assert_eq!(

@@ -68,18 +68,18 @@ use ckb_types::{
 pub use fiber_types::channel_v2_validation::decode_channel_actor_data;
 use fiber_types::{
     blake2b_hash_with_salt, is_tlc_key_derivation_safe, try_derive_tlc_pubkey, AddTlcCommand,
-    AppliedFlags, AwaitingChannelReadyFlags, AwaitingTxSignaturesFlags, BasicMppPaymentData,
-    ChannelActorData, ChannelAnnouncement, ChannelBasePublicKeys, ChannelConnectivityState,
-    ChannelConstraints, ChannelFeatures, ChannelFlags, ChannelOpenRecord, ChannelState,
-    ChannelTlcInfo, ChannelUpdate, ChannelUpdateChannelFlags, ChannelUpdateMessageFlags,
-    CloseFlags, CollaboratingFundingTxFlags, CommitmentNumbers, EcdsaSignature,
-    ExternalFundingPersistState, Hash256, InMemorySigner, InboundTlcStatus, Musig2Context,
-    NegotiatingFundingFlags, OutboundTlcStatus, PaymentCustomRecords, PeeledPaymentOnionPacket,
-    PendingNotifySettleTlc, PrevTlcInfo, Privkey, Pubkey, PublicChannelInfo, RemoveTlcFulfill,
-    RemoveTlcReason, RetryableTlcOperation, RevocationData, RevokeAndAck, SettlementData,
-    SettlementTlc, ShutdownInfo, ShutdownSettlementRecord, ShuttingDownFlags,
-    SigningCommitmentFlags, TLCId, TlcErr, TlcErrPacket, TlcErrorCode, TlcInfo, TlcStatus,
-    INITIAL_COMMITMENT_NUMBER, NO_SHARED_SECRET,
+    AppliedFlags, Attempt, AwaitingChannelReadyFlags, AwaitingTxSignaturesFlags,
+    BasicMppPaymentData, ChannelActorData, ChannelAnnouncement, ChannelBasePublicKeys,
+    ChannelConnectivityState, ChannelConstraints, ChannelFeatures, ChannelFlags, ChannelOpenRecord,
+    ChannelState, ChannelTlcInfo, ChannelUpdate, ChannelUpdateChannelFlags,
+    ChannelUpdateMessageFlags, CloseFlags, CollaboratingFundingTxFlags, CommitmentNumbers,
+    EcdsaSignature, ExternalFundingPersistState, Hash256, InMemorySigner, InboundTlcStatus,
+    Musig2Context, NegotiatingFundingFlags, OutboundTlcStatus, PaymentCustomRecords,
+    PeeledPaymentOnionPacket, PendingNotifySettleTlc, PrevTlcInfo, Privkey, Pubkey,
+    PublicChannelInfo, RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation, RevocationData,
+    RevokeAndAck, SettlementData, SettlementTlc, ShutdownInfo, ShutdownSettlementRecord,
+    ShuttingDownFlags, SigningCommitmentFlags, TLCId, TlcErr, TlcErrPacket, TlcErrorCode, TlcInfo,
+    TlcStatus, INITIAL_COMMITMENT_NUMBER, NO_SHARED_SECRET,
 };
 pub use fiber_types::{
     CommitDiff, CommitmentSignedTemplate, ReplayOrderHint, TlcReplayUpdate,
@@ -4091,17 +4091,20 @@ where
                         state.tlc_state.set_offered_tlc_removed(id, fulfill.clone());
                         if let Some(attempt_id) = tlc.attempt_id {
                             state.pending_payment_notifications.insert(tlc.payment_hash);
-                            payer_effects_applied &= self
-                                .reconcile_onchain_payer_tlc(
-                                    channel_id,
-                                    OnChainConfirmedPayerTlc {
-                                        tlc_id: tlc.tlc_id,
-                                        payment_hash: tlc.payment_hash,
-                                        attempt_id,
-                                        preimage: tlc.preimage,
-                                    },
-                                )
-                                .await;
+                            let confirmed = OnChainConfirmedPayerTlc {
+                                tlc_id: tlc.tlc_id,
+                                payment_hash: tlc.payment_hash,
+                                attempt_id,
+                                preimage: tlc.preimage,
+                            };
+                            if self
+                                .reconcile_onchain_payer_tlc(channel_id, confirmed)
+                                .await
+                            {
+                                confirm_onchain_payer_fulfill(state, confirmed);
+                            } else {
+                                payer_effects_applied = false;
+                            }
                         }
                     }
                 }
@@ -11925,8 +11928,9 @@ impl ChannelActorState {
         !self.retryable_tlc_operations.is_empty()
     }
 
-    pub(crate) fn owns_payment_attempt(&self, payment_hash: Hash256, attempt_id: u64) -> bool {
-        let attempt_id = Some(attempt_id);
+    pub(crate) fn owns_payment_attempt(&self, attempt: &Attempt) -> bool {
+        let payment_hash = attempt.payment_hash;
+        let attempt_id = Some(attempt.id);
         let settled_force_close = matches!(self.state, ChannelState::Closed(flags)
             if flags.intersects(CloseFlags::UNCOOPERATIVE_LOCAL | CloseFlags::UNCOOPERATIVE_REMOTE)
                 && !flags.intersects(CloseFlags::WAITING_ONCHAIN_SETTLEMENT | CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED));
@@ -11935,12 +11939,20 @@ impl ChannelActorState {
             !tlc.applied_flags.contains(AppliedFlags::REMOVE)
                 && tlc.payment_hash == payment_hash
                 && tlc.attempt_id == attempt_id
-                // Released chain-timeout completion did not apply REMOVE. Once
-                // force-close settlement finished, its failed payer TLC is historical.
+                // Released chain completion did not always apply REMOVE. Retire a
+                // historical fulfill only when this exact attempt recorded its result;
+                // an unobserved preimage must still be delivered to the payer.
                 && !(settled_force_close
                     && tlc.is_offered()
                     && tlc.forwarding_tlc.is_none()
-                    && matches!(tlc.removed_reason, Some(RemoveTlcReason::RemoveTlcFail(_))))
+                    && match &tlc.removed_reason {
+                        Some(RemoveTlcReason::RemoveTlcFail(_)) => true,
+                        Some(RemoveTlcReason::RemoveTlcFulfill(reason)) => {
+                            attempt.is_success()
+                                && attempt.preimage == Some(reason.payment_preimage)
+                        }
+                        None => false,
+                    })
         }) || self.retryable_tlc_operations.iter().any(|operation| {
             matches!(
                 operation,
