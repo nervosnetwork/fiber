@@ -1488,8 +1488,8 @@ async fn do_test_update_graph_balance_after_payment(public: bool) {
     let payment_hash2 = res2.payment_hash;
 
     // make sure the payment is processed
-    node_a.wait_until_success(payment_hash1).await;
-    node_b.wait_until_success(payment_hash2).await;
+    node_a.wait_until_payment_finished(payment_hash1).await;
+    node_b.wait_until_payment_finished(payment_hash2).await;
 
     assert_eq!(
         node_a.get_payment_status(payment_hash1).await,
@@ -1720,7 +1720,7 @@ async fn test_forward_queued_add_restart_keeps_settlements_balanced() {
             }
         }
         if fulfill {
-            a.wait_until_success(hash).await;
+            a.wait_until_payment_finished(hash).await;
         } else {
             a.wait_until_failed(hash).await;
         }
@@ -1790,7 +1790,7 @@ async fn test_v2_retry_queue_batch_settles_payments() {
     a.release_held_fiber_messages().await;
     tokio::time::timeout(Duration::from_secs(15), async {
         for hash in payments {
-            a.wait_until_success(hash).await;
+            a.wait_until_payment_finished(hash).await;
         }
     })
     .await
@@ -1816,8 +1816,8 @@ async fn test_v2_paired_concurrent_updates() {
     b.release_held_fiber_messages().await;
     tokio::time::timeout(Duration::from_secs(15), async {
         tokio::join!(
-            a.wait_until_success(pa.payment_hash),
-            b.wait_until_success(pb.payment_hash)
+            a.wait_until_payment_finished(pa.payment_hash),
+            b.wait_until_payment_finished(pb.payment_hash)
         );
     })
     .await
@@ -1913,8 +1913,8 @@ async fn test_v2_crossed_lost_commitments_settle_after_reconnect() {
         a.connect_to(&mut b).await;
         tokio::time::timeout(Duration::from_secs(5), async {
             tokio::join!(
-                a.wait_until_success(pa.payment_hash),
-                b.wait_until_success(pb.payment_hash)
+                a.wait_until_payment_finished(pa.payment_hash),
+                b.wait_until_payment_finished(pb.payment_hash)
             );
             loop {
                 let sa = a.get_channel_actor_state(id);
@@ -2267,7 +2267,7 @@ async fn test_v2_opening_and_paired_actor_payments() {
         let payment = a.send_payment_keysend(&b, 10000, false).await.unwrap();
         tokio::time::timeout(
             Duration::from_secs(15),
-            a.wait_until_success(payment.payment_hash),
+            a.wait_until_payment_finished(payment.payment_hash),
         )
         .await
         .unwrap();
@@ -2275,7 +2275,7 @@ async fn test_v2_opening_and_paired_actor_payments() {
     let payment = b.send_payment_keysend(&a, 9999, false).await.unwrap();
     tokio::time::timeout(
         Duration::from_secs(15),
-        b.wait_until_success(payment.payment_hash),
+        b.wait_until_payment_finished(payment.payment_hash),
     )
     .await
     .unwrap();
@@ -2316,7 +2316,7 @@ async fn test_network_send_payment_normal_keysend_workflow() {
     assert_eq!(res.status, PaymentStatus::Created);
     let payment_hash = res.payment_hash;
 
-    node_a.wait_until_success(payment_hash).await;
+    node_a.wait_until_payment_finished(payment_hash).await;
 
     let new_balance_node_a = node_a.get_local_balance_from_channel(channel_id);
     let new_balance_node_b = node_b.get_local_balance_from_channel(channel_id);
@@ -2338,7 +2338,7 @@ async fn test_network_send_payment_normal_keysend_workflow() {
     let payment_hash = res.payment_hash;
 
     assert_eq!(res.failed_error, None);
-    node_a.wait_until_success(payment_hash).await;
+    node_a.wait_until_payment_finished(payment_hash).await;
 
     assert!(node_a.get_payment_preimage(&payment_hash).is_none());
 }
@@ -2374,8 +2374,8 @@ async fn test_network_send_payment_send_each_other() {
     assert_eq!(res2.status, PaymentStatus::Created);
     let payment_hash2 = res2.payment_hash;
 
-    node_a.wait_until_success(payment_hash1).await;
-    node_b.wait_until_success(payment_hash2).await;
+    node_a.wait_until_payment_finished(payment_hash1).await;
+    node_b.wait_until_payment_finished(payment_hash2).await;
 
     assert_eq!(
         node_a.get_payment_status(payment_hash1).await,
@@ -2452,10 +2452,10 @@ async fn test_network_send_payment_more_send_each_other() {
     assert_eq!(res4.status, PaymentStatus::Created);
     let payment_hash4 = res4.payment_hash;
 
-    node_a.wait_until_success(payment_hash1).await;
-    node_b.wait_until_success(payment_hash2).await;
-    node_a.wait_until_success(payment_hash3).await;
-    node_b.wait_until_success(payment_hash4).await;
+    node_a.wait_until_payment_finished(payment_hash1).await;
+    node_b.wait_until_payment_finished(payment_hash2).await;
+    node_a.wait_until_payment_finished(payment_hash3).await;
+    node_b.wait_until_payment_finished(payment_hash4).await;
 
     let node_a_new_balance = node_a.get_local_balance_from_channel(new_channel_id);
     let node_b_new_balance = node_b.get_local_balance_from_channel(new_channel_id);
@@ -2889,7 +2889,7 @@ async fn test_send_payment_with_3_nodes_f() {
         .await;
     assert!(node_b.get_payment_preimage(&res.payment_hash).is_some());
 
-    node_a.wait_until_success(res.payment_hash).await;
+    node_a.wait_until_payment_finished(res.payment_hash).await;
 
     assert!(node_a.get_payment_preimage(&res.payment_hash).is_none());
     assert!(node_b.get_payment_preimage(&res.payment_hash).is_none());
@@ -2940,7 +2940,7 @@ async fn test_send_payment_with_rev_3_nodes() {
     assert_eq!(res.status, PaymentStatus::Created);
     assert!(res.fee > 0);
     // make sure the payment is sent
-    node_c.wait_until_success(res.payment_hash).await;
+    node_c.wait_until_payment_finished(res.payment_hash).await;
     assert_eq!(
         node_c.get_payment_status(res.payment_hash).await,
         PaymentStatus::Success
@@ -2984,13 +2984,13 @@ async fn test_send_payment_with_max_nodes() {
     assert!(res.fee > 0);
 
     // make sure the payment is sent
-    nodes[0].wait_until_success(res.payment_hash).await;
+    nodes[0].wait_until_payment_finished(res.payment_hash).await;
 
     assert_eq!(
         nodes[0].get_payment_status(res.payment_hash).await,
         PaymentStatus::Success
     );
-    nodes[0].wait_until_success(res.payment_hash).await;
+    nodes[0].wait_until_payment_finished(res.payment_hash).await;
 
     let sender_local_new = nodes[0].get_local_balance_from_channel(channels[0]);
     let receiver_local_new = nodes[last].get_local_balance_from_channel(channels[last - 1]);
@@ -5954,7 +5954,7 @@ async fn test_forward_payment_tlc_minimum_value() {
         .expect("send ok");
     // this is the payment_hash generated by keysend
     assert_eq!(res.status, PaymentStatus::Created);
-    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+    node_a.wait_until_payment_finished(res.payment_hash).await;
 
     // update B's ChannelUpdate in channel_b_c with new tlc_minimum_value
     let update_result = call!(node_b.network_actor, |rpc_reply| {
@@ -6000,7 +6000,7 @@ async fn test_forward_payment_tlc_minimum_value() {
         ))
     })
     .expect("node_b alive");
-    assert!(add_tlc_result.is_ok());
+    assert!(add_tlc_result.is_ok(), "{add_tlc_result:?}");
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
     // AddTlc from B to C is not OK because the forwarding value is too small
@@ -8588,7 +8588,7 @@ async fn test_send_payment_with_channel_balance_error() {
         .expect("send ok");
     let payment_hash = res.payment_hash;
     // sleep for a while
-    source_node.wait_until_success(payment_hash).await;
+    source_node.wait_until_payment_finished(payment_hash).await;
 
     node_2.update_channel_local_balance(channels[2], 100).await;
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
@@ -9015,7 +9015,7 @@ async fn test_send_payment_will_succeed_with_retry_in_middle_hops() {
         .expect("payment successful");
 
     let payment_hash = res.payment_hash;
-    source_node.wait_until_success(payment_hash).await;
+    source_node.wait_until_payment_finished(payment_hash).await;
 
     let fee = res.fee;
     eprintln!("fee: {:?}", fee);
@@ -9176,7 +9176,7 @@ async fn test_send_payment_will_succeed_with_valid_invoice() {
     assert!(res.is_ok());
 
     let payment_hash = res.unwrap().payment_hash;
-    source_node.wait_until_success(payment_hash).await;
+    source_node.wait_until_payment_finished(payment_hash).await;
 
     source_node
         .assert_payment_status(payment_hash, PaymentStatus::Success, Some(1))
@@ -11701,14 +11701,8 @@ async fn test_reestablish_bidirectional_pending() {
     );
 
     node_a.restart().await;
-    wait_until(|| {
-        let state_a = node_a.get_channel_actor_state(channel_id);
-        let state_b = node_b.get_channel_actor_state(channel_id);
-        !state_a.reestablishing
-            && state_a.get_local_commitment_number() == state_b.get_remote_commitment_number()
-            && state_a.get_remote_commitment_number() == state_b.get_local_commitment_number()
-    })
-    .await;
+    // Payment completion establishes a stable commitment snapshot after recovery.
+    wait_for_reestablished_payments(&node_a, &node_b, channel_id).await;
 
     let state_a_after = node_a.get_channel_actor_state(channel_id);
     let state_b_after = node_b.get_channel_actor_state(channel_id);
@@ -11964,6 +11958,22 @@ async fn test_reestablish_commitment_number_consistency() {
     );
 }
 
+async fn wait_for_reestablished_payments(a: &NetworkNode, b: &NetworkNode, channel_id: Hash256) {
+    a.wait_until_no_inflight_payments().await;
+    b.wait_until_no_inflight_payments().await;
+    crate::tests::test_utils::wait_until_timeout(5000, || {
+        let a = a.get_channel_actor_state(channel_id);
+        let b = b.get_channel_actor_state(channel_id);
+        !a.reestablishing
+            && !b.reestablishing
+            && !a.tlc_state.waiting_ack
+            && !b.tlc_state.waiting_ack
+            && a.get_local_commitment_number() == b.get_remote_commitment_number()
+            && a.get_remote_commitment_number() == b.get_local_commitment_number()
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn test_reestablish_dual_owed_ordering() {
     init_tracing();
@@ -12000,7 +12010,8 @@ async fn test_reestablish_dual_owed_ordering() {
     );
 
     node_a.restart().await;
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    // Payment completion establishes a stable commitment snapshot after recovery.
+    wait_for_reestablished_payments(&node_a, &node_b, channel_id).await;
 
     let state_a_after = node_a.get_channel_actor_state(channel_id);
     let state_b_after = node_b.get_channel_actor_state(channel_id);
@@ -12066,7 +12077,8 @@ async fn test_legacy_fallback_dual_owed_no_commit_diff() {
     );
 
     node_a.restart().await;
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    // Payment completion establishes a stable commitment snapshot after recovery.
+    wait_for_reestablished_payments(&node_a, &node_b, channel_id).await;
 
     let state_a_after = node_a.get_channel_actor_state(channel_id);
     let state_b_after = node_b.get_channel_actor_state(channel_id);
@@ -12131,7 +12143,8 @@ async fn test_legacy_fallback_single_owed_no_commit_diff() {
     node_a.store.delete_pending_commit_diff(&channel_id);
 
     node_a.restart().await;
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    // Payment completion establishes a stable commitment snapshot after recovery.
+    wait_for_reestablished_payments(&node_a, &node_b, channel_id).await;
 
     let state_a_after = node_a.get_channel_actor_state(channel_id);
     let state_b_after = node_b.get_channel_actor_state(channel_id);
@@ -14488,6 +14501,7 @@ mod udt_funding_cell_capacity {
             scheduled_channel_update_handle: None,
             pending_notify_settle_tlcs: vec![],
             pending_remove_effects_v2: 0,
+            pending_payment_notifications: Default::default(),
             replayed_tlc_updates_v2: 0,
             pending_reestablish_channel_ready: false,
             defer_peer_tlc_updates: false,

@@ -13,7 +13,7 @@ use crate::{
             PAYMENT_MAX_PARTS_LIMIT,
         },
         network::DebugEvent,
-        payment::SendPaymentCommand,
+        payment::{PaymentSessionExt, SendPaymentCommand},
         types::RemoveTlcReason,
         AddTlcCommand, AttemptStatus, BasicMppPaymentData, FeatureVector, Hash256, HashAlgorithm,
         NetworkActorCommand, NetworkActorMessage, PaymentCustomRecords, PaymentHopData,
@@ -53,7 +53,7 @@ async fn test_send_mpp_basic_two_channels_one_time() {
 
     eprintln!("begin to wait for payment: {} success ...", payment_hash);
 
-    node_0.wait_until_success(payment_hash).await;
+    node_0.wait_until_payment_finished(payment_hash).await;
     let find_path_count = node_0
         .get_payment_find_path_count(payment_hash)
         .await
@@ -270,7 +270,7 @@ async fn test_send_mpp_amount_split() {
     eprintln!("res: {:?}", res);
     assert!(res.is_ok());
     let payment_hash = res.unwrap().payment_hash;
-    node_0.wait_until_success(payment_hash).await;
+    node_0.wait_until_payment_finished(payment_hash).await;
 
     let payment_session = node_0.get_payment_session(payment_hash).unwrap();
     dbg!(&payment_session.status, &payment_session.attempts_count());
@@ -2492,7 +2492,6 @@ async fn test_send_mpp_will_fail_with_disable_single_path() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_send_mpp_will_success_with_middle_hop_capacity_not_enough() {
     init_tracing();
-
     let (nodes, channels) = create_n_nodes_network(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
@@ -2505,37 +2504,71 @@ async fn test_send_mpp_will_success_with_middle_hop_capacity_not_enough() {
     )
     .await;
     let [node_0, _node_1, node_2] = nodes.try_into().expect("ok nodes");
-
-    let res = node_0
-        .send_mpp_payment_with_dry_run_option(&node_2, 300000, None, true)
-        .await;
-
-    let query_res = res.unwrap();
+    // Hold the invoice until routing has assembled every part. Capacity learning
+    // is independent of the short debug deadline for automatic MPP collection.
+    let preimage = gen_rand_sha256_hash();
+    let invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(300000))
+        .payment_preimage(preimage)
+        .payment_secret(gen_rand_sha256_hash())
+        .allow_mpp(true)
+        .payee_pub_key(node_2.pubkey.into())
+        .expiry_time(Duration::from_secs(3600))
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_2.private_key.0))
+        .unwrap();
+    let payment_hash = *invoice.payment_hash();
+    node_2.insert_invoice(invoice.clone(), None);
+    let query_res = node_0
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            dry_run: true,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
     assert_eq!(query_res.routers.len(), 1);
-    dbg!(&query_res.routers);
-
     let used_channels = node_0
         .routers_used_channels(&query_res.routers, &channels)
         .await;
-
-    dbg!(&used_channels);
     assert!(used_channels.contains(&channels[1]));
-
-    let res = node_0
-        .send_mpp_payment(&node_2, 300000, None)
+    node_0.wait_until_no_inflight_payments().await;
+    node_0
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            ..Default::default()
+        })
         .await
         .expect("send mpp payment");
-
-    let payment_hash = res.payment_hash;
+    wait_until_timeout(120000, || {
+        node_2.get_invoice_status(&payment_hash) == Some(CkbInvoiceStatus::Received)
+    })
+    .await;
+    node_2
+        .settle_invoice(&payment_hash, preimage)
+        .await
+        .unwrap();
     node_0.wait_until_success(payment_hash).await;
-
-    let payment_session = node_0.get_payment_session(payment_hash).unwrap();
-    let attempts = payment_session.attempts().collect::<Vec<_>>();
+    node_0.wait_until_payment_finished(payment_hash).await;
+    node_0.wait_until_no_inflight_payments().await;
+    let session = node_0.get_payment_session(payment_hash).unwrap();
+    let attempts = session.attempts().collect::<Vec<_>>();
     assert!(!attempts.iter().any(|a| a
         .last_error
-        .clone()
+        .as_deref()
         .unwrap_or_default()
         .contains("HoldTlcTimeout")));
+    let settled_routes = attempts
+        .iter()
+        .filter(|attempt| attempt.is_success())
+        .map(|attempt| attempt.route.clone())
+        .collect::<Vec<_>>();
+    let settled_channels = node_0
+        .routers_used_channels(&settled_routes, &channels)
+        .await;
+    assert!(
+        channels[2..].iter().all(|id| settled_channels.contains(id)),
+        "all three funded alternatives are required to settle the payment"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -2899,7 +2932,7 @@ async fn test_send_mpp_basic_two_channels_send_each_other_multiple_time() {
         assert!(res.is_ok());
         let payment_hash = res.unwrap().payment_hash;
         eprintln!("begin to wait for payment: {} success ...", payment_hash);
-        node_0.wait_until_success(payment_hash).await;
+        node_0.wait_until_payment_finished(payment_hash).await;
 
         let payment_session = node_0.get_payment_session(payment_hash).unwrap();
         dbg!(&payment_session.status, &payment_session.attempts_count());
@@ -2912,7 +2945,7 @@ async fn test_send_mpp_basic_two_channels_send_each_other_multiple_time() {
         assert!(res.is_ok());
         let payment_hash = res.unwrap().payment_hash;
         eprintln!("begin to wait for payment: {} success ...", payment_hash);
-        node_1.wait_until_success(payment_hash).await;
+        node_1.wait_until_payment_finished(payment_hash).await;
 
         let payment_session = node_1.get_payment_session(payment_hash).unwrap();
         dbg!(&payment_session.status, &payment_session.attempts_count());
@@ -2925,7 +2958,7 @@ async fn test_send_mpp_basic_two_channels_send_each_other_multiple_time() {
     assert!(res.is_ok());
     let payment_hash = res.unwrap().payment_hash;
     eprintln!("begin to wait for payment: {} success ...", payment_hash);
-    node_0.wait_until_success(payment_hash).await;
+    node_0.wait_until_payment_finished(payment_hash).await;
 
     let payment_session = node_0.get_payment_session(payment_hash).unwrap();
     dbg!(&payment_session.status, &payment_session.attempts_count());
@@ -2974,7 +3007,7 @@ async fn test_send_mpp_three_channels_send_each_other_multiple_time() {
         assert!(res.is_ok());
         let payment_hash = res.unwrap().payment_hash;
         eprintln!("begin to wait for payment: {} success ...", payment_hash);
-        node_0.wait_until_success(payment_hash).await;
+        node_0.wait_until_payment_finished(payment_hash).await;
 
         let payment_session = node_0.get_payment_session(payment_hash).unwrap();
         dbg!(&payment_session.status, &payment_session.attempts_count());
@@ -2989,7 +3022,7 @@ async fn test_send_mpp_three_channels_send_each_other_multiple_time() {
         assert!(res.is_ok());
         let payment_hash = res.unwrap().payment_hash;
         eprintln!("begin to wait for payment: {} success ...", payment_hash);
-        node_1.wait_until_success(payment_hash).await;
+        node_1.wait_until_payment_finished(payment_hash).await;
 
         let payment_session = node_1.get_payment_session(payment_hash).unwrap();
         dbg!(&payment_session.status, &payment_session.attempts_count());
@@ -3368,15 +3401,12 @@ async fn test_mpp_fail_on_total_amount_not_match() {
     let payment_session = node_0.get_payment_session(payment_hash).unwrap();
     eprintln!("now payment session status: {:?}", payment_session.status);
 
-    node_0
-        .expect_debug_event("after on_remove_tlc_event session_status: Failed")
-        .await;
-
-    let payment_session = node_0.get_payment_session(payment_hash).unwrap();
-    eprintln!("now payment session status: {:?}", payment_session.status);
-
+    // Final failure is published after channel delivery completes, which may
+    // happen after the last OnRemove callback's diagnostic event.
     node_0.wait_until_failed(payment_hash).await;
+    node_0.wait_until_no_inflight_payments().await;
     let payment_session = node_0.get_payment_session(payment_hash).unwrap();
+    assert!(!payment_session.has_outstanding_channel_work(&node_0.store));
     assert_eq!(payment_session.attempts_count(), 2);
     assert!(payment_session
         .attempts()
@@ -3830,8 +3860,12 @@ async fn test_send_payment_tlc_expiry_soon_first_hop() {
         .expect("send payment success")
         .payment_hash;
 
-    node_0.wait_until_success(payment_hash).await;
+    node_0.wait_until_payment_finished(payment_hash).await;
     let mut payment_session = node_0.get_payment_session(payment_hash).unwrap();
+    // Exercise an unpaid retry. The bootstrap payment's valid proof remains final.
+    let payment_hash = *ckb_invoice.payment_hash();
+    payment_session.request.payment_hash = payment_hash;
+    payment_session.request.preimage = Some(preimage);
 
     let hash_algorithm = HashAlgorithm::CkbHash;
     let funding_tx_hash = node_0.get_channel_funding_tx(&channels[0]).unwrap();
@@ -3855,6 +3889,9 @@ async fn test_send_payment_tlc_expiry_soon_first_hop() {
     payment_session.status = PaymentStatus::Created;
     payment_session.last_error = None;
     let mut attempt = payment_session.attempts().next().cloned().unwrap();
+    attempt.payment_hash = payment_hash;
+    attempt.hash = payment_hash;
+    attempt.preimage = None;
     attempt.status = AttemptStatus::Retrying;
     attempt.last_error = None;
     attempt.route_hops = hops_infos;
@@ -3912,8 +3949,12 @@ async fn test_send_payment_tlc_expiry_soon() {
         .expect("send payment success")
         .payment_hash;
 
-    node_0.wait_until_success(payment_hash).await;
+    node_0.wait_until_payment_finished(payment_hash).await;
     let mut payment_session = node_0.get_payment_session(payment_hash).unwrap();
+    // Exercise an unpaid retry. The bootstrap payment's valid proof remains final.
+    let payment_hash = *ckb_invoice.payment_hash();
+    payment_session.request.payment_hash = payment_hash;
+    payment_session.request.preimage = Some(preimage);
     let attempts: Vec<_> = payment_session.attempts().collect();
     let route = attempts[0].route_hops.clone();
     for x in route {
@@ -3951,6 +3992,9 @@ async fn test_send_payment_tlc_expiry_soon() {
     payment_session.status = PaymentStatus::Created;
     payment_session.last_error = None;
     let mut attempt = payment_session.attempts().next().cloned().unwrap();
+    attempt.payment_hash = payment_hash;
+    attempt.hash = payment_hash;
+    attempt.preimage = None;
     attempt.status = AttemptStatus::Retrying;
     attempt.last_error = None;
     attempt.route_hops = hops_infos;

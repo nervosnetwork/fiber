@@ -1641,7 +1641,7 @@ The status of a payment, will update as the payment progresses.
 
 * `Created` - Initial status. A payment session is created, but no HTLC has been dispatched.
 * `Inflight` - The first hop AddTlc is sent successfully and waiting for the response.
-* `Success` - The payment is finished. All related HTLCs are successfully settled.
+* `Success` - A payment TLC was successfully claimed. Other attempts may still be pending.
 * `Failed` - The payment session has terminated.
 ---
 

@@ -4,16 +4,17 @@
 //! a settlement proof for an exact local TLC id and full 32-byte payment hash.
 
 use crate::fiber::channel::{
-    settlement_data_to_witness, settlement_tlc_to_witness, ChannelActorState,
+    settlement_data_to_witness, settlement_tlc_to_witness, tlc_expiry_delay, ChannelActorState,
     ChannelActorStateStore,
 };
 use ckb_hash::blake2b_256;
 use ckb_sdk::util::blake160;
+use ckb_types::core::EpochNumberWithFraction;
 use ckb_types::packed::Script;
 use fiber_types::{
     AppliedFlags, ChannelData, ChannelFeatures, ChannelState, CloseFlags, Hash256, HashAlgorithm,
     InboundTlcStatus, OutboundTlcStatus, Pubkey, RemoveTlcFulfill, RemoveTlcReason, SettlementData,
-    TLCId, TlcInfo,
+    TLCId, TlcErrorCode, TlcInfo,
 };
 use musig2::{secp::Point, KeyAggContext};
 use serde::{Deserialize, Serialize};
@@ -478,7 +479,8 @@ fn is_uncommitted_payer_failure(tlc: &TlcInfo) -> bool {
         && !tlc.applied_flags.contains(AppliedFlags::REMOVE)
 }
 
-/// Replace an uncommitted peer failure only after payer reconciliation has acknowledged it.
+/// Release an origin-payer TLC only after its on-chain fulfillment was acknowledged.
+/// Also replaces an uncommitted peer failure when the chain proves fulfillment.
 pub(crate) fn confirm_onchain_payer_fulfill(
     state: &mut ChannelActorState,
     fulfilled: OnChainConfirmedPayerTlc,
@@ -486,7 +488,17 @@ pub(crate) fn confirm_onchain_payer_fulfill(
     let Some(tlc) = state.tlc_state.get_mut(&fulfilled.tlc_id) else {
         return false;
     };
-    if !is_uncommitted_payer_failure(tlc) {
+    if !tlc.is_offered()
+        || tlc.forwarding_tlc.is_some()
+        || tlc.payment_hash != fulfilled.payment_hash
+        || tlc.attempt_id != Some(fulfilled.attempt_id)
+        || tlc.applied_flags.contains(AppliedFlags::REMOVE)
+        || Hash256::from(tlc.hash_algorithm.hash(fulfilled.preimage)) != tlc.payment_hash
+        || !(is_uncommitted_payer_failure(tlc)
+            || matches!(&tlc.removed_reason,
+                Some(RemoveTlcReason::RemoveTlcFulfill(reason))
+                    if reason.payment_preimage == fulfilled.preimage))
+    {
         return false;
     }
     tlc.removed_reason = Some(RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
@@ -584,6 +596,7 @@ pub(crate) fn collect_onchain_timeout_settled_tlcs(
         .offered_tlcs
         .tlcs
         .iter()
+        .filter(|tlc| !tlc.applied_flags.contains(AppliedFlags::REMOVE))
         .filter(|tlc| tlc.removed_confirmed_at.is_none())
         .filter_map(|tlc| {
             match resolve_onchain_tlc(
@@ -617,6 +630,26 @@ pub(crate) fn collect_onchain_timeout_settled_tlcs(
                 role,
             })
         })
+        .collect()
+}
+
+/// Revalidate a payer failure against durable chain evidence before delivery or acknowledgement.
+pub(crate) fn collect_onchain_payer_failures(
+    state: &ChannelActorState,
+    store: &impl ChannelActorStateStore,
+) -> Vec<(OnChainTimeoutSettledTlc, TlcErrorCode)> {
+    let expect_expiry = crate::now_timestamp_as_millis_u64().saturating_add(tlc_expiry_delay(
+        &EpochNumberWithFraction::from_full_value(state.commitment_delay_epoch),
+    ));
+    collect_onchain_excluded_tlcs(state, store)
+        .into_iter()
+        .map(|tlc| (tlc, TlcErrorCode::PermanentChannelFailure))
+        .chain(
+            collect_onchain_timeout_settled_tlcs(state, store, expect_expiry)
+                .into_iter()
+                .map(|tlc| (tlc, TlcErrorCode::ExpiryTooSoon)),
+        )
+        .filter(|(tlc, _)| matches!(tlc.role, OnChainTimeoutTlcRole::OriginPayer { .. }))
         .collect()
 }
 

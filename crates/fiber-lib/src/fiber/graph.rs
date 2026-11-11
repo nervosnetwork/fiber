@@ -3090,8 +3090,15 @@ pub trait NetworkGraphStateStore {
     /// separately persisted attempts.
     fn get_persisted_payment_status(&self, payment_hash: Hash256) -> Option<PaymentStatus>;
     fn get_all_payment_sessions(&self) -> Vec<PaymentSession>;
+    /// Payment hashes with attempt-channel wake-up entries, including final
+    /// attempts whose channel work may not have completed. Reads only index keys.
+    fn get_payment_hashes_with_channel_index(&self) -> HashSet<Hash256>;
+    /// Repair legacy route-index aliases and retire completed recovery keys at startup.
+    /// Reads only indexed payments; returns their hashes for result/upstream recovery.
+    fn reconcile_attempts_channel_index(&self) -> HashSet<Hash256>;
+    /// Returns list views with their resolved status; unindexed legacy failures do not probe channels.
     fn get_payment_sessions_with_status(&self, status: PaymentStatus) -> Vec<PaymentSession>;
-    /// Get payment sessions with pagination support.
+    /// Get payment list views with resolved status and pagination support.
     /// `limit`: maximum number of results to return.
     /// `after`: if provided, start after this payment_hash (exclusive cursor).
     /// `status`: optional status filter.
@@ -3103,6 +3110,8 @@ pub trait NetworkGraphStateStore {
         status: Option<PaymentStatus>,
     ) -> Vec<PaymentSession>;
     fn insert_payment_session(&self, session: PaymentSession);
+    /// Publish the current effective result without rewriting the session record.
+    fn publish_payment_result(&self, payment_hash: Hash256);
     fn insert_payment_history_result(
         &mut self,
         channel_outpoint: OutPoint,

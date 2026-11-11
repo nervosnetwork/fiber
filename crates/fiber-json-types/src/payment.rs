@@ -19,7 +19,7 @@ pub enum PaymentStatus {
     Created,
     /// The first hop AddTlc is sent successfully and waiting for the response.
     Inflight,
-    /// The payment is finished. All related HTLCs are successfully settled.
+    /// A payment TLC was successfully claimed. Other attempts may still be pending.
     Success,
     /// The payment session has terminated.
     Failed,

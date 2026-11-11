@@ -401,6 +401,91 @@ fn test_v2_migration_preserves_legacy_zero_channel() {
 }
 
 #[test]
+fn test_payment_session_released_layout_needs_no_migration() {
+    use crate::fiber::graph::NetworkGraphStateStore;
+    use crate::fiber::payment::{PaymentSessionExt, SendPaymentDataBuilder};
+    use fiber_types::{PaymentSession, PaymentStatus};
+    let path = gen_path();
+    let mut expected = Vec::new();
+    {
+        let store = crate::store::open_store(&path).unwrap();
+        for status in [
+            PaymentStatus::Created,
+            PaymentStatus::Inflight,
+            PaymentStatus::Failed,
+            PaymentStatus::Success,
+        ] {
+            let hash = crate::gen_rand_sha256_hash();
+            let request =
+                SendPaymentDataBuilder::new(crate::gen_rand_fiber_public_key(), 100, hash)
+                    .max_fee_amount(Some(10))
+                    .build()
+                    .unwrap();
+            let mut session = PaymentSession::new_session(&store, request, 3);
+            session.status = status;
+            let bytes = bincode::serialize(&session).unwrap();
+            let released: fiber_types_0100::PaymentSession = bincode::deserialize(&bytes).unwrap();
+            assert_eq!(bincode::serialize(&released).unwrap(), bytes);
+            let key = [&[0xC0], hash.as_ref()].concat();
+            store.put(&key, &bytes);
+            expected.push((key, bytes, hash, status));
+        }
+    }
+    let store = crate::store::open_store_with_migration(
+        &path,
+        true,
+        Box::new(|_| panic!("unchanged layout needs no migration")),
+        Box::new(|_| {}),
+    )
+    .unwrap();
+    for (key, bytes, hash, status) in expected {
+        assert_eq!(store.get_payment_session(hash).unwrap().status, status);
+        assert_eq!(
+            store.get(key).unwrap(),
+            bytes,
+            "reading released sessions must not rewrite history"
+        );
+    }
+}
+
+#[test]
+fn test_legacy_derived_failure_needs_no_recovery_index_or_migration() {
+    use crate::fiber::graph::NetworkGraphStateStore;
+    use crate::fiber::payment::{PaymentSessionExt, SendPaymentDataBuilder};
+    use fiber_types::{PaymentSession, PaymentStatus};
+    let path = gen_path();
+    let store = crate::store::open_store(&path).unwrap();
+    let hash = crate::gen_rand_sha256_hash();
+    let target = crate::gen_rand_fiber_public_key();
+    let request = SendPaymentDataBuilder::new(target, 100, hash)
+        .max_fee_amount(Some(10))
+        .build()
+        .unwrap();
+    let session = PaymentSession::new_session(&store, request, 1);
+    store.insert_payment_session(session.clone());
+    let mut attempt = session.new_attempt(
+        1,
+        crate::gen_rand_fiber_public_key(),
+        target,
+        vec![fiber_types::PaymentHopData {
+            amount: 100,
+            ..Default::default()
+        }],
+    );
+    attempt.set_failed_status("exhausted", false);
+    store.insert_attempt(attempt);
+    store.clear_attempts_channel_index(hash);
+    let recovered = store.get_payment_session(hash).unwrap();
+    assert_eq!(recovered.effective_status(&store), PaymentStatus::Failed);
+    assert!(!recovered.can_retry());
+    assert!(store.get_payment_hashes_with_channel_index().is_empty());
+    assert_eq!(
+        store.get_persisted_payment_status(hash),
+        Some(PaymentStatus::Created)
+    );
+}
+
+#[test]
 fn test_published_legacy_at_latest_epoch_reads_without_migration() {
     use crate::fiber::channel::ChannelActorStateStore;
     use fiber_types_0100::sample::StoreSample;

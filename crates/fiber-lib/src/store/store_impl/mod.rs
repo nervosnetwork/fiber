@@ -23,7 +23,7 @@ use crate::{
         channel::{ChannelActorState, ChannelActorStateStore, ChannelOpenRecordStore, CommitDiff},
         graph::NetworkGraphStateStore,
         network::NetworkActorStateStore,
-        payment::PaymentSessionExt,
+        payment::{attempt_has_channel_work, PaymentSessionExt},
     },
     invoice::{CkbInvoice, CkbInvoiceStatus, InvoiceError, InvoiceStore, PreimageStore},
 };
@@ -98,6 +98,61 @@ impl std::fmt::Debug for Store {
 }
 
 impl Store {
+    fn restore_payment_session(&self, session: PaymentSession) -> PaymentSession {
+        session.init_attempts(self)
+    }
+
+    /// Resolve a list view without probing channels for unindexed historical failures.
+    /// This compatibility shortcut is deliberately not used for settlement or notifications.
+    fn filter_payment_session(
+        &self,
+        session: PaymentSession,
+        status: Option<PaymentStatus>,
+    ) -> Option<PaymentSession> {
+        if session.status.is_final()
+            && status.is_some_and(|wanted| {
+                session.status != wanted
+                    && !(session.status == PaymentStatus::Failed
+                        && matches!(wanted, PaymentStatus::Success | PaymentStatus::Inflight))
+            })
+        {
+            return None;
+        }
+        let mut session = self.restore_payment_session(session);
+        // Channel work can only promote Failed to Inflight, never to Success.
+        if status.is_some_and(|wanted| {
+            session.status != wanted
+                && !(session.status == PaymentStatus::Failed && wanted == PaymentStatus::Inflight)
+        }) {
+            return None;
+        }
+        if session.status == PaymentStatus::Failed {
+            let pending = session.attempts().any(Attempt::is_inflight)
+                || session.attempts().any(|attempt| {
+                    attempt
+                        .first_hop_channel_outpoint()
+                        .is_some_and(|outpoint| {
+                            let key = KeyValue::AttemptChannelIndex((
+                                outpoint.clone(),
+                                attempt.payment_hash,
+                                attempt.id,
+                            ))
+                            .key();
+                            self.get(key).is_some() && attempt_has_channel_work(attempt, self)
+                        })
+                });
+            if pending {
+                // List views only: neither the session record nor its attempts are rewritten.
+                session.status = PaymentStatus::Inflight;
+            }
+        }
+        if status.is_some_and(|wanted| session.status != wanted) {
+            None
+        } else {
+            Some(session)
+        }
+    }
+
     /// Shut down the browser database after all actors and background writes stop.
     #[cfg(target_arch = "wasm32")]
     pub fn shutdown(self) {
@@ -122,9 +177,7 @@ impl Store {
 
     fn channel_owns_attempt(&self, channel_outpoint: &OutPoint, attempt: &Attempt) -> bool {
         self.get_channel_state_by_outpoint(channel_outpoint)
-            .is_some_and(|channel_state| {
-                channel_state.owns_payment_attempt(attempt.payment_hash, attempt.id)
-            })
+            .is_some_and(|channel_state| channel_state.owns_payment_attempt(attempt))
     }
 
     #[cfg(feature = "watchtower")]
@@ -1484,7 +1537,7 @@ impl NetworkGraphStateStore for Store {
         let prefix = [&[PAYMENT_SESSION_PREFIX], payment_hash.as_ref()].concat();
         self.get(prefix)
             .map(|v| deserialize_from(v.as_ref(), "PaymentSession"))
-            .map(|session: PaymentSession| session.init_attempts(self))
+            .map(|session: PaymentSession| self.restore_payment_session(session))
     }
 
     fn get_persisted_payment_status(&self, payment_hash: Hash256) -> Option<PaymentStatus> {
@@ -1499,9 +1552,76 @@ impl NetworkGraphStateStore for Store {
             .into_iter()
             .map(|kv| {
                 let session: PaymentSession = deserialize_from(kv.value.as_ref(), "PaymentSession");
-                session.init_attempts(self)
+                self.restore_payment_session(session)
             })
             .collect()
+    }
+
+    fn get_payment_hashes_with_channel_index(&self) -> HashSet<Hash256> {
+        // Key: prefix(1) | outpoint(36) | payment hash(32) | attempt id(8).
+        // Stream the index and deduplicate without loading sessions or attempts.
+        self.prefix_iterator([ATTEMPT_CHANNEL_INDEX_PREFIX])
+            .filter_map(|(key, _)| key.get(37..69)?.try_into().ok())
+            .collect()
+    }
+
+    fn reconcile_attempts_channel_index(&self) -> HashSet<Hash256> {
+        // Enumerate only recovery keys, never the payment/attempt tables. Group by
+        // payment so completion checks load its attempts and channel work once.
+        let mut indexed = HashMap::<Hash256, Vec<(Vec<u8>, u64)>>::new();
+        for (key, _) in self.prefix_iterator([ATTEMPT_CHANNEL_INDEX_PREFIX]) {
+            if key.len() != 77 {
+                continue;
+            }
+            let hash = Hash256::from(<[u8; 32]>::try_from(&key[37..69]).expect("index hash"));
+            let id = u64::from_le_bytes(key[69..77].try_into().expect("index attempt id"));
+            indexed.entry(hash).or_default().push((key.to_vec(), id));
+        }
+        let mut hashes = HashSet::new();
+        for (hash, entries) in indexed {
+            let session = self.get_payment_session(hash);
+            if session.is_some() {
+                hashes.insert(hash);
+            }
+            let finished = session.as_ref().is_none_or(|session| {
+                session.status.is_final() && !session.has_pending_payment_work(self)
+            });
+            // Bound write batches even when an old node accumulated many aliases.
+            for chunk in entries.chunks(256) {
+                let mut batch = self.batch();
+                let mut changed = false;
+                for (key, id) in chunk {
+                    let current_key = if finished {
+                        None
+                    } else {
+                        session.as_ref().and_then(|session| {
+                            session
+                                .attempts()
+                                .find(|attempt| attempt.id == *id)
+                                .and_then(|attempt| attempt.first_hop_channel_outpoint())
+                                .map(|outpoint| {
+                                    KeyValue::AttemptChannelIndex((outpoint.clone(), hash, *id))
+                                        .key()
+                                })
+                        })
+                    };
+                    if current_key.as_ref() == Some(key) {
+                        continue;
+                    }
+                    batch.delete(key.clone());
+                    if let Some(current_key) = current_key {
+                        if self.get(&current_key).is_none() {
+                            batch.put(current_key, vec![]);
+                        }
+                    }
+                    changed = true;
+                }
+                if changed {
+                    batch.commit();
+                }
+            }
+        }
+        hashes
     }
 
     fn get_payment_sessions_with_status(&self, status: PaymentStatus) -> Vec<PaymentSession> {
@@ -1510,16 +1630,7 @@ impl NetworkGraphStateStore for Store {
             .into_iter()
             .filter_map(|kv| {
                 let session: PaymentSession = deserialize_from(kv.value.as_ref(), "PaymentSession");
-                // Loading attempts cannot change a persisted terminal status.
-                if session.status.is_final() && session.status != status {
-                    return None;
-                }
-                let session = session.init_attempts(self);
-                if session.status == status {
-                    Some(session)
-                } else {
-                    None
-                }
+                self.filter_payment_session(session, Some(status))
             })
             .collect()
     }
@@ -1539,14 +1650,7 @@ impl NetworkGraphStateStore for Store {
 
         iter.filter_map(|(_key, value)| {
             let session: PaymentSession = deserialize_from(&value, "PaymentSession");
-            if session.status.is_final() && status.is_some_and(|s| session.status != s) {
-                return None;
-            }
-            let session = session.init_attempts(self);
-            match status {
-                Some(ref s) if session.status != *s => None,
-                _ => Some(session),
-            }
+            self.filter_payment_session(session, status)
         })
         .take(limit)
         .collect()
@@ -1554,17 +1658,22 @@ impl NetworkGraphStateStore for Store {
 
     fn insert_payment_session(&self, session: PaymentSession) {
         let payment_hash = session.payment_hash();
-        let session_clone = session.clone();
-        let payment_preimage = (session.status == PaymentStatus::Success)
-            .then(|| session.attempts().find_map(|attempt| attempt.preimage))
-            .flatten();
         let mut batch = self.batch();
         let kv = KeyValue::PaymentSession(payment_hash, session);
         batch.put(kv.key(), kv.value());
         batch.commit();
+        self.publish_payment_result(payment_hash);
+    }
+
+    fn publish_payment_result(&self, payment_hash: Hash256) {
+        let Some(mut session) = self.get_payment_session(payment_hash) else {
+            return;
+        };
+        session.status = session.effective_status(self);
+        let payment_preimage = session.payment_preimage();
         self.notify(StoreChange::PutPaymentSession {
             payment_hash,
-            payment_session: session_clone,
+            payment_session: session,
             payment_preimage,
         });
     }
@@ -1584,7 +1693,10 @@ impl NetworkGraphStateStore for Store {
         assert_ne!(attempt.id, 0, "Attempt ID should not be zero");
 
         let first_hop_outpoint = attempt.first_hop_channel_outpoint().cloned();
-        let is_new = self.get_attempt(attempt.payment_hash, attempt.id).is_none();
+        let previous = self.get_attempt(attempt.payment_hash, attempt.id);
+        let previous_outpoint = previous
+            .as_ref()
+            .and_then(|a| a.first_hop_channel_outpoint());
 
         let mut batch = self.batch();
 
@@ -1592,8 +1704,19 @@ impl NetworkGraphStateStore for Store {
         let kv = KeyValue::Attempt((attempt.payment_hash, attempt.id), attempt.clone());
         batch.put(kv.key(), kv.value());
 
-        // Add to channel index only for new attempts
-        if is_new {
+        // Route changes and their wake-up index must become durable together.
+        // Status/preimage updates must not recreate an already retired index.
+        if previous.is_none() || previous_outpoint != first_hop_outpoint.as_ref() {
+            if let Some(outpoint) = previous_outpoint {
+                batch.delete(
+                    KeyValue::AttemptChannelIndex((
+                        outpoint.clone(),
+                        attempt.payment_hash,
+                        attempt.id,
+                    ))
+                    .key(),
+                );
+            }
             if let Some(outpoint) = first_hop_outpoint {
                 let kv =
                     KeyValue::AttemptChannelIndex((outpoint, attempt.payment_hash, attempt.id));
@@ -1700,7 +1823,17 @@ impl NetworkGraphStateStore for Store {
             .map(|kv| deserialize_from(kv.value.as_ref(), "Attempt"))
             .collect();
 
-        // Only delete channel index entries, keep the attempts themselves
+        let finished = self
+            .get_payment_session(payment_hash)
+            .is_some_and(|session| {
+                session.status.is_final() && !session.has_pending_payment_work(self)
+            });
+        if !finished {
+            // These keys also recover a stopped dispatcher after its final
+            // channel acknowledgement but before publishing final failure.
+            return;
+        }
+        // Release issued and unissued attempts only after payment completion.
         for attempt in attempts {
             if let Some(outpoint) = attempt.first_hop_channel_outpoint() {
                 let index_key = [

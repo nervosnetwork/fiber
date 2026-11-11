@@ -14,20 +14,21 @@ use strum::{AsRefStr, EnumString};
 /// The status of a payment, will update as the payment progresses.
 /// The transfer path for payment status is `Created -> Inflight -> Success | Failed`.
 ///
-/// **MPP Behavior**: A single session may involve multiple attempts (HTLCs) to fulfill the total amount.
+/// **MPP Behavior**: A single claimed attempt establishes payment success.
+/// Remaining attempts continue until their existing TLCs finish.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum PaymentStatus {
     /// Initial status. A payment session is created, but no HTLC has been dispatched.
     Created,
     /// The first hop AddTlc is sent successfully and waiting for the response.
     ///
-    /// > **MPP Logic**: Status `Inflight` means at least one attempt is still not in `Success`, payment needs more retrying or waiting for HTLC settlement.
+    /// > **MPP Logic**: No claimed attempt has returned its preimage and payment work is pending.
     Inflight,
-    /// The payment is finished. All related HTLCs are successfully settled,
-    /// and the aggregate amount equals the total requested amount.
+    /// A payment TLC was successfully claimed and returned its preimage.
+    /// Other attempts may still be awaiting their outcomes.
     Success,
-    /// The payment session has terminated. HTLCs have failed and the target
-    /// amount cannot be fulfilled after exhausting all retries.
+    /// Local dispatch has given up. Public readers must keep the result Inflight
+    /// while issued TLCs remain unresolved; a valid fulfillment still takes precedence.
     Failed,
 }
 
@@ -1075,8 +1076,14 @@ impl PaymentSession {
         self.cached_attempts.push(attempt);
     }
 
+    /// Whether payment-level success or failure permits further dispatch.
+    /// Attempt retry policy and new-part budgets are checked separately.
+    pub fn can_retry(&self) -> bool {
+        !self.calc_payment_status().is_final()
+    }
+
     pub fn allow_more_attempts(&self) -> bool {
-        if self.status.is_final() {
+        if !self.can_retry() {
             return false;
         }
 
@@ -1095,7 +1102,16 @@ impl PaymentSession {
         true
     }
 
+    /// The preimage learned from a fulfillment of this payment's TLC.
+    pub fn payment_preimage(&self) -> Option<Hash256> {
+        self.attempts().find_map(|attempt| attempt.preimage)
+    }
+
     pub fn calc_payment_status(&self) -> PaymentStatus {
+        if self.payment_preimage().is_some() || self.attempts().any(|attempt| attempt.is_success())
+        {
+            return PaymentStatus::Success;
+        }
         if self.cached_attempts.is_empty() || self.status.is_final() {
             return self.status;
         }
@@ -1104,12 +1120,10 @@ impl PaymentSession {
             return PaymentStatus::Inflight;
         }
 
-        if self.attempts().all(|a| a.is_failed()) && !self.allow_more_attempts() {
+        // Preserve the released derived failure for exhausted legacy sessions.
+        // Public readers must additionally check outstanding channel work.
+        if self.attempts().all(Attempt::is_failed) && self.retry_times() >= self.try_limit {
             return PaymentStatus::Failed;
-        }
-
-        if self.success_attempts_amount_is_enough() {
-            return PaymentStatus::Success;
         }
 
         PaymentStatus::Created
@@ -1131,21 +1145,6 @@ impl PaymentSession {
         self.status = PaymentStatus::Failed;
         self.last_updated_at = crate::now_timestamp_as_millis_u64();
         self.last_error = Some(error.to_string());
-    }
-
-    fn success_attempts_amount_is_enough(&self) -> bool {
-        let success_amount: u128 = self
-            .cached_attempts
-            .iter()
-            .filter_map(|a| {
-                if a.is_success() {
-                    Some(a.route.receiver_amount())
-                } else {
-                    None
-                }
-            })
-            .sum();
-        success_amount >= self.request.amount
     }
 }
 

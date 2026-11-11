@@ -3704,7 +3704,7 @@ async fn assert_excluded_payer_reconciliation(
         }
     );
     assert_eq!(
-        node.store.get_payment_session(payment_hash).unwrap().status,
+        node.get_payment_result(payment_hash).await.status,
         if reused_attempt || other_inflight {
             PaymentStatus::Inflight
         } else {
@@ -3713,7 +3713,9 @@ async fn assert_excluded_payer_reconciliation(
     );
     assert_eq!(
         node.store.get_persisted_payment_status(payment_hash),
-        Some(if reused_attempt || other_inflight {
+        // Failed retains the local give-up decision. The public assertion
+        // above must remain Inflight while another shard is unresolved.
+        Some(if reused_attempt {
             PaymentStatus::Inflight
         } else {
             PaymentStatus::Failed

@@ -8,6 +8,7 @@ use crate::fiber::gossip::get_gossip_actor_name;
 use crate::fiber::gossip::GossipActorMessage;
 use crate::fiber::graph::NetworkGraphStateStore;
 use crate::fiber::network::*;
+use crate::fiber::payment::PaymentSessionExt;
 use crate::fiber::payment::SendPaymentCommand;
 use crate::fiber::payment::SendPaymentWithRouterCommand;
 use crate::fiber::types::FiberMessage;
@@ -1202,6 +1203,11 @@ impl NetworkNode {
         0
     }
 
+    /// Wait until all payment actors have exited and the network has removed them.
+    pub async fn wait_until_no_inflight_payments(&self) {
+        wait_until_async_timeout(|| async { self.get_inflight_payment_count().await == 0 }).await;
+    }
+
     pub async fn get_inflight_payment_count(&self) -> u32 {
         let message = |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::GetInflightPaymentCount(rpc_reply))
@@ -1420,12 +1426,35 @@ impl NetworkNode {
             |status| {
                 if status == PaymentStatus::Failed {
                     error!("Unexpected payment failed: {:?}\n\n", payment_hash);
-                    assert_eq!(status, PaymentStatus::Success);
+                    assert_eq!(
+                        status,
+                        PaymentStatus::Success,
+                        "payment session: {:?}",
+                        self.get_payment_session(payment_hash)
+                    );
                 }
             },
             "Payment did not succeed within the expected time",
         )
         .await;
+    }
+
+    /// Wait until the successful payment's existing attempts and TLCs have finished.
+    pub async fn wait_until_payment_finished(&self, payment_hash: Hash256) {
+        self.wait_until_success(payment_hash).await;
+        tokio::time::timeout(Duration::from_secs(DEFAULT_WAIT_UNTIL_TIME), async {
+            loop {
+                let session = self
+                    .get_payment_session(payment_hash)
+                    .expect("payment exists");
+                if !session.has_pending_payment_work(&self.store) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("Successful payment still has pending TLCs");
     }
 
     pub async fn wait_until_failed(&self, payment_hash: Hash256) {
