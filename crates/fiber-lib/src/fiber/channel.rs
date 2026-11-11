@@ -9947,21 +9947,19 @@ impl ChannelActorState {
             );
             self.on_new_channel_ready(myself);
 
-            debug!(
-                "Broadcasting channel announcement {:?} and channel update {:?}",
-                &channel_announcement, &channel_update
-            );
+            let mut messages = vec![BroadcastMessageWithTimestamp::ChannelAnnouncement(
+                // Funding proves the channel exists even if this connection is still recovering.
+                self.must_get_funding_transaction_timestamp(),
+                channel_announcement,
+            )];
+            if self.session_v2.is_none() || !self.reestablishing {
+                // Availability is advertised by on_reestablished_channel_ready after recovery.
+                messages.push(BroadcastMessageWithTimestamp::ChannelUpdate(channel_update));
+            }
+            debug!("Broadcasting public channel messages {:?}", &messages);
             self.network()
                 .send_message(NetworkActorMessage::new_command(
-                    NetworkActorCommand::BroadcastMessages(vec![
-                        BroadcastMessageWithTimestamp::ChannelAnnouncement(
-                            // here channel funding tx must be exists, otherwise the above
-                            // `try_create_channel_messages` will return None
-                            self.must_get_funding_transaction_timestamp(),
-                            channel_announcement,
-                        ),
-                        BroadcastMessageWithTimestamp::ChannelUpdate(channel_update),
-                    ]),
+                    NetworkActorCommand::BroadcastMessages(messages),
                 ))
                 .expect(ASSUME_NETWORK_ACTOR_ALIVE);
         }
@@ -10002,6 +10000,12 @@ impl ChannelActorState {
         self.update_state(ChannelState::ChannelReady);
         self.increment_local_commitment_number();
         self.increment_remote_commitment_number();
+        if self.session_v2.is_some() && self.reestablishing && self.recovery_peer_v2.is_none() {
+            // Opening can complete while offline or before the peer's recovery handshake.
+            // Preserve connectivity and its recovery clock; the validated recovery path
+            // will publish Online, route availability, and ChannelReady notifications.
+            return;
+        }
         self.connectivity_state = ChannelConnectivityState::Online;
         if self.session_v2.is_some() && self.recovery_peer_v2.is_some() {
             self.reestablishing = false;

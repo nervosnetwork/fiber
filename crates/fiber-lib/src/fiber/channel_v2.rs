@@ -1365,11 +1365,12 @@ where
             }
             state.recovery_peer_v2 = Some(peer);
             // Bootstrap funding flow is unlocked only for this validated handshake.
-            // Keep the recovery watchdog active until actual ChannelReady.
             self.replay_effects_v2(state);
             if external && !state.ephemeral_config.external_funding.signed_submitted {
-                // Waiting for local funding submission owes no peer response.
+                // Resume bootstrap under its funding-phase checks and funding timeout.
+                // Local submission waiting must not consume a future recovery budget.
                 state.reestablishing = false;
+                state.reestablish_timer = None;
                 if let Some(outgoing) = state.session_v2.as_ref().and_then(|s| s.outgoing.clone()) {
                     // A lost bootstrap CS must still be replayed while the wallet waits.
                     state.send_v2_message(FiberMessage::commitment_signed_v2(
@@ -1388,6 +1389,7 @@ where
                 }
                 return Ok(());
             }
+            // Keep the recovery watchdog active until actual ChannelReady.
             if external && !state.is_acceptor {
                 self.release_external_funding_signed_tx(state)?;
             }
