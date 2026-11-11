@@ -4648,7 +4648,7 @@ where
             ChannelEvent::PeerReconnected => {
                 state.on_peer_reconnected();
                 if state.session_v2.is_some() && state.reestablishing {
-                    myself.send_after(Duration::from_millis(REESTABLISH_TIMEOUT + 1), || {
+                    myself.send_after(state.reestablish_timeout_delay(), || {
                         ChannelActorMessage::Event(ChannelEvent::CheckActiveChannel)
                     });
                 }
@@ -4748,11 +4748,8 @@ where
                     );
                     self.notify_network_actor_shutdown_me(state);
                 } else if state.session_v2.is_some()
-                    && state.reestablishing
                     && !state.is_closed()
-                    && state.reestablish_started_at.is_some_and(|started| {
-                        now_timestamp_as_millis_u64().saturating_sub(started) > REESTABLISH_TIMEOUT
-                    })
+                    && state.reestablish_timed_out(now_timestamp_as_millis_u64())
                 {
                     // V2 keeps its recovery deadline through validated handshake replay,
                     // including funding states that the V1 TLC watchdog does not cover.
@@ -4797,6 +4794,16 @@ where
                     self.apply_settled_remove_tlcs(myself, state, false).await;
                 }
                 let now = now_timestamp_as_millis_u64();
+                if state.is_reestablish_stalled(now) {
+                    error!(
+                        "Channel {} from peer {:?} has spent over {} ms waiting for channel recovery, shutting down it forcefully",
+                        state.get_id(),
+                        state.get_remote_pubkey(),
+                        REESTABLISH_TIMEOUT,
+                    );
+                    self.notify_network_actor_shutdown_me(state);
+                    return Ok(());
+                }
                 if state.is_revocation_nonce_ledger_stalled(now) {
                     error!(
                         "Channel {} from peer {:?} cannot add or remove TLCs: its revocation nonce ledger has been unbalanced for over {} ms (send_present={}, verify_present={}) with no CommitmentSigned or RevokeAndAck from the peer, shutting down it forcefully",
@@ -4805,15 +4812,6 @@ where
                         PEER_CHANNEL_RESPONSE_TIMEOUT,
                         state.remote_revocation_nonce_for_send.is_some(),
                         state.remote_revocation_nonce_for_verify.is_some(),
-                    );
-                    self.notify_network_actor_shutdown_me(state);
-                }
-                if state.is_reestablish_stalled(now) {
-                    error!(
-                        "Channel {} from peer {:?} has been waiting over {} ms for the reconnected peer's ReestablishChannel, shutting down it forcefully",
-                        state.get_id(),
-                        state.get_remote_pubkey(),
-                        REESTABLISH_TIMEOUT,
                     );
                     self.notify_network_actor_shutdown_me(state);
                 }
@@ -6082,6 +6080,43 @@ pub(crate) fn resolve_dual_owed_replay_order(
 type ScheduledChannelUpdateHandle =
     Option<Arc<JoinHandle<Result<(), MessagingErr<ChannelActorMessage>>>>>;
 
+/// Runtime recovery clock. V2 pauses it across disconnects; V1 starts a fresh clock.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReestablishTimer {
+    /// Effective start timestamp, shifted on resume to exclude time spent offline.
+    RunningSince(u64),
+    /// Accumulated online waiting time, retained while the peer is offline.
+    PausedAfter(u64),
+}
+
+impl ReestablishTimer {
+    fn elapsed(self, now: u64) -> u64 {
+        match self {
+            Self::RunningSince(started) => now.saturating_sub(started),
+            Self::PausedAfter(elapsed) => elapsed,
+        }
+    }
+
+    fn pause(self, now: u64) -> Self {
+        Self::PausedAfter(self.elapsed(now))
+    }
+
+    fn resume(self, now: u64) -> Self {
+        match self {
+            Self::PausedAfter(elapsed) => Self::RunningSince(now.saturating_sub(elapsed)),
+            running => running,
+        }
+    }
+
+    fn expired(self, now: u64) -> bool {
+        matches!(self, Self::RunningSince(_)) && self.elapsed(now) > REESTABLISH_TIMEOUT
+    }
+
+    fn remaining_millis(self, now: u64) -> u64 {
+        REESTABLISH_TIMEOUT.saturating_sub(self.elapsed(now)) + 1
+    }
+}
+
 /// Wrapper around [`ChannelActorData`] that adds runtime-only fields.
 ///
 /// All persistable fields live in the embedded `core`.
@@ -6117,12 +6152,11 @@ pub struct ChannelActorState {
     #[doc = "skip_store"]
     pub revocation_nonce_unbalanced_since: Option<u64>,
 
-    // When the peer reconnected and we started waiting for its ReestablishChannel (see
-    // `is_reestablish_stalled`). V1 clears it once that message arrives; V2 keeps its
-    // recovery deadline through handshake replay. Going offline clears it for both versions,
-    // so time spent offline never counts toward `REESTABLISH_TIMEOUT`.
+    // V2 accumulates online recovery wait across connections, pausing while offline.
+    // V1 clears this clock on disconnect and on receipt of ReestablishChannel.
+    // Runtime only: local actor/process restoration starts a fresh recovery budget.
     #[doc = "skip_store"]
-    pub reestablish_started_at: Option<u64>,
+    pub reestablish_timer: Option<ReestablishTimer>,
 
     /// Validated peer handshake for this connection (never restored across disconnects).
     #[doc = "skip_store"]
@@ -6228,7 +6262,7 @@ impl From<ChannelActorData> for ChannelActorState {
             core,
             waiting_peer_response: None,
             revocation_nonce_unbalanced_since: None,
-            reestablish_started_at: None,
+            reestablish_timer: None,
             recovery_peer_v2: None,
             network: None,
             scheduled_channel_update_handle: None,
@@ -6712,15 +6746,10 @@ impl ChannelActorState {
             })
     }
 
-    /// True if a V1 peer reconnected more than `REESTABLISH_TIMEOUT` ago and has still not sent
-    /// its ReestablishChannel. Until it does, every other peer message is ignored, our TLC
-    /// removals are blocked and the peer response timeout is off, so a peer that never sends it
-    /// could keep us from fulfilling or failing the TLCs it sent us indefinitely. Checked on
-    /// each `MaintainChannelTlcs` tick, so the channel is force-closed within one
-    /// `CHECK_CHANNELS_INTERVAL` after the timeout.
-    ///
-    /// Only states that can hold TLCs and accept a force close are covered. `Stale` must wait
-    /// for the peer's audit, and once our commitment is broadcast there is nothing left to do.
+    /// True if recovery exhausted its online waiting budget in a force-closable TLC state.
+    /// V1 stops on receipt of its handshake; V2 retains the clock through validated replay
+    /// and pauses across disconnects. `Stale` must wait for an audit, and a published
+    /// commitment is already being watched on-chain.
     pub fn is_reestablish_stalled(&self, now: u64) -> bool {
         let can_force_close = match self.state {
             ChannelState::ChannelReady => true,
@@ -6729,14 +6758,24 @@ impl ChannelActorState {
             }
             _ => false,
         };
-        self.session_v2.is_none()
-            && can_force_close
-            && self.reestablishing
+        can_force_close && self.reestablish_timed_out(now)
+    }
+
+    fn reestablish_timed_out(&self, now: u64) -> bool {
+        self.reestablishing
             && self.connectivity_state == ChannelConnectivityState::Syncing
-            && self.reestablish_started_at.is_some_and(|started| {
-                // saturating_sub, as in `peer_does_not_reply_ack_in_time`: the wall clock may step back
-                now.saturating_sub(started) > REESTABLISH_TIMEOUT
-            })
+            && self
+                .reestablish_timer
+                .is_some_and(|timer| timer.expired(now))
+    }
+
+    fn reestablish_timeout_delay(&self) -> Duration {
+        Duration::from_millis(
+            self.reestablish_timer
+                .map_or(REESTABLISH_TIMEOUT + 1, |timer| {
+                    timer.remaining_millis(now_timestamp_as_millis_u64())
+                }),
+        )
     }
 
     pub fn set_waiting_ack(&mut self, myself: &ActorRef<ChannelActorMessage>, waiting_ack: bool) {
@@ -7112,9 +7151,14 @@ impl ChannelActorState {
         self.replayed_tlc_updates_v2 = 0;
         self.clear_waiting_peer_response();
         self.reestablishing = true;
-        // An offline peer is not withholding its ReestablishChannel; the clock starts when it
-        // reconnects.
-        self.reestablish_started_at = None;
+        // A V2 disconnect pauses the online recovery budget, rather than granting a
+        // fresh timeout on every reconnect. V1 retains its existing per-connection rule.
+        self.reestablish_timer = if self.session_v2.is_some() {
+            self.reestablish_timer
+                .map(|timer| timer.pause(now_timestamp_as_millis_u64()))
+        } else {
+            None
+        };
         self.connectivity_state = ChannelConnectivityState::Offline;
         if let Some(handle) = self.scheduled_channel_update_handle.take() {
             handle.abort();
@@ -7125,7 +7169,7 @@ impl ChannelActorState {
         self.replayed_tlc_updates_v2 = 0;
         self.clear_waiting_peer_response();
         self.reestablishing = false;
-        self.reestablish_started_at = None;
+        self.reestablish_timer = None;
         self.connectivity_state = ChannelConnectivityState::Offline;
         if let Some(handle) = self.scheduled_channel_update_handle.take() {
             handle.abort();
@@ -7153,7 +7197,13 @@ impl ChannelActorState {
     fn on_peer_reconnected(&mut self) {
         if self.reestablishing && self.connectivity_state == ChannelConnectivityState::Offline {
             self.connectivity_state = ChannelConnectivityState::Syncing;
-            self.reestablish_started_at = Some(now_timestamp_as_millis_u64());
+            let now = now_timestamp_as_millis_u64();
+            self.reestablish_timer = Some(
+                self.reestablish_timer
+                    .map_or(ReestablishTimer::RunningSince(now), |timer| {
+                        timer.resume(now)
+                    }),
+            );
             if self.session_v2.is_some() {
                 // Ordinary rounds advertise a fresh verification nonce at each handshake.
                 // Bootstrap CS/Ready replays keep their original allocation until safe to advance;
@@ -7454,7 +7504,7 @@ impl ChannelActorState {
             },
             waiting_peer_response: None,
             revocation_nonce_unbalanced_since: None,
-            reestablish_started_at: None,
+            reestablish_timer: None,
             network: Some(network),
             recovery_peer_v2: None,
             scheduled_channel_update_handle: None,
@@ -7560,7 +7610,7 @@ impl ChannelActorState {
             },
             waiting_peer_response: None,
             revocation_nonce_unbalanced_since: None,
-            reestablish_started_at: None,
+            reestablish_timer: None,
             network: Some(network),
             recovery_peer_v2: None,
             scheduled_channel_update_handle: None,
@@ -9916,21 +9966,19 @@ impl ChannelActorState {
             );
             self.on_new_channel_ready(myself);
 
-            debug!(
-                "Broadcasting channel announcement {:?} and channel update {:?}",
-                &channel_announcement, &channel_update
-            );
+            let mut messages = vec![BroadcastMessageWithTimestamp::ChannelAnnouncement(
+                // Funding proves the channel exists even if this connection is still recovering.
+                self.must_get_funding_transaction_timestamp(),
+                channel_announcement,
+            )];
+            if self.session_v2.is_none() || !self.reestablishing {
+                // Availability is advertised by on_reestablished_channel_ready after recovery.
+                messages.push(BroadcastMessageWithTimestamp::ChannelUpdate(channel_update));
+            }
+            debug!("Broadcasting public channel messages {:?}", &messages);
             self.network()
                 .send_message(NetworkActorMessage::new_command(
-                    NetworkActorCommand::BroadcastMessages(vec![
-                        BroadcastMessageWithTimestamp::ChannelAnnouncement(
-                            // here channel funding tx must be exists, otherwise the above
-                            // `try_create_channel_messages` will return None
-                            self.must_get_funding_transaction_timestamp(),
-                            channel_announcement,
-                        ),
-                        BroadcastMessageWithTimestamp::ChannelUpdate(channel_update),
-                    ]),
+                    NetworkActorCommand::BroadcastMessages(messages),
                 ))
                 .expect(ASSUME_NETWORK_ACTOR_ALIVE);
         }
@@ -9971,10 +10019,16 @@ impl ChannelActorState {
         self.update_state(ChannelState::ChannelReady);
         self.increment_local_commitment_number();
         self.increment_remote_commitment_number();
+        if self.session_v2.is_some() && self.reestablishing && self.recovery_peer_v2.is_none() {
+            // Opening can complete while offline or before the peer's recovery handshake.
+            // Preserve connectivity and its recovery clock; the validated recovery path
+            // will publish Online, route availability, and ChannelReady notifications.
+            return;
+        }
         self.connectivity_state = ChannelConnectivityState::Online;
         if self.session_v2.is_some() && self.recovery_peer_v2.is_some() {
             self.reestablishing = false;
-            self.reestablish_started_at = None;
+            self.reestablish_timer = None;
             self.clear_waiting_peer_response();
             self.schedule_next_retry_task(myself);
         }
@@ -9999,7 +10053,7 @@ impl ChannelActorState {
 
         self.pending_reestablish_channel_ready = false;
         self.reestablishing = false;
-        self.reestablish_started_at = None;
+        self.reestablish_timer = None;
         self.connectivity_state = ChannelConnectivityState::Online;
         // A V2 peer could not answer while we were offline, so it gets a fresh window now.
         self.refresh_peer_response_wait_v2_after_reestablish();
@@ -10450,7 +10504,7 @@ impl ChannelActorState {
         // branches below clear `reestablishing` (`ShuttingDown` keeps it), and after a failed
         // handshake a force close could broadcast a revoked commitment if our state is the stale
         // one.
-        self.reestablish_started_at = None;
+        self.reestablish_timer = None;
         let network = self.network();
         self.notify_funding_tx(&network);
         if self.ephemeral_config.external_funding.signed_submitted
@@ -12180,6 +12234,34 @@ mod tests {
 
     use fiber_types::{HashAlgorithm, TlcState};
 
+    #[test]
+    fn reestablish_timer_excludes_offline_time_and_preserves_remaining_budget() {
+        let start = 1_000_000;
+        let online = REESTABLISH_TIMEOUT * 3 / 5;
+        let running = ReestablishTimer::RunningSince(start);
+        let paused = running.pause(start + online);
+        assert_eq!(paused, ReestablishTimer::PausedAfter(online));
+        let reconnect = start + online + REESTABLISH_TIMEOUT * 100;
+        assert_eq!(paused.elapsed(reconnect), online);
+        assert!(!paused.expired(reconnect));
+        assert_eq!(paused.pause(reconnect), paused);
+        let resumed = paused.resume(reconnect);
+        assert_eq!(resumed.elapsed(reconnect), online);
+        assert_eq!(
+            resumed.remaining_millis(reconnect),
+            REESTABLISH_TIMEOUT - online + 1
+        );
+        // Duplicate reconnect/handshake events must not grant another window.
+        assert_eq!(resumed.resume(reconnect + online), resumed);
+        assert!(!resumed.expired(reconnect + REESTABLISH_TIMEOUT - online));
+        assert!(resumed.expired(reconnect + REESTABLISH_TIMEOUT - online + 1));
+        let expired_pause = resumed.pause(reconnect + online);
+        assert!(!expired_pause.expired(reconnect + online));
+        let resumed_expired = expired_pause.resume(reconnect + online * 10);
+        assert_eq!(resumed_expired.remaining_millis(reconnect + online * 10), 1);
+        assert!(resumed_expired.expired(reconnect + online * 10));
+    }
+
     fn channel_state_with_limits(
         local_constraints: ChannelConstraints,
         remote_constraints: ChannelConstraints,
@@ -12246,7 +12328,7 @@ mod tests {
             deferred_peer_tlc_updates: VecDeque::new(),
             waiting_peer_response: None,
             revocation_nonce_unbalanced_since: None,
-            reestablish_started_at: None,
+            reestablish_timer: None,
             network: None,
             recovery_peer_v2: None,
             scheduled_channel_update_handle: None,

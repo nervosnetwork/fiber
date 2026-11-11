@@ -896,6 +896,7 @@ impl TestFiberMessageHold {
                 | (
                     TestFiberMessageKind::ReestablishChannel,
                     FiberChannelMessage::ReestablishChannel(_)
+                        | FiberChannelMessage::ReestablishChannelV2(_)
                 )
         )
     }
@@ -7829,8 +7830,31 @@ where
             Err(ProcessingChannelError::RepeatedProcessing(_)) => {
                 // ignore duplicated open channel request
             }
-            Err(_) => {
+            Err(ref err) => {
                 debug_event!(self.network, "ChannelPendingToBeRejected");
+                // A rejected OpenChannel would otherwise leave the initiator waiting in
+                // NegotiatingFunding until its funding timeout. Resource-limit rejections may
+                // be retried, but an invalid request is fatal for the initiator.
+                if matches!(
+                    &err,
+                    ProcessingChannelError::InvalidParameter(_)
+                        | ProcessingChannelError::CapacityError(_)
+                ) {
+                    let abort = FiberMessageWithTarget {
+                        target: peer_pubkey,
+                        message: FiberMessage::ChannelNormalOperation(
+                            FiberChannelMessage::TxAbort(TxAbort {
+                                channel_id: id,
+                                message: err.to_string().into_bytes(),
+                            }),
+                        ),
+                    };
+                    self.network
+                        .send_message(NetworkActorMessage::new_command(
+                            NetworkActorCommand::SendFiberMessage(abort),
+                        ))
+                        .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+                }
             }
         };
 

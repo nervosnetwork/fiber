@@ -476,7 +476,7 @@ pub(crate) fn create_test_channel_state_with_tlc(
         },
         waiting_peer_response: None,
         revocation_nonce_unbalanced_since: None,
-        reestablish_started_at: None,
+        reestablish_timer: None,
         recovery_peer_v2: None,
         network: None,
         scheduled_channel_update_handle: None,
@@ -1481,4 +1481,230 @@ fn test_tlc_settlement_accessors() {
         settlement.remove_tlc_command().reason,
         RemoveTlcReason::RemoveTlcFulfill(_)
     ));
+}
+
+/// Runs `f` and counts the ERROR events it emits on this thread.
+fn count_error_events<T>(f: impl FnOnce() -> T) -> (T, usize) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use tracing_subscriber::layer::SubscriberExt;
+
+    struct ErrorCounter(Arc<AtomicUsize>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for ErrorCounter {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if *event.metadata().level() == tracing::Level::ERROR {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    let errors = Arc::new(AtomicUsize::new(0));
+    let counter =
+        tracing::Dispatch::new(tracing_subscriber::registry().with(ErrorCounter(errors.clone())));
+    // tracing caches a callsite's interest when the callsite is first hit. While only one
+    // dispatcher is alive, it asks only the default of the thread that hits it, which can be
+    // another test's thread with no subscriber. A second live dispatcher makes it ask all.
+    let _second = tracing::Dispatch::new(tracing_subscriber::registry());
+    let result = tracing::dispatcher::with_default(&counter, f);
+    (result, errors.load(Ordering::SeqCst))
+}
+
+#[test]
+fn test_hold_invoice_payment_logs_no_error_when_nothing_is_rejected() {
+    let preimage = gen_rand_sha256_hash();
+    let payment_hash = Hash256::from(ckb_hash::blake2b_256(preimage));
+    let invoice = create_test_invoice(payment_hash, Some(1000), false);
+    let channel_id = gen_rand_sha256_hash();
+    let store = MockStore::new()
+        .with_invoice(invoice, CkbInvoiceStatus::Open)
+        .with_hold_tlc(payment_hash, channel_id, 0)
+        .with_channel_state(create_test_channel_state_with_tlc(
+            channel_id,
+            0,
+            1000,
+            payment_hash,
+            None,
+        ));
+
+    // The TLC is held: the invoice becomes Received and nothing is settled yet.
+    let (settlements, held_errors) =
+        count_error_events(|| SettleTlcSetCommand::new_hold_tlc_set(payment_hash, &store).run());
+    assert!(settlements.is_empty());
+    assert_eq!(
+        store.get_invoice_status(&payment_hash),
+        Some(CkbInvoiceStatus::Received)
+    );
+
+    // The preimage is revealed: the held TLC is fulfilled.
+    store.insert_preimage(payment_hash, preimage);
+    let (settlements, settled_errors) = count_error_events(|| {
+        SettleTlcSetCommand::new_received_hold_tlc_set(payment_hash, &store).run()
+    });
+    assert_eq!(settlements.len(), 1);
+    assert!(is_fulfill_settlement(&settlements[0]));
+
+    assert_eq!(
+        [held_errors, settled_errors],
+        [0, 0],
+        "ERROR events when holding and when fulfilling the only TLC"
+    );
+}
+
+#[test]
+fn test_settlement_logs_no_error_when_nothing_is_rejected() {
+    // Non-MPP, one TLC that pays the invoice.
+    let preimage = gen_rand_sha256_hash();
+    let payment_hash = Hash256::from(ckb_hash::blake2b_256(preimage));
+    let channel_id = gen_rand_sha256_hash();
+    let store = MockStore::new()
+        .with_invoice(
+            create_test_invoice(payment_hash, Some(1000), false),
+            CkbInvoiceStatus::Open,
+        )
+        .with_preimage(payment_hash, preimage)
+        .with_channel_state(create_test_channel_state_with_tlc(
+            channel_id,
+            0,
+            1000,
+            payment_hash,
+            None,
+        ));
+    let (settlements, non_mpp_errors) = count_error_events(|| {
+        SettleTlcSetCommand::new(payment_hash, vec![(channel_id, 0)], &store).run()
+    });
+    assert_eq!(settlements.len(), 1);
+    assert!(is_fulfill_settlement(&settlements[0]));
+
+    // MPP, two parts that pay the invoice exactly.
+    let preimage = gen_rand_sha256_hash();
+    let payment_hash = Hash256::from(ckb_hash::blake2b_256(preimage));
+    let channel_id_0 = gen_rand_sha256_hash();
+    let channel_id_1 = gen_rand_sha256_hash();
+    let store = MockStore::new()
+        .with_invoice(
+            create_test_invoice(payment_hash, Some(2000), true),
+            CkbInvoiceStatus::Open,
+        )
+        .with_preimage(payment_hash, preimage)
+        .with_channel_state(create_test_channel_state_with_tlc(
+            channel_id_0,
+            0,
+            1000,
+            payment_hash,
+            Some(2000),
+        ))
+        .with_channel_state(create_test_channel_state_with_tlc(
+            channel_id_1,
+            1,
+            1000,
+            payment_hash,
+            Some(2000),
+        ));
+    let (settlements, mpp_errors) = count_error_events(|| {
+        SettleTlcSetCommand::new(
+            payment_hash,
+            vec![(channel_id_0, 0), (channel_id_1, 1)],
+            &store,
+        )
+        .run()
+    });
+    assert_eq!(settlements.len(), 2);
+    assert!(settlements.iter().all(is_fulfill_settlement));
+
+    // A hold set with no TLCs left in the store.
+    let payment_hash = gen_rand_sha256_hash();
+    let store = MockStore::new().with_invoice(
+        create_test_invoice(payment_hash, Some(1000), false),
+        CkbInvoiceStatus::Open,
+    );
+    let (settlements, empty_set_errors) =
+        count_error_events(|| SettleTlcSetCommand::new_hold_tlc_set(payment_hash, &store).run());
+    assert!(settlements.is_empty());
+
+    assert_eq!(
+        [non_mpp_errors, mpp_errors, empty_set_errors],
+        [0, 0, 0],
+        "ERROR events for a non-MPP payment, an MPP payment and an empty TLC set"
+    );
+}
+
+#[test]
+fn test_rejected_tlcs_are_still_logged_as_error() {
+    let preimage = gen_rand_sha256_hash();
+    let payment_hash = Hash256::from(ckb_hash::blake2b_256(preimage));
+    let channel_id_0 = gen_rand_sha256_hash();
+    let channel_id_1 = gen_rand_sha256_hash();
+    let store = MockStore::new()
+        .with_invoice(
+            create_test_invoice(payment_hash, Some(1000), false),
+            CkbInvoiceStatus::Open,
+        )
+        .with_preimage(payment_hash, preimage)
+        .with_channel_state(create_test_channel_state_with_tlc(
+            channel_id_0,
+            0,
+            1000,
+            payment_hash,
+            None,
+        ))
+        .with_channel_state(create_test_channel_state_with_tlc(
+            channel_id_1,
+            1,
+            1000,
+            payment_hash,
+            None,
+        ));
+
+    // Two TLCs for a non-MPP invoice: one is fulfilled, the other rejected.
+    let (settlements, extra_tlc_errors) = count_error_events(|| {
+        SettleTlcSetCommand::new(
+            payment_hash,
+            vec![(channel_id_0, 0), (channel_id_1, 1)],
+            &store,
+        )
+        .run()
+    });
+    assert_eq!(settlements.len(), 2);
+    assert_eq!(
+        settlements
+            .iter()
+            .filter(|s| is_fulfill_settlement(s))
+            .count(),
+        1
+    );
+
+    // A paid invoice rejects a late TLC.
+    let payment_hash = gen_rand_sha256_hash();
+    let channel_id = gen_rand_sha256_hash();
+    let store = MockStore::new()
+        .with_invoice(
+            create_test_invoice(payment_hash, Some(1000), false),
+            CkbInvoiceStatus::Paid,
+        )
+        .with_channel_state(create_test_channel_state_with_tlc(
+            channel_id,
+            0,
+            1000,
+            payment_hash,
+            None,
+        ));
+    let (settlements, paid_invoice_errors) = count_error_events(|| {
+        SettleTlcSetCommand::new(payment_hash, vec![(channel_id, 0)], &store).run()
+    });
+    assert_eq!(settlements.len(), 1);
+    assert_eq!(
+        get_error_code(&settlements[0]),
+        Some(TlcErrorCode::HoldTlcTimeout)
+    );
+
+    assert_eq!(
+        [extra_tlc_errors, paid_invoice_errors],
+        [1, 1],
+        "ERROR events for a rejected extra TLC and a TLC on a paid invoice"
+    );
 }

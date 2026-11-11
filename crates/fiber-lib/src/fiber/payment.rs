@@ -1131,12 +1131,18 @@ where
                 return Ok(());
             }
             PaymentActorMessage::SendPayment(payment_request, reply) => {
+                let dry_run = payment_request.dry_run;
                 match self
                     .on_send_payment(myself.clone(), state, payment_request)
                     .await
                 {
                     Ok(payment) => {
                         let _ = reply.send(Ok(payment));
+                        if dry_run {
+                            // A dry run stores no payment session, so nothing is left to wait for.
+                            myself.stop(Some("Dry run payment complete".to_string()));
+                            return Ok(());
+                        }
                     }
                     Err(e) => {
                         error!("Failed to send payment: {:?}", e);

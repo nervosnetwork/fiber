@@ -208,7 +208,7 @@ impl ChannelActorState {
         {
             self.reestablishing = false;
             self.connectivity_state = fiber_types::ChannelConnectivityState::Online;
-            self.reestablish_started_at = None;
+            self.reestablish_timer = None;
             self.refresh_peer_response_wait_v2_after_reestablish();
             self.schedule_next_retry_task(myself);
             return;
@@ -1326,10 +1326,9 @@ where
         let nonce_already_persisted =
             state.connectivity_state == fiber_types::ChannelConnectivityState::Syncing;
         state.on_peer_reconnected();
-        myself.send_after(
-            std::time::Duration::from_millis(super::REESTABLISH_TIMEOUT + 1),
-            || ChannelActorMessage::Event(super::ChannelEvent::CheckActiveChannel),
-        );
+        myself.send_after(state.reestablish_timeout_delay(), || {
+            ChannelActorMessage::Event(super::ChannelEvent::CheckActiveChannel)
+        });
         state.validate_recovery_history_v2()?;
         state.notify_funding_tx(&self.network);
         let session = state
@@ -1366,11 +1365,12 @@ where
             }
             state.recovery_peer_v2 = Some(peer);
             // Bootstrap funding flow is unlocked only for this validated handshake.
-            // Keep the recovery watchdog active until actual ChannelReady.
             self.replay_effects_v2(state);
             if external && !state.ephemeral_config.external_funding.signed_submitted {
-                // Waiting for local funding submission owes no peer response.
+                // Resume bootstrap under its funding-phase checks and funding timeout.
+                // Local submission waiting must not consume a future recovery budget.
                 state.reestablishing = false;
+                state.reestablish_timer = None;
                 if let Some(outgoing) = state.session_v2.as_ref().and_then(|s| s.outgoing.clone()) {
                     // A lost bootstrap CS must still be replayed while the wallet waits.
                     state.send_v2_message(FiberMessage::commitment_signed_v2(
@@ -1389,6 +1389,7 @@ where
                 }
                 return Ok(());
             }
+            // Keep the recovery watchdog active until actual ChannelReady.
             if external && !state.is_acceptor {
                 self.release_external_funding_signed_tx(state)?;
             }
@@ -2117,6 +2118,7 @@ impl ChannelActorState {
 
 #[cfg(test)]
 mod tests {
+    use super::super::ReestablishTimer;
     use super::*;
     use crate::fiber::graph::NetworkGraphStateStore;
     use crate::fiber::network::NetworkActorEvent;
@@ -2174,6 +2176,100 @@ mod tests {
             5000
         )
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_v2_reconnects_share_reestablish_timeout() {
+        assert_reconnects_share_reestablish_timeout(false).await;
+    }
+
+    #[tokio::test]
+    async fn test_v2_maintenance_checks_cumulative_reestablish_timeout() {
+        assert_reconnects_share_reestablish_timeout(true).await;
+    }
+
+    async fn assert_reconnects_share_reestablish_timeout(maintenance: bool) {
+        let (a, b, id) =
+            create_nodes_with_established_channel(100000000000, 11800000000, false).await;
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let (network, task) = Actor::spawn(None, CaptureNetwork, captured.clone())
+            .await
+            .unwrap();
+        let (myself, handle) = Actor::spawn(None, NoopChannelActor, ()).await.unwrap();
+        let mut state = a.get_channel_actor_state(id);
+        state.network = Some(network.clone());
+        assert!(!state.tlc_state.waiting_ack);
+        let actor = ChannelActor::new(a.pubkey, b.pubkey, network.clone(), a.store.clone(), None);
+        state.mark_reestablishing_offline();
+        let leg = super::super::REESTABLISH_TIMEOUT * 3 / 5;
+        for reconnect in 0..2 {
+            state.on_peer_reconnected();
+            // Each connection waits less than the timeout, but the two waits exceed it.
+            // Backdate the active clock rather than sleeping for minutes in production.
+            let Some(ReestablishTimer::RunningSince(started)) = state.reestablish_timer else {
+                panic!("a reconnected peer must have a running recovery clock");
+            };
+            state.reestablish_timer =
+                Some(ReestablishTimer::RunningSince(started.saturating_sub(leg)));
+            actor
+                .handle_event(
+                    &myself,
+                    &mut state,
+                    if maintenance {
+                        super::super::ChannelEvent::MaintainChannelTlcs
+                    } else {
+                        super::super::ChannelEvent::CheckActiveChannel
+                    },
+                )
+                .await
+                .unwrap();
+            capture_barrier(&network, id).await;
+            let closes = captured
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|message| {
+                    matches!(message,
+                    NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+                        super::super::ChannelCommandWithId {
+                            command: super::super::ChannelCommand::Shutdown(command, _), ..
+                        }
+                    )) if command.force)
+                })
+                .count();
+            assert_eq!(
+                closes, reconnect,
+                "reconnect must not reset the recovery budget"
+            );
+            captured.lock().unwrap().clear();
+            if reconnect == 0 {
+                state.on_peer_disconnected();
+                // An older one-shot check can fire while offline: it must not force close.
+                actor
+                    .handle_event(
+                        &myself,
+                        &mut state,
+                        super::super::ChannelEvent::CheckActiveChannel,
+                    )
+                    .await
+                    .unwrap();
+                capture_barrier(&network, id).await;
+                assert!(!captured.lock().unwrap().iter().any(|message| matches!(
+                    message,
+                    NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+                        super::super::ChannelCommandWithId {
+                            command: super::super::ChannelCommand::Shutdown(_, _),
+                            ..
+                        }
+                    ))
+                )));
+                captured.lock().unwrap().clear();
+            }
+        }
+        myself.stop(None);
+        handle.await.unwrap();
+        network.stop(None);
+        task.await.unwrap();
     }
 
     #[tokio::test]
@@ -6612,7 +6708,7 @@ mod tests {
                 .await
                 .is_err());
         }
-        stale.reestablish_started_at = Some(0);
+        stale.reestablish_timer = Some(ReestablishTimer::RunningSince(0));
         stale.waiting_peer_response = Some(0);
         actor
             .handle_event(
@@ -7372,7 +7468,9 @@ mod tests {
         )
         .await;
         b.wait_for_held_fiber_messages(2).await;
-        crate::tests::test_utils::wait_until_timeout(5000, || {
+        // B holding ClosingSigned only proves its own shutdown was sent. A's
+        // network/channel actors can still be processing that Shutdown message.
+        crate::tests::test_utils::wait_until_timeout(5_000, || {
             a.get_channel_actor_state(id)
                 .session_v2
                 .as_ref()
@@ -7941,6 +8039,9 @@ mod tests {
         // This path has no fresh reconnect (the channel is already Syncing), so the handshake
         // must not consume or replace the verification nonce.
         assert_eq!(state.session_v2.as_ref().unwrap().own.public_nonce, own);
+        state.reestablish_timer = Some(ReestablishTimer::RunningSince(
+            crate::now_timestamp_as_millis_u64() - super::super::REESTABLISH_TIMEOUT / 2,
+        ));
         actor
             .handle_peer_message(
                 &myself,
@@ -7952,6 +8053,10 @@ mod tests {
         // The spec route abandons the outstanding CS and re-signs it with a fresh nonce, so
         // recovery completes here and a new ACK obligation is armed.
         assert!(!state.reestablishing);
+        assert_eq!(
+            state.reestablish_timer, None,
+            "validated recovery resets the budget"
+        );
         assert!(state.tlc_state.waiting_ack);
         let resigned_nonce = state
             .session_v2
