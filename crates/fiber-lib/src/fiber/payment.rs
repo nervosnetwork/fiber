@@ -2815,6 +2815,97 @@ mod closed_add_tests {
     }
 
     #[tokio::test]
+    async fn test_review_rerouted_lost_admission_recovers_on_current_channel() {
+        use crate::fiber::{NetworkActorEvent, NetworkActorMessage, PaymentStatus};
+
+        let (a, b, channel_id) =
+            create_nodes_with_established_channel(100000000000, 11800000000, false).await;
+        let request = super::SendPaymentCommand {
+            target_pubkey: Some(b.pubkey),
+            amount: Some(1000),
+            keysend: Some(true),
+            ..Default::default()
+        }
+        .build_send_payment_data(crate::invoice::Currency::Fibd)
+        .unwrap();
+        let hash = request.payment_hash;
+        let (network, network_task) = Actor::spawn(None, DropAdmissionReply, ()).await.unwrap();
+        let actor = PaymentActor::new(a.store.clone(), a.network_graph.clone(), network.clone());
+        let mut state = PaymentActorState::new(PaymentActorArguments {
+            payment_hash: hash,
+            init_command: PaymentActorMessage::TlcUpdated,
+        });
+        let (myself, task) = Actor::spawn(None, RetryMailbox, ()).await.unwrap();
+        let response = actor
+            .send_payment_with_payment_data(myself, &mut state, request)
+            .await;
+        task.await.unwrap();
+        network.stop(None);
+        network_task.await.unwrap();
+        let response = response
+            .expect("a retained payment must return a trackable response, not an RPC failure");
+        assert_eq!(response.payment_hash, hash);
+        assert_eq!(response.status, PaymentStatus::Created);
+        let attempts = a.store.get_attempts(hash);
+        assert_eq!(attempts.len(), 1);
+        let id = attempts[0].id;
+        let current_outpoint = attempts[0].first_hop_channel_outpoint().unwrap().clone();
+        let mut attempt = attempts[0].clone();
+        let mut hops = attempt.route_hops.clone();
+        hops[0].funding_tx_hash = fiber_types::Hash256::from([77; 32]);
+        attempt.update_route(hops);
+        let old_outpoint = attempt.first_hop_channel_outpoint().unwrap().clone();
+        attempt.status = AttemptStatus::Retrying;
+        attempt.last_error = Some("rebuild route after failure".to_owned());
+        a.store.insert_attempt(attempt);
+        let mut session = a.store.get_payment_session(hash).unwrap();
+        let (network, network_task) = Actor::spawn(None, DropAdmissionReply, ()).await.unwrap();
+        let actor = PaymentActor::new(a.store.clone(), a.network_graph.clone(), network.clone());
+        let mut state = PaymentActorState::new(PaymentActorArguments {
+            payment_hash: hash,
+            init_command: PaymentActorMessage::TlcUpdated,
+        });
+        let (myself, task) = Actor::spawn(None, RetryMailbox, ()).await.unwrap();
+        let result = actor
+            .retry_payment_attempt(myself, &mut state, &mut session, Some(id))
+            .await;
+        task.await.unwrap();
+        network.stop(None);
+        network_task.await.unwrap();
+        assert!(matches!(
+            result,
+            Err(crate::Error::PaymentAdmissionInterrupted(_))
+        ));
+        let retained = a.store.get_attempt(hash, id).unwrap();
+        assert!(retained.is_retrying());
+        assert_eq!(
+            retained.first_hop_channel_outpoint(),
+            Some(&current_outpoint)
+        );
+        assert!(a
+            .store
+            .get_pending_attempts_by_channel_outpoint(&old_outpoint)
+            .is_empty());
+        assert_eq!(
+            a.store
+                .get_pending_attempts_by_channel_outpoint(&current_outpoint)
+                .len(),
+            1
+        );
+        // Only B becomes ready. No old-channel event or direct retry rescues the payment.
+        a.network_actor
+            .send_message(NetworkActorMessage::new_event(
+                NetworkActorEvent::ChannelReady(channel_id, b.pubkey, current_outpoint),
+            ))
+            .unwrap();
+        a.wait_until_success(hash).await;
+        a.wait_until_payment_finished(hash).await;
+        a.wait_until_no_inflight_payments().await;
+        assert_eq!(a.store.get_attempts(hash).len(), 1);
+        assert_eq!(a.store.get_attempt(hash, id).unwrap().tried_times, 1);
+    }
+
+    #[tokio::test]
     async fn test_lost_admission_reply_does_not_fail_or_retry_attempt() {
         use crate::fiber::PaymentStatus;
 

@@ -7294,7 +7294,7 @@ where
     }
 
     async fn restore_persisted_offline_channels(&mut self) -> HashSet<Hash256> {
-        let mut payment_hashes = self.store.get_payment_hashes_with_channel_index();
+        let mut payment_hashes = self.store.reconcile_attempts_channel_index();
         for (pubkey, channel_id, _channel_state) in self.store.get_channel_states(None) {
             let Some(channel_actor_state) = self.store.get_channel_actor_state(&channel_id) else {
                 continue;
@@ -7350,7 +7350,7 @@ where
                         }
                     }
                     for attempt in attempts {
-                        // The index retains the original hop; the payer rechecks the current route's owner.
+                        // Recovery keys follow the current first hop; recheck durable ownership.
                         let owned = attempt.first_hop_channel_outpoint_eq(&outpoint)
                             && (channel_actor_state.owns_payment_attempt(&attempt)
                                 || channel_actor_state.session_v2.iter().any(|session| {

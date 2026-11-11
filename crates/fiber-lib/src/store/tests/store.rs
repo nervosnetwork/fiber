@@ -1780,6 +1780,163 @@ fn test_store_payment_sessions_with_status() {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
+fn test_review_rerouted_attempt_index_recovery() {
+    use crate::store::store_trait::FiberStore;
+    use fiber_types::schema::{
+        ATTEMPT_CHANNEL_INDEX_PREFIX, ATTEMPT_PREFIX, PAYMENT_SESSION_PREFIX,
+    };
+    let (store, _dir) = generate_store();
+    let hash = gen_rand_sha256_hash();
+    let request = SendPaymentDataBuilder::new(gen_rand_fiber_public_key(), 100, hash)
+        .max_fee_amount(Some(1000))
+        .build()
+        .unwrap();
+    let mut session = PaymentSession::new_session(&store, request, 10);
+    let a = ckb_types::packed::OutPoint::new(gen_rand_sha256_hash().into(), 0);
+    let b = ckb_types::packed::OutPoint::new(gen_rand_sha256_hash().into(), 0);
+    let mut attempt = session.new_attempt(
+        1,
+        gen_rand_fiber_public_key(),
+        gen_rand_fiber_public_key(),
+        vec![PaymentHopData {
+            amount: 100,
+            funding_tx_hash: a.tx_hash().into(),
+            ..Default::default()
+        }],
+    );
+    let key = |outpoint: &ckb_types::packed::OutPoint| {
+        [
+            &[ATTEMPT_CHANNEL_INDEX_PREFIX],
+            outpoint.as_slice(),
+            hash.as_ref(),
+            &1u64.to_le_bytes(),
+        ]
+        .concat()
+    };
+    store.insert_payment_session(session.clone());
+    store.insert_attempt(attempt.clone());
+    attempt.status = AttemptStatus::Retrying;
+    let mut hops = attempt.route_hops.clone();
+    hops[0].funding_tx_hash = b.tx_hash().into();
+    attempt.update_route(hops);
+    store.insert_attempt(attempt.clone());
+    let current = attempt.first_hop_channel_outpoint().unwrap();
+    assert!(store.get(key(&a)).is_none());
+    assert!(store.get(key(current)).is_some());
+    assert!(store
+        .get_pending_attempts_by_channel_outpoint(&a)
+        .is_empty());
+    assert_eq!(
+        store
+            .get_pending_attempts_by_channel_outpoint(current)
+            .len(),
+        1
+    );
+
+    // Restore the released layout: the attempt points at B, but only A is indexed.
+    store.delete(key(current));
+    store.put(key(&a), []);
+    // Missing attempt/session records leave removable orphan keys, including
+    // enough aliases to cross a bounded repair batch.
+    for id in 2u64..=300 {
+        store.put(
+            [
+                &[ATTEMPT_CHANNEL_INDEX_PREFIX],
+                a.as_slice(),
+                hash.as_ref(),
+                &id.to_le_bytes(),
+            ]
+            .concat(),
+            [],
+        );
+    }
+    let orphan = gen_rand_sha256_hash();
+    store.put(
+        [
+            &[ATTEMPT_CHANNEL_INDEX_PREFIX],
+            a.as_slice(),
+            orphan.as_ref(),
+            &1u64.to_le_bytes(),
+        ]
+        .concat(),
+        [],
+    );
+    let attempt_key = [&[ATTEMPT_PREFIX], hash.as_ref(), &1u64.to_le_bytes()].concat();
+    let session_key = [&[PAYMENT_SESSION_PREFIX], hash.as_ref()].concat();
+    let records_before = (store.get(&attempt_key), store.get(&session_key));
+    // Unindexed history must never be deserialized, even during repair.
+    let history = gen_rand_sha256_hash();
+    store.put([&[PAYMENT_SESSION_PREFIX], history.as_ref()].concat(), []);
+    store.put(
+        [&[ATTEMPT_PREFIX], history.as_ref(), &1u64.to_le_bytes()].concat(),
+        [],
+    );
+    assert_eq!(
+        store.reconcile_attempts_channel_index(),
+        [hash].into_iter().collect()
+    );
+    assert!(store.get(key(&a)).is_none());
+    assert!(store.get(key(current)).is_some());
+    assert_eq!(
+        (store.get(&attempt_key), store.get(&session_key)),
+        records_before
+    );
+    assert_eq!(
+        store
+            .collect_by_prefix(&[ATTEMPT_CHANNEL_INDEX_PREFIX])
+            .len(),
+        1
+    );
+
+    assert_eq!(
+        store
+            .get_pending_attempts_by_channel_outpoint(current)
+            .len(),
+        1
+    );
+
+    // A final local result cannot retire a still-owned queued Add.
+    let mut channel = sample_channel_actor_state(ChannelState::ChannelReady, None);
+    let channel_outpoint = channel.must_get_funding_transaction_outpoint();
+    let mut hops = attempt.route_hops.clone();
+    hops[0].funding_tx_hash = channel_outpoint.tx_hash().into();
+    attempt.update_route(hops);
+    attempt.set_failed_status("stopped", false);
+    store.insert_attempt(attempt.clone());
+    session.set_failed_status("stopped");
+    store.insert_payment_session(session);
+    channel
+        .retryable_tlc_operations
+        .push_back(RetryableTlcOperation::AddTlc(AddTlcCommand {
+            amount: 100,
+            payment_hash: hash,
+            attempt_id: Some(1),
+            expiry: 0,
+            hash_algorithm: HashAlgorithm::CkbHash,
+            onion_packet: None,
+            shared_secret: [0; 32],
+            is_trampoline_hop: false,
+            previous_tlc: None,
+        }));
+    store.insert_channel_actor_state(channel.clone());
+    store.delete(key(&channel_outpoint));
+    store.put(key(&a), []);
+    store.reconcile_attempts_channel_index();
+    assert!(store.get(key(&channel_outpoint)).is_some());
+    channel.retryable_tlc_operations.clear();
+    store.insert_channel_actor_state(channel);
+    // Include an additional historical alias: cleanup must delete actual keys.
+    store.put(key(&a), []);
+    store.reconcile_attempts_channel_index();
+    assert!(store.get_payment_hashes_with_channel_index().is_empty());
+    // Same-route result updates must not resurrect retired indexes.
+    store.insert_attempt(attempt);
+    assert!(store.get_payment_hashes_with_channel_index().is_empty());
+    assert!(store.reconcile_attempts_channel_index().is_empty());
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
 fn test_payment_recovery_hashes_read_only_channel_index_keys() {
     use fiber_types::schema::{
         ATTEMPT_CHANNEL_INDEX_PREFIX, ATTEMPT_PREFIX, PAYMENT_SESSION_PREFIX,

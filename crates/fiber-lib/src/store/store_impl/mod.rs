@@ -1514,6 +1514,65 @@ impl NetworkGraphStateStore for Store {
             .collect()
     }
 
+    fn reconcile_attempts_channel_index(&self) -> HashSet<Hash256> {
+        // Enumerate only recovery keys, never the payment/attempt tables. Group by
+        // payment so completion checks load its attempts and channel work once.
+        let mut indexed = HashMap::<Hash256, Vec<(Vec<u8>, u64)>>::new();
+        for (key, _) in self.prefix_iterator([ATTEMPT_CHANNEL_INDEX_PREFIX]) {
+            if key.len() != 77 {
+                continue;
+            }
+            let hash = Hash256::from(<[u8; 32]>::try_from(&key[37..69]).expect("index hash"));
+            let id = u64::from_le_bytes(key[69..77].try_into().expect("index attempt id"));
+            indexed.entry(hash).or_default().push((key.to_vec(), id));
+        }
+        let mut hashes = HashSet::new();
+        for (hash, entries) in indexed {
+            let session = self.get_payment_session(hash);
+            if session.is_some() {
+                hashes.insert(hash);
+            }
+            let finished = session.as_ref().is_none_or(|session| {
+                session.status.is_final() && !session.has_pending_payment_work(self)
+            });
+            // Bound write batches even when an old node accumulated many aliases.
+            for chunk in entries.chunks(256) {
+                let mut batch = self.batch();
+                let mut changed = false;
+                for (key, id) in chunk {
+                    let current_key = if finished {
+                        None
+                    } else {
+                        session.as_ref().and_then(|session| {
+                            session
+                                .attempts()
+                                .find(|attempt| attempt.id == *id)
+                                .and_then(|attempt| attempt.first_hop_channel_outpoint())
+                                .map(|outpoint| {
+                                    KeyValue::AttemptChannelIndex((outpoint.clone(), hash, *id))
+                                        .key()
+                                })
+                        })
+                    };
+                    if current_key.as_ref() == Some(key) {
+                        continue;
+                    }
+                    batch.delete(key.clone());
+                    if let Some(current_key) = current_key {
+                        if self.get(&current_key).is_none() {
+                            batch.put(current_key, vec![]);
+                        }
+                    }
+                    changed = true;
+                }
+                if changed {
+                    batch.commit();
+                }
+            }
+        }
+        hashes
+    }
+
     fn get_payment_sessions_with_status(&self, status: PaymentStatus) -> Vec<PaymentSession> {
         let prefix = [PAYMENT_SESSION_PREFIX];
         self.collect_by_prefix(&prefix)
@@ -1609,7 +1668,10 @@ impl NetworkGraphStateStore for Store {
         assert_ne!(attempt.id, 0, "Attempt ID should not be zero");
 
         let first_hop_outpoint = attempt.first_hop_channel_outpoint().cloned();
-        let is_new = self.get_attempt(attempt.payment_hash, attempt.id).is_none();
+        let previous = self.get_attempt(attempt.payment_hash, attempt.id);
+        let previous_outpoint = previous
+            .as_ref()
+            .and_then(|a| a.first_hop_channel_outpoint());
 
         let mut batch = self.batch();
 
@@ -1617,8 +1679,19 @@ impl NetworkGraphStateStore for Store {
         let kv = KeyValue::Attempt((attempt.payment_hash, attempt.id), attempt.clone());
         batch.put(kv.key(), kv.value());
 
-        // Add to channel index only for new attempts
-        if is_new {
+        // Route changes and their wake-up index must become durable together.
+        // Status/preimage updates must not recreate an already retired index.
+        if previous.is_none() || previous_outpoint != first_hop_outpoint.as_ref() {
+            if let Some(outpoint) = previous_outpoint {
+                batch.delete(
+                    KeyValue::AttemptChannelIndex((
+                        outpoint.clone(),
+                        attempt.payment_hash,
+                        attempt.id,
+                    ))
+                    .key(),
+                );
+            }
             if let Some(outpoint) = first_hop_outpoint {
                 let kv =
                     KeyValue::AttemptChannelIndex((outpoint, attempt.payment_hash, attempt.id));

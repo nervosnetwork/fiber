@@ -3504,13 +3504,22 @@ mod tests {
             a.store.delete_attempts(hash);
             a.store.insert_attempt(retrying.clone());
             if moved_route {
-                // The existing index remains at the original hop when a retry replaces its route.
-                let funding_hash = fiber_types::Hash256::from([77; 32]);
-                retrying.route.nodes[0].channel_outpoint =
-                    ckb_types::packed::OutPoint::new(funding_hash.into(), 0);
-                retrying.route_hops[0].funding_tx_hash = funding_hash;
-                retrying.session_key = [43; 32];
-                a.store.insert_attempt(retrying);
+                // A released node may have left an alias at a previous first hop.
+                // Restore that raw legacy layout without changing the current route.
+                use fiber_types::schema::ATTEMPT_CHANNEL_INDEX_PREFIX;
+                let old_outpoint = ckb_types::packed::OutPoint::new([77; 32].into(), 0);
+                let key = |outpoint: &ckb_types::packed::OutPoint| {
+                    [
+                        &[ATTEMPT_CHANNEL_INDEX_PREFIX],
+                        outpoint.as_slice(),
+                        hash.as_ref(),
+                        &attempt.id.to_le_bytes(),
+                    ]
+                    .concat()
+                };
+                a.store
+                    .delete(key(attempt.first_hop_channel_outpoint().unwrap()));
+                a.store.put(key(&old_outpoint), []);
             }
             a.store.insert_payment_session(session);
             assert_eq!(
@@ -3519,7 +3528,7 @@ mod tests {
                         attempt.first_hop_channel_outpoint().unwrap()
                     )
                     .len(),
-                1
+                usize::from(!moved_route)
             );
             a.start().await;
             crate::tests::test_utils::wait_until_timeout(5000, || {
@@ -3605,23 +3614,54 @@ mod tests {
             .unwrap();
             assert!(result.is_err());
         }
-        let mut newer = original.clone();
-        newer.session_key = [42; 32];
-        a.store.insert_attempt(newer);
-        ractor::call_t!(
-            a.network_actor,
-            |reply| NetworkActorMessage::new_command(NetworkActorCommand::CompleteClosedLocalAdd {
-                channel_id: id,
-                command: Box::new(command.clone()),
-                reply,
-            }),
-            5000
-        )
-        .unwrap()
-        .unwrap();
-        let unchanged = a.store.get_attempt(hash, original.id).unwrap();
-        assert_eq!(unchanged.status, fiber_types::AttemptStatus::Created);
-        assert_eq!(unchanged.tried_times, original.tried_times);
+        for moved_route in [false, true] {
+            let mut newer = original.clone();
+            if moved_route {
+                let mut hops = newer.route_hops.clone();
+                hops[0].funding_tx_hash = fiber_types::Hash256::from([77; 32]);
+                newer.update_route(hops);
+            } else {
+                newer.session_key = [42; 32];
+            }
+            a.store.insert_attempt(newer.clone());
+            ractor::call_t!(
+                a.network_actor,
+                |reply| NetworkActorMessage::new_command(
+                    NetworkActorCommand::CompleteClosedLocalAdd {
+                        channel_id: id,
+                        command: Box::new(command.clone()),
+                        reply,
+                    }
+                ),
+                5000
+            )
+            .unwrap()
+            .unwrap();
+            let unchanged = a.store.get_attempt(hash, original.id).unwrap();
+            assert_eq!(unchanged.status, fiber_types::AttemptStatus::Created);
+            assert_eq!(unchanged.tried_times, original.tried_times);
+            assert_eq!(
+                unchanged.first_hop_channel_outpoint(),
+                newer.first_hop_channel_outpoint()
+            );
+            assert_eq!(unchanged.session_key, newer.session_key);
+            if moved_route {
+                assert!(a
+                    .store
+                    .get_pending_attempts_by_channel_outpoint(
+                        original.first_hop_channel_outpoint().unwrap()
+                    )
+                    .is_empty());
+                assert_eq!(
+                    a.store
+                        .get_pending_attempts_by_channel_outpoint(
+                            newer.first_hop_channel_outpoint().unwrap()
+                        )
+                        .len(),
+                    1
+                );
+            }
+        }
         let mut retrying = original;
         retrying.status = fiber_types::AttemptStatus::Retrying;
         retrying.tried_times = 1;

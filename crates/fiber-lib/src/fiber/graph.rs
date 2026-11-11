@@ -3093,6 +3093,9 @@ pub trait NetworkGraphStateStore {
     /// Payment hashes with attempt-channel wake-up entries, including final
     /// attempts whose channel work may not have completed. Reads only index keys.
     fn get_payment_hashes_with_channel_index(&self) -> HashSet<Hash256>;
+    /// Repair legacy route-index aliases and retire completed recovery keys at startup.
+    /// Reads only indexed payments; returns their hashes for result/upstream recovery.
+    fn reconcile_attempts_channel_index(&self) -> HashSet<Hash256>;
     fn get_payment_sessions_with_status(&self, status: PaymentStatus) -> Vec<PaymentSession>;
     /// Get payment sessions with pagination support.
     /// `limit`: maximum number of results to return.
