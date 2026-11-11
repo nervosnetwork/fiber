@@ -73,7 +73,7 @@ use musig2::secp::{Point, Scalar};
 use musig2::KeyAggContext;
 use ractor::{call, Actor, ActorProcessingErr, ActorRef};
 use secp256k1::SECP256K1;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tracing::debug;
@@ -4768,6 +4768,144 @@ async fn test_restarted_offline_channel_force_closes_expired_offered_tlc() {
             "offline restored channel should force close expired offered tlc, got {:?}",
             state
         ),
+    }
+}
+
+#[tokio::test]
+async fn test_received_tlc_claim_force_closes_after_offline_restart_v2() {
+    init_tracing();
+    let (mut payer, mut payee, channel_id) =
+        create_nodes_with_established_channel(HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT, true).await;
+    assert!(payee
+        .get_channel_actor_state(channel_id)
+        .session_v2
+        .is_some());
+    let mut claims = Vec::new();
+    for algorithm in [HashAlgorithm::Sha256, HashAlgorithm::CkbHash] {
+        let preimage = gen_rand_sha256_hash();
+        let payment_hash = algorithm.hash(preimage).into();
+        let invoice = InvoiceBuilder::new(Currency::Fibd)
+            .amount(Some(3_000_000))
+            .payment_hash(payment_hash)
+            .hash_algorithm(algorithm)
+            .payee_pub_key(payee.pubkey.into())
+            .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &payee.private_key.0))
+            .expect("build hold invoice");
+        payee.insert_invoice(invoice.clone(), None);
+        payer
+            .send_payment(SendPaymentCommand {
+                invoice: Some(invoice.to_string()),
+                ..Default::default()
+            })
+            .await
+            .expect("pay hold invoice");
+        wait_until_timeout(5_000, || {
+            payee.get_invoice_status(&payment_hash) == Some(CkbInvoiceStatus::Received)
+        })
+        .await;
+        let tlc_id = payee
+            .get_channel_actor_state(channel_id)
+            .tlc_state
+            .received_tlcs
+            .tlcs
+            .iter()
+            .find(|tlc| tlc.payment_hash == payment_hash)
+            .unwrap()
+            .tlc_id;
+        claims.push((payment_hash, preimage, tlc_id));
+    }
+    let commitment_hash = payee
+        .get_channel_actor_state(channel_id)
+        .latest_commitment_transaction
+        .clone()
+        .unwrap()
+        .into_view()
+        .hash();
+
+    payer.stop().await;
+    wait_until(|| {
+        payee.get_channel_actor_state(channel_id).connectivity_state
+            == ChannelConnectivityState::Offline
+    })
+    .await;
+    for (payment_hash, preimage, tlc_id) in &claims {
+        payee
+            .settle_invoice(payment_hash, *preimage)
+            .await
+            .expect("settle hold invoice");
+        let fulfill = RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+            payment_preimage: *preimage,
+        });
+        wait_until_timeout(5_000, || {
+            payee
+                .get_channel_actor_state(channel_id)
+                .retryable_tlc_operations
+                .contains(&RetryableTlcOperation::RemoveTlc(*tlc_id, fulfill.clone()))
+        })
+        .await;
+    }
+    payee.stop().await;
+    let mut state = payee.get_channel_actor_state(channel_id);
+    // Only the first TLC enters its safety window. Closing the channel must also
+    // restore the second claim, whose watchtower notification could have been lost.
+    state.tlc_state.get_mut(&claims[0].2).unwrap().expiry = now_timestamp_as_millis_u64() + 5_000;
+    payee.store.insert_channel_actor_state(state);
+    for (payment_hash, _, _) in &claims {
+        crate::invoice::PreimageStore::remove_preimage(&payee.store, payment_hash);
+        assert_eq!(payee.get_payment_preimage(payment_hash), None);
+    }
+    payee.start().await;
+    notify_maintain_channel_tlcs(&payee, channel_id);
+    wait_until_timeout(5_000, || {
+        let state = payee.get_channel_actor_state(channel_id);
+        matches!(state.state, ChannelState::ShuttingDown(flags)
+            if flags.contains(ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION))
+            || matches!(state.state, ChannelState::Closed(flags)
+                if flags.contains(CloseFlags::UNCOOPERATIVE_LOCAL))
+    })
+    .await;
+    assert!(
+        payee
+            .get_channel_actor_state(channel_id)
+            .retryable_tlc_operations
+            .iter()
+            .all(|operation| !matches!(
+                operation,
+                RetryableTlcOperation::RemoveTlc(_, RemoveTlcReason::RemoveTlcFail(_))
+            )),
+        "claim protection must not enqueue an expiry failure"
+    );
+    assert_eq!(
+        payee
+            .get_channel_actor_state(channel_id)
+            .latest_commitment_transaction
+            .clone()
+            .unwrap()
+            .into_view()
+            .hash(),
+        commitment_hash
+    );
+    let mut pending_preimages: HashMap<_, _> = claims
+        .into_iter()
+        .map(|(payment_hash, preimage, _)| {
+            assert_eq!(payee.get_payment_preimage(&payment_hash), Some(preimage));
+            (payment_hash, preimage)
+        })
+        .collect();
+    // Deduplication does not promise notification order. Waiting for one hash at a time
+    // would discard another claim's earlier notification and then wait forever for it.
+    while !pending_preimages.is_empty() {
+        let (payment_hash, preimage) = payee
+            .expect_to_process_event(|event| match event {
+                NetworkServiceEvent::PreimageCreated(hash, preimage)
+                    if pending_preimages.contains_key(hash) =>
+                {
+                    Some((*hash, *preimage))
+                }
+                _ => None,
+            })
+            .await;
+        assert_eq!(pending_preimages.remove(&payment_hash), Some(preimage));
     }
 }
 
