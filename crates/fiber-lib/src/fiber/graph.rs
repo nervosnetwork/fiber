@@ -3090,6 +3090,9 @@ pub trait NetworkGraphStateStore {
     /// separately persisted attempts.
     fn get_persisted_payment_status(&self, payment_hash: Hash256) -> Option<PaymentStatus>;
     fn get_all_payment_sessions(&self) -> Vec<PaymentSession>;
+    /// Payment hashes with attempt-channel wake-up entries, including final
+    /// attempts whose channel work may not have completed. Reads only index keys.
+    fn get_payment_hashes_with_channel_index(&self) -> HashSet<Hash256>;
     fn get_payment_sessions_with_status(&self, status: PaymentStatus) -> Vec<PaymentSession>;
     /// Get payment sessions with pagination support.
     /// `limit`: maximum number of results to return.

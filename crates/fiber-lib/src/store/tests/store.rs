@@ -1777,6 +1777,46 @@ fn test_store_payment_sessions_with_status() {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
+fn test_payment_recovery_hashes_read_only_channel_index_keys() {
+    use fiber_types::schema::{
+        ATTEMPT_CHANNEL_INDEX_PREFIX, ATTEMPT_PREFIX, PAYMENT_SESSION_PREFIX,
+    };
+    use std::collections::HashSet;
+
+    let (store, _dir) = generate_store();
+    let hashes = [gen_rand_sha256_hash(), gen_rand_sha256_hash()];
+    for hash in hashes {
+        // Neither record is needed to enumerate recovery candidates.
+        store.put([&[PAYMENT_SESSION_PREFIX], hash.as_ref()].concat(), []);
+        for id in 1u64..=2 {
+            let outpoint = gen_rand_channel_outpoint();
+            store.put(
+                [
+                    &[ATTEMPT_CHANNEL_INDEX_PREFIX],
+                    outpoint.as_slice(),
+                    hash.as_ref(),
+                    &id.to_le_bytes(),
+                ]
+                .concat(),
+                [],
+            );
+            store.put(
+                [&[ATTEMPT_PREFIX], hash.as_ref(), &id.to_le_bytes()].concat(),
+                [],
+            );
+        }
+    }
+    // Historical records without wake-up entries must not become candidates.
+    let history = gen_rand_sha256_hash();
+    store.put([&[PAYMENT_SESSION_PREFIX], history.as_ref()].concat(), []);
+    assert_eq!(
+        store.get_payment_hashes_with_channel_index(),
+        HashSet::from(hashes)
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
 fn test_payment_status_queries_skip_attempts_for_mismatched_terminal_sessions() {
     for terminal_status in [PaymentStatus::Success, PaymentStatus::Failed] {
         let (store, _dir) = generate_store();

@@ -1504,6 +1504,14 @@ impl NetworkGraphStateStore for Store {
             .collect()
     }
 
+    fn get_payment_hashes_with_channel_index(&self) -> HashSet<Hash256> {
+        // Key: prefix(1) | outpoint(36) | payment hash(32) | attempt id(8).
+        // Stream the index and deduplicate without loading sessions or attempts.
+        self.prefix_iterator([ATTEMPT_CHANNEL_INDEX_PREFIX])
+            .filter_map(|(key, _)| key.get(37..69)?.try_into().ok())
+            .collect()
+    }
+
     fn get_payment_sessions_with_status(&self, status: PaymentStatus) -> Vec<PaymentSession> {
         let prefix = [PAYMENT_SESSION_PREFIX];
         self.collect_by_prefix(&prefix)

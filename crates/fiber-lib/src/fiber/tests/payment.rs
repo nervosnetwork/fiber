@@ -65,6 +65,147 @@ use std::time::{Duration, SystemTime};
 use tracing::{debug, error, info};
 
 #[tokio::test]
+async fn test_startup_does_not_read_completed_payment_history() {
+    use fiber_store::backend::StorageBackend;
+    use fiber_types::schema::{ATTEMPT_PREFIX, PAYMENT_SESSION_PREFIX};
+
+    let (mut payer, payee, _) =
+        create_nodes_with_established_channel(100000000000, 11800000000, false).await;
+    let hash = payer
+        .send_payment_keysend(&payee, 1000, false)
+        .await
+        .unwrap()
+        .payment_hash;
+    payer.wait_until_payment_finished(hash).await;
+    payer.wait_until_no_inflight_payments().await;
+    let attempt = payer.store.get_attempts(hash).pop().unwrap();
+    payer.stop().await;
+
+    // Unreadable sentinels make any scan of completed sessions or attempts fail.
+    // Their wake-up indexes have already been cleared by normal completion.
+    payer
+        .store
+        .put([&[PAYMENT_SESSION_PREFIX], hash.as_ref()].concat(), []);
+    payer.store.put(
+        [&[ATTEMPT_PREFIX], hash.as_ref(), &attempt.id.to_le_bytes()].concat(),
+        [],
+    );
+    tokio::time::timeout(Duration::from_secs(5), payer.start())
+        .await
+        .expect("startup must not load completed payment history");
+    assert_eq!(payer.get_inflight_payment_count().await, 0);
+}
+
+#[tokio::test]
+async fn test_startup_recovers_trampoline_success_without_attempt_index() {
+    assert_startup_recovers_trampoline_result_without_attempt_index(true).await;
+}
+
+#[tokio::test]
+async fn test_startup_recovers_trampoline_failure_without_attempt_index() {
+    assert_startup_recovers_trampoline_result_without_attempt_index(false).await;
+}
+
+async fn assert_startup_recovers_trampoline_result_without_attempt_index(success: bool) {
+    init_tracing();
+    let (mut upstream, mut relay, channel) =
+        create_nodes_with_established_channel(100000000000, 11800000000, false).await;
+    let relay_balance = relay.get_local_balance_from_channel(channel);
+    let preimage = gen_rand_sha256_hash();
+    let invoice = relay.build_basic_invoice(1000, preimage);
+    let hash = *invoice.payment_hash();
+    relay.insert_invoice(invoice.clone(), None);
+    upstream
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    wait_until_timeout(5000, || {
+        relay
+            .get_channel_actor_state(channel)
+            .tlc_state
+            .received_tlcs
+            .tlcs
+            .iter()
+            .any(|tlc| {
+                tlc.payment_hash == hash
+                    && tlc.inbound_status() == fiber_types::InboundTlcStatus::Committed
+            })
+    })
+    .await;
+    relay.stop().await;
+    let tlc = relay
+        .get_channel_actor_state(channel)
+        .tlc_state
+        .received_tlcs
+        .tlcs
+        .iter()
+        .find(|tlc| tlc.payment_hash == hash)
+        .unwrap()
+        .clone();
+
+    // Model the crash after downstream completion/index cleanup but before
+    // delivering the result to the still-pending upstream TLC.
+    let target = gen_rand_fiber_public_key();
+    let request = SendPaymentDataBuilder::new(target, 1000, hash)
+        .max_fee_amount(Some(1000))
+        .trampoline_context(Some(TrampolineContext {
+            previous_tlcs: vec![PrevTlcInfo::new_with_shared_secret(
+                channel,
+                tlc.id(),
+                0,
+                tlc.shared_secret,
+            )],
+            hash_algorithm: tlc.hash_algorithm,
+            ..Default::default()
+        }))
+        .build()
+        .unwrap();
+    let mut session = fiber_types::PaymentSession::new_session(&relay.store, request, 1);
+    if success {
+        let mut attempt = session.new_attempt(
+            1,
+            relay.pubkey,
+            target,
+            vec![PaymentHopData {
+                amount: 1000,
+                ..Default::default()
+            }],
+        );
+        attempt.set_success_status();
+        attempt.preimage = Some(preimage);
+        relay.store.insert_attempt(attempt);
+        session.set_success_status();
+    } else {
+        session.set_failed_status("downstream route failed");
+    }
+    relay.store.insert_payment_session(session);
+    relay.store.clear_attempts_channel_index(hash);
+    assert!(relay
+        .store
+        .get_payment_hashes_with_channel_index()
+        .is_empty());
+    relay.start().await;
+    upstream.connect_to(&mut relay).await;
+    if success {
+        upstream.wait_until_success(hash).await;
+        upstream.wait_until_payment_finished(hash).await;
+    } else {
+        upstream.wait_until_failed(hash).await;
+    }
+    upstream.wait_until_no_inflight_payments().await;
+    // TLCs may already be garbage collected after reestablishment; assert the
+    // durable outcome and balance instead of sampling a removal in progress.
+    wait_until_timeout(5000, || {
+        relay.get_local_balance_from_channel(channel)
+            == relay_balance + if success { 1000 } else { 0 }
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn test_payer_preimage_succeeds_before_tlc_finishes_after_restart() {
     init_tracing();
     let (mut payer, mut payee, channel) =

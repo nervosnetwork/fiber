@@ -7210,11 +7210,42 @@ where
         Ok(channel)
     }
 
-    async fn restore_persisted_offline_channels(&mut self) {
+    async fn restore_persisted_offline_channels(&mut self) -> HashSet<Hash256> {
+        let mut payment_hashes = self.store.get_payment_hashes_with_channel_index();
         for (pubkey, channel_id, _channel_state) in self.store.get_channel_states(None) {
             let Some(channel_actor_state) = self.store.get_channel_actor_state(&channel_id) else {
                 continue;
             };
+            // Reuse the channel state already loaded for restoration. Attempt
+            // indexes can be cleared before a channel outcome is fully applied,
+            // or before a trampoline result has reached its upstream TLC.
+            payment_hashes.extend(channel_actor_state.tlc_state.all_tlcs().filter_map(|tlc| {
+                let pending = if tlc.is_offered() {
+                    tlc.attempt_id.is_some() && !tlc.applied_flags.contains(AppliedFlags::REMOVE)
+                } else {
+                    tlc.removed_reason.is_none()
+                };
+                pending.then_some(tlc.payment_hash)
+            }));
+            payment_hashes.extend(
+                channel_actor_state
+                    .retryable_tlc_operations
+                    .iter()
+                    .filter_map(|operation| match operation {
+                        RetryableTlcOperation::AddTlc(command) if command.attempt_id.is_some() => {
+                            Some(command.payment_hash)
+                        }
+                        _ => None,
+                    }),
+            );
+            if let Some(session) = &channel_actor_state.session_v2 {
+                payment_hashes.extend(
+                    session
+                        .remove_effects
+                        .iter()
+                        .filter_map(|(tlc, _)| tlc.attempt_id.map(|_| tlc.payment_hash)),
+                );
+            }
             if channel_actor_state.channel_features.is_v2()
                 && matches!(channel_actor_state.state, ChannelState::Closed(_))
             {
@@ -7268,6 +7299,7 @@ where
                 );
             }
         }
+        payment_hashes
     }
 
     async fn on_peer_connected(&mut self, remote_pubkey: Pubkey, session: &SessionContext) {
@@ -8485,7 +8517,7 @@ where
         myself: ActorRef<Self::Msg>,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        state.restore_persisted_offline_channels().await;
+        let payment_hashes = state.restore_persisted_offline_channels().await;
 
         // MAINTAINING_CONNECTIONS_INTERVAL is long, we need to trigger when start
         myself
@@ -8505,9 +8537,12 @@ where
 
         // Trigger hold tlc fulfill retry and timeout checks at startup.
         self.retry_hold_tlc_sets(&myself);
-        // A crash after persisting an attempt outcome but before delivering its
-        // upstream removal must not lose the forwarding decision.
-        for session in self.store.get_all_payment_sessions() {
+        // Recover only channel-owned work and indexed attempts. Scanning payment
+        // history here makes every restart grow with the node's lifetime traffic.
+        for payment_hash in payment_hashes {
+            let Some(session) = self.store.get_payment_session(payment_hash) else {
+                continue;
+            };
             if session.has_pending_payment_work(&self.store) {
                 myself
                     .send_message(NetworkActorMessage::new_command(
