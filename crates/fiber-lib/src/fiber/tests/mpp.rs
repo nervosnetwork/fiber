@@ -13,7 +13,7 @@ use crate::{
             PAYMENT_MAX_PARTS_LIMIT,
         },
         network::DebugEvent,
-        payment::SendPaymentCommand,
+        payment::{PaymentSessionExt, SendPaymentCommand},
         types::RemoveTlcReason,
         AddTlcCommand, AttemptStatus, BasicMppPaymentData, FeatureVector, Hash256, HashAlgorithm,
         NetworkActorCommand, NetworkActorMessage, PaymentCustomRecords, PaymentHopData,
@@ -3368,15 +3368,12 @@ async fn test_mpp_fail_on_total_amount_not_match() {
     let payment_session = node_0.get_payment_session(payment_hash).unwrap();
     eprintln!("now payment session status: {:?}", payment_session.status);
 
-    node_0
-        .expect_debug_event("after on_remove_tlc_event session_status: Failed")
-        .await;
-
-    let payment_session = node_0.get_payment_session(payment_hash).unwrap();
-    eprintln!("now payment session status: {:?}", payment_session.status);
-
+    // Final failure is published after channel delivery completes, which may
+    // happen after the last OnRemove callback's diagnostic event.
     node_0.wait_until_failed(payment_hash).await;
+    node_0.wait_until_no_inflight_payments().await;
     let payment_session = node_0.get_payment_session(payment_hash).unwrap();
+    assert!(!payment_session.has_outstanding_channel_work(&node_0.store));
     assert_eq!(payment_session.attempts_count(), 2);
     assert!(payment_session
         .attempts()

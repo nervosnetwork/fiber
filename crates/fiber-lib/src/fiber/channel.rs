@@ -16,10 +16,10 @@ use crate::fiber::fee::{
 use crate::fiber::network::DebugEvent;
 use crate::fiber::onchain_tlc_reconcile::{
     collect_onchain_confirmed_payer_tlcs, collect_onchain_excluded_tlcs,
-    collect_onchain_fulfilled_tlcs, collect_onchain_received_timeout_settled_tlcs,
-    collect_onchain_timeout_settled_tlcs, confirm_onchain_payer_fulfill,
-    has_unresolved_onchain_tlcs, onchain_fulfilled_preimage, OnChainConfirmedPayerTlc,
-    OnChainTimeoutTlcRole, StoredOnChainTlcSettlement,
+    collect_onchain_fulfilled_tlcs, collect_onchain_payer_failures,
+    collect_onchain_received_timeout_settled_tlcs, collect_onchain_timeout_settled_tlcs,
+    confirm_onchain_payer_fulfill, has_unresolved_onchain_tlcs, onchain_fulfilled_preimage,
+    OnChainConfirmedPayerTlc, OnChainTimeoutTlcRole, StoredOnChainTlcSettlement,
 };
 use crate::fiber::types::{BroadcastMessageWithTimestamp, TxSignatures};
 use crate::store::actor::StoreActorMessage;
@@ -519,20 +519,25 @@ where
     fn persist_state_and_publish_pending_effects(&self, state: &mut ChannelActorState) {
         let count = std::mem::take(&mut state.pending_remove_effects_v2);
         self.store.insert_channel_actor_state(state.clone());
+        let mut updated_payments = std::mem::take(&mut state.pending_payment_notifications);
         for tlc in &state.tlc_state.offered_tlcs.tlcs {
             if tlc.attempt_id.is_some()
                 && tlc.forwarding_tlc.is_none()
-                && matches!(
-                    tlc.removed_reason,
-                    Some(RemoveTlcReason::RemoveTlcFulfill(_))
-                )
-            {
-                self.network
-                    .send_message(NetworkActorMessage::new_command(
-                        NetworkActorCommand::PaymentTlcUpdated(tlc.payment_hash),
+                && (tlc.applied_flags.contains(AppliedFlags::REMOVE)
+                    || matches!(
+                        tlc.removed_reason,
+                        Some(RemoveTlcReason::RemoveTlcFulfill(_))
                     ))
-                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+            {
+                updated_payments.insert(tlc.payment_hash);
             }
+        }
+        for payment_hash in updated_payments {
+            self.network
+                .send_message(NetworkActorMessage::new_command(
+                    NetworkActorCommand::PaymentTlcUpdated(payment_hash),
+                ))
+                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
         }
         self.publish_force_closing_removes_v2(state);
         if let Some(session) = &state.session_v2 {
@@ -3955,22 +3960,10 @@ where
                                 tlc.payment_hash,
                                 attempt_id,
                                 reason.clone(),
-                                None,
+                                Some((state.get_id(), tlc.tlc_id)),
                             ),
                         ))
                         .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-                    if let TLCId::Offered(id) = tlc.tlc_id {
-                        // A peer RemoveTlc may already have marked this TLC removed without the
-                        // commitment handshake completing (issue #1612). Only mark it again when
-                        // it was never removed: `set_offered_tlc_removed` asserts Committed.
-                        if state
-                            .tlc_state
-                            .get(&TLCId::Offered(id))
-                            .is_some_and(|t| t.removed_reason.is_none())
-                        {
-                            state.tlc_state.set_offered_tlc_removed(id, reason);
-                        }
-                    }
                 }
             }
         }
@@ -4269,6 +4262,7 @@ where
         let excluded_effects_applied = self.fail_onchain_excluded_tlcs(state);
         payer_effects_applied
             && excluded_effects_applied
+            && collect_onchain_payer_failures(state, &self.store).is_empty()
             && !has_unresolved_onchain_tlcs(state, &self.store)
     }
 
@@ -4867,6 +4861,9 @@ where
                         tlc.tlc_id != tlc_id || tlc.removed_reason.as_ref() != Some(&reason)
                     });
                     if let Some(hash) = payment_hash {
+                        // Include retired TLCs in the message-tail notification,
+                        // published only after the outbox acknowledgement is saved.
+                        state.pending_payment_notifications.insert(hash);
                         let retain_invoice_preimage = self.store.has_invoice_preimage(&hash)
                             && self.store.get_invoice_status(&hash) == Some(CkbInvoiceStatus::Open);
                         if matches!(reason, RemoveTlcReason::RemoveTlcFulfill(_))
@@ -6149,6 +6146,10 @@ pub struct ChannelActorState {
     #[doc = "skip_store"]
     pub pending_remove_effects_v2: usize,
 
+    /// Payment wake-ups to publish once the current message's mutations are saved.
+    #[doc = "skip_store"]
+    pub pending_payment_notifications: HashSet<Hash256>,
+
     /// Prefix of pending TLC updates already published on this connection.
     #[doc = "skip_store"]
     pub replayed_tlc_updates_v2: usize,
@@ -6240,6 +6241,7 @@ impl From<ChannelActorData> for ChannelActorState {
             private_key: None,
             needs_backup: false,
             pending_remove_effects_v2: 0,
+            pending_payment_notifications: Default::default(),
             replayed_tlc_updates_v2: 0,
         };
         state.hydrate_external_funding_runtime();
@@ -7465,6 +7467,7 @@ impl ChannelActorState {
             private_key: Some(private_key),
             needs_backup: true,
             pending_remove_effects_v2: 0,
+            pending_payment_notifications: Default::default(),
             replayed_tlc_updates_v2: 0,
         };
         if let Some(nonce) = remote_channel_announcement_nonce {
@@ -7570,6 +7573,7 @@ impl ChannelActorState {
             private_key: Some(private_key),
             needs_backup: true,
             pending_remove_effects_v2: 0,
+            pending_payment_notifications: Default::default(),
             replayed_tlc_updates_v2: 0,
         };
         state.initialize_session_v2(None);
@@ -12252,6 +12256,7 @@ mod tests {
             private_key: None,
             needs_backup: false,
             pending_remove_effects_v2: 0,
+            pending_payment_notifications: Default::default(),
             replayed_tlc_updates_v2: 0,
         }
     }

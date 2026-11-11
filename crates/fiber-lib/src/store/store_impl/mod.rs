@@ -98,6 +98,17 @@ impl std::fmt::Debug for Store {
 }
 
 impl Store {
+    fn restore_payment_session(&self, session: PaymentSession) -> PaymentSession {
+        let mut session = session.init_attempts(self);
+        // Legacy Failed meant "stop retrying", even if another TLC could still
+        // fulfill. Do not expose that as final failure to RPC or CCH readers.
+        if session.status == PaymentStatus::Failed && session.has_outstanding_channel_work(self) {
+            session.retry_stopped = true;
+            session.status = PaymentStatus::Inflight;
+        }
+        session
+    }
+
     /// Shut down the browser database after all actors and background writes stop.
     #[cfg(target_arch = "wasm32")]
     pub fn shutdown(self) {
@@ -1484,7 +1495,7 @@ impl NetworkGraphStateStore for Store {
         let prefix = [&[PAYMENT_SESSION_PREFIX], payment_hash.as_ref()].concat();
         self.get(prefix)
             .map(|v| deserialize_from(v.as_ref(), "PaymentSession"))
-            .map(|session: PaymentSession| session.init_attempts(self))
+            .map(|session: PaymentSession| self.restore_payment_session(session))
     }
 
     fn get_persisted_payment_status(&self, payment_hash: Hash256) -> Option<PaymentStatus> {
@@ -1499,7 +1510,7 @@ impl NetworkGraphStateStore for Store {
             .into_iter()
             .map(|kv| {
                 let session: PaymentSession = deserialize_from(kv.value.as_ref(), "PaymentSession");
-                session.init_attempts(self)
+                self.restore_payment_session(session)
             })
             .collect()
     }
@@ -1522,11 +1533,11 @@ impl NetworkGraphStateStore for Store {
                 if session.status.is_final()
                     && session.status != status
                     && !(session.status == PaymentStatus::Failed
-                        && status == PaymentStatus::Success)
+                        && matches!(status, PaymentStatus::Success | PaymentStatus::Inflight))
                 {
                     return None;
                 }
-                let session = session.init_attempts(self);
+                let session = self.restore_payment_session(session);
                 if session.status == status {
                     Some(session)
                 } else {
@@ -1555,12 +1566,12 @@ impl NetworkGraphStateStore for Store {
                 && status.is_some_and(|status| {
                     session.status != status
                         && !(session.status == PaymentStatus::Failed
-                            && status == PaymentStatus::Success)
+                            && matches!(status, PaymentStatus::Success | PaymentStatus::Inflight))
                 })
             {
                 return None;
             }
-            let session = session.init_attempts(self);
+            let session = self.restore_payment_session(session);
             match status {
                 Some(ref s) if session.status != *s => None,
                 _ => Some(session),
@@ -1721,11 +1732,13 @@ impl NetworkGraphStateStore for Store {
             .is_some_and(|session| {
                 session.status.is_final() && !session.has_pending_payment_work(self)
             });
-        // Keep wake-up ownership for pending TLCs, but release unissued attempts at completion.
+        if !finished {
+            // These keys also recover a stopped dispatcher after its final
+            // channel acknowledgement but before publishing final failure.
+            return;
+        }
+        // Release issued and unissued attempts only after payment completion.
         for attempt in attempts {
-            if !attempt.status.is_final() && !finished {
-                continue;
-            }
             if let Some(outpoint) = attempt.first_hop_channel_outpoint() {
                 let index_key = [
                     &[ATTEMPT_CHANNEL_INDEX_PREFIX],

@@ -703,6 +703,271 @@ struct StoreBackedTestHarness {
     mock_state: MockNetworkState,
 }
 
+#[tokio::test]
+async fn test_cch_real_mpp_partial_success_does_not_wait_for_remaining_shard() {
+    assert_cch_real_mpp_outcome(false, true, false).await;
+}
+
+#[tokio::test]
+async fn test_cch_real_mpp_stopped_retry_survives_restart_and_late_success() {
+    assert_cch_real_mpp_outcome(true, true, true).await;
+}
+
+#[tokio::test]
+async fn test_cch_real_mpp_stopped_retry_fails_only_after_last_shard() {
+    assert_cch_real_mpp_outcome(true, false, false).await;
+}
+
+async fn assert_cch_real_mpp_outcome(stop_retry: bool, success: bool, restart: bool) {
+    use crate::fiber::channel::{
+        ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, RemoveTlcCommand,
+    };
+    use crate::invoice::InvoiceBuilder;
+    use crate::tests::test_utils::{
+        establish_channel_between_nodes, wait_until_timeout, NetworkNode, NetworkNodeConfig,
+    };
+    use crate::{ChannelParameters, MIN_RESERVED_CKB};
+    use fiber_types::{
+        InboundTlcStatus, RemoveTlcFulfill, RemoveTlcReason, TLCId, TlcErr, TlcErrPacket,
+        TlcErrorCode, TlcStatus,
+    };
+
+    let harness = setup_test_harness().await;
+    let (mut store, _store_dir) = generate_store();
+    let changes = Arc::new(Mutex::new(Vec::new()));
+    let observed = changes.clone();
+    let cch = harness.actor.clone();
+    store.set_watcher(Arc::new(move |change| {
+        if let StoreChange::PutPaymentSession {
+            payment_session, ..
+        } = &change
+        {
+            observed.lock().unwrap().push(payment_session.status);
+        }
+        cch.send_message(CchMessage::StoreChangeEvent(change))
+            .unwrap();
+    }));
+    // Real payment and channel actors publish directly into the real CCH actor.
+    // The Lightning incoming leg is simulated, as in the existing CCH harness.
+    let mut payer =
+        NetworkNode::new_with_config(NetworkNodeConfig::builder().build().with_store(store)).await;
+    let mut payee = NetworkNode::new().await;
+    payer.connect_to(&mut payee).await;
+    for _ in 0..2 {
+        establish_channel_between_nodes(
+            &mut payer,
+            &mut payee,
+            ChannelParameters {
+                node_a_funding_amount: MIN_RESERVED_CKB + 1_000_000_000,
+                node_b_funding_amount: MIN_RESERVED_CKB,
+                ..Default::default()
+            },
+        )
+        .await;
+    }
+    let amount = 1_500_000_000;
+    let (preimage, hash) = create_valid_preimage_pair(187);
+    let invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(amount))
+        .payment_hash(hash)
+        .hash_algorithm(HashAlgorithm::Sha256)
+        .allow_mpp(true)
+        .payment_secret(crate::gen_rand_sha256_hash())
+        .payee_pub_key(payee.pubkey.into())
+        .build_with_sign(|message| {
+            secp256k1::SECP256K1.sign_ecdsa_recoverable(message, &payee.private_key.0)
+        })
+        .unwrap();
+    payee.insert_invoice(invoice.clone(), None);
+    harness
+        .insert_order_directly(CchOrder {
+            created_at: crate::now_timestamp_as_millis_u64() / 1000,
+            expiry_delta_seconds: 3600,
+            wrapped_btc_type_script: ckb_jsonrpc_types::Script::default(),
+            outgoing_pay_req: invoice.to_string(),
+            incoming_invoice: CchInvoice::Lightning(
+                create_test_lightning_invoice_with_payment_hash(hash),
+            ),
+            payment_hash: hash,
+            payment_preimage: None,
+            amount_sats: amount,
+            fee_sats: 1000,
+            status: CchOrderStatus::OutgoingInFlight,
+            failure_reason: None,
+        })
+        .await
+        .unwrap();
+    payer
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            max_parts: Some(2),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    wait_until_timeout(5000, || {
+        let held = payee.store.get_payment_hold_tlcs(hash);
+        held.len() == 2
+            && held.iter().all(|part| {
+                payee
+                    .get_tlc(part.channel_id, TLCId::Received(part.tlc_id))
+                    .is_some_and(|tlc| {
+                        tlc.status == TlcStatus::Inbound(InboundTlcStatus::Committed)
+                    })
+            })
+    })
+    .await;
+    let held = payee.store.get_payment_hold_tlcs(hash);
+    let attempts = payer.store.get_attempts(hash);
+    let failure = |part: &crate::fiber::types::HoldTlc| {
+        let tlc = payee
+            .get_tlc(part.channel_id, TLCId::Received(part.tlc_id))
+            .unwrap();
+        RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+            TlcErr::new(TlcErrorCode::TemporaryNodeFailure),
+            &tlc.shared_secret,
+        ))
+    };
+    let fail_first = failure(&held[0]);
+    let fail_last = failure(&held[1]);
+    if stop_retry {
+        let mut session = payer.get_payment_session(hash).unwrap();
+        session.try_limit = session.retry_times();
+        payer.store.insert_payment_session(session);
+        // Exhaust one shard's retry allowance. Only after it fails is there
+        // unallocated value for which the global budget forbids a new attempt.
+        for mut attempt in payer.store.get_attempts(hash) {
+            attempt.try_limit = 0;
+            payer.store.insert_attempt(attempt);
+        }
+        call!(payee.network_actor, |reply| {
+            NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+                ChannelCommandWithId {
+                    channel_id: held[0].channel_id,
+                    command: ChannelCommand::RemoveTlc(
+                        RemoveTlcCommand {
+                            id: held[0].tlc_id,
+                            reason: fail_first.clone(),
+                        },
+                        reply,
+                    ),
+                },
+            ))
+        })
+        .unwrap()
+        .unwrap();
+        wait_until_timeout(5000, || {
+            payer.get_payment_session(hash).unwrap().retry_stopped
+                && payer
+                    .store
+                    .get_attempts(hash)
+                    .iter()
+                    .any(|attempt| attempt.is_failed())
+        })
+        .await;
+        assert_eq!(
+            harness.get_order(hash).await.unwrap().status,
+            CchOrderStatus::OutgoingInFlight
+        );
+        assert!(!changes.lock().unwrap().contains(&PaymentStatus::Failed));
+        if restart {
+            payer.restart().await;
+            payer.connect_to(&mut payee).await;
+            wait_until_timeout(5000, || {
+                let left = payer.get_channel_actor_state(held[1].channel_id);
+                let right = payee.get_channel_actor_state(held[1].channel_id);
+                !left.reestablishing
+                    && !right.reestablishing
+                    && !left.tlc_state.waiting_ack
+                    && !right.tlc_state.waiting_ack
+            })
+            .await;
+            assert!(payer.get_payment_session(hash).unwrap().retry_stopped);
+            payer.retry_send_payment(hash, Some(attempts[0].id)).await;
+        }
+    }
+    let reason = if success {
+        RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+            payment_preimage: preimage,
+        })
+    } else {
+        fail_last
+    };
+    call!(payee.network_actor, |reply| {
+        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: held[1].channel_id,
+                command: ChannelCommand::RemoveTlc(
+                    RemoveTlcCommand {
+                        id: held[1].tlc_id,
+                        reason,
+                    },
+                    reply,
+                ),
+            },
+        ))
+    })
+    .unwrap()
+    .unwrap();
+    if success {
+        let order = harness
+            .wait_for_order_status(hash, CchOrderStatus::OutgoingSuccess, 5000)
+            .await;
+        assert_eq!(order.payment_preimage, Some(preimage));
+        assert!(!changes.lock().unwrap().contains(&PaymentStatus::Failed));
+        if !stop_retry {
+            assert!(payer
+                .get_payment_session(hash)
+                .unwrap()
+                .has_pending_payment_work(&payer.store));
+            assert_eq!(payer.get_inflight_payment_count().await, 1);
+        }
+        // Complete the simulated Lightning incoming settlement. The real Fiber
+        // payer is still independently responsible for draining any other shard.
+        harness.simulate_lightning_invoice_settled(hash);
+        harness
+            .wait_for_order_status(hash, CchOrderStatus::Success, 5000)
+            .await;
+        if !stop_retry {
+            call!(payee.network_actor, |reply| {
+                NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+                    ChannelCommandWithId {
+                        channel_id: held[0].channel_id,
+                        command: ChannelCommand::RemoveTlc(
+                            RemoveTlcCommand {
+                                id: held[0].tlc_id,
+                                reason: fail_first,
+                            },
+                            reply,
+                        ),
+                    },
+                ))
+            })
+            .unwrap()
+            .unwrap();
+        }
+        payer.wait_until_payment_finished(hash).await;
+    } else {
+        harness
+            .wait_for_order_status(hash, CchOrderStatus::Failed, 5000)
+            .await;
+        payer.wait_until_failed(hash).await;
+    }
+    payer.wait_until_no_inflight_payments().await;
+    let final_attempts = payer.store.get_attempts(hash);
+    assert_eq!(final_attempts.len(), attempts.len());
+    for attempt in final_attempts {
+        assert_eq!(
+            attempt.tried_times,
+            attempts
+                .iter()
+                .find(|old| old.id == attempt.id)
+                .unwrap()
+                .tried_times
+        );
+    }
+}
+
 impl TestHarness {
     /// Get an order from the actor
     async fn get_order(&self, payment_hash: Hash256) -> Result<CchOrder, CchError> {

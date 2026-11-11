@@ -65,6 +65,114 @@ use std::time::{Duration, SystemTime};
 use tracing::{debug, error, info};
 
 #[tokio::test]
+async fn test_stopped_payment_recovers_after_last_channel_ack_before_final_failure() {
+    use ckb_types::prelude::Entity;
+    use fiber_store::backend::StorageBackend;
+    use fiber_types::schema::ATTEMPT_CHANNEL_INDEX_PREFIX;
+    let (mut payer, payee, _) =
+        create_nodes_with_established_channel(100000000000, 11800000000, false).await;
+    let invoice = payee.build_basic_invoice(1000, gen_rand_sha256_hash());
+    let hash = *invoice.payment_hash();
+    payee.insert_invoice(invoice.clone(), None);
+    payer
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    wait_until_timeout(5000, || payee.store.get_payment_hold_tlcs(hash).len() == 1).await;
+    payee.cancel_invoice(&hash);
+    payer.wait_until_failed(hash).await;
+    payer.wait_until_no_inflight_payments().await;
+    payer.stop().await;
+    let mut session = payer.store.get_payment_session(hash).unwrap();
+    assert!(!session.has_outstanding_channel_work(&payer.store));
+    // Replay a crash after channel delivery completed but before the final
+    // session write and recovery-index cleanup.
+    session.status = PaymentStatus::Inflight;
+    session.retry_stopped = true;
+    payer.store.insert_payment_session(session);
+    let attempt = payer.store.get_attempts(hash).pop().unwrap();
+    payer.store.put(
+        [
+            &[ATTEMPT_CHANNEL_INDEX_PREFIX],
+            attempt.first_hop_channel_outpoint().unwrap().as_slice(),
+            hash.as_ref(),
+            &attempt.id.to_le_bytes(),
+        ]
+        .concat(),
+        [],
+    );
+    payer.start().await;
+    payer.wait_until_failed(hash).await;
+    payer.wait_until_no_inflight_payments().await;
+    assert!(payer
+        .store
+        .get_payment_hashes_with_channel_index()
+        .is_empty());
+    assert_eq!(
+        payer.store.get_attempts(hash)[0].tried_times,
+        attempt.tried_times
+    );
+}
+
+#[tokio::test]
+async fn test_legacy_failed_payment_with_live_tlc_recovers_without_dispatch() {
+    use fiber_store::backend::StorageBackend;
+    let (mut payer, mut payee, _) =
+        create_nodes_with_established_channel(100000000000, 11800000000, false).await;
+    let preimage = gen_rand_sha256_hash();
+    let invoice = payee.build_basic_invoice(1000, preimage);
+    let hash = *invoice.payment_hash();
+    payee.insert_invoice(invoice.clone(), None);
+    payer
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    payer.wait_until_inflight(hash).await;
+    wait_until_timeout(5000, || payee.store.get_payment_hold_tlcs(hash).len() == 1).await;
+    let attempts = payer.store.get_attempts(hash);
+    payer.stop().await;
+    let mut legacy = payer.store.get_payment_session(hash).unwrap();
+    legacy.set_failed_status("old stop-before-final-outcome behavior");
+    legacy.retry_stopped = false;
+    payer.store.insert_payment_session(legacy);
+    assert_eq!(
+        payer.store.get_payment_session(hash).unwrap().status,
+        PaymentStatus::Inflight
+    );
+    assert!(payer
+        .store
+        .get_payment_sessions_with_status(PaymentStatus::Inflight)
+        .iter()
+        .any(|session| session.payment_hash() == hash));
+    payer.start().await;
+    let key = [
+        &[fiber_types::schema::PAYMENT_SESSION_PREFIX],
+        hash.as_ref(),
+    ]
+    .concat();
+    wait_until_timeout(5000, || {
+        let session: PaymentSession =
+            bincode::deserialize(&payer.store.get(&key).unwrap()).unwrap();
+        session.retry_stopped && session.status == PaymentStatus::Inflight
+    })
+    .await;
+    payer.connect_to(&mut payee).await;
+    payer.retry_send_payment(hash, Some(attempts[0].id)).await;
+    payee.settle_invoice(&hash, preimage).await.unwrap();
+    payer.wait_until_payment_finished(hash).await;
+    payer.wait_until_no_inflight_payments().await;
+    let final_attempts = payer.store.get_attempts(hash);
+    assert_eq!(final_attempts.len(), attempts.len());
+    assert_eq!(final_attempts[0].tried_times, attempts[0].tried_times);
+}
+
+#[tokio::test]
 async fn test_startup_does_not_read_completed_payment_history() {
     use fiber_store::backend::StorageBackend;
     use fiber_types::schema::{ATTEMPT_PREFIX, PAYMENT_SESSION_PREFIX};
@@ -456,6 +564,7 @@ fn test_payment_session(request: SendPaymentData, now: u64) -> PaymentSession {
         created_at: now,
         last_updated_at: now,
         cached_attempts: vec![],
+        retry_stopped: false,
     }
 }
 
@@ -543,6 +652,7 @@ fn test_sender_side_trampoline_retry_does_not_reuse_visible_route_amount() {
         created_at: now,
         last_updated_at: now,
         cached_attempts: vec![attempt.clone()],
+        retry_stopped: false,
     };
     assert_eq!(attempt.route.receiver_amount(), amount_to_trampoline);
     assert_eq!(session.remain_amount(), 0);
@@ -802,7 +912,11 @@ async fn test_remove_tlc_fail_event_decode_fallback_does_not_record_history() {
         .node
         .get_payment_session(fixture.payment_hash)
         .expect("payment session exists");
-    assert_eq!(session.status, PaymentStatus::Failed);
+    // This injected notification does not complete the real first-hop TLC.
+    // Preserve the decode-failure diagnostics without publishing final failure.
+    assert_eq!(session.status, PaymentStatus::Inflight);
+    assert!(session.retry_stopped);
+    assert!(session.has_outstanding_channel_work(&fixture.node.store));
     assert_eq!(
         session.last_error_code,
         Some(TlcErrorCode::InvalidOnionError)
@@ -5475,6 +5589,218 @@ async fn test_send_payment_shutdown_channel_actor_may_already_stopped() {
     }
 
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+}
+
+#[cfg(feature = "watchtower")]
+#[tokio::test]
+async fn test_payer_confirmed_onchain_timeout_completes() {
+    assert_confirmed_payer_timeout(false, false, false).await;
+}
+
+#[cfg(feature = "watchtower")]
+#[tokio::test]
+async fn test_payer_confirmed_onchain_timeout_completes_after_restart() {
+    assert_confirmed_payer_timeout(false, true, false).await;
+}
+
+#[cfg(feature = "watchtower")]
+#[tokio::test]
+async fn test_trampoline_confirmed_onchain_timeout_fails_upstream() {
+    assert_confirmed_payer_timeout(true, false, false).await;
+}
+
+#[cfg(feature = "watchtower")]
+#[tokio::test]
+async fn test_trampoline_confirmed_onchain_timeout_fails_upstream_after_restart() {
+    assert_confirmed_payer_timeout(true, true, false).await;
+}
+
+#[cfg(feature = "watchtower")]
+#[tokio::test]
+async fn test_payer_confirmed_onchain_timeout_completes_without_live_channel() {
+    assert_confirmed_payer_timeout(false, false, true).await;
+}
+
+#[cfg(feature = "watchtower")]
+#[tokio::test]
+async fn test_trampoline_confirmed_onchain_timeout_fails_upstream_without_live_channel() {
+    assert_confirmed_payer_timeout(true, false, true).await;
+}
+
+#[cfg(feature = "watchtower")]
+async fn assert_confirmed_payer_timeout(trampoline: bool, restart: bool, no_live: bool) {
+    init_tracing();
+    let links = if trampoline {
+        vec![
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+        ]
+    } else {
+        vec![((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT))]
+    };
+    let (mut nodes, channels) =
+        create_n_nodes_network(&links, if trampoline { 3 } else { 2 }).await;
+    let payer = usize::from(trampoline);
+    let recipient = payer + 1;
+    if trampoline {
+        wait_until_node_supports_trampoline_routing(&nodes[0], &nodes[1]).await;
+    }
+    let invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(1000))
+        .payment_preimage(gen_rand_sha256_hash())
+        .payee_pub_key(nodes[recipient].pubkey.into())
+        .allow_trampoline_routing(true)
+        .build_with_sign(|hash| {
+            SECP256K1.sign_ecdsa_recoverable(hash, &nodes[recipient].private_key.0)
+        })
+        .unwrap();
+    let hash = *invoice.payment_hash();
+    nodes[recipient].insert_invoice(invoice.clone(), None);
+    nodes[0]
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            trampoline_hops: trampoline.then(|| vec![nodes[1].pubkey]),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let channel = channels[payer];
+    wait_until_timeout(5000, || {
+        nodes[payer]
+            .get_channel_actor_state(channel)
+            .tlc_state
+            .offered_tlcs
+            .tlcs
+            .iter()
+            .any(|tlc| {
+                tlc.payment_hash == hash && tlc.outbound_status() == OutboundTlcStatus::Committed
+            })
+    })
+    .await;
+    nodes[payer].send_shutdown(channel, true).await.unwrap();
+    wait_until_timeout(5000, || {
+        matches!(nodes[payer].get_channel_actor_state(channel).state,
+        ChannelState::Closed(flags) if flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT))
+    })
+    .await;
+    let mut closed = nodes[payer].get_channel_actor_state(channel);
+    let tlc = closed
+        .tlc_state
+        .offered_tlcs
+        .tlcs
+        .iter_mut()
+        .find(|tlc| tlc.payment_hash == hash)
+        .unwrap();
+    tlc.expiry = now_timestamp_as_millis_u64().saturating_sub(1);
+    let tlc_id = tlc.tlc_id;
+    let algorithm = tlc.hash_algorithm;
+    nodes[payer]
+        .update_channel_actor_state(
+            closed,
+            Some(ReloadParams {
+                notify_changes: false,
+            }),
+        )
+        .await;
+    let actor = nodes[payer].get_channel_actor(channel).await.unwrap();
+    actor
+        .send_message(ChannelActorMessage::Event(
+            ChannelEvent::MaintainChannelTlcs,
+        ))
+        .unwrap();
+    ractor::call_t!(
+        actor,
+        |reply| ChannelActorMessage::Command(ChannelCommand::TestBarrier(reply)),
+        5000
+    )
+    .unwrap();
+    assert!(
+        nodes[payer]
+            .get_tlc(channel, tlc_id)
+            .unwrap()
+            .removed_reason
+            .is_none(),
+        "expiry without a confirmed chain outcome must stay pending"
+    );
+    assert_eq!(
+        nodes[payer].get_payment_session(hash).unwrap().status,
+        PaymentStatus::Inflight
+    );
+    if no_live {
+        actor
+            .send_message(ChannelActorMessage::Event(ChannelEvent::Stop(
+                StopReason::Closed,
+            )))
+            .unwrap();
+        wait_until_timeout(5000, || actor.get_status() == ractor::ActorStatus::Stopped).await;
+        nodes[payer].node_info().await;
+        assert!(nodes[payer].get_channel_actor(channel).await.is_none());
+    }
+    if restart {
+        nodes[payer].stop().await;
+    }
+    nodes[payer].store.insert_onchain_tlc_settlement(
+        &fiber_types::NodeId::local(),
+        &channel,
+        tlc_id,
+        OnChainTlcSettlement {
+            payment_hash: hash,
+            hash_algorithm: algorithm,
+            preimage: None,
+            tx_hash: gen_rand_sha256_hash(),
+            tlc_index: 0,
+        },
+    );
+    if restart {
+        nodes[payer].start().await;
+        if trampoline {
+            let (left, right) = nodes.split_at_mut(1);
+            left[0].connect_to(&mut right[0]).await;
+        }
+    }
+    if no_live {
+        nodes[payer]
+            .network_actor
+            .send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::CheckChannels,
+            ))
+            .unwrap();
+    } else {
+        nodes[payer]
+            .network_actor
+            .send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+                    channel_id: channel,
+                    command: ChannelCommand::NotifyEvent(ChannelEvent::MaintainChannelTlcs),
+                }),
+            ))
+            .unwrap();
+    }
+    wait_until_timeout(5000, || {
+        nodes[payer].get_tlc(channel, tlc_id).is_some_and(|tlc| {
+            tlc.applied_flags
+                .contains(fiber_types::AppliedFlags::REMOVE)
+        })
+    })
+    .await;
+    nodes[payer].wait_until_failed(hash).await;
+    nodes[payer].wait_until_no_inflight_payments().await;
+    nodes[0].wait_until_failed(hash).await;
+    // The confirmed timeout remains replayable, but cannot create new attempts.
+    let attempts = nodes[payer].store.get_attempts(hash);
+    assert_eq!(attempts.len(), 1);
+    nodes[payer]
+        .network_actor
+        .send_message(NetworkActorMessage::new_command(
+            NetworkActorCommand::CheckChannels,
+        ))
+        .unwrap();
+    nodes[payer].node_info().await;
+    assert_eq!(nodes[payer].get_inflight_payment_count().await, 0);
+    assert_eq!(
+        nodes[payer].store.get_attempts(hash)[0].tried_times,
+        attempts[0].tried_times
+    );
 }
 
 #[cfg(feature = "watchtower")]
@@ -11519,6 +11845,7 @@ async fn test_local_remove_notification_reuses_retry_policy_without_double_failu
         created_at: 0,
         last_updated_at: 0,
         cached_attempts: vec![],
+        retry_stopped: false,
     };
     let mut attempt = session.new_attempt(
         1,

@@ -3561,6 +3561,7 @@ async fn assert_excluded_payer_reconciliation(
         created_at: 0,
         last_updated_at: 0,
         cached_attempts: vec![],
+        retry_stopped: false,
     };
     let mut attempt = session.new_attempt(
         1,
@@ -4176,6 +4177,7 @@ async fn assert_excluded_payer_with_unclaimed_balance(
         created_at: 0,
         last_updated_at: 0,
         cached_attempts: vec![],
+        retry_stopped: false,
     };
     let mut attempt = session.new_attempt(
         1,

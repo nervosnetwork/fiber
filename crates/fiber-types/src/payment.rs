@@ -900,6 +900,9 @@ pub struct PaymentSession {
     /// Runtime cache for attempts; not persisted.
     #[serde(skip)]
     pub cached_attempts: Vec<Attempt>,
+    /// Stop creating or retrying attempts, while issued channel work can still succeed.
+    #[serde(default)]
+    pub retry_stopped: bool,
 }
 
 /// Default maximum number of parts for a multi-part payment.
@@ -1077,7 +1080,7 @@ impl PaymentSession {
     }
 
     pub fn allow_more_attempts(&self) -> bool {
-        if self.status.is_final() {
+        if self.status.is_final() || self.retry_stopped {
             return false;
         }
 
@@ -1114,8 +1117,10 @@ impl PaymentSession {
             return PaymentStatus::Inflight;
         }
 
-        if self.attempts().all(|a| a.is_failed()) && !self.allow_more_attempts() {
-            return PaymentStatus::Failed;
+        // Only the payer can finalize failure after checking durable channel work.
+        // Attempt records alone cannot prove that every TLC outcome was delivered.
+        if self.retry_stopped {
+            return PaymentStatus::Inflight;
         }
 
         PaymentStatus::Created

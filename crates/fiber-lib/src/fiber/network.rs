@@ -91,10 +91,10 @@ use crate::fiber::fee::{check_open_channel_parameters, check_tlc_delta_with_epoc
 use crate::fiber::gossip::{GossipConfig, GossipService, SubscribableGossipMessageStore};
 use crate::fiber::onchain_tlc_reconcile::{
     collect_onchain_confirmed_payer_tlcs, collect_onchain_excluded_tlcs,
-    collect_onchain_fulfilled_tlcs, collect_onchain_received_timeout_settled_tlcs,
-    collect_onchain_timeout_settled_tlcs, confirm_onchain_payer_fulfill,
-    has_unresolved_onchain_tlcs, onchain_fulfilled_preimage, recover_shutdown_settlement_data,
-    verify_and_select_settlement_data, OnChainTimeoutTlcRole,
+    collect_onchain_fulfilled_tlcs, collect_onchain_payer_failures,
+    collect_onchain_received_timeout_settled_tlcs, collect_onchain_timeout_settled_tlcs,
+    confirm_onchain_payer_fulfill, has_unresolved_onchain_tlcs, onchain_fulfilled_preimage,
+    recover_shutdown_settlement_data, verify_and_select_settlement_data, OnChainTimeoutTlcRole,
 };
 use crate::fiber::payment::{
     PaymentActor, PaymentActorArguments, PaymentActorMessage, PaymentSessionExt,
@@ -2082,9 +2082,12 @@ where
                     let Some(channel) = self.store.get_channel_actor_state(&channel_id) else {
                         return Ok(());
                     };
-                    let Some(tlc) = collect_onchain_excluded_tlcs(&channel, &self.store)
-                        .into_iter()
-                        .find(|tlc| tlc.tlc_id == tlc_id && tlc.payment_hash == payment_hash)
+                    let Some((tlc, error_code)) =
+                        collect_onchain_payer_failures(&channel, &self.store)
+                            .into_iter()
+                            .find(|(tlc, _)| {
+                                tlc.tlc_id == tlc_id && tlc.payment_hash == payment_hash
+                            })
                     else {
                         return Ok(());
                     };
@@ -2099,7 +2102,7 @@ where
                     }
                     // The source determines the local failure; do not trust a stale event reason.
                     remove_tlc_reason = RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
-                        TlcErr::new(TlcErrorCode::PermanentChannelFailure),
+                        TlcErr::new(error_code),
                         &tlc.shared_secret,
                     ));
                     // Manually added TLCs have no payer state to persist.
@@ -2130,7 +2133,7 @@ where
                         return Ok(());
                     };
                     local_error = Some(TlcErr::new_channel_fail(
-                        TlcErrorCode::PermanentChannelFailure,
+                        error_code,
                         channel.get_local_pubkey(),
                         channel_outpoint.clone(),
                         None,
@@ -2992,7 +2995,19 @@ where
                 self.retry_hold_tlc_sets(&myself);
             }
             NetworkActorCommand::PaymentTlcUpdated(payment_hash) => {
-                if self
+                if let Some(actor) = state.inflight_payments.get(&payment_hash) {
+                    // The last durable channel acknowledgement must wake an existing
+                    // actor even when there is no remaining work to resume.
+                    if let Err(err) = actor.send_message(PaymentActorMessage::TlcUpdated) {
+                        debug!("Failed to wake payment {payment_hash}: {err}");
+                        // ActorStopped may still be queued behind this message.
+                        myself.send_after(Duration::from_millis(10), move || {
+                            NetworkActorMessage::new_command(
+                                NetworkActorCommand::PaymentTlcUpdated(payment_hash),
+                            )
+                        });
+                    }
+                } else if self
                     .store
                     .get_payment_session(payment_hash)
                     .is_some_and(|session| {
@@ -3006,6 +3021,8 @@ where
                         PaymentActorMessage::TlcUpdated,
                     )
                     .await;
+                } else {
+                    state.resolve_trampoline_upstream(payment_hash, None).await;
                 }
             }
             NetworkActorCommand::SettleHoldTlcSet(payment_hash) => {
@@ -3218,9 +3235,9 @@ where
                             }) {
                                 return true;
                             }
-                            collect_onchain_excluded_tlcs(&source, &self.store)
+                            collect_onchain_payer_failures(&source, &self.store)
                                 .iter()
-                                .any(|tlc| {
+                                .any(|(tlc, _)| {
                                     tlc.tlc_id == downstream_tlc_id
                                         && tlc.payment_hash == payment_hash
                                         && matches!(
@@ -3931,6 +3948,9 @@ where
                     });
                     if session.remove_effects.len() != before {
                         self.store.insert_channel_actor_state(channel_state);
+                        let _ = state.network.send_message(NetworkActorMessage::new_command(
+                            NetworkActorCommand::PaymentTlcUpdated(payment_hash),
+                        ));
                         // Receipt completes delivery, not the source's balance
                         // transition. A crash before source application leaves a
                         // TLC which must still be applied once on actor restore.
@@ -3958,6 +3978,9 @@ where
                         // removal reason before the channel closed.
                         tlc.applied_flags.insert(AppliedFlags::REMOVE);
                         self.store.insert_channel_actor_state(channel_state);
+                        let _ = state.network.send_message(NetworkActorMessage::new_command(
+                            NetworkActorCommand::PaymentTlcUpdated(payment_hash),
+                        ));
                     }
                 }
             }
@@ -4091,23 +4114,11 @@ where
                                 tlc.payment_hash,
                                 attempt_id,
                                 reason.clone(),
-                                None,
+                                Some((channel_id, tlc.tlc_id)),
                             ),
                         ))
                         .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-                    if let TLCId::Offered(id) = tlc.tlc_id {
-                        // A peer RemoveTlc may already have marked this TLC removed without the
-                        // commitment handshake completing (issue #1612). Only mark it again when
-                        // it was never removed: `set_offered_tlc_removed` asserts Committed.
-                        if actor_state
-                            .tlc_state
-                            .get(&TLCId::Offered(id))
-                            .is_some_and(|t| t.removed_reason.is_none())
-                        {
-                            actor_state.tlc_state.set_offered_tlc_removed(id, reason);
-                            actor_state_changed = true;
-                        }
-                    }
+                    payer_effects_applied = false;
                 }
             }
         }
@@ -8543,12 +8554,16 @@ where
             let Some(session) = self.store.get_payment_session(payment_hash) else {
                 continue;
             };
-            if session.has_pending_payment_work(&self.store) {
+            if !session.status.is_final() || session.has_pending_payment_work(&self.store) {
                 myself
                     .send_message(NetworkActorMessage::new_command(
                         NetworkActorCommand::PaymentTlcUpdated(session.payment_hash()),
                     ))
                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+            } else {
+                // A crash may leave only the index after all work and the final
+                // result were committed. Retire that stale recovery entry.
+                self.store.clear_attempts_channel_index(payment_hash);
             }
             let Some(context) = session.request.trampoline_context.as_ref() else {
                 continue;

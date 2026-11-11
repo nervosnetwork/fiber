@@ -1376,6 +1376,7 @@ fn test_channel_actor_state_store() {
         private_key: None,
         needs_backup: false,
         pending_remove_effects_v2: 0,
+        pending_payment_notifications: Default::default(),
         replayed_tlc_updates_v2: 0,
     };
 
@@ -1523,6 +1524,7 @@ fn sample_channel_actor_state(
         private_key: None,
         needs_backup: false,
         pending_remove_effects_v2: 0,
+        pending_payment_notifications: Default::default(),
         replayed_tlc_updates_v2: 0,
     }
 }
@@ -1845,7 +1847,8 @@ fn test_payment_status_queries_skip_attempts_for_mismatched_terminal_sessions() 
             PaymentStatus::Failed,
         ] {
             if status == terminal_status
-                || (terminal_status == PaymentStatus::Failed && status == PaymentStatus::Success)
+                || (terminal_status == PaymentStatus::Failed
+                    && matches!(status, PaymentStatus::Success | PaymentStatus::Inflight))
             {
                 continue;
             }
@@ -1930,7 +1933,8 @@ fn test_payment_status_queries_filter_hydrated_attempts_before_pagination() {
         (
             PaymentStatus::Created,
             AttemptStatus::Failed,
-            PaymentStatus::Failed,
+            // Reads alone cannot finalize failure without channel evidence.
+            PaymentStatus::Created,
         ),
         (
             PaymentStatus::Success,
@@ -1940,7 +1944,7 @@ fn test_payment_status_queries_filter_hydrated_attempts_before_pagination() {
         (
             PaymentStatus::Failed,
             AttemptStatus::Inflight,
-            PaymentStatus::Failed,
+            PaymentStatus::Inflight,
         ),
         (
             PaymentStatus::Created,
@@ -2006,8 +2010,8 @@ fn test_payment_status_queries_filter_hydrated_attempts_before_pagination() {
         }
     }
     for (limit, after, expected) in [
-        (2, 1, vec![7, 8]),
-        (1, 3, vec![7]),
+        (2, 1, vec![6, 7]),
+        (1, 3, vec![6]),
         (1, 7, vec![8]),
         (1, 8, vec![]),
         (0, 0, vec![]),
@@ -2036,7 +2040,7 @@ fn test_payment_status_queries_filter_hydrated_attempts_before_pagination() {
         vec![
             PaymentStatus::Created,
             PaymentStatus::Success,
-            PaymentStatus::Failed
+            PaymentStatus::Created
         ]
     );
     for (index, &(persisted, _, _)) in cases.iter().enumerate() {

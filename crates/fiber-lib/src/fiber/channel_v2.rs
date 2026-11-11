@@ -3405,6 +3405,9 @@ mod tests {
             retrying.status = fiber_types::AttemptStatus::Retrying;
             let mut session = a.store.get_payment_session(hash).unwrap();
             session.status = fiber_types::PaymentStatus::Inflight;
+            // Rewind to the retry-permitted crash window, before the later
+            // terminal routing failure stopped dispatch.
+            session.retry_stopped = false;
             a.store.delete_attempts(hash);
             a.store.insert_attempt(retrying.clone());
             if moved_route {
