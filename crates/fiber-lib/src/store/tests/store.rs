@@ -1933,8 +1933,7 @@ fn test_payment_status_queries_filter_hydrated_attempts_before_pagination() {
         (
             PaymentStatus::Created,
             AttemptStatus::Failed,
-            // Reads alone cannot finalize failure without channel evidence.
-            PaymentStatus::Created,
+            PaymentStatus::Failed,
         ),
         (
             PaymentStatus::Success,
@@ -1978,7 +1977,13 @@ fn test_payment_status_queries_filter_hydrated_attempts_before_pagination() {
         );
         attempt.status = attempt_status;
         store.insert_attempt(attempt);
-        assert_eq!(store.get_payment_session(hash).unwrap().status, effective);
+        assert_eq!(
+            store
+                .get_payment_session(hash)
+                .unwrap()
+                .effective_status(&store),
+            effective
+        );
     }
     for status in [
         PaymentStatus::Created,
@@ -1997,7 +2002,9 @@ fn test_payment_status_queries_filter_hydrated_attempts_before_pagination() {
             store.get_payment_sessions_with_limit(100, None, Some(status)),
         ] {
             assert!(
-                sessions.iter().all(|session| session.status == status),
+                sessions
+                    .iter()
+                    .all(|session| session.effective_status(&store) == status),
                 "filter must match returned status: {status:?}"
             );
             assert_eq!(
@@ -2035,12 +2042,12 @@ fn test_payment_status_queries_filter_hydrated_attempts_before_pagination() {
     assert_eq!(
         unfiltered
             .iter()
-            .map(|session| session.status)
+            .map(|session| session.effective_status(&store))
             .collect::<Vec<_>>(),
         vec![
             PaymentStatus::Created,
             PaymentStatus::Success,
-            PaymentStatus::Created
+            PaymentStatus::Failed
         ]
     );
     for (index, &(persisted, _, _)) in cases.iter().enumerate() {

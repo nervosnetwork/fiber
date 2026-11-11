@@ -99,14 +99,7 @@ impl std::fmt::Debug for Store {
 
 impl Store {
     fn restore_payment_session(&self, session: PaymentSession) -> PaymentSession {
-        let mut session = session.init_attempts(self);
-        // Legacy Failed meant "stop retrying", even if another TLC could still
-        // fulfill. Do not expose that as final failure to RPC or CCH readers.
-        if session.status == PaymentStatus::Failed && session.has_outstanding_channel_work(self) {
-            session.retry_stopped = true;
-            session.status = PaymentStatus::Inflight;
-        }
-        session
+        session.init_attempts(self)
     }
 
     /// Shut down the browser database after all actors and background writes stop.
@@ -1538,7 +1531,7 @@ impl NetworkGraphStateStore for Store {
                     return None;
                 }
                 let session = self.restore_payment_session(session);
-                if session.status == status {
+                if session.effective_status(self) == status {
                     Some(session)
                 } else {
                     None
@@ -1573,7 +1566,7 @@ impl NetworkGraphStateStore for Store {
             }
             let session = self.restore_payment_session(session);
             match status {
-                Some(ref s) if session.status != *s => None,
+                Some(ref s) if session.effective_status(self) != *s => None,
                 _ => Some(session),
             }
         })
@@ -1583,8 +1576,9 @@ impl NetworkGraphStateStore for Store {
 
     fn insert_payment_session(&self, session: PaymentSession) {
         let payment_hash = session.payment_hash();
-        let session_clone = session.clone();
-        let payment_preimage = session.payment_preimage();
+        let mut session_clone = self.restore_payment_session(session.clone());
+        session_clone.status = session_clone.effective_status(self);
+        let payment_preimage = session_clone.payment_preimage();
         let mut batch = self.batch();
         let kv = KeyValue::PaymentSession(payment_hash, session);
         batch.put(kv.key(), kv.value());

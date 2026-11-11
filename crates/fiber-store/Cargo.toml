@@ -30,8 +30,6 @@ fiber-types-081 = { package = "fiber-types", version = "0.8.1" }
 
 # Serialization for migration data conversion
 bincode = "1.3.3"
-# Reconstruct released attempt-channel index keys during payment migration.
-ckb-types = "1"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 rocksdb = { package = "ckb-rocksdb", version = "=0.21.1", features = [

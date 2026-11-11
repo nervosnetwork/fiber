@@ -334,7 +334,8 @@ where
         let payments: Vec<GetPaymentCommandResult> = sessions
             .into_iter()
             .map(|session| {
-                let response: crate::fiber::network::SendPaymentResponse = session.into();
+                let response =
+                    crate::fiber::network::SendPaymentResponse::from_session(session, &self.store);
                 send_payment_response_to_json(&response)
             })
             .collect();

@@ -401,11 +401,10 @@ fn test_v2_migration_preserves_legacy_zero_channel() {
 }
 
 #[test]
-fn test_payment_retry_stop_migration_preserves_history_and_is_idempotent() {
+fn test_payment_session_released_layout_needs_no_migration() {
     use crate::fiber::graph::NetworkGraphStateStore;
     use crate::fiber::payment::{PaymentSessionExt, SendPaymentDataBuilder};
     use fiber_types::{PaymentSession, PaymentStatus};
-
     let path = gen_path();
     let mut expected = Vec::new();
     {
@@ -424,108 +423,66 @@ fn test_payment_retry_stop_migration_preserves_history_and_is_idempotent() {
                     .unwrap();
             let mut session = PaymentSession::new_session(&store, request, 3);
             session.status = status;
-            session.last_error = Some("retained history".to_owned());
+            let bytes = bincode::serialize(&session).unwrap();
+            let released: fiber_types_0100::PaymentSession = bincode::deserialize(&bytes).unwrap();
+            assert_eq!(bincode::serialize(&released).unwrap(), bytes);
             let key = [&[0xC0], hash.as_ref()].concat();
-            let mut old_bytes = bincode::serialize(&session).unwrap();
-            // Verify the exact released layout, not merely a permissive prefix decode.
-            old_bytes.pop();
-            let released: fiber_types_0100::PaymentSession =
-                bincode::deserialize(&old_bytes).unwrap();
-            assert_eq!(bincode::serialize(&released).unwrap(), old_bytes);
-            store.put(&key, &old_bytes);
-            expected.push((hash, status));
+            store.put(&key, &bytes);
+            expected.push((key, bytes, hash, status));
         }
-        store.put(MIGRATION_VERSION_KEY, "20260925120000");
     }
-    for _ in 0..2 {
-        let store = crate::store::open_store(&path).unwrap();
-        for (hash, status) in &expected {
-            let session = store.get_payment_session(*hash).unwrap();
-            assert_eq!(session.status, *status);
-            assert_eq!(session.retry_stopped, *status == PaymentStatus::Failed);
-            assert_eq!(
-                session.last_error.as_deref(),
-                if *status == PaymentStatus::Success {
-                    None
-                } else {
-                    Some("retained history")
-                }
-            );
-            assert_eq!(session.try_limit, 3);
-        }
+    let store = crate::store::open_store_with_migration(
+        &path,
+        true,
+        Box::new(|_| panic!("unchanged layout needs no migration")),
+        Box::new(|_| {}),
+    )
+    .unwrap();
+    for (key, bytes, hash, status) in expected {
+        assert_eq!(store.get_payment_session(hash).unwrap().status, status);
         assert_eq!(
-            store.get(MIGRATION_VERSION_KEY).unwrap(),
-            LATEST_DB_VERSION.as_bytes()
+            store.get(key).unwrap(),
+            bytes,
+            "reading released sessions must not rewrite history"
         );
     }
 }
 
 #[test]
-fn test_payment_retry_stop_migration_recovers_derived_failure_without_index() {
+fn test_legacy_derived_failure_needs_no_recovery_index_or_migration() {
     use crate::fiber::graph::NetworkGraphStateStore;
     use crate::fiber::payment::{PaymentSessionExt, SendPaymentDataBuilder};
     use fiber_types::{PaymentSession, PaymentStatus};
     let path = gen_path();
+    let store = crate::store::open_store(&path).unwrap();
     let hash = crate::gen_rand_sha256_hash();
-    {
-        let store = crate::store::open_store(&path).unwrap();
-        let target = crate::gen_rand_fiber_public_key();
-        let request = SendPaymentDataBuilder::new(target, 100, hash)
-            .max_fee_amount(Some(10))
-            .build()
-            .unwrap();
-        let session = PaymentSession::new_session(&store, request, 1);
-        let mut attempt = session.new_attempt(
-            1,
-            crate::gen_rand_fiber_public_key(),
-            target,
-            vec![fiber_types::PaymentHopData {
-                amount: 100,
-                ..Default::default()
-            }],
-        );
-        attempt.set_failed_status("exhausted", false);
-        store.insert_attempt(attempt);
-        // Older readers derived Failed from attempts, so actor cleanup could
-        // leave the aggregate non-final without any wake-up index.
-        store.clear_attempts_channel_index(hash);
-        let index = [
-            &[fiber_types::schema::ATTEMPT_CHANNEL_INDEX_PREFIX],
-            &[0; 36][..],
-            hash.as_ref(),
-            &1u64.to_le_bytes(),
-        ]
-        .concat();
-        store.delete(index);
-        let mut bytes = bincode::serialize(&session).unwrap();
-        bytes.pop();
-        store.put([&[0xC0], hash.as_ref()].concat(), bytes);
-        store.put(MIGRATION_VERSION_KEY, "20260925120000");
-    }
-    for _ in 0..2 {
-        let store = crate::store::open_store(&path).unwrap();
-        let session = store.get_payment_session(hash).unwrap();
-        assert_eq!(session.status, PaymentStatus::Inflight);
-        assert!(session.retry_stopped);
-        assert!(store
-            .get_payment_hashes_with_channel_index()
-            .contains(&hash));
-    }
-}
-
-#[test]
-fn test_payment_retry_stop_migration_preflight_rejects_corruption_without_writes() {
-    let path = gen_path();
-    let key = [&[0xC0], &[42; 32][..]].concat();
-    {
-        let store = fiber_store::Store::open_db(&path).unwrap();
-        store.put(MIGRATION_VERSION_KEY, "20260925120000");
-        store.put(&key, b"corrupt payment");
-    }
-    assert!(crate::store::open_store(&path).is_err());
-    let store = fiber_store::Store::open_db(&path).unwrap();
-    assert_eq!(store.get(&key).unwrap(), b"corrupt payment");
-    assert_eq!(store.get(MIGRATION_VERSION_KEY).unwrap(), b"20260925120000");
+    let target = crate::gen_rand_fiber_public_key();
+    let request = SendPaymentDataBuilder::new(target, 100, hash)
+        .max_fee_amount(Some(10))
+        .build()
+        .unwrap();
+    let session = PaymentSession::new_session(&store, request, 1);
+    store.insert_payment_session(session.clone());
+    let mut attempt = session.new_attempt(
+        1,
+        crate::gen_rand_fiber_public_key(),
+        target,
+        vec![fiber_types::PaymentHopData {
+            amount: 100,
+            ..Default::default()
+        }],
+    );
+    attempt.set_failed_status("exhausted", false);
+    store.insert_attempt(attempt);
+    store.clear_attempts_channel_index(hash);
+    let recovered = store.get_payment_session(hash).unwrap();
+    assert_eq!(recovered.effective_status(&store), PaymentStatus::Failed);
+    assert!(!recovered.can_retry());
+    assert!(store.get_payment_hashes_with_channel_index().is_empty());
+    assert_eq!(
+        store.get_persisted_payment_status(hash),
+        Some(PaymentStatus::Created)
+    );
 }
 
 #[test]
@@ -537,7 +494,7 @@ fn test_published_legacy_at_latest_epoch_reads_without_migration() {
     let mut originals = Vec::new();
     {
         let store = fiber_store::Store::open_db(&path).unwrap();
-        store.put(MIGRATION_VERSION_KEY, LATEST_DB_VERSION);
+        store.put(MIGRATION_VERSION_KEY, "20260925120000");
         for mut channel in fiber_types_0100::ChannelActorData::samples(42) {
             channel.commitment_contract_features =
                 fiber_types_0100::CommitmentContractFeatures::LEGACY;
@@ -548,6 +505,7 @@ fn test_published_legacy_at_latest_epoch_reads_without_migration() {
             originals.push((id, key, original));
         }
     }
+    assert_eq!(LATEST_DB_VERSION, "20260925120000");
     for _ in 0..2 {
         let store = crate::store::open_store_with_migration(
             &path,
@@ -568,10 +526,7 @@ fn test_published_legacy_at_latest_epoch_reads_without_migration() {
             assert_eq!(&store.get(key).unwrap(), original);
         }
         assert_eq!(store.get_all_channel_states().len(), originals.len());
-        assert_eq!(
-            store.get(MIGRATION_VERSION_KEY).unwrap(),
-            LATEST_DB_VERSION.as_bytes()
-        );
+        assert_eq!(store.get(MIGRATION_VERSION_KEY).unwrap(), b"20260925120000");
     }
     crate::store::check_validate(&path).expect("raw database validator shares compatibility");
 }
@@ -643,10 +598,7 @@ fn test_upstream_091_migration_all_channel_prefixes_and_stale() {
                 bincode::deserialize(&store.get(key).unwrap()).unwrap();
             assert_eq!(read.channel_features, fiber_types::ChannelFeatures::LEGACY);
         }
-        assert_eq!(
-            store.get(MIGRATION_VERSION_KEY).unwrap(),
-            LATEST_DB_VERSION.as_bytes()
-        );
+        assert_eq!(store.get(MIGRATION_VERSION_KEY).unwrap(), b"20260925120000");
     }
     crate::store::check_validate(&path).unwrap();
 }

@@ -603,44 +603,59 @@ pub trait PaymentSessionExt {
     fn has_pending_payment_work(&self, store: &impl ChannelActorStateStore) -> bool;
     /// Issued TLCs, queued Adds and current completion receipts still owned by a channel.
     fn has_outstanding_channel_work(&self, store: &impl ChannelActorStateStore) -> bool;
+    /// Result exposed to RPC and CCH. A local give-up cannot refund unresolved TLCs.
+    fn effective_status(&self, store: &impl ChannelActorStateStore) -> PaymentStatus;
+}
+
+/// Durable channel ownership, excluding a payer admission still only in a mailbox.
+pub(crate) fn attempt_has_channel_work(
+    attempt: &Attempt,
+    store: &impl ChannelActorStateStore,
+) -> bool {
+    attempt
+        .first_hop_channel_outpoint()
+        .and_then(|outpoint| store.get_channel_state_by_outpoint(outpoint))
+        .is_some_and(|channel| {
+            channel.owns_payment_attempt(attempt.payment_hash, attempt.id)
+                || channel.session_v2.as_ref().is_some_and(|session| {
+                    session.remove_effects.iter().any(|(tlc, execution)| {
+                        tlc.payment_hash == attempt.payment_hash
+                            && tlc.attempt_id == Some(attempt.id)
+                            && (attempt.status == AttemptStatus::Created
+                                || execution.is_none_or(|number| {
+                                    number == attempt.tried_times
+                                        || (attempt.is_retrying()
+                                            && number.saturating_add(1) == attempt.tried_times)
+                                })
+                                || (attempt.preimage.is_none()
+                                    && matches!(
+                                        tlc.removed_reason,
+                                        Some(RemoveTlcReason::RemoveTlcFulfill(_))
+                                    )))
+                    })
+                })
+        })
 }
 
 impl PaymentSessionExt for PaymentSession {
     fn has_pending_payment_work(&self, store: &impl ChannelActorStateStore) -> bool {
         self.has_outstanding_channel_work(store)
             || (!self.status.is_final()
-                && !self.retry_stopped
                 && self.attempts().any(|attempt| !attempt.status.is_final()))
     }
 
+    fn effective_status(&self, store: &impl ChannelActorStateStore) -> PaymentStatus {
+        let status = self.calc_payment_status();
+        if status == PaymentStatus::Failed && self.has_outstanding_channel_work(store) {
+            PaymentStatus::Inflight
+        } else {
+            status
+        }
+    }
+
     fn has_outstanding_channel_work(&self, store: &impl ChannelActorStateStore) -> bool {
-        self.attempts().any(|attempt| {
-            attempt.is_inflight()
-                || attempt
-                    .first_hop_channel_outpoint()
-                    .and_then(|outpoint| store.get_channel_state_by_outpoint(outpoint))
-                    .is_some_and(|channel| {
-                        channel.owns_payment_attempt(self.payment_hash(), attempt.id)
-                            || channel.session_v2.as_ref().is_some_and(|session| {
-                                session.remove_effects.iter().any(|(tlc, execution)| {
-                                    tlc.payment_hash == self.payment_hash()
-                                        && tlc.attempt_id == Some(attempt.id)
-                                        && ((attempt.status == AttemptStatus::Created
-                                            || execution.is_none_or(|number| {
-                                                number == attempt.tried_times
-                                                    || (attempt.is_retrying()
-                                                        && number.saturating_add(1)
-                                                            == attempt.tried_times)
-                                            }))
-                                            || (attempt.preimage.is_none()
-                                                && matches!(
-                                                    tlc.removed_reason,
-                                                    Some(RemoveTlcReason::RemoveTlcFulfill(_))
-                                                )))
-                                })
-                            })
-                    })
-        })
+        self.attempts()
+            .any(|attempt| attempt.is_inflight() || attempt_has_channel_work(attempt, store))
     }
 
     fn new_session(
@@ -658,7 +673,6 @@ impl PaymentSessionExt for PaymentSession {
             created_at: now,
             last_updated_at: now,
             cached_attempts: vec![],
-            retry_stopped: false,
         }
         .init_attempts(store)
     }
@@ -678,9 +692,12 @@ impl PaymentSessionExt for PaymentSession {
     }
 }
 
-impl From<PaymentSession> for SendPaymentResponse {
-    fn from(session: PaymentSession) -> Self {
-        let status = session.status;
+impl SendPaymentResponse {
+    pub(crate) fn from_session(
+        session: PaymentSession,
+        store: &impl ChannelActorStateStore,
+    ) -> Self {
+        let status = session.effective_status(store);
         let fee = session.fee_paid();
         let payment_preimage = session.payment_preimage();
         let mut all_attempts = session
@@ -1123,6 +1140,10 @@ where
         command: PaymentActorMessage,
     ) -> crate::Result<()> {
         let completion_actor = myself.clone();
+        let previous_result = self
+            .store
+            .get_payment_session(state.payment_hash)
+            .map(|session| session.effective_status(&self.store));
         self.observe_tlc_preimages(state.payment_hash);
         self.advance_payment_result(state);
         match command {
@@ -1265,6 +1286,15 @@ where
         };
         self.observe_tlc_preimages(state.payment_hash);
         self.advance_payment_result(state);
+        if previous_result == Some(PaymentStatus::Inflight) {
+            if let Some(session) = self.store.get_payment_session(state.payment_hash) {
+                if session.effective_status(&self.store) == PaymentStatus::Failed {
+                    // A rejected mailbox admission has no channel ack to wake
+                    // observers. Publish the newly final result after its attempt write.
+                    self.store.insert_payment_session(session);
+                }
+            }
+        }
         self.check_payment_final(completion_actor, state);
         Ok(())
     }
@@ -1278,7 +1308,7 @@ where
         self.check_payment_final(myself.clone(), state);
         let payment_hash = state.payment_hash;
         if let Some(session) = self.store.get_payment_session(payment_hash) {
-            if session.status.is_final() {
+            if session.effective_status(&self.store).is_final() {
                 return;
             } else {
                 // Payment is still not final, log the current status for debugging
@@ -1392,51 +1422,25 @@ where
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
     }
 
-    /// Publish failure only after dispatch has stopped and every issued effect
-    /// has completed. A channel acknowledgement must never wait for this step.
+    /// Persist a give-up decision without changing its meaning for retry admission.
+    /// Effective public failure is derived separately from outstanding channel work.
     fn advance_payment_result(&self, state: &PaymentActorState) {
-        let payment_hash = state.payment_hash;
-        let Some(mut session) = self.store.get_payment_session(payment_hash) else {
+        let hash = state.payment_hash;
+        let Some(mut session) = self.store.get_payment_session(hash) else {
             return;
         };
         if session.status == PaymentStatus::Success {
             return;
         }
-        let persisted = self.store.get_persisted_payment_status(payment_hash);
-        let outstanding = !state.pending_add_results.is_empty()
-            || session.has_outstanding_channel_work(&self.store);
-        let mut changed = persisted != Some(session.status);
-        if persisted == Some(PaymentStatus::Failed) && outstanding {
-            session.retry_stopped = true;
-            session.status = PaymentStatus::Inflight;
-            changed = true;
-        }
-        if !session.status.is_final()
-            && !session.retry_stopped
+        let persisted = self.store.get_persisted_payment_status(hash);
+        if session.can_retry()
             && session.attempts_count() > 0
             && session.remain_amount() > 0
             && session.retry_times() >= session.try_limit
         {
-            session.retry_stopped = true;
-            session.last_error = Some("Can not send payment with limited attempts".to_owned());
-            changed = true;
+            session.set_failed_status("Can not send payment with limited attempts");
         }
-        if session.retry_stopped && !session.status.is_final() {
-            if outstanding {
-                if session.status != PaymentStatus::Inflight {
-                    session.status = PaymentStatus::Inflight;
-                    changed = true;
-                }
-            } else {
-                let error = session
-                    .last_error
-                    .clone()
-                    .unwrap_or_else(|| "Payment attempts exhausted".to_owned());
-                session.set_failed_status(&error);
-                changed = true;
-            }
-        }
-        if changed && !session.is_dry_run() {
+        if persisted != Some(session.status) && !session.is_dry_run() {
             self.store.insert_payment_session(session);
         }
     }
@@ -1913,14 +1917,9 @@ where
         if session.status == PaymentStatus::Success {
             return;
         }
-        // Persist before acknowledging or retiring any source TLC. Keeping the
-        // public status non-final prevents CCH from cancelling its incoming leg.
-        session.retry_stopped = true;
-        session.last_error = Some(error.to_owned());
-        session.last_updated_at = now_timestamp_as_millis_u64();
-        if !session.status.is_final() {
-            session.status = PaymentStatus::Inflight;
-        }
+        // Failed is the existing durable give-up decision. Public observers
+        // receive effective_status(), which stays Inflight until issued work ends.
+        session.set_failed_status(error);
         if error_code.is_some() {
             session.last_error_code = error_code;
         }
@@ -1941,10 +1940,7 @@ where
             self.set_payment_fail_with_error(session, error, error_code);
         }
 
-        attempt.set_failed_status(
-            error,
-            retryable && !session.retry_stopped && session.status != PaymentStatus::Success,
-        );
+        attempt.set_failed_status(error, retryable && session.can_retry());
         if !session.is_dry_run() {
             self.store.insert_attempt(attempt.clone());
         }
@@ -2000,6 +1996,10 @@ where
                 return Err(err);
             }
         }
+        // Make network admission visible to public result readers before another
+        // shard can make this session give up. A restart recovers orphan admissions.
+        attempt.set_inflight_status();
+        self.store.insert_attempt(attempt.clone());
         state.pending_add_results.insert(attempt.id);
         Ok(())
     }
@@ -2018,7 +2018,7 @@ where
             return Err(Error::InvalidParameter(payment_hash.to_string()));
         };
 
-        if session.status.is_final() || session.retry_stopped {
+        if !session.can_retry() {
             return Ok(());
         }
 
@@ -2059,7 +2059,7 @@ where
         session: &mut PaymentSession,
         attempt_id: Option<u64>,
     ) -> Result<(), Error> {
-        if session.retry_stopped || session.status.is_final() {
+        if !session.can_retry() {
             return Ok(());
         }
         let Some(attempt_id) = attempt_id else {
@@ -2164,12 +2164,10 @@ where
         if !attempt.first_hop_channel_outpoint_eq(&channel_outpoint) {
             return Ok(());
         }
-        if (session.status == PaymentStatus::Success || !session.status.is_final())
-            && matches!(
-                attempt.status,
-                AttemptStatus::Created | AttemptStatus::Retrying
-            )
-        {
+        if matches!(
+            attempt.status,
+            AttemptStatus::Created | AttemptStatus::Retrying | AttemptStatus::Inflight
+        ) {
             let packet = command
                 .onion_packet
                 .clone()
@@ -2190,8 +2188,10 @@ where
                     channel_outpoint,
                     None,
                 );
-                if attempt.status == AttemptStatus::Created
-                    || session.status == PaymentStatus::Success
+                if matches!(
+                    attempt.status,
+                    AttemptStatus::Created | AttemptStatus::Inflight
+                ) || session.status == PaymentStatus::Success
                 {
                     self.handle_add_tlc_result_event(
                         myself,
@@ -2205,7 +2205,7 @@ where
                         )),
                     )
                     .await;
-                } else {
+                } else if session.can_retry() {
                     // Retrying is already a durable failed outcome; re-arm it without counting failure twice.
                     self.update_graph_with_tlc_fail(&self.network, &failure)
                         .await;
@@ -2221,7 +2221,10 @@ where
             .store
             .get_attempt(state.payment_hash, attempt_id)
             .ok_or("Closed Add attempt disappeared")?;
-        if current.status == AttemptStatus::Created && !session.status.is_final() {
+        if matches!(
+            current.status,
+            AttemptStatus::Created | AttemptStatus::Inflight
+        ) {
             return Err("Closed Add outcome is not persisted".to_owned());
         }
         if !session.is_dry_run() {
@@ -2466,7 +2469,7 @@ where
                 .processed_onchain_removals
                 .insert((completion.channel_id, completion.tlc_id));
         }
-        Ok(retry && !session.retry_stopped && session.status != PaymentStatus::Success)
+        Ok(retry && session.can_retry())
     }
 
     /// Apply an on-chain-confirmed fulfill to one exact payment attempt.
@@ -2537,7 +2540,7 @@ where
 
     fn payment_need_more_retry(&self, session: &mut PaymentSession) -> Result<bool, Error> {
         session.flush_attempts(&self.store);
-        if session.status == PaymentStatus::Success || session.retry_stopped {
+        if !session.can_retry() {
             return Ok(false);
         }
         if session.remain_amount() > 0 && session.retry_times() >= session.try_limit {
@@ -2630,10 +2633,7 @@ where
                 // some attempts are still flight state, this means some middle hops
                 // haven't send back the result of the onion packet, so we can not retry the payment session
                 // otherwise, we are sure it's safe to cleanup all the previous attempts
-                if payment_session
-                    .attempts()
-                    .any(|attempt| attempt.is_inflight() || self.channel_owns_attempt(attempt))
-                {
+                if payment_session.has_outstanding_channel_work(&self.store) {
                     return Err(Error::InvalidParameter(format!(
                         "Payment session {} has attempts that are in flight state, can not retry",
                         payment_data.payment_hash
@@ -2655,7 +2655,10 @@ where
         if payment_data.dry_run {
             let mut payment_session = PaymentSession::new_session(&self.store, payment_data, 0);
             self.build_payment_routes(&mut payment_session).await?;
-            return Ok(payment_session.into());
+            return Ok(SendPaymentResponse::from_session(
+                payment_session,
+                &self.store,
+            ));
         }
 
         let try_limit = if payment_data.allow_mpp() {
@@ -2686,7 +2689,15 @@ where
                 return Err(error);
             }
         }
-        return Ok(payment_session.into());
+        let giving_up = self.store.get_persisted_payment_status(state.payment_hash)
+            == Some(PaymentStatus::Failed);
+        let mut response = SendPaymentResponse::from_session(payment_session, &self.store);
+        if response.status == PaymentStatus::Inflight && !giving_up {
+            // Preserve send_payment's admission response. AddTlcResult has not
+            // been processed by this actor yet; subsequent queries report Inflight.
+            response.status = PaymentStatus::Created;
+        }
+        Ok(response)
     }
 }
 
@@ -2757,16 +2768,27 @@ mod closed_add_tests {
         a.wait_until_payment_finished(hash).await;
         a.wait_until_no_inflight_payments().await;
         let mut attempt = a.store.get_attempts(hash).pop().unwrap();
-        attempt.status = AttemptStatus::Created;
+        attempt.status = AttemptStatus::Inflight;
         attempt.preimage = None;
         a.store.insert_attempt(attempt.clone());
         let mut session = a.store.get_payment_session(hash).unwrap();
-        session.status = PaymentStatus::Inflight;
-        session.retry_stopped = true;
+        session.status = PaymentStatus::Failed;
         a.store.insert_payment_session(session);
 
+        let published = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed = published.clone();
+        let mut watched_store = a.store.clone();
+        watched_store.set_watcher(std::sync::Arc::new(move |change| {
+            if let crate::store::store_impl::StoreChange::PutPaymentSession {
+                payment_session,
+                ..
+            } = change
+            {
+                observed.lock().unwrap().push(payment_session.status);
+            }
+        }));
         let actor = PaymentActor::new(
-            a.store.clone(),
+            watched_store,
             a.network_graph.clone(),
             a.network_actor.clone(),
         );
@@ -2777,7 +2799,7 @@ mod closed_add_tests {
         state.pending_add_results.insert(attempt.id);
         let (mailbox, mut task) = Actor::spawn(None, RetryMailbox, ()).await.unwrap();
         let mut dispatching = a.store.get_payment_session(hash).unwrap();
-        dispatching.retry_stopped = false;
+        dispatching.status = PaymentStatus::Inflight;
         actor
             .retry_payment_attempt(
                 mailbox.clone(),
@@ -2792,15 +2814,14 @@ mod closed_add_tests {
             attempt.session_key,
             "an Add already admitted to the channel mailbox must not be sent again"
         );
-        assert!(!a
-            .store
-            .get_payment_session(hash)
-            .unwrap()
-            .has_outstanding_channel_work(&a.store));
+        assert!(!super::attempt_has_channel_work(&attempt, &a.store));
         actor.advance_payment_result(&state);
         assert_eq!(
-            a.store.get_persisted_payment_status(hash),
-            Some(PaymentStatus::Inflight)
+            a.store
+                .get_payment_session(hash)
+                .unwrap()
+                .effective_status(&a.store),
+            PaymentStatus::Inflight
         );
         actor.handle_check_payment_status(mailbox.clone(), &mut state);
         assert!(
@@ -2829,6 +2850,11 @@ mod closed_add_tests {
         assert_eq!(
             a.store.get_persisted_payment_status(hash),
             Some(PaymentStatus::Failed)
+        );
+        assert_eq!(
+            published.lock().unwrap().last(),
+            Some(&PaymentStatus::Failed),
+            "an admission rejection must publish final failure without a channel acknowledgement"
         );
         tokio::time::timeout(std::time::Duration::from_secs(5), task)
             .await
@@ -2878,7 +2904,7 @@ mod closed_add_tests {
         if reserved_retry {
             let recovered = a.store.get_payment_session(hash).unwrap();
             assert!(
-                !recovered.retry_stopped,
+                recovered.can_retry(),
                 "tried_times includes the reserved next send, not just sends already executed"
             );
             assert!(!recovered.status.is_final());
@@ -2886,8 +2912,11 @@ mod closed_add_tests {
             return;
         }
         assert_eq!(
-            a.store.get_persisted_payment_status(hash),
-            Some(PaymentStatus::Inflight),
+            a.store
+                .get_payment_session(hash)
+                .unwrap()
+                .effective_status(&a.store),
+            PaymentStatus::Inflight,
             "a retry decision must not publish final failure while an issued TLC can still fulfill"
         );
         if !exhausted {

@@ -2492,7 +2492,6 @@ async fn test_send_mpp_will_fail_with_disable_single_path() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_send_mpp_will_success_with_middle_hop_capacity_not_enough() {
     init_tracing();
-
     let (nodes, channels) = create_n_nodes_network(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
@@ -2505,37 +2504,71 @@ async fn test_send_mpp_will_success_with_middle_hop_capacity_not_enough() {
     )
     .await;
     let [node_0, _node_1, node_2] = nodes.try_into().expect("ok nodes");
-
-    let res = node_0
-        .send_mpp_payment_with_dry_run_option(&node_2, 300000, None, true)
-        .await;
-
-    let query_res = res.unwrap();
+    // Hold the invoice until routing has assembled every part. Capacity learning
+    // is independent of the short debug deadline for automatic MPP collection.
+    let preimage = gen_rand_sha256_hash();
+    let invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(300000))
+        .payment_preimage(preimage)
+        .payment_secret(gen_rand_sha256_hash())
+        .allow_mpp(true)
+        .payee_pub_key(node_2.pubkey.into())
+        .expiry_time(Duration::from_secs(3600))
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_2.private_key.0))
+        .unwrap();
+    let payment_hash = *invoice.payment_hash();
+    node_2.insert_invoice(invoice.clone(), None);
+    let query_res = node_0
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            dry_run: true,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
     assert_eq!(query_res.routers.len(), 1);
-    dbg!(&query_res.routers);
-
     let used_channels = node_0
         .routers_used_channels(&query_res.routers, &channels)
         .await;
-
-    dbg!(&used_channels);
     assert!(used_channels.contains(&channels[1]));
-
-    let res = node_0
-        .send_mpp_payment(&node_2, 300000, None)
+    node_0.wait_until_no_inflight_payments().await;
+    node_0
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            ..Default::default()
+        })
         .await
         .expect("send mpp payment");
-
-    let payment_hash = res.payment_hash;
+    wait_until_timeout(120000, || {
+        node_2.get_invoice_status(&payment_hash) == Some(CkbInvoiceStatus::Received)
+    })
+    .await;
+    node_2
+        .settle_invoice(&payment_hash, preimage)
+        .await
+        .unwrap();
     node_0.wait_until_success(payment_hash).await;
-
-    let payment_session = node_0.get_payment_session(payment_hash).unwrap();
-    let attempts = payment_session.attempts().collect::<Vec<_>>();
+    node_0.wait_until_payment_finished(payment_hash).await;
+    node_0.wait_until_no_inflight_payments().await;
+    let session = node_0.get_payment_session(payment_hash).unwrap();
+    let attempts = session.attempts().collect::<Vec<_>>();
     assert!(!attempts.iter().any(|a| a
         .last_error
-        .clone()
+        .as_deref()
         .unwrap_or_default()
         .contains("HoldTlcTimeout")));
+    let settled_routes = attempts
+        .iter()
+        .filter(|attempt| attempt.is_success())
+        .map(|attempt| attempt.route.clone())
+        .collect::<Vec<_>>();
+    let settled_channels = node_0
+        .routers_used_channels(&settled_routes, &channels)
+        .await;
+    assert!(
+        channels[2..].iter().all(|id| settled_channels.contains(id)),
+        "all three funded alternatives are required to settle the payment"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

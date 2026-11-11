@@ -629,8 +629,11 @@ impl Actor for MockNetworkActor {
                     let result = state
                         .payment_store
                         .as_ref()
-                        .and_then(|store| store.get_payment_session(payment_hash))
-                        .map(SendPaymentResponse::from)
+                        .and_then(|store| {
+                            store
+                                .get_payment_session(payment_hash)
+                                .map(|session| SendPaymentResponse::from_session(session, store))
+                        })
                         .ok_or_else(|| format!("Payment session not found: {payment_hash:?}"));
                     let _ = reply.send(result);
                 }
@@ -857,7 +860,7 @@ async fn assert_cch_real_mpp_outcome(stop_retry: bool, success: bool, restart: b
         .unwrap()
         .unwrap();
         wait_until_timeout(5000, || {
-            payer.get_payment_session(hash).unwrap().retry_stopped
+            !payer.get_payment_session(hash).unwrap().can_retry()
                 && payer
                     .store
                     .get_attempts(hash)
@@ -882,7 +885,7 @@ async fn assert_cch_real_mpp_outcome(stop_retry: bool, success: bool, restart: b
                     && !right.tlc_state.waiting_ack
             })
             .await;
-            assert!(payer.get_payment_session(hash).unwrap().retry_stopped);
+            assert!(!payer.get_payment_session(hash).unwrap().can_retry());
             payer.retry_send_payment(hash, Some(attempts[0].id)).await;
         }
     }

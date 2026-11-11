@@ -1426,7 +1426,12 @@ impl NetworkNode {
             |status| {
                 if status == PaymentStatus::Failed {
                     error!("Unexpected payment failed: {:?}\n\n", payment_hash);
-                    assert_eq!(status, PaymentStatus::Success);
+                    assert_eq!(
+                        status,
+                        PaymentStatus::Success,
+                        "payment session: {:?}",
+                        self.get_payment_session(payment_hash)
+                    );
                 }
             },
             "Payment did not succeed within the expected time",

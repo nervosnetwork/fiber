@@ -97,8 +97,8 @@ use crate::fiber::onchain_tlc_reconcile::{
     recover_shutdown_settlement_data, verify_and_select_settlement_data, OnChainTimeoutTlcRole,
 };
 use crate::fiber::payment::{
-    PaymentActor, PaymentActorArguments, PaymentActorMessage, PaymentSessionExt,
-    PaymentTlcRemoveContext, SendPaymentCommand, SendPaymentDataBuilder,
+    attempt_has_channel_work, PaymentActor, PaymentActorArguments, PaymentActorMessage,
+    PaymentSessionExt, PaymentTlcRemoveContext, SendPaymentCommand, SendPaymentDataBuilder,
     SendPaymentWithRouterCommand,
 };
 use crate::fiber::peer_message_policy::{PeerMessageAdmission, PeerMessagePolicy};
@@ -2996,6 +2996,16 @@ where
                 self.retry_hold_tlc_sets(&myself);
             }
             NetworkActorCommand::PaymentTlcUpdated(payment_hash) => {
+                if let Some(session) = self.store.get_payment_session(payment_hash) {
+                    if session.status == PaymentStatus::Failed
+                        && !session.has_outstanding_channel_work(&self.store)
+                    {
+                        // The persisted give-up decision was previously exposed as
+                        // Inflight. Publish its now-final result after the last ack,
+                        // including when the payer actor is currently absent.
+                        self.store.insert_payment_session(session);
+                    }
+                }
                 if let Some(actor) = state.inflight_payments.get(&payment_hash) {
                     // The last durable channel acknowledgement must wake an existing
                     // actor even when there is no remaining work to resume.
@@ -5298,7 +5308,10 @@ where
 
     fn on_get_payment(&self, payment_hash: &Hash256) -> Result<SendPaymentResponse, Error> {
         match self.store.get_payment_session(*payment_hash) {
-            Some(session_state) => Ok(session_state.into()),
+            Some(session_state) => Ok(SendPaymentResponse::from_session(
+                session_state,
+                &self.store,
+            )),
             None => Err(Error::InvalidParameter(format!(
                 "Payment session not found: {:?}",
                 payment_hash
@@ -8575,9 +8588,38 @@ where
         // Recover only channel-owned work and indexed attempts. Scanning payment
         // history here makes every restart grow with the node's lifetime traffic.
         for payment_hash in payment_hashes {
-            let Some(session) = self.store.get_payment_session(payment_hash) else {
+            let Some(mut session) = self.store.get_payment_session(payment_hash) else {
                 continue;
             };
+            // Admissions were persisted before their AddTlc result. Mailboxes
+            // disappear on restart, so absence of durable channel ownership
+            // means this attempt was never accepted and can be recovered safely.
+            for mut attempt in session.cached_attempts.clone() {
+                if !attempt.is_inflight() || attempt_has_channel_work(&attempt, &self.store) {
+                    continue;
+                }
+                if session.status == PaymentStatus::Failed {
+                    attempt.set_failed_status("Channel admission interrupted by restart", false);
+                } else {
+                    attempt.status = fiber_types::AttemptStatus::Created;
+                }
+                self.store.insert_attempt(attempt.clone());
+                session.update_with_attempt(attempt.clone());
+                let waits_for_reestablish = attempt
+                    .first_hop_channel_outpoint()
+                    .and_then(|outpoint| self.store.get_channel_state_by_outpoint(outpoint))
+                    .is_some_and(|channel| !matches!(channel.state, ChannelState::Closed(_)));
+                if session.can_retry() && !waits_for_reestablish {
+                    myself
+                        .send_message(NetworkActorMessage::new_event(
+                            NetworkActorEvent::ResumePaymentAfterClosedChannel(
+                                payment_hash,
+                                attempt.id,
+                            ),
+                        ))
+                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                }
+            }
             if !session.status.is_final() || session.has_pending_payment_work(&self.store) {
                 myself
                     .send_message(NetworkActorMessage::new_command(
@@ -8587,6 +8629,9 @@ where
             } else {
                 // A crash may leave only the index after all work and the final
                 // result were committed. Retire that stale recovery entry.
+                if session.status == PaymentStatus::Failed {
+                    self.store.insert_payment_session(session.clone());
+                }
                 self.store.clear_attempts_channel_index(payment_hash);
             }
             let Some(context) = session.request.trampoline_context.as_ref() else {

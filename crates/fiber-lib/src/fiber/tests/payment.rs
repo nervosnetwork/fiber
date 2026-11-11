@@ -65,7 +65,83 @@ use std::time::{Duration, SystemTime};
 use tracing::{debug, error, info};
 
 #[tokio::test]
-async fn test_stopped_payment_recovers_after_last_channel_ack_before_final_failure() {
+async fn test_restart_recovers_orphan_payment_admission() {
+    assert_orphan_payment_admission(false).await;
+}
+
+#[tokio::test]
+async fn test_restart_does_not_retry_stopped_orphan_payment_admission() {
+    assert_orphan_payment_admission(true).await;
+}
+
+async fn assert_orphan_payment_admission(stopped: bool) {
+    init_tracing();
+    let (mut payer, mut payee, _) =
+        create_nodes_with_established_channel(100000000000, 11800000000, false).await;
+    let old_hash = payer
+        .send_payment_keysend(&payee, 1000, false)
+        .await
+        .unwrap()
+        .payment_hash;
+    payer.wait_until_payment_finished(old_hash).await;
+    payer.wait_until_no_inflight_payments().await;
+    payer.stop().await;
+    let preimage = gen_rand_sha256_hash();
+    let invoice = payee.build_basic_invoice(1000, preimage);
+    let hash = *invoice.payment_hash();
+    payee.insert_invoice(invoice.clone(), None);
+    // Reproduce admission persisted by the payer but not yet by the channel.
+    let mut session = payer.store.get_payment_session(old_hash).unwrap();
+    let mut attempt = session.cached_attempts[0].clone();
+    session.request.payment_hash = hash;
+    session.request.invoice = Some(invoice.to_string());
+    session.request.keysend = false;
+    session.request.preimage = None;
+    session.status = if stopped {
+        PaymentStatus::Failed
+    } else {
+        PaymentStatus::Inflight
+    };
+    session.last_error = None;
+    session.cached_attempts.clear();
+    attempt.payment_hash = hash;
+    attempt.hash = hash;
+    attempt.status = AttemptStatus::Inflight;
+    attempt.preimage = None;
+    for hop in &mut attempt.route_hops {
+        hop.payment_preimage = None;
+        hop.hash_algorithm = session.request.hash_algorithm();
+    }
+    payer.store.insert_attempt(attempt.clone());
+    payer.store.insert_payment_session(session);
+    assert_eq!(
+        payer
+            .get_payment_session(hash)
+            .unwrap()
+            .effective_status(&payer.store),
+        PaymentStatus::Inflight
+    );
+    payer.start().await;
+    if stopped {
+        payer.wait_until_failed(hash).await;
+        payer.wait_until_no_inflight_payments().await;
+        assert!(payee.store.get_payment_hold_tlcs(hash).is_empty());
+    } else {
+        payer.connect_to(&mut payee).await;
+        wait_until_timeout(5000, || payee.store.get_payment_hold_tlcs(hash).len() == 1).await;
+        payee.settle_invoice(&hash, preimage).await.unwrap();
+        payer.wait_until_payment_finished(hash).await;
+        payer.wait_until_no_inflight_payments().await;
+    }
+    assert_eq!(payer.store.get_attempts(hash).len(), 1);
+    assert_eq!(
+        payer.store.get_attempts(hash)[0].tried_times,
+        attempt.tried_times
+    );
+}
+
+#[tokio::test]
+async fn test_stopped_payment_recovers_after_last_channel_ack_before_index_cleanup() {
     use ckb_types::prelude::Entity;
     use fiber_store::backend::StorageBackend;
     use fiber_types::schema::ATTEMPT_CHANNEL_INDEX_PREFIX;
@@ -88,10 +164,9 @@ async fn test_stopped_payment_recovers_after_last_channel_ack_before_final_failu
     payer.stop().await;
     let mut session = payer.store.get_payment_session(hash).unwrap();
     assert!(!session.has_outstanding_channel_work(&payer.store));
-    // Replay a crash after channel delivery completed but before the final
-    // session write and recovery-index cleanup.
-    session.status = PaymentStatus::Inflight;
-    session.retry_stopped = true;
+    // Replay a crash after channel delivery completed but before final
+    // result notification and recovery-index cleanup.
+    session.status = PaymentStatus::Failed;
     payer.store.insert_payment_session(session);
     let attempt = payer.store.get_attempts(hash).pop().unwrap();
     payer.store.put(
@@ -139,10 +214,13 @@ async fn test_legacy_failed_payment_with_live_tlc_recovers_without_dispatch() {
     payer.stop().await;
     let mut legacy = payer.store.get_payment_session(hash).unwrap();
     legacy.set_failed_status("old stop-before-final-outcome behavior");
-    legacy.retry_stopped = false;
     payer.store.insert_payment_session(legacy);
     assert_eq!(
-        payer.store.get_payment_session(hash).unwrap().status,
+        payer
+            .store
+            .get_payment_session(hash)
+            .unwrap()
+            .effective_status(&payer.store),
         PaymentStatus::Inflight
     );
     assert!(payer
@@ -159,7 +237,7 @@ async fn test_legacy_failed_payment_with_live_tlc_recovers_without_dispatch() {
     wait_until_timeout(5000, || {
         let session: PaymentSession =
             bincode::deserialize(&payer.store.get(&key).unwrap()).unwrap();
-        session.retry_stopped && session.status == PaymentStatus::Inflight
+        !session.can_retry()
     })
     .await;
     payer.connect_to(&mut payee).await;
@@ -564,7 +642,6 @@ fn test_payment_session(request: SendPaymentData, now: u64) -> PaymentSession {
         created_at: now,
         last_updated_at: now,
         cached_attempts: vec![],
-        retry_stopped: false,
     }
 }
 
@@ -652,7 +729,6 @@ fn test_sender_side_trampoline_retry_does_not_reuse_visible_route_amount() {
         created_at: now,
         last_updated_at: now,
         cached_attempts: vec![attempt.clone()],
-        retry_stopped: false,
     };
     assert_eq!(attempt.route.receiver_amount(), amount_to_trampoline);
     assert_eq!(session.remain_amount(), 0);
@@ -914,8 +990,11 @@ async fn test_remove_tlc_fail_event_decode_fallback_does_not_record_history() {
         .expect("payment session exists");
     // This injected notification does not complete the real first-hop TLC.
     // Preserve the decode-failure diagnostics without publishing final failure.
-    assert_eq!(session.status, PaymentStatus::Inflight);
-    assert!(session.retry_stopped);
+    assert_eq!(
+        session.effective_status(&fixture.node.store),
+        PaymentStatus::Inflight
+    );
+    assert!(!session.can_retry());
     assert!(session.has_outstanding_channel_work(&fixture.node.store));
     assert_eq!(
         session.last_error_code,
@@ -11845,7 +11924,6 @@ async fn test_local_remove_notification_reuses_retry_policy_without_double_failu
         created_at: 0,
         last_updated_at: 0,
         cached_attempts: vec![],
-        retry_stopped: false,
     };
     let mut attempt = session.new_attempt(
         1,

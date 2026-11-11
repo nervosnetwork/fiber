@@ -27,8 +27,8 @@ pub enum PaymentStatus {
     /// A payment TLC was successfully claimed and returned its preimage.
     /// Other attempts may still be awaiting their outcomes.
     Success,
-    /// The payment session has terminated. HTLCs have failed and the target
-    /// amount cannot be fulfilled after exhausting all retries.
+    /// Local dispatch has given up. Public readers must keep the result Inflight
+    /// while issued TLCs remain unresolved; a valid fulfillment still takes precedence.
     Failed,
 }
 
@@ -900,9 +900,6 @@ pub struct PaymentSession {
     /// Runtime cache for attempts; not persisted.
     #[serde(skip)]
     pub cached_attempts: Vec<Attempt>,
-    /// Stop creating or retrying attempts, while issued channel work can still succeed.
-    #[serde(default)]
-    pub retry_stopped: bool,
 }
 
 /// Default maximum number of parts for a multi-part payment.
@@ -1079,8 +1076,14 @@ impl PaymentSession {
         self.cached_attempts.push(attempt);
     }
 
+    /// Whether payment-level success or failure permits further dispatch.
+    /// Attempt retry policy and new-part budgets are checked separately.
+    pub fn can_retry(&self) -> bool {
+        !self.calc_payment_status().is_final()
+    }
+
     pub fn allow_more_attempts(&self) -> bool {
-        if self.status.is_final() || self.retry_stopped {
+        if !self.can_retry() {
             return false;
         }
 
@@ -1117,10 +1120,10 @@ impl PaymentSession {
             return PaymentStatus::Inflight;
         }
 
-        // Only the payer can finalize failure after checking durable channel work.
-        // Attempt records alone cannot prove that every TLC outcome was delivered.
-        if self.retry_stopped {
-            return PaymentStatus::Inflight;
+        // Preserve the released derived failure for exhausted legacy sessions.
+        // Public readers must additionally check outstanding channel work.
+        if self.attempts().all(Attempt::is_failed) && self.retry_times() >= self.try_limit {
+            return PaymentStatus::Failed;
         }
 
         PaymentStatus::Created

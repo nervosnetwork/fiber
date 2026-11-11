@@ -11701,14 +11701,8 @@ async fn test_reestablish_bidirectional_pending() {
     );
 
     node_a.restart().await;
-    wait_until(|| {
-        let state_a = node_a.get_channel_actor_state(channel_id);
-        let state_b = node_b.get_channel_actor_state(channel_id);
-        !state_a.reestablishing
-            && state_a.get_local_commitment_number() == state_b.get_remote_commitment_number()
-            && state_a.get_remote_commitment_number() == state_b.get_local_commitment_number()
-    })
-    .await;
+    // Payment completion establishes a stable commitment snapshot after recovery.
+    wait_for_reestablished_payments(&node_a, &node_b, channel_id).await;
 
     let state_a_after = node_a.get_channel_actor_state(channel_id);
     let state_b_after = node_b.get_channel_actor_state(channel_id);
@@ -11964,6 +11958,22 @@ async fn test_reestablish_commitment_number_consistency() {
     );
 }
 
+async fn wait_for_reestablished_payments(a: &NetworkNode, b: &NetworkNode, channel_id: Hash256) {
+    a.wait_until_no_inflight_payments().await;
+    b.wait_until_no_inflight_payments().await;
+    crate::tests::test_utils::wait_until_timeout(5000, || {
+        let a = a.get_channel_actor_state(channel_id);
+        let b = b.get_channel_actor_state(channel_id);
+        !a.reestablishing
+            && !b.reestablishing
+            && !a.tlc_state.waiting_ack
+            && !b.tlc_state.waiting_ack
+            && a.get_local_commitment_number() == b.get_remote_commitment_number()
+            && a.get_remote_commitment_number() == b.get_local_commitment_number()
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn test_reestablish_dual_owed_ordering() {
     init_tracing();
@@ -12000,7 +12010,8 @@ async fn test_reestablish_dual_owed_ordering() {
     );
 
     node_a.restart().await;
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    // Payment completion establishes a stable commitment snapshot after recovery.
+    wait_for_reestablished_payments(&node_a, &node_b, channel_id).await;
 
     let state_a_after = node_a.get_channel_actor_state(channel_id);
     let state_b_after = node_b.get_channel_actor_state(channel_id);
@@ -12066,7 +12077,8 @@ async fn test_legacy_fallback_dual_owed_no_commit_diff() {
     );
 
     node_a.restart().await;
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    // Payment completion establishes a stable commitment snapshot after recovery.
+    wait_for_reestablished_payments(&node_a, &node_b, channel_id).await;
 
     let state_a_after = node_a.get_channel_actor_state(channel_id);
     let state_b_after = node_b.get_channel_actor_state(channel_id);
@@ -12131,7 +12143,8 @@ async fn test_legacy_fallback_single_owed_no_commit_diff() {
     node_a.store.delete_pending_commit_diff(&channel_id);
 
     node_a.restart().await;
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    // Payment completion establishes a stable commitment snapshot after recovery.
+    wait_for_reestablished_payments(&node_a, &node_b, channel_id).await;
 
     let state_a_after = node_a.get_channel_actor_state(channel_id);
     let state_b_after = node_b.get_channel_actor_state(channel_id);
