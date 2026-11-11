@@ -2164,11 +2164,38 @@ where
 
     fn store_preimage(&self, payment_hash: Hash256, preimage: Hash256) {
         self.store.insert_preimage(payment_hash, preimage);
+        self.notify_preimage_created(payment_hash, preimage);
+    }
+
+    fn notify_preimage_created(&self, payment_hash: Hash256, preimage: Hash256) {
         self.network
             .send_message(NetworkActorMessage::new_notification(
                 NetworkServiceEvent::PreimageCreated(payment_hash, preimage),
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+    }
+
+    /// Restore every authorized pending claim before a V2 force close, whichever deadline fired.
+    fn restore_received_tlc_claim_preimages(&self, state: &ChannelActorState) {
+        // Deduplicate same-hash parts and avoid rewriting preimages already stored locally.
+        let preimages: HashMap<_, _> = state
+            .tlc_state
+            .received_tlcs
+            .tlcs
+            .iter()
+            .filter_map(|tlc| {
+                state
+                    .pending_received_tlc_claim_preimage(tlc)
+                    .map(|preimage| (tlc.payment_hash, preimage))
+            })
+            .collect();
+        for (payment_hash, preimage) in preimages {
+            if self.store.get_preimage(&payment_hash).is_none() {
+                self.store_preimage(payment_hash, preimage);
+            } else {
+                self.notify_preimage_created(payment_hash, preimage);
+            }
+        }
     }
 
     fn handle_add_tlc_peer_message(
@@ -2735,6 +2762,9 @@ where
             };
 
             let transaction = state.get_latest_commitment_transaction().await?;
+            if state.session_v2.is_some() {
+                self.restore_received_tlc_claim_preimages(state);
+            }
 
             if let Some(close) = state.session_v2.as_mut().and_then(|s| s.closing.as_mut()) {
                 close.superseded_by_force_close = true;
@@ -3802,48 +3832,6 @@ where
                 RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill { payment_preimage }),
             );
         }
-
-        let delay_epoch = EpochNumberWithFraction::from_full_value(state.commitment_delay_epoch);
-        let epoch_delay_milliseconds = tlc_expiry_delay(&delay_epoch);
-        // for received tlcs, check whether the tlc is expired, if so we send RemoveTlc message
-        // to previous hop, even if later hop send backup RemoveTlc message to us later,
-        // it will be ignored.
-        let expect_expiry = now_timestamp_as_millis_u64()
-            .saturating_add(epoch_delay_milliseconds)
-            .saturating_add(CHECK_CHANNELS_INTERVAL.as_millis() as u64);
-        let expired_tlcs: Vec<_> = state
-            .tlc_state
-            .get_committed_received_tlcs()
-            .filter(|tlc| {
-                tlc.forwarding_tlc.is_none()
-                    && !state.is_waiting_forward_result_for_received_tlc(tlc.tlc_id)
-                    && tlc.expiry < expect_expiry
-            })
-            .collect();
-        for tlc in expired_tlcs {
-            info!(
-                "Removing expired tlc {:?} for channel {:?}",
-                tlc.id(),
-                state.get_id()
-            );
-            if let Err(err) = self.queue_channel_remove_tlc(
-                myself,
-                RemoveTlcCommand {
-                    id: tlc.id(),
-                    reason: RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
-                        TlcErr::new(TlcErrorCode::ExpiryTooSoon),
-                        &tlc.shared_secret,
-                    )),
-                },
-            ) {
-                error!(
-                    "Failed to remove expired tlc {:?} for channel {:?}: {}",
-                    tlc.id(),
-                    state.id,
-                    err
-                );
-            }
-        }
     }
 
     /// Protect offered TLCs even while a cooperative shutdown waits for pending TLCs.
@@ -3887,6 +3875,98 @@ where
                 );
             }
         }
+    }
+
+    /// Resolve received-TLC expiry in one path: protect an authorized V2 fulfill on-chain,
+    /// otherwise fail eligible local TLCs off-chain. Never enqueue an expiry failure before
+    /// deciding whether the channel must close for a pending claim.
+    /// Returns whether this turn started a force close.
+    async fn maintain_expiring_received_tlcs(
+        &self,
+        myself: &ActorRef<ChannelActorMessage>,
+        state: &mut ChannelActorState,
+        now: u64,
+    ) -> ProcessingChannelResult<bool> {
+        let can_process_expiry = match state.state {
+            ChannelState::ChannelReady => true,
+            ChannelState::ShuttingDown(flags) => {
+                !flags.contains(ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION)
+            }
+            _ => false,
+        };
+        if !can_process_expiry || state.ensure_v2_not_quarantined().is_err() {
+            return Ok(false);
+        }
+        let delay_epoch = EpochNumberWithFraction::from_full_value(state.commitment_delay_epoch);
+        // Use the existing 2/3 commitment-delay safety window. A received preimage claim
+        // matures after 1/3 of the delay; include a maintenance interval to avoid starting
+        // the close one tick late. This deadline does not depend on peer connectivity.
+        let expect_expiry = now
+            .saturating_add(tlc_expiry_delay(&delay_epoch))
+            .saturating_add(CHECK_CHANNELS_INTERVAL.as_millis() as u64);
+        let claim = state.session_v2.as_ref().and_then(|_| {
+            state.tlc_state.received_tlcs.tlcs.iter().find(|tlc| {
+                tlc.expiry < expect_expiry
+                    && state.pending_received_tlc_claim_preimage(tlc).is_some()
+            })
+        });
+        if let Some(tlc) = claim {
+            info!(
+                channel_id = %state.get_id(),
+                tlc_id = ?tlc.tlc_id,
+                expiry = tlc.expiry,
+                "Force closing channel to claim an expiring received TLC"
+            );
+            // Decide and enter the closing state in this actor turn: a queued generic
+            // shutdown could otherwise race with a settled fulfill or another close.
+            self.handle_shutdown_command(
+                state,
+                ShutdownCommand {
+                    force: true,
+                    close_script: None,
+                    fee_rate: None,
+                },
+            )
+            .await?;
+            return Ok(true);
+        }
+        if !state.is_ready() {
+            return Ok(false);
+        }
+        let expired_tlcs: Vec<_> = state
+            .tlc_state
+            .get_committed_received_tlcs()
+            .filter(|tlc| {
+                tlc.forwarding_tlc.is_none()
+                    && !state.is_waiting_forward_result_for_received_tlc(tlc.tlc_id)
+                    && tlc.expiry < expect_expiry
+            })
+            .collect();
+        for tlc in expired_tlcs {
+            info!(
+                "Removing expired tlc {:?} for channel {:?}",
+                tlc.id(),
+                state.get_id()
+            );
+            if let Err(err) = self.queue_channel_remove_tlc(
+                myself,
+                RemoveTlcCommand {
+                    id: tlc.id(),
+                    reason: RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+                        TlcErr::new(TlcErrorCode::ExpiryTooSoon),
+                        &tlc.shared_secret,
+                    )),
+                },
+            ) {
+                error!(
+                    "Failed to remove expired tlc {:?} for channel {:?}: {}",
+                    tlc.id(),
+                    state.id,
+                    err
+                );
+            }
+        }
+        Ok(false)
     }
 
     fn onchain_settlement_expect_expiry(state: &ChannelActorState, now: u64) -> Option<u64> {
@@ -4811,10 +4891,14 @@ where
                 } else if state.is_waiting_onchain_settlement() {
                     self.maintain_waiting_onchain_settlement_tlcs(state, now);
                 }
-                if matches!(
-                    state.state,
-                    ChannelState::ChannelReady | ChannelState::ShuttingDown(_)
-                ) {
+                if !self
+                    .maintain_expiring_received_tlcs(myself, state, now)
+                    .await?
+                    && matches!(
+                        state.state,
+                        ChannelState::ChannelReady | ChannelState::ShuttingDown(_)
+                    )
+                {
                     self.force_close_expiring_offered_tlcs(myself, state, now);
                 }
                 // Only closed or shutting-down channels can have on-chain TLC settlement
@@ -7230,6 +7314,38 @@ impl ChannelActorState {
         self.waiting_forward_tlc_tasks.contains_key(&tlc_id)
     }
 
+    /// Return this exact received TLC's authorized, still-unconfirmed claim preimage.
+    /// A global same-hash preimage cannot establish the outcome of a forwarding attempt.
+    fn pending_received_tlc_claim_preimage(&self, tlc: &TlcInfo) -> Option<Hash256> {
+        if tlc.removed_confirmed_at.is_some()
+            || !matches!(
+                tlc.status,
+                TlcStatus::Inbound(InboundTlcStatus::Committed | InboundTlcStatus::LocalRemoved)
+            )
+        {
+            return None;
+        }
+        let valid_preimage = |reason: &RemoveTlcReason| {
+            let RemoveTlcReason::RemoveTlcFulfill(fulfill) = reason else {
+                return None;
+            };
+            let payment_hash: Hash256 = tlc.hash_algorithm.hash(fulfill.payment_preimage).into();
+            (payment_hash == tlc.payment_hash).then_some(fulfill.payment_preimage)
+        };
+        if let Some(reason) = &tlc.removed_reason {
+            // An already-applied resolution cannot be replaced by a queued operation.
+            return valid_preimage(reason);
+        }
+        self.retryable_tlc_operations
+            .iter()
+            .find_map(|operation| match operation {
+                RetryableTlcOperation::RemoveTlc(id, reason) if *id == tlc.tlc_id => {
+                    valid_preimage(reason)
+                }
+                _ => None,
+            })
+    }
+
     /// Returns whether a received TLC may be fulfilled from a preimage in the local store.
     ///
     /// A stored preimage only proves that *some* payment with the same hash succeeded. It does
@@ -8977,6 +9093,15 @@ impl ChannelActorState {
             if tlc.removed_reason.is_some() {
                 return Err(ProcessingChannelError::RepeatedProcessing(
                     "TLC is already removed".to_string(),
+                ));
+            }
+            if self.session_v2.is_some()
+                && tlc.is_received()
+                && matches!(reason, RemoveTlcReason::RemoveTlcFail(_))
+                && self.pending_received_tlc_claim_preimage(tlc).is_some()
+            {
+                return Err(ProcessingChannelError::RepeatedProcessing(
+                    "TLC already has an authorized fulfill".to_string(),
                 ));
             }
             if (tlc.is_offered() && tlc.outbound_status() != OutboundTlcStatus::Committed)
@@ -12575,5 +12700,77 @@ mod tests {
             state.check_tlc_limits(20, false),
             Err(ProcessingChannelError::TlcValueInflightExceedLimit)
         ));
+    }
+
+    #[test]
+    fn received_tlc_fulfill_cannot_be_overridden_by_expiry_fail() {
+        use crate::store::sample::StoreSample;
+
+        for algorithm in [HashAlgorithm::Sha256, HashAlgorithm::CkbHash] {
+            let mut state = channel_state_with_limits(
+                ChannelConstraints::new(1_000_000, 10),
+                ChannelConstraints::new(1_000_000, 10),
+            );
+            state.session_v2 = ChannelActorState::samples(0).remove(2).session_v2.clone();
+            let preimage = Hash256::from([7; 32]);
+            let fulfill = RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+                payment_preimage: preimage,
+            });
+            let fail = RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+                TlcErr::new(TlcErrorCode::ExpiryTooSoon),
+                &NO_SHARED_SECRET,
+            ));
+            let mut tlc = committed_tlc(TLCId::Received(0), 10);
+            tlc.hash_algorithm = algorithm;
+            tlc.payment_hash = algorithm.hash(preimage).into();
+            state.tlc_state.received_tlcs.tlcs.push(tlc.clone());
+            // A fulfill for another TLC, even with the same hash, does not authorize this one.
+            state
+                .retryable_tlc_operations
+                .push_back(RetryableTlcOperation::RemoveTlc(
+                    TLCId::Received(1),
+                    fulfill.clone(),
+                ));
+            assert!(state.pending_received_tlc_claim_preimage(&tlc).is_none());
+            assert!(state
+                .check_remove_tlc_with_reason(tlc.tlc_id, &fail)
+                .is_ok());
+
+            // An older queued failure must neither hide nor supersede a valid fulfill.
+            state
+                .retryable_tlc_operations
+                .push_back(RetryableTlcOperation::RemoveTlc(tlc.tlc_id, fail.clone()));
+            state
+                .retryable_tlc_operations
+                .push_back(RetryableTlcOperation::RemoveTlc(
+                    tlc.tlc_id,
+                    fulfill.clone(),
+                ));
+            assert_eq!(
+                state.pending_received_tlc_claim_preimage(&tlc),
+                Some(preimage)
+            );
+            assert!(matches!(
+                state.check_remove_tlc_with_reason(tlc.tlc_id, &fail),
+                Err(ProcessingChannelError::RepeatedProcessing(_))
+            ));
+            assert!(state
+                .check_remove_tlc_with_reason(tlc.tlc_id, &fulfill)
+                .is_ok());
+            tlc.payment_hash = Hash256::from([9; 32]);
+            assert!(state.pending_received_tlc_claim_preimage(&tlc).is_none());
+            tlc.payment_hash = algorithm.hash(preimage).into();
+            tlc.status = TlcStatus::Inbound(InboundTlcStatus::LocalRemoved);
+            tlc.removed_reason = Some(fulfill);
+            assert_eq!(
+                state.pending_received_tlc_claim_preimage(&tlc),
+                Some(preimage)
+            );
+            tlc.removed_confirmed_at = Some(1);
+            assert!(state.pending_received_tlc_claim_preimage(&tlc).is_none());
+            tlc.removed_confirmed_at = None;
+            tlc.removed_reason = Some(fail);
+            assert!(state.pending_received_tlc_claim_preimage(&tlc).is_none());
+        }
     }
 }
