@@ -222,10 +222,8 @@ pub enum ChannelCommand {
     TxCollaborationCommand(TxCollaborationCommand),
     FundingTxSigned(Transaction, RpcReplyPort<Result<(), String>>),
     CommitmentSigned(Option<RpcReplyPort<Result<(), String>>>),
+    /// Reply with the Add result after persisting any accepted TLC or queued Add.
     AddTlc(AddTlcCommand, RpcReplyPort<Result<AddTlcResponse, TlcErr>>),
-    /// Acknowledge local handling after persisting any accepted TLC or queued Add.
-    /// AddTlcResult alone reports the outcome, including a local rejection.
-    AddTlcWithAdmission(AddTlcCommand, RpcReplyPort<()>),
     RemoveTlc(RemoveTlcCommand, RpcReplyPort<ProcessingChannelResult>),
     Shutdown(ShutdownCommand, RpcReplyPort<Result<(), String>>),
     BroadcastChannelUpdate(),
@@ -260,7 +258,6 @@ impl Display for ChannelCommand {
             ChannelCommand::FundingTxSigned(_, _) => write!(f, "FundingTxSigned"),
             ChannelCommand::CommitmentSigned(_) => write!(f, "CommitmentSigned"),
             ChannelCommand::AddTlc(_, _) => write!(f, "AddTlc"),
-            ChannelCommand::AddTlcWithAdmission(_, _) => write!(f, "AddTlcWithAdmission"),
             ChannelCommand::RemoveTlc(_, _) => write!(f, "RemoveTlc"),
             ChannelCommand::Shutdown(_, _) => write!(f, "Shutdown"),
             ChannelCommand::BroadcastChannelUpdate() => write!(f, "BroadcastChannelUpdate"),
@@ -3595,22 +3592,6 @@ where
             }
             ChannelCommand::AddTlc(command, reply) => {
                 let res = self.handle_add_tlc_command(myself, state, &command).await;
-
-                self.post_add_tlc_command(myself, state, command, &res);
-                match res {
-                    Ok(tlc_id) => {
-                        let _ = reply.send(Ok(AddTlcResponse { tlc_id }));
-                        Ok(())
-                    }
-                    Err(err) => {
-                        let tlc_err = self.get_tlc_error(state, &err);
-                        let _ = reply.send(Err(tlc_err));
-                        Err(err)
-                    }
-                }
-            }
-            ChannelCommand::AddTlcWithAdmission(command, reply) => {
-                let res = self.handle_add_tlc_command(myself, state, &command).await;
                 // WaitingTlcAck registers the Add in the existing retry queue.
                 // Persist that ownership before letting the payer continue dispatch.
                 let queued = matches!(res, Err(ProcessingChannelError::WaitingTlcAck))
@@ -3622,8 +3603,17 @@ where
                 if !queued {
                     self.post_add_tlc_command(myself, state, command, &res);
                 }
-                let _ = reply.send(());
-                res.map(|_| ())
+                match res {
+                    Ok(tlc_id) => {
+                        let _ = reply.send(Ok(AddTlcResponse { tlc_id }));
+                        Ok(())
+                    }
+                    Err(err) => {
+                        let tlc_err = self.get_tlc_error(state, &err);
+                        let _ = reply.send(Err(tlc_err));
+                        Err(err)
+                    }
+                }
             }
             ChannelCommand::RemoveTlc(command, reply) => {
                 match self

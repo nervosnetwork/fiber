@@ -81,9 +81,10 @@ use crate::ckb::contracts::{
 };
 use crate::ckb::{CkbChainMessage, FundingError, FundingRequest, FundingTx, GetShutdownTxResponse};
 use crate::fiber::channel::{
-    tlc_expiry_delay, ChannelActorState, ChannelEphemeralConfig, ChannelInitializationOperation,
-    OfflineChannelRestoreMode, OpenChannelWithExternalFundingParameter, TxCollaborationCommand,
-    TxUpdateCommand, MAX_TLC_NUMBER_IN_FLIGHT,
+    tlc_expiry_delay, AddTlcResponse, ChannelActorState, ChannelEphemeralConfig,
+    ChannelInitializationOperation, OfflineChannelRestoreMode,
+    OpenChannelWithExternalFundingParameter, TxCollaborationCommand, TxUpdateCommand,
+    MAX_TLC_NUMBER_IN_FLIGHT,
 };
 use crate::fiber::config::{DEFAULT_COMMITMENT_DELAY_EPOCHS, MIN_TLC_EXPIRY_DELTA};
 use crate::fiber::fee::{check_open_channel_parameters, check_tlc_delta_with_epochs};
@@ -3404,6 +3405,8 @@ where
                         // Let the channel acknowledge its durable local ownership without
                         // blocking this actor, which the channel itself may need to call.
                         crate::tasks::spawn(async move {
+                            // Even WaitingTlcAck or a rejection completes local handling.
+                            // AddTlcResult reports the outcome; do not count it twice here.
                             if admission.await.is_ok() {
                                 let _ = reply.send(Ok(()));
                             }
@@ -4900,7 +4903,7 @@ where
         &self,
         state: &mut NetworkActorState<S, C>,
         command: SendOnionPacketCommand,
-    ) -> Result<Option<oneshot::Receiver<()>>, TlcErr> {
+    ) -> Result<Option<oneshot::Receiver<Result<AddTlcResponse, TlcErr>>>, TlcErr> {
         trace!("Entering handle_send_onion_packet_command");
         let SendOnionPacketCommand {
             peeled_onion_packet,
@@ -4946,7 +4949,7 @@ where
 
         let (send, recv) = oneshot::channel();
         let rpc_reply = RpcReplyPort::from(send);
-        let command = ChannelCommand::AddTlcWithAdmission(
+        let command = ChannelCommand::AddTlc(
             AddTlcCommand {
                 amount: info.amount,
                 payment_hash,
