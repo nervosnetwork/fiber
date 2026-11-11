@@ -895,6 +895,7 @@ impl TestFiberMessageHold {
                 | (
                     TestFiberMessageKind::ReestablishChannel,
                     FiberChannelMessage::ReestablishChannel(_)
+                        | FiberChannelMessage::ReestablishChannelV2(_)
                 )
         )
     }

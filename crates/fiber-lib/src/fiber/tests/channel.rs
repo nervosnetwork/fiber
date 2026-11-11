@@ -5,10 +5,11 @@ use crate::ckb::{CkbChainMessage, FundingContext, FundingTx, GetShutdownTxRespon
 use crate::fiber::channel::{
     funding_timeout_check_delay, merge_external_funding_witnesses, settlement_tlc_to_witness,
     AddTlcResponse, ChannelActor, ChannelActorMessage, ChannelActorState, ChannelActorStateStore,
-    ChannelOpenRecordStore, ProcessingChannelResult, ReloadParams, ReplayOrderHint, UpdateCommand,
-    DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_FEE_RATE, DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
-    MAX_COMMITMENT_DELAY_EPOCHS, MAX_TLC_NUMBER_IN_FLIGHT, MIN_COMMITMENT_DELAY_EPOCHS,
-    PEER_CHANNEL_RESPONSE_TIMEOUT, REESTABLISH_TIMEOUT, XUDT_COMPATIBLE_WITNESS,
+    ChannelOpenRecordStore, ProcessingChannelResult, ReestablishTimer, ReloadParams,
+    ReplayOrderHint, UpdateCommand, DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_FEE_RATE,
+    DEFAULT_MAX_TLC_VALUE_IN_FLIGHT, MAX_COMMITMENT_DELAY_EPOCHS, MAX_TLC_NUMBER_IN_FLIGHT,
+    MIN_COMMITMENT_DELAY_EPOCHS, PEER_CHANNEL_RESPONSE_TIMEOUT, REESTABLISH_TIMEOUT,
+    XUDT_COMPATIBLE_WITNESS,
 };
 use crate::fiber::config::{
     DEFAULT_COMMITMENT_DELAY_EPOCHS, DEFAULT_FINAL_TLC_EXPIRY_DELTA, DEFAULT_TLC_EXPIRY_DELTA,
@@ -11365,6 +11366,63 @@ async fn test_reestablish_timeout_force_closes_channel_when_peer_withholds_reest
     );
 }
 
+/// A real peer cannot extend V2 recovery indefinitely by reconnecting before each timeout.
+#[tokio::test]
+async fn test_v2_repeated_reconnect_without_handshake_force_closes_channel() {
+    init_tracing();
+    let (mut node_a, mut node_b, channel_id) =
+        create_nodes_with_established_channel(50_000_000_000, 10_000_000_000, true).await;
+    let original_actor = node_a.get_channel_actor(channel_id).await.unwrap();
+    node_b
+        .hold_next_fiber_messages(
+            node_a.pubkey,
+            channel_id,
+            TestFiberMessageKind::ReestablishChannel,
+            usize::MAX,
+        )
+        .await;
+    disconnect_peers_and_wait_for_channel_offline(
+        &mut node_a,
+        &mut node_b,
+        channel_id,
+        "first V2 reconnect",
+    )
+    .await;
+    node_a.connect_to(&mut node_b).await;
+    node_b.wait_for_held_fiber_messages(1).await;
+    let first_wait = REESTABLISH_TIMEOUT * 3 / 5;
+    tokio::time::sleep(Duration::from_millis(first_wait)).await;
+    assert_eq!(
+        node_a.get_channel_actor_state(channel_id).state,
+        ChannelState::ChannelReady
+    );
+    disconnect_peers_and_wait_for_channel_offline(
+        &mut node_a,
+        &mut node_b,
+        channel_id,
+        "second V2 reconnect",
+    )
+    .await;
+    node_a.connect_to(&mut node_b).await;
+    node_b.wait_for_held_fiber_messages(2).await;
+    assert_eq!(
+        node_a.get_channel_actor(channel_id).await.unwrap().get_id(),
+        original_actor.get_id(),
+        "reconnect must preserve the live actor's recovery budget",
+    );
+    // The second connection only has the remaining budget, not another full timeout.
+    let remaining =
+        Duration::from_millis(REESTABLISH_TIMEOUT - first_wait) + CHECK_CHANNELS_INTERVAL * 2;
+    wait_until_timeout(remaining.as_millis() as u64, || {
+        matches!(node_a.get_channel_actor_state(channel_id).state,
+            ChannelState::ShuttingDown(flags)
+                if flags.contains(ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION))
+            || matches!(node_a.get_channel_actor_state(channel_id).state,
+                ChannelState::Closed(flags) if flags.contains(CloseFlags::UNCOOPERATIVE_LOCAL))
+    })
+    .await;
+}
+
 /// Time the peer spends offline does not count toward `REESTABLISH_TIMEOUT`: an offline peer
 /// is not withholding its ReestablishChannel, so the channel stays open however long the peer
 /// is gone and reestablishes normally once it is back.
@@ -11440,7 +11498,7 @@ async fn test_reestablish_timeout_stops_after_rejected_handshake() {
     state.network = Some(node_a.network_actor.clone());
     state.reestablishing = true;
     state.connectivity_state = ChannelConnectivityState::Syncing;
-    state.reestablish_started_at = Some(0);
+    state.reestablish_timer = Some(ReestablishTimer::RunningSince(0));
     let peer = ReestablishChannel {
         channel_id,
         local_commitment_number: state.get_remote_commitment_number() + 2,
@@ -11455,7 +11513,7 @@ async fn test_reestablish_timeout_stops_after_rejected_handshake() {
         .await
         .is_err());
     assert!(state.reestablishing);
-    assert_eq!(state.reestablish_started_at, None);
+    assert_eq!(state.reestablish_timer, None);
     assert!(!state.is_reestablish_stalled(REESTABLISH_TIMEOUT + 1));
 }
 
@@ -11480,21 +11538,21 @@ fn test_reestablish_stalled_only_for_syncing_force_closable_channels() {
     stalled.state = ChannelState::ChannelReady;
     stalled.reestablishing = true;
     stalled.connectivity_state = ChannelConnectivityState::Syncing;
-    stalled.reestablish_started_at = Some(started);
+    stalled.reestablish_timer = Some(ReestablishTimer::RunningSince(started));
     assert!(stalled.is_reestablish_stalled(after_timeout));
     assert!(!stalled.is_reestablish_stalled(started + REESTABLISH_TIMEOUT));
     assert!(!stalled.is_reestablish_stalled(started - 1));
     assert!(!stalled_with(&stalled, after_timeout, |state| {
         state.reestablishing = false
     }));
-    // V2 retains its separate watchdog through validated handshake replay.
-    assert!(!stalled_with(&stalled, after_timeout, |state| {
+    // Periodic maintenance also checks the V2 recovery budget.
+    assert!(stalled_with(&stalled, after_timeout, |state| {
         state.session_v2 = ChannelActorState::samples(0).remove(2).session_v2.clone()
     }));
 
     // The peer's ReestablishChannel arrived and stopped the clock.
     assert!(!stalled_with(&stalled, after_timeout, |state| {
-        state.reestablish_started_at = None
+        state.reestablish_timer = None
     }));
     // An offline peer is not withholding anything.
     assert!(!stalled_with(&stalled, after_timeout, |state| {
@@ -14424,7 +14482,7 @@ mod udt_funding_cell_capacity {
             },
             waiting_peer_response: None,
             revocation_nonce_unbalanced_since: None,
-            reestablish_started_at: None,
+            reestablish_timer: None,
             recovery_peer_v2: None,
             network: None,
             scheduled_channel_update_handle: None,
