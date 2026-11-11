@@ -189,6 +189,67 @@ async fn test_reject_legacy_inbound_open_before_creating_pending_record() {
 }
 
 #[tokio::test]
+async fn test_legacy_initiator_gets_tx_abort_when_inbound_open_rejected() {
+    let mut legacy_initiator = NetworkNode::new().await;
+    let mut node = NetworkNode::new().await;
+
+    let mut features = legacy_initiator.node_info().await.features;
+    features.unset_channel_v2_optional();
+    features.unset_channel_v2_required();
+    legacy_initiator
+        .update_node_features_and_wait(features)
+        .await;
+    call!(legacy_initiator.network_actor, |reply| {
+        NetworkActorMessage::new_command(NetworkActorCommand::TestEnableLegacyFixture(reply))
+    })
+    .expect("legacy initiator alive");
+
+    legacy_initiator.connect_to(&mut node).await;
+
+    let open_result = call!(legacy_initiator.network_actor, |reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+            OpenChannelCommand {
+                pubkey: node.pubkey,
+                public: true,
+                one_way: false,
+                shutdown_script: None,
+                funding_amount: 100_000_000_000,
+                funding_udt_type_script: None,
+                commitment_fee_rate: None,
+                commitment_delay_epoch: None,
+                funding_fee_rate: None,
+                tlc_expiry_delta: None,
+                tlc_min_value: None,
+                tlc_fee_proportional_millionths: None,
+                max_tlc_number_in_flight: None,
+                max_tlc_value_in_flight: None,
+            },
+            reply,
+        ))
+    })
+    .expect("legacy initiator alive")
+    .expect("legacy open must be allowed by the test fixture");
+    let temp_channel_id = open_result.channel_id;
+
+    // Without the TxAbort this channel would stay in NegotiatingFunding until the
+    // funding timeout, which is exactly the bug reported in issue #1697.
+    legacy_initiator
+        .expect_event(|event| {
+            matches!(
+                event,
+                NetworkServiceEvent::ChannelFundingAborted(id) if *id == temp_channel_id
+            )
+        })
+        .await;
+    assert!(
+        legacy_initiator
+            .get_channel_actor_state_unchecked(temp_channel_id)
+            .is_none(),
+        "aborted channel must be removed from storage"
+    );
+}
+
+#[tokio::test]
 async fn test_existing_channel_reestablishes_when_peer_drops_channel_v2_feature() {
     let (mut node, mut peer, channel_id, _) =
         NetworkNode::new_2_nodes_with_established_channel(100_000_000_000, 100_000_000_000, false)
