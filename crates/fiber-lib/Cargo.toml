@@ -2,7 +2,7 @@
 build = "src/build.rs"
 edition = "2021"
 name = "fnn"
-version = "0.10.0-rc1"
+version = "0.10.0-rc3"
 license.workspace = true
 
 [lib]
