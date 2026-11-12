@@ -23,9 +23,9 @@ use crate::cch::cch_fiber_agent::{CchFiberAgentActor, CchFiberAgentHttpBackend, 
 use crate::cch::order::CchOrderStateMachine;
 use crate::cch::scheduler::{CchOrderSchedulerActor, SchedulerArgs, SchedulerMessage};
 use crate::cch::trackers::{
-    CchTrackingEvent, InvoiceTrackingReservationResult, LndConnectionInfo, LndTrackerActor,
-    LndTrackerArgs, LndTrackerMessage, PaymentTrackingReservationResult, RedactedCchTrackingEvent,
-    MAX_TRACKED_INVOICES, MAX_TRACKED_PAYMENTS,
+    CchTrackingEvent, InvoiceSource, InvoiceTrackingReservationResult, LndConnectionInfo,
+    LndTrackerActor, LndTrackerArgs, LndTrackerMessage, PaymentTrackingReservationResult,
+    RedactedCchTrackingEvent, MAX_TRACKED_INVOICES, MAX_TRACKED_PAYMENTS,
 };
 use crate::cch::{CchConfig, CchError, CchOrderStore, CchStoreError, OutgoingFeeLimit};
 use crate::ckb::contracts::{get_script_by_contract, Contract};
@@ -2208,6 +2208,21 @@ impl<S: CchOrderStore> CchState<S> {
         mut order: CchOrder,
         event: CchTrackingEvent,
     ) -> std::result::Result<Option<CchOrder>, CchError> {
+        if let CchTrackingEvent::InvoiceChanged { source, .. } = &event {
+            let expected_source = match &order.incoming_invoice {
+                CchInvoice::Fiber(_) => InvoiceSource::Fiber,
+                CchInvoice::Lightning(_) => InvoiceSource::Lightning,
+            };
+            if *source != expected_source {
+                tracing::warn!(
+                    "Ignoring CCH invoice event from {:?} for {:x}; expected {:?}",
+                    source,
+                    order.payment_hash,
+                    expected_source
+                );
+                return Ok(None);
+            }
+        }
         if order.status == CchOrderStatus::Pending
             && matches!(
                 &event,
@@ -2255,6 +2270,7 @@ impl<S: CchOrderStore> CchState<S> {
         }
         let event = CchTrackingEvent::InvoiceChanged {
             payment_hash,
+            source: InvoiceSource::Fiber,
             status: deferred.status,
             failure_reason: deferred.failure_reason,
         };
@@ -2277,6 +2293,7 @@ impl<S: CchOrderStore> CchState<S> {
                 .contains(&payment_hash)
         {
             if let CchTrackingEvent::InvoiceChanged {
+                source: InvoiceSource::Fiber,
                 status,
                 failure_reason,
                 ..
@@ -2316,6 +2333,7 @@ impl<S: CchOrderStore> CchState<S> {
                 invoice_status,
             } => vec![CchTrackingEvent::InvoiceChanged {
                 payment_hash: *payment_hash,
+                source: InvoiceSource::Fiber,
                 status: *invoice_status,
                 failure_reason: None,
             }],

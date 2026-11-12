@@ -43,7 +43,10 @@ use tokio::{
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
-use crate::{cch::trackers::CchTrackingEvent, invoice::CkbInvoiceStatus};
+use crate::{
+    cch::trackers::{CchTrackingEvent, InvoiceSource},
+    invoice::CkbInvoiceStatus,
+};
 use fiber_types::payment::PaymentStatus as FiberPaymentStatus;
 use fiber_types::Hash256;
 
@@ -971,6 +974,7 @@ fn map_lnd_invoice_changed_event(invoice: lnrpc::Invoice) -> Result<CchTrackingE
 
     Ok(CchTrackingEvent::InvoiceChanged {
         payment_hash: Hash256::try_from(invoice.r_hash.as_slice())?,
+        source: InvoiceSource::Lightning,
         failure_reason: None,
         status,
     })

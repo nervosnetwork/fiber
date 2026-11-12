@@ -17,7 +17,7 @@ use crate::cch::{
         DEFAULT_BTC_FINAL_TLC_EXPIRY_DELTA_BLOCKS, DEFAULT_CKB_FINAL_TLC_EXPIRY_DELTA_SECONDS,
     },
     order::CchOrderStore,
-    trackers::{CchTrackingEvent, MAX_TRACKED_PAYMENTS},
+    trackers::{CchTrackingEvent, InvoiceSource, MAX_TRACKED_PAYMENTS},
     CchConfig, CchError, CchStoreError,
 };
 use crate::fiber::{
@@ -517,6 +517,7 @@ impl Actor for MockNetworkActor {
                             .insert(payment_hash, (invoice, authoritative_status));
                         state.event_port.send(CchTrackingEvent::InvoiceChanged {
                             payment_hash,
+                            source: InvoiceSource::Fiber,
                             status: event_status,
                             failure_reason: None,
                         });
@@ -544,6 +545,7 @@ impl Actor for MockNetworkActor {
                         if status_before_reply.is_some() {
                             state.event_port.send(CchTrackingEvent::InvoiceChanged {
                                 payment_hash,
+                                source: InvoiceSource::Fiber,
                                 status,
                                 failure_reason: None,
                             });
@@ -646,6 +648,7 @@ impl Actor for MockNetworkActor {
                     // Simulate FiberStoreWatcher detecting the settlement
                     state.event_port.send(CchTrackingEvent::InvoiceChanged {
                         payment_hash,
+                        source: InvoiceSource::Fiber,
                         status: CkbInvoiceStatus::Paid,
                         failure_reason: None,
                     });
@@ -741,8 +744,18 @@ impl TestHarness {
     /// Simulate incoming invoice being paid (e.g., user pays Fiber invoice or LN invoice)
     /// This injects the event via OutputPort, simulating what FiberStoreWatcher/LndTrackerActor would do
     fn simulate_incoming_invoice_received(&self, payment_hash: Hash256) {
+        let source = match self
+            ._store
+            .get_cch_order(&payment_hash)
+            .unwrap()
+            .incoming_invoice
+        {
+            CchInvoice::Fiber(_) => InvoiceSource::Fiber,
+            CchInvoice::Lightning(_) => InvoiceSource::Lightning,
+        };
         self.event_port.send(CchTrackingEvent::InvoiceChanged {
             payment_hash,
+            source,
             status: CkbInvoiceStatus::Received,
             failure_reason: None,
         });
@@ -881,6 +894,7 @@ impl TestHarness {
     fn simulate_lightning_invoice_settled(&self, payment_hash: Hash256) {
         self.event_port.send(CchTrackingEvent::InvoiceChanged {
             payment_hash,
+            source: InvoiceSource::Lightning,
             status: CkbInvoiceStatus::Paid,
             failure_reason: None,
         });
@@ -1022,8 +1036,18 @@ impl StoreBackedTestHarness {
     }
 
     fn simulate_incoming_invoice_received(&self, payment_hash: Hash256) {
+        let source = match self
+            .store
+            .get_cch_order(&payment_hash)
+            .unwrap()
+            .incoming_invoice
+        {
+            CchInvoice::Fiber(_) => InvoiceSource::Fiber,
+            CchInvoice::Lightning(_) => InvoiceSource::Lightning,
+        };
         self.event_port.send(CchTrackingEvent::InvoiceChanged {
             payment_hash,
+            source,
             status: CkbInvoiceStatus::Received,
             failure_reason: None,
         });
@@ -1995,6 +2019,7 @@ async fn test_final_send_btc_order_releases_payment_tracking_capacity() {
 
     harness.event_port.send(CchTrackingEvent::InvoiceChanged {
         payment_hash: order.payment_hash,
+        source: InvoiceSource::Fiber,
         status: CkbInvoiceStatus::Expired,
         failure_reason: Some("test expiry".to_string()),
     });
@@ -3050,6 +3075,7 @@ async fn test_incoming_cancel_does_not_finalize_outgoing_in_flight_order() {
     harness.insert_order_directly(order).await.unwrap();
     harness.event_port.send(CchTrackingEvent::InvoiceChanged {
         payment_hash,
+        source: InvoiceSource::Fiber,
         status: CkbInvoiceStatus::Cancelled,
         failure_reason: Some("stale incoming cancellation".to_string()),
     });
@@ -4483,6 +4509,175 @@ async fn test_receive_btc_rejects_conflicting_retry_for_same_payment_hash() {
         CchError::ConflictingReceiveBTCRequest(hash) if hash == payment_hash
     ));
     assert_eq!(lnd.add_calls(), 1);
+}
+
+#[tokio::test]
+async fn test_receive_btc_ignores_fiber_invoice_event_until_lnd_accepts() {
+    let store = MockCchOrderStore::new();
+    let lnd = Arc::new(MockLndInvoiceClient::default());
+    let harness = setup_test_harness_with_config_store_and_lnd(
+        receive_btc_recovery_test_config(),
+        store,
+        Some(lnd.clone()),
+    )
+    .await;
+    let payment_hash = create_valid_preimage_pair(232).1;
+    let order = call!(
+        harness.actor,
+        CchMessage::ReceiveBTC,
+        crate::cch::ReceiveBTC {
+            fiber_pay_req: create_receive_btc_fiber_invoice(
+                payment_hash,
+                100_000,
+                "invoice source check",
+            )
+            .to_string(),
+        }
+    )
+    .expect("actor call failed")
+    .expect("receive_btc should create a hold invoice");
+    assert_eq!(order.status, CchOrderStatus::Pending);
+    assert_eq!(
+        lnd.state
+            .lock()
+            .unwrap()
+            .invoices
+            .get(&payment_hash)
+            .unwrap()
+            .state(),
+        lnrpc::invoice::InvoiceState::Open
+    );
+
+    harness
+        .actor
+        .send_message(CchMessage::StoreChangeEvent(
+            StoreChange::PutCkbInvoiceStatus {
+                payment_hash,
+                invoice_status: CkbInvoiceStatus::Received,
+            },
+        ))
+        .unwrap();
+    assert_eq!(
+        harness.get_order(payment_hash).await.unwrap().status,
+        CchOrderStatus::Pending
+    );
+    assert!(!harness.was_fiber_payment_sent(payment_hash));
+
+    lnd.state
+        .lock()
+        .unwrap()
+        .invoices
+        .get_mut(&payment_hash)
+        .unwrap()
+        .state = lnrpc::invoice::InvoiceState::Accepted as i32;
+    harness.event_port.send(CchTrackingEvent::InvoiceChanged {
+        payment_hash,
+        source: InvoiceSource::Lightning,
+        status: CkbInvoiceStatus::Received,
+        failure_reason: None,
+    });
+    harness
+        .wait_for_order_status(payment_hash, CchOrderStatus::OutgoingInFlight, 2_000)
+        .await;
+    assert!(harness.was_fiber_payment_sent(payment_hash));
+}
+
+#[tokio::test]
+async fn test_receive_btc_ignores_fiber_event_with_opposite_creation_intent() {
+    let config = receive_btc_recovery_test_config();
+    let store = MockCchOrderStore::new();
+    let lnd = Arc::new(MockLndInvoiceClient::default());
+    let harness = setup_test_harness_with_config_store_and_lnd(
+        config.clone(),
+        store.clone(),
+        Some(lnd.clone()),
+    )
+    .await;
+    let payment_hash = create_valid_preimage_pair(233).1;
+    store
+        .insert_send_btc_order_creation(create_send_btc_order_creation(&config, payment_hash))
+        .unwrap();
+
+    let order = call!(
+        harness.actor,
+        CchMessage::ReceiveBTC,
+        crate::cch::ReceiveBTC {
+            fiber_pay_req: create_receive_btc_fiber_invoice(
+                payment_hash,
+                100_000,
+                "opposite intent",
+            )
+            .to_string(),
+        }
+    )
+    .expect("actor call failed")
+    .expect("opposite creation intent should not block receive_btc");
+    assert_eq!(order.status, CchOrderStatus::Pending);
+    assert_eq!(lnd.add_calls(), 1);
+    assert_eq!(
+        lnd.state
+            .lock()
+            .unwrap()
+            .invoices
+            .get(&payment_hash)
+            .unwrap()
+            .state(),
+        lnrpc::invoice::InvoiceState::Open
+    );
+
+    harness
+        .actor
+        .send_message(CchMessage::StoreChangeEvent(
+            StoreChange::PutCkbInvoiceStatus {
+                payment_hash,
+                invoice_status: CkbInvoiceStatus::Received,
+            },
+        ))
+        .unwrap();
+    assert_eq!(
+        harness.get_order(payment_hash).await.unwrap().status,
+        CchOrderStatus::Pending
+    );
+    assert!(!harness.was_fiber_payment_sent(payment_hash));
+}
+
+#[tokio::test]
+async fn test_send_btc_worker_ignores_lightning_invoice_event() {
+    let config = receive_btc_recovery_test_config();
+    let store = MockCchOrderStore::new();
+    let harness = setup_test_harness_with_config_and_store(config, store.clone()).await;
+    let payment_hash = create_valid_preimage_pair(235).1;
+    *harness.mock_state.add_invoice_delay.lock().unwrap() = Duration::from_millis(300);
+    let actor = harness.actor.clone();
+    let send_request = create_test_lightning_invoice_with_payment_hash(payment_hash).to_string();
+    let send = tokio::spawn(async move {
+        call!(
+            actor,
+            CchMessage::SendBTC,
+            crate::cch::SendBTC {
+                btc_pay_req: send_request,
+                currency: Currency::Fibb,
+            }
+        )
+        .expect("actor call failed")
+    });
+    for _ in 0..100 {
+        if store.get_send_btc_order_creation(&payment_hash).is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(store.get_send_btc_order_creation(&payment_hash).is_ok());
+
+    // An LND invoice event must not be deferred as the send_btc Fiber invoice status.
+    harness.event_port.send(CchTrackingEvent::InvoiceChanged {
+        payment_hash,
+        source: InvoiceSource::Lightning,
+        status: CkbInvoiceStatus::Received,
+        failure_reason: None,
+    });
+    let order = send.await.unwrap().unwrap();
+    assert_eq!(order.status, CchOrderStatus::Pending);
 }
 
 #[test]

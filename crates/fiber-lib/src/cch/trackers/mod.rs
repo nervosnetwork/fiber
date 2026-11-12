@@ -1,5 +1,5 @@
 mod event;
-pub use event::{CchTrackingEvent, RedactedCchTrackingEvent};
+pub use event::{CchTrackingEvent, InvoiceSource, RedactedCchTrackingEvent};
 
 mod lnd_trackers;
 pub use lnd_trackers::{
