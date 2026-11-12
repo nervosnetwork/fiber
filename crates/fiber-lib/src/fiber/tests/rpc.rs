@@ -132,6 +132,44 @@ async fn test_list_payments_filters_effective_status_with_cursor() {
 }
 
 #[tokio::test]
+async fn test_list_channels_reports_negotiated_commitment_delay() {
+    let delay = ckb_types::core::EpochNumberWithFraction::new(2, 0, 1);
+    let (nodes, _) = create_n_nodes_network_with_params(
+        &[(
+            (0, 1),
+            ChannelParameters {
+                commitment_delay_epoch: Some(delay),
+                ..ChannelParameters::new(MIN_RESERVED_CKB + 10_000_000_000, MIN_RESERVED_CKB)
+            },
+        )],
+        2,
+        Some(gen_rpc_config()),
+    )
+    .await;
+    // Both the initiator and acceptor must report the initiator's non-default value.
+    for (index, node) in nodes.iter().enumerate() {
+        let result: ListChannelsResult = node
+            .send_rpc_request(
+                "list_channels",
+                ListChannelsParams {
+                    pubkey: None,
+                    include_closed: None,
+                    only_pending: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.channels.len(), 1);
+        let channel = &result.channels[0];
+        assert_eq!(channel.is_acceptor, index == 1);
+        assert_eq!(
+            channel.commitment_delay_epoch.unwrap().value(),
+            delay.full_value()
+        );
+    }
+}
+
+#[tokio::test]
 async fn test_rpc_basic() {
     let (nodes, _channels) = create_n_nodes_network_with_params(
         &[

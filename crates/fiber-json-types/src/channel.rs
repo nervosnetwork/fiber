@@ -421,6 +421,10 @@ pub struct Channel {
     /// Is this channel initially inbound?
     /// An inbound channel is one where the counterparty is the funder of the channel.
     pub is_acceptor: bool,
+    /// The commitment transaction delay chosen by the channel initiator, encoded as
+    /// an EpochNumberWithFraction (the same format as open_channel.commitment_delay_epoch),
+    /// not a duration in milliseconds. Null when the opening record has no delay information.
+    pub commitment_delay_epoch: Option<EpochNumberWithFraction>,
     /// Is this channel one-way?
     /// Combines with is_acceptor to determine if the channel able to send payment to the counterparty or not.
     pub is_one_way: bool,

@@ -419,6 +419,7 @@ impl NetworkNodeConfigBuilder {
 
 #[derive(Debug, Default, Clone)]
 pub(crate) struct ChannelParameters {
+    pub commitment_delay_epoch: Option<ckb_types::core::EpochNumberWithFraction>,
     pub public: bool,
     pub one_way: bool,
     pub node_a_funding_amount: u128,
@@ -463,7 +464,7 @@ pub(crate) async fn create_channel_with_nodes(
                 funding_amount: params.node_a_funding_amount,
                 funding_udt_type_script: params.funding_udt_type_script,
                 commitment_fee_rate: None,
-                commitment_delay_epoch: None,
+                commitment_delay_epoch: params.commitment_delay_epoch,
                 funding_fee_rate: None,
                 tlc_expiry_delta: params.a_tlc_expiry_delta,
                 tlc_min_value: params.a_tlc_min_value,

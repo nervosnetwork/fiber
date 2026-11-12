@@ -112,6 +112,7 @@ fn pending_accept_channel_to_rpc(pending: PendingAcceptChannel) -> Channel {
         channel_id: pending.channel_id.into(),
         // The accepting node is the non-initiator, so is_acceptor = true
         is_acceptor: true,
+        commitment_delay_epoch: Some(pending.commitment_delay_epoch.into()),
         is_public: false,
         is_one_way: false,
         channel_outpoint: None,
@@ -339,6 +340,7 @@ where
                 channel_id: channel_id.into(),
                 is_public: state.is_public(),
                 is_acceptor: state.is_acceptor,
+                commitment_delay_epoch: Some(state.commitment_delay_epoch.into()),
                 is_one_way: state.is_one_way,
                 channel_outpoint: state.get_funding_transaction_outpoint(),
                 pubkey: state.remote_pubkey.into(),
@@ -447,6 +449,7 @@ where
                     channel_id: record.channel_id.into(),
                     is_public: false,
                     is_acceptor: record.is_acceptor,
+                    commitment_delay_epoch: None,
                     is_one_way: false,
                     channel_outpoint: None,
                     pubkey: record.pubkey.into(),

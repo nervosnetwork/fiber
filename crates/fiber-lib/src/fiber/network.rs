@@ -754,6 +754,8 @@ pub struct AcceptChannelResponse {
 /// These are held in `to_be_accepted_channels` waiting for a manual `accept_channel` call.
 #[derive(Debug, Clone)]
 pub struct PendingAcceptChannel {
+    /// The commitment delay proposed by the channel initiator, in epoch encoding.
+    pub commitment_delay_epoch: u64,
     /// The temporary channel ID assigned by the initiator.
     pub channel_id: Hash256,
     /// The public key of the channel initiator.
@@ -3683,6 +3685,9 @@ where
                             channel_id: *channel_id,
                             pubkey: *pubkey,
                             funding_amount: pending_open.open_channel.funding_amount,
+                            commitment_delay_epoch: pending_open
+                                .open_channel
+                                .commitment_delay_epoch,
                             udt_type_script: pending_open
                                 .open_channel
                                 .funding_udt_type_script
