@@ -8046,6 +8046,10 @@ where
                     .store
                     .get_channel_actor_state(&prev_tlc.prev_channel_id)
                 {
+                    // A closed channel settles its TLCs on chain, with the preimage stored above.
+                    if matches!(channel.state, ChannelState::Closed(_)) {
+                        continue;
+                    }
                     let Some(tlc) = channel
                         .tlc_state
                         .get(&TLCId::Received(prev_tlc.prev_tlc_id))
@@ -8108,6 +8112,10 @@ where
                 .store
                 .get_channel_actor_state(&prev_tlc.prev_channel_id)
             {
+                // A closed channel settles its TLCs on chain: the peer takes an unpaid one back.
+                if matches!(channel.state, ChannelState::Closed(_)) {
+                    continue;
+                }
                 let Some(tlc) = channel
                     .tlc_state
                     .get(&TLCId::Received(prev_tlc.prev_tlc_id))
