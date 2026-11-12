@@ -12651,3 +12651,115 @@ async fn test_missing_payment_session_is_still_logged() {
         .expect("the actor stops")
         .expect("the actor ends cleanly");
 }
+
+// A trampoline payment whose upstream channel was force-closed: the incoming TLC is settled on
+// chain, so startup recovery keeps the preimage and sends no removal to the closed channel.
+#[tokio::test]
+async fn test_startup_skips_closed_upstream_channel_on_success() {
+    assert_startup_skips_closed_upstream_channel(true).await;
+}
+
+#[tokio::test]
+async fn test_startup_skips_closed_upstream_channel_on_failure() {
+    assert_startup_skips_closed_upstream_channel(false).await;
+}
+
+async fn assert_startup_skips_closed_upstream_channel(success: bool) {
+    init_tracing();
+    let (upstream, mut relay, channel) =
+        create_nodes_with_established_channel(100000000000, 11800000000, false).await;
+    let preimage = gen_rand_sha256_hash();
+    let invoice = relay.build_basic_invoice(1000, preimage);
+    let hash = *invoice.payment_hash();
+    relay.insert_invoice(invoice.clone(), None);
+    upstream
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    wait_until_timeout(5000, || {
+        relay
+            .get_channel_actor_state(channel)
+            .tlc_state
+            .received_tlcs
+            .tlcs
+            .iter()
+            .any(|tlc| {
+                tlc.payment_hash == hash
+                    && tlc.inbound_status() == fiber_types::InboundTlcStatus::Committed
+            })
+    })
+    .await;
+    relay.stop().await;
+    let mut state = relay.get_channel_actor_state(channel);
+    let tlc = state
+        .tlc_state
+        .received_tlcs
+        .tlcs
+        .iter()
+        .find(|tlc| tlc.payment_hash == hash)
+        .unwrap()
+        .clone();
+    // The upstream channel was force-closed while the downstream payment was in flight.
+    state.state = ChannelState::Closed(
+        CloseFlags::UNCOOPERATIVE_LOCAL | CloseFlags::WAITING_ONCHAIN_SETTLEMENT,
+    );
+    relay.store.insert_channel_actor_state(state);
+
+    // The downstream payment then ended, before its result reached the upstream TLC.
+    let target = gen_rand_fiber_public_key();
+    let request = SendPaymentDataBuilder::new(target, 1000, hash)
+        .max_fee_amount(Some(1000))
+        .trampoline_context(Some(TrampolineContext {
+            previous_tlcs: vec![PrevTlcInfo::new_with_shared_secret(
+                channel,
+                tlc.id(),
+                0,
+                tlc.shared_secret,
+            )],
+            hash_algorithm: tlc.hash_algorithm,
+            ..Default::default()
+        }))
+        .build()
+        .unwrap();
+    let mut session = fiber_types::PaymentSession::new_session(&relay.store, request, 1);
+    if success {
+        let mut attempt = session.new_attempt(
+            1,
+            relay.pubkey,
+            target,
+            vec![PaymentHopData {
+                amount: 1000,
+                ..Default::default()
+            }],
+        );
+        attempt.set_success_status();
+        attempt.preimage = Some(preimage);
+        relay.store.insert_attempt(attempt);
+        session.set_success_status();
+    } else {
+        session.set_failed_status("downstream route failed");
+    }
+    relay.store.insert_payment_session(session);
+    relay.store.clear_attempts_channel_index(hash);
+
+    // The test runtime is single threaded, so the node logs on this thread.
+    let errors = ErrorEvents::capture();
+    relay.start().await;
+    if success {
+        // The preimage is kept for the on-chain settlement of the incoming TLC.
+        wait_until_timeout(5000, || {
+            crate::invoice::PreimageStore::get_preimage(&relay.store, &hash) == Some(preimage)
+        })
+        .await;
+    }
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    let removals: Vec<String> = errors
+        .messages()
+        .into_iter()
+        .filter(|message| message.contains("removing tlc") || message.contains("upstream channel"))
+        .collect();
+    assert_eq!(removals, Vec::<String>::new());
+}
