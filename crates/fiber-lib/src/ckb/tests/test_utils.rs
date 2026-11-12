@@ -857,10 +857,15 @@ pub fn complete_commitment_tx(commitment_tx: &TransactionView) -> TransactionVie
 #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 async fn test_set_and_get_block_timestamp() {
+    // A block of its own: the mock chain commits every transaction in H256::default(), so another
+    // test may have cached that block's timestamp already.
+    let block = H256::from(rand::random::<[u8; 32]>());
     let now = now_timestamp_as_millis_u64();
-    set_next_block_timestamp(now).await;
-    let timestamp = get_block_timestamp(H256::default()).await;
-    assert_eq!(timestamp, now);
+    // One lock for both steps, or a parallel test reading a new block takes the next timestamp.
+    let context = BLOCK_TIMESTAMP_CONTEXT.get_or_init(|| TokioRwLock::new(Default::default()));
+    let mut context = context.write().await;
+    context.set_next_block_timestamp(now);
+    assert_eq!(context.get_block_timestamp(block), now);
 }
 
 #[derive(Clone, Debug)]
