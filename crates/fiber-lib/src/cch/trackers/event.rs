@@ -2,11 +2,20 @@ use crate::invoice::CkbInvoiceStatus;
 use fiber_types::{Hash256, PaymentStatus};
 use std::fmt;
 
+/// The backend that owns an incoming CCH invoice and reports its status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InvoiceSource {
+    Fiber,
+    Lightning,
+}
+
 #[derive(Debug, Clone)]
 pub enum CchTrackingEvent {
     InvoiceChanged {
         /// The payment hash of the invoice.
         payment_hash: Hash256,
+        /// Set by the backend adapter, not taken from the invoice.
+        source: InvoiceSource,
         status: CkbInvoiceStatus,
         failure_reason: Option<String>,
     },
@@ -37,11 +46,13 @@ impl fmt::Debug for RedactedCchTrackingEvent<'_> {
         match self.0 {
             CchTrackingEvent::InvoiceChanged {
                 payment_hash,
+                source,
                 status,
                 failure_reason,
             } => f
                 .debug_struct("InvoiceChanged")
                 .field("payment_hash", payment_hash)
+                .field("source", source)
                 .field("status", status)
                 .field("failure_reason", failure_reason)
                 .finish(),

@@ -7,7 +7,7 @@
 
 use crate::cch::actor::redacted_store_change_summary;
 use crate::cch::order::state_machine::CchOrderEvent;
-use crate::cch::trackers::{CchTrackingEvent, RedactedCchTrackingEvent};
+use crate::cch::trackers::{CchTrackingEvent, InvoiceSource, RedactedCchTrackingEvent};
 use crate::store::store_impl::StoreChange;
 use fiber_types::invoice::CkbInvoiceStatus;
 use fiber_types::{AttemptStatus, CchOrderStatus, Hash256, PaymentStatus};
@@ -28,6 +28,7 @@ fn test_invoice_changed_event_converts_to_incoming_invoice_changed() {
     let payment_hash = test_payment_hash(1);
     let tracking_event = CchTrackingEvent::InvoiceChanged {
         payment_hash,
+        source: InvoiceSource::Fiber,
         status: CkbInvoiceStatus::Received,
         failure_reason: None,
     };
@@ -51,6 +52,7 @@ fn test_invoice_changed_event_preserves_failure_reason() {
     let payment_hash = test_payment_hash(1);
     let tracking_event = CchTrackingEvent::InvoiceChanged {
         payment_hash,
+        source: InvoiceSource::Fiber,
         status: CkbInvoiceStatus::Cancelled,
         failure_reason: Some("cancelled by user".to_string()),
     };
@@ -128,6 +130,7 @@ fn test_tracking_event_payment_hash_accessor() {
 
     let invoice_event = CchTrackingEvent::InvoiceChanged {
         payment_hash,
+        source: InvoiceSource::Fiber,
         status: CkbInvoiceStatus::Open,
         failure_reason: None,
     };
