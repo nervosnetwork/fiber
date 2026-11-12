@@ -12750,7 +12750,10 @@ async fn assert_startup_skips_closed_upstream_channel(success: bool) {
     relay.start().await;
     if success {
         // The preimage is kept for the on-chain settlement of the incoming TLC.
-        wait_until_timeout(5000, || relay.store.get_preimage(&hash) == Some(preimage)).await;
+        wait_until_timeout(5000, || {
+            crate::invoice::PreimageStore::get_preimage(&relay.store, &hash) == Some(preimage)
+        })
+        .await;
     }
     tokio::time::sleep(Duration::from_millis(1000)).await;
     let removals: Vec<String> = errors
