@@ -25,7 +25,7 @@ pub use fiber_types_090::channel::ChannelActorData as OldChannelActorData;
 pub use fiber_types_090::channel::ChannelOpenRecord as OldChannelOpenRecord;
 pub use fiber_types_090::watchtower::ChannelData as OldChannelData;
 
-// New (0.10.0-rc3) types, with `commitment_contract_features` (defaults to Legacy).
+// New (0.10.0) types, with `commitment_contract_features` (defaults to Legacy).
 pub use fiber_types_0100::channel::ChannelActorData as NewChannelActorData;
 pub use fiber_types_0100::channel::ChannelOpenRecord as NewChannelOpenRecord;
 pub use fiber_types_0100::watchtower::ChannelData as NewChannelData;
