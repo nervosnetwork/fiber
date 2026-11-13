@@ -56,11 +56,25 @@ const ACTOR_HANDLE_WARN_THRESHOLD_MS: u64 = 15_000;
 
 pub struct InFlightCkbTxActorArguments {
     pub transaction: Option<TransactionView>,
+    pub watched_inputs: Vec<OutPoint>,
+    pub only_abort_on_input_spent: bool,
 }
 
 pub struct InFlightCkbTxActorState {
     transaction: Option<TransactionView>,
+    watched_inputs: Vec<OutPoint>,
+    only_abort_on_input_spent: bool,
     result: Option<CkbTxTracingResult>,
+}
+
+impl InFlightCkbTxActorState {
+    fn tracer_mask(&self) -> CkbTxTracingMask {
+        if self.only_abort_on_input_spent {
+            CkbTxTracingMask::Committed | CkbTxTracingMask::WatchedInputSpent
+        } else {
+            CkbTxTracingMask::Committed | CkbTxTracingMask::Rejected
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -74,7 +88,15 @@ pub enum InternalMessage {
 #[derive(Clone, Debug, AsRefStr)]
 pub enum InFlightCkbTxActorMessage {
     /// Send the transaction. The actor may start with only tx tracer first.
-    SendTx(TransactionView),
+    SendTx {
+        tx: TransactionView,
+        only_abort_on_input_spent: bool,
+    },
+    /// Register funding inputs to watch for double-spends while the tx is unbroadcast.
+    WatchInputs {
+        inputs: Vec<OutPoint>,
+        only_abort_on_input_spent: bool,
+    },
     /// Message for the actor itself
     Internal(InternalMessage),
 }
@@ -93,8 +115,20 @@ where
         _myself: ActorRef<Self::Msg>,
         args: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
+        let mut watched_inputs = args.watched_inputs;
+        if matches!(self.tx_kind, InFlightCkbTxKind::Funding(_)) {
+            if let Some(tx) = args.transaction.as_ref() {
+                for input in tx.input_pts_iter() {
+                    if !watched_inputs.contains(&input) {
+                        watched_inputs.push(input);
+                    }
+                }
+            }
+        }
         Ok(InFlightCkbTxActorState {
             transaction: args.transaction,
+            watched_inputs,
+            only_abort_on_input_spent: args.only_abort_on_input_spent,
             result: None,
         })
     }
@@ -129,20 +163,51 @@ where
                 self.send_tx(myself, state).await
             }
             InFlightCkbTxActorMessage::Internal(InternalMessage::ReportTracingResult(result)) => {
+                if state.only_abort_on_input_spent
+                    && !matches!(result.tx_status, TxStatus::Committed(..))
+                    && !result.watched_input_spent
+                {
+                    return Ok(());
+                }
                 state.result = Some(result.clone());
                 self.report_tracing_result(myself, result).await
             }
-            InFlightCkbTxActorMessage::SendTx(tx) => {
+            InFlightCkbTxActorMessage::SendTx {
+                tx,
+                only_abort_on_input_spent,
+            } => {
                 let tx_hash: Hash256 = tx.hash().into();
                 // ignore if the tx has does not match
                 if tx_hash == self.tx_hash {
                     let should_send_tx = state.transaction.is_none();
+                    if matches!(self.tx_kind, InFlightCkbTxKind::Funding(_)) {
+                        self.register_watched_inputs(
+                            &myself,
+                            state,
+                            tx.input_pts_iter().collect(),
+                            only_abort_on_input_spent,
+                        )?;
+                    }
                     state.transaction = Some(tx);
                     if should_send_tx {
                         self.send_tx_interval(myself).await?;
                     }
                 } else {
                     tracing::error!("expected tx hash {}, got {}", self.tx_hash, tx_hash);
+                }
+                Ok(())
+            }
+            InFlightCkbTxActorMessage::WatchInputs {
+                inputs,
+                only_abort_on_input_spent,
+            } => {
+                if matches!(self.tx_kind, InFlightCkbTxKind::Funding(_)) {
+                    self.register_watched_inputs(
+                        &myself,
+                        state,
+                        inputs,
+                        only_abort_on_input_spent,
+                    )?;
                 }
                 Ok(())
             }
@@ -164,6 +229,57 @@ where
         8000
     }
 
+    fn spawn_tracer(
+        &self,
+        myself: &ActorRef<InFlightCkbTxActorMessage>,
+        mask: CkbTxTracingMask,
+        watched_inputs: Vec<OutPoint>,
+    ) -> Result<(), ActorProcessingErr> {
+        let tracing_request = |tx| {
+            CkbChainMessage::CreateTxTracer(CkbTxTracer {
+                tx_hash: self.tx_hash,
+                confirmations: self.confirmations,
+                mask,
+                watched_inputs,
+                callback: tx,
+            })
+        };
+
+        self.chain_actor.call_and_forward(
+            tracing_request,
+            myself,
+            |tracing_result| {
+                InFlightCkbTxActorMessage::Internal(InternalMessage::ReportTracingResult(
+                    tracing_result,
+                ))
+            },
+            None,
+        )?;
+        Ok(())
+    }
+
+    fn register_watched_inputs(
+        &self,
+        myself: &ActorRef<InFlightCkbTxActorMessage>,
+        state: &mut InFlightCkbTxActorState,
+        inputs: Vec<OutPoint>,
+        only_abort_on_input_spent: bool,
+    ) -> Result<(), ActorProcessingErr> {
+        let mode_upgraded = only_abort_on_input_spent && !state.only_abort_on_input_spent;
+        state.only_abort_on_input_spent |= only_abort_on_input_spent;
+        let mut added = false;
+        for input in inputs {
+            if !state.watched_inputs.contains(&input) {
+                state.watched_inputs.push(input);
+                added = true;
+            }
+        }
+        if (added || mode_upgraded) && state.result.is_none() {
+            self.spawn_tracer(myself, state.tracer_mask(), state.watched_inputs.clone())?;
+        }
+        Ok(())
+    }
+
     async fn start(
         &self,
         myself: ActorRef<InFlightCkbTxActorMessage>,
@@ -177,25 +293,7 @@ where
             state.transaction.is_some(),
         );
         // start tx tracer
-        let tracing_request = |tx| {
-            CkbChainMessage::CreateTxTracer(CkbTxTracer {
-                tx_hash: self.tx_hash,
-                confirmations: self.confirmations,
-                mask: CkbTxTracingMask::Committed | CkbTxTracingMask::Rejected,
-                callback: tx,
-            })
-        };
-
-        self.chain_actor.call_and_forward(
-            tracing_request,
-            &myself,
-            |tracing_result| {
-                InFlightCkbTxActorMessage::Internal(InternalMessage::ReportTracingResult(
-                    tracing_result,
-                ))
-            },
-            None,
-        )?;
+        self.spawn_tracer(&myself, state.tracer_mask(), state.watched_inputs.clone())?;
 
         if state.transaction.is_some() {
             self.send_tx_interval(myself).await?;
@@ -283,7 +381,7 @@ where
                     self.tx_hash,
                     err
                 );
-                if reports_send_error(&self.tx_kind, &err) {
+                if !state.only_abort_on_input_spent && reports_send_error(&self.tx_kind, &err) {
                     let _ = self
                         .chain_actor
                         .send_message(CkbChainMessage::ReportSendTxError(self.tx_hash, err));
@@ -338,14 +436,15 @@ where
             }
             (InFlightCkbTxKind::Funding(_channel_id), status) => {
                 tracing::error!(
-                    "Funding transaction {:?} failed to be confirmed with final status {:?}",
+                    "Funding transaction {:?} failed to be confirmed with final status {:?} (watched_input_spent={})",
                     self.tx_hash,
-                    status
+                    status,
+                    result.watched_input_spent,
                 );
-                NetworkActorEvent::FundingTransactionFailed(OutPoint::new(
-                    self.tx_hash.into(),
-                    DUMMY_FUNDING_TX_INDEX,
-                ))
+                NetworkActorEvent::FundingTransactionFailed {
+                    outpoint: OutPoint::new(self.tx_hash.into(), DUMMY_FUNDING_TX_INDEX),
+                    input_spent: result.watched_input_spent,
+                }
             }
             (
                 InFlightCkbTxKind::Closing(pubkey, channel_id, force_closing),

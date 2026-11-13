@@ -1388,15 +1388,18 @@ pub enum NetworkActorEvent {
     FundingTransactionPending(Transaction, OutPoint, Hash256),
 
     /// An externally signed funding transaction was released to the peer. Watch
-    /// for confirmation without broadcasting it before signatures are complete.
-    ExternalFundingTransactionSubmitted(OutPoint, Hash256),
+    /// for confirmation or input double-spends without broadcasting it before signatures are complete.
+    ExternalFundingTransactionSubmitted(OutPoint, Hash256, Vec<OutPoint>),
 
     /// A funding transaction has been confirmed. The transaction was included in the
     /// block with the given transaction index, and the timestamp in the block header.
     FundingTransactionConfirmed(OutPoint, H256, u32, u64),
 
     /// A funding transaction has failed.
-    FundingTransactionFailed(OutPoint),
+    FundingTransactionFailed {
+        outpoint: OutPoint,
+        input_spent: bool,
+    },
 
     /// A closing transaction has been confirmed (pubkey, channel_id, tx_hash, force, close_by_us).
     ClosingTransactionConfirmed(Pubkey, Hash256, Byte32, bool, bool),
@@ -2011,12 +2014,18 @@ where
                     .on_funding_transaction_pending(channel_id, transaction, outpoint)
                     .await;
             }
-            NetworkActorEvent::ExternalFundingTransactionSubmitted(outpoint, channel_id) => {
+            NetworkActorEvent::ExternalFundingTransactionSubmitted(
+                outpoint,
+                channel_id,
+                watched_inputs,
+            ) => {
                 state.pending_channels.insert(outpoint.clone(), channel_id);
                 if let Err(err) = state
                     .trace_tx(
                         outpoint.tx_hash().into(),
                         InFlightCkbTxKind::Funding(channel_id),
+                        watched_inputs,
+                        true,
                     )
                     .await
                 {
@@ -2034,10 +2043,18 @@ where
                     .on_funding_transaction_confirmed(outpoint, block_hash, tx_index, timestamp)
                     .await;
             }
-            NetworkActorEvent::FundingTransactionFailed(outpoint) => {
+            NetworkActorEvent::FundingTransactionFailed {
+                outpoint,
+                input_spent,
+            } => {
                 state.inflight_tracers.remove(&outpoint.tx_hash().into());
-                error!("Funding transaction failed: {:?}", outpoint);
-                state.abort_funding(Either::Right(outpoint)).await;
+                error!(
+                    "Funding transaction failed: {:?} (input_spent={})",
+                    outpoint, input_spent
+                );
+                state
+                    .on_funding_transaction_failed(outpoint, input_spent)
+                    .await;
             }
             NetworkActorEvent::ClosingTransactionPending(channel_id, pubkey, tx, force) => {
                 if state
@@ -2254,6 +2271,12 @@ where
                             StopReason::AbortFundingWithDetail(detail) => detail.clone(),
                             StopReason::FundingFailed => {
                                 format!("[Channel {}] Funding transaction failed", channel_id)
+                            }
+                            StopReason::FundingInputSpent => {
+                                format!(
+                                    "[Channel {}] Funding input spent by another committed transaction",
+                                    channel_id
+                                )
                             }
                             StopReason::FundingFailedWithDetail(detail) => detail.clone(),
                             StopReason::PeerDisConnected => {
@@ -5810,8 +5833,19 @@ where
             )),
         };
 
+        let watched_inputs: Vec<OutPoint> = if has_partial_witnesses {
+            funding_tx.input_pts_iter().collect()
+        } else {
+            Vec::new()
+        };
+        let only_abort_on_input_spent = state.only_abort_funding_on_input_spent(&channel_id);
         state
-            .trace_tx(tx_hash, InFlightCkbTxKind::Funding(channel_id))
+            .trace_tx(
+                tx_hash,
+                InFlightCkbTxKind::Funding(channel_id),
+                watched_inputs,
+                only_abort_on_input_spent,
+            )
             .await?;
 
         myself
@@ -6688,13 +6722,33 @@ where
         Ok(features)
     }
 
+    fn only_abort_funding_on_input_spent(&self, channel_id: &Hash256) -> bool {
+        self.store
+            .get_channel_actor_state(channel_id)
+            .is_some_and(|channel_state| {
+                channel_state.has_submitted_local_external_funding()
+                    && channel_state.funding_tx_confirmed_at.is_none()
+                    && !channel_state.is_ready()
+                    && !channel_state.is_closed()
+            })
+    }
+
     pub async fn trace_tx(
         &mut self,
         tx_hash: Hash256,
         tx_kind: InFlightCkbTxKind,
+        watched_inputs: Vec<OutPoint>,
+        only_abort_on_input_spent: bool,
     ) -> crate::Result<()> {
-        if self.inflight_tracers.contains_key(&tx_hash) {
-            debug!("Skipping duplicate tracer for tx {:?}", tx_hash);
+        if let Some(existing) = self.inflight_tracers.get(&tx_hash) {
+            if !watched_inputs.is_empty() || only_abort_on_input_spent {
+                existing.send_message(InFlightCkbTxActorMessage::WatchInputs {
+                    inputs: watched_inputs,
+                    only_abort_on_input_spent,
+                })?;
+            } else {
+                debug!("Skipping duplicate tracer for tx {:?}", tx_hash);
+            }
             return Ok(());
         }
         let handler = InFlightCkbTxActor {
@@ -6709,7 +6763,11 @@ where
         let (actor_ref, _) = Actor::spawn_linked(
             None,
             handler,
-            InFlightCkbTxActorArguments { transaction: None },
+            InFlightCkbTxActorArguments {
+                transaction: None,
+                watched_inputs,
+                only_abort_on_input_spent,
+            },
             self.network.get_cell(),
         )
         .await?;
@@ -6724,6 +6782,12 @@ where
         tx_kind: InFlightCkbTxKind,
     ) -> crate::Result<()> {
         let tx_hash: Hash256 = tx.hash().into();
+        let only_abort_on_input_spent = match &tx_kind {
+            InFlightCkbTxKind::Funding(channel_id) => {
+                self.only_abort_funding_on_input_spent(channel_id)
+            }
+            InFlightCkbTxKind::Closing(..) => false,
+        };
         if let Some(existing) = self.inflight_tracers.get(&tx_hash) {
             // A trace-only actor already exists for this tx_hash.
             // Upgrade it with the actual transaction for broadcasting.
@@ -6731,7 +6795,10 @@ where
                 "Upgrading existing tracer for tx {:?} with transaction payload",
                 tx_hash
             );
-            existing.send_message(InFlightCkbTxActorMessage::SendTx(tx))?;
+            existing.send_message(InFlightCkbTxActorMessage::SendTx {
+                tx,
+                only_abort_on_input_spent,
+            })?;
             return Ok(());
         }
         debug!(
@@ -6752,11 +6819,19 @@ where
             confirmations: CKB_TX_TRACING_CONFIRMATIONS,
         };
 
+        let watched_inputs = if matches!(handler.tx_kind, InFlightCkbTxKind::Funding(_)) {
+            tx.input_pts_iter().collect()
+        } else {
+            Vec::new()
+        };
+
         let (actor_ref, _) = Actor::spawn_linked(
             None,
             handler,
             InFlightCkbTxActorArguments {
                 transaction: Some(tx),
+                watched_inputs,
+                only_abort_on_input_spent,
             },
             self.network.get_cell(),
         )
@@ -6764,6 +6839,68 @@ where
         self.inflight_tracers.insert(tx_hash, actor_ref);
 
         Ok(())
+    }
+
+    pub async fn on_funding_transaction_failed(&mut self, outpoint: OutPoint, input_spent: bool) {
+        if !input_spent {
+            if let Some(&channel_id) = self.pending_channels.get(&outpoint) {
+                if self.only_abort_funding_on_input_spent(&channel_id) {
+                    warn!(
+                        "Keeping pending external-funding channel {} after non-double-spend funding tx failure {:?}: signed funding tx may still confirm",
+                        channel_id, outpoint
+                    );
+                    let watched_inputs = self
+                        .store
+                        .get_channel_actor_state(&channel_id)
+                        .and_then(|channel_state| {
+                            channel_state.funding_tx.as_ref().map(|tx| {
+                                tx.raw()
+                                    .inputs()
+                                    .into_iter()
+                                    .map(|input| input.previous_output())
+                                    .collect()
+                            })
+                        })
+                        .unwrap_or_default();
+                    if let Err(err) = self
+                        .trace_tx(
+                            outpoint.tx_hash().into(),
+                            InFlightCkbTxKind::Funding(channel_id),
+                            watched_inputs,
+                            true,
+                        )
+                        .await
+                    {
+                        error!(
+                            "Failed to re-arm external funding transaction tracer for channel {}: {}",
+                            channel_id, err
+                        );
+                    }
+                    return;
+                }
+            }
+        }
+
+        let Some(channel_id) = self.pending_channels.remove(&outpoint) else {
+            warn!(
+                "Funding transaction failed for outpoint {:?} but no channel found",
+                &outpoint
+            );
+            return;
+        };
+
+        let stop_reason = if input_spent {
+            StopReason::FundingInputSpent
+        } else {
+            StopReason::FundingFailed
+        };
+
+        self.send_message_to_channel_actor(
+            channel_id,
+            None,
+            ChannelActorMessage::Event(ChannelEvent::Stop(stop_reason)),
+        )
+        .await;
     }
 
     pub async fn abort_funding(&mut self, channel_id_or_outpoint: Either<Hash256, OutPoint>) {
@@ -6806,11 +6943,7 @@ where
 
     pub async fn abandon_channel(&mut self, channel_id: Hash256) -> ProcessingChannelResult {
         if let Some(channel_actor_state) = self.store.get_channel_actor_state(&channel_id) {
-            if channel_actor_state
-                .ephemeral_config
-                .external_funding
-                .signed_submitted
-            {
+            if channel_actor_state.has_submitted_local_external_funding() {
                 return Err(ProcessingChannelError::InvalidParameter(format!(
                     "Channel {} has released a signed external funding transaction and cannot be abandoned",
                     channel_id

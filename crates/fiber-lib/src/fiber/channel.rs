@@ -1252,8 +1252,7 @@ where
                 Ok(())
             }
             FiberChannelMessage::TxAbort(tx_abort) => {
-                if state.state.can_abort_funding()
-                    && !state.ephemeral_config.external_funding.signed_submitted
+                if state.state.can_abort_funding() && !state.has_submitted_local_external_funding()
                 {
                     let peer_msg = String::from_utf8_lossy(&tx_abort.message);
                     let detail = if !tx_abort.message.is_empty() {
@@ -4501,6 +4500,25 @@ where
         }
     }
 
+    fn notify_external_funding_submitted(&self, state: &ChannelActorState) {
+        let watched_inputs = state
+            .must_get_funding_transaction()
+            .raw()
+            .inputs()
+            .into_iter()
+            .map(|input| input.previous_output())
+            .collect();
+        self.network
+            .send_message(NetworkActorMessage::new_event(
+                NetworkActorEvent::ExternalFundingTransactionSubmitted(
+                    state.must_get_funding_transaction_outpoint(),
+                    state.get_id(),
+                    watched_inputs,
+                ),
+            ))
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+    }
+
     async fn handle_external_funding_tx_sync(
         &self,
         myself: &ActorRef<ChannelActorMessage>,
@@ -4519,14 +4537,7 @@ where
                 if flags.contains(SigningCommitmentFlags::OUR_COMMITMENT_SIGNED_SENT)
         );
         self.install_external_funding_signed_tx(state, signed_tx, already_sent_commitment);
-        self.network
-            .send_message(NetworkActorMessage::new_event(
-                NetworkActorEvent::ExternalFundingTransactionSubmitted(
-                    state.must_get_funding_transaction_outpoint(),
-                    state.get_id(),
-                ),
-            ))
-            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        self.notify_external_funding_submitted(state);
         if !already_sent_commitment {
             self.handle_commitment_signed_command(myself, state).await?;
         } else if let ChannelState::SigningCommitment(flags) = state.state {
@@ -4623,14 +4634,7 @@ where
                 "Cannot release signed funding tx without a local commitment".to_string(),
             ));
         }
-        self.network
-            .send_message(NetworkActorMessage::new_event(
-                NetworkActorEvent::ExternalFundingTransactionSubmitted(
-                    state.must_get_funding_transaction_outpoint(),
-                    state.get_id(),
-                ),
-            ))
-            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        self.notify_external_funding_submitted(state);
         self.network
             .send_message(NetworkActorMessage::new_command(
                 NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
@@ -4792,8 +4796,13 @@ where
             }
             ChannelEvent::Stop(reason) => {
                 debug_event!(self.network, "ChannelActorStopped");
+                let funding_input_spent_onchain = reason == StopReason::FundingInputSpent
+                    && state.funding_tx_confirmed_at.is_none()
+                    && !state.is_ready()
+                    && !state.is_closed();
                 if (reason == StopReason::Abandon || reason.is_abort_funding())
-                    && state.ephemeral_config.external_funding.signed_submitted
+                    && state.has_submitted_local_external_funding()
+                    && !funding_input_spent_onchain
                 {
                     warn!(
                         "Ignoring funding abort for channel {}: signed external funding tx may still confirm",
@@ -4817,14 +4826,19 @@ where
                     }
                     if let Some(detail) = reason.funding_abort_detail() {
                         state.funding_abort_detail = Some(detail.to_string());
+                    } else if reason == StopReason::FundingInputSpent {
+                        state.funding_abort_detail = Some(format!(
+                            "[Channel {}] Funding input spent by another committed transaction",
+                            state.get_id()
+                        ));
                     }
                     // Do not send local diagnostics to the peer. The detailed reason is
                     // retained for the local RPC/history path, while the wire message is
                     // deliberately stable and public-safe.
                     let public_abort_message = match reason {
-                        StopReason::FundingFailed | StopReason::FundingFailedWithDetail(_) => {
-                            "Funding failed"
-                        }
+                        StopReason::FundingFailed
+                        | StopReason::FundingInputSpent
+                        | StopReason::FundingFailedWithDetail(_) => "Funding failed",
                         StopReason::AbortFunding | StopReason::AbortFundingWithDetail(_) => {
                             "Funding aborted"
                         }
@@ -4895,14 +4909,7 @@ where
                 if state.ephemeral_config.external_funding.signed_submitted
                     && state.funding_tx_confirmed_at.is_none()
                 {
-                    self.network
-                        .send_message(NetworkActorMessage::new_event(
-                            NetworkActorEvent::ExternalFundingTransactionSubmitted(
-                                state.must_get_funding_transaction_outpoint(),
-                                state.get_id(),
-                            ),
-                        ))
-                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                    self.notify_external_funding_submitted(state);
                 }
                 self.finalize_closed_retryable_tlc_operations(myself, state)
                     .await;
@@ -5990,14 +5997,7 @@ where
         if state.ephemeral_config.external_funding.signed_submitted
             && state.funding_tx_confirmed_at.is_none()
         {
-            self.network
-                .send_message(NetworkActorMessage::new_event(
-                    NetworkActorEvent::ExternalFundingTransactionSubmitted(
-                        state.must_get_funding_transaction_outpoint(),
-                        state.get_id(),
-                    ),
-                ))
-                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+            self.notify_external_funding_submitted(state);
         }
         // A forward dispatched before the process exit has no in-memory result left, and
         // reestablishment does not replay it. Resolve it from the persisted downstream link.
@@ -6443,6 +6443,7 @@ pub enum StopReason {
     AbortFunding,
     AbortFundingWithDetail(String),
     FundingFailed,
+    FundingInputSpent,
     FundingFailedWithDetail(String),
     Closed,
     PeerDisConnected,
@@ -6455,6 +6456,7 @@ impl StopReason {
             StopReason::AbortFunding
                 | StopReason::AbortFundingWithDetail(_)
                 | StopReason::FundingFailed
+                | StopReason::FundingInputSpent
                 | StopReason::FundingFailedWithDetail(_)
         )
     }
@@ -12099,8 +12101,12 @@ impl ChannelActorState {
         Ok(())
     }
 
+    pub(crate) fn has_submitted_local_external_funding(&self) -> bool {
+        !self.is_acceptor && self.ephemeral_config.external_funding.signed_submitted
+    }
+
     pub(crate) fn can_abort_funding_on_timeout(&self) -> bool {
-        if self.ephemeral_config.external_funding.signed_submitted {
+        if self.has_submitted_local_external_funding() {
             return false;
         }
         // Can abort funding on timeout if the channel is not ready and we have
