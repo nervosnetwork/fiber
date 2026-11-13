@@ -4,7 +4,7 @@ use std::ops::Bound;
 use std::sync::Arc;
 use tracing::info;
 
-use crate::backend::StorageBackend;
+use crate::backend::{BatchWriter, StorageBackend};
 use crate::iterator::{IteratorDirection, KVPair};
 
 /// Minimal object-safe store trait for migration operations.
@@ -12,6 +12,9 @@ use crate::iterator::{IteratorDirection, KVPair};
 pub trait MigrationStore {
     fn get(&self, key: &[u8]) -> Option<Vec<u8>>;
     fn put(&self, key: &[u8], value: &[u8]);
+
+    /// Atomically preserve archived records and remove their active keys.
+    fn write_batch(&self, puts: &[(Vec<u8>, Vec<u8>)], deletes: &[Vec<u8>]);
 
     /// Collect all key-value pairs whose keys start with the given prefix.
     fn collect_prefix(&self, prefix: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)>;
@@ -39,6 +42,17 @@ impl<T: StorageBackend + ?Sized> MigrationStore for T {
         StorageBackend::put(self, key, value)
     }
 
+    fn write_batch(&self, puts: &[(Vec<u8>, Vec<u8>)], deletes: &[Vec<u8>]) {
+        let mut batch = self.batch();
+        for (key, value) in puts {
+            batch.put(key, value);
+        }
+        for key in deletes {
+            batch.delete(key);
+        }
+        batch.commit();
+    }
+
     fn collect_prefix(&self, prefix: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
         let owned_prefix = prefix.to_vec();
         let pairs: Vec<KVPair> = self.collect_iterator(
@@ -52,8 +66,8 @@ impl<T: StorageBackend + ?Sized> MigrationStore for T {
 }
 
 pub const MIGRATION_VERSION_KEY: &[u8] = b"db-version";
-// V2-only storage epoch: older databases must never be migrated in place.
-pub const INIT_DB_VERSION: &str = "20261113000001";
+// Oldest recognized layout that can contain V2 signing sessions.
+pub const INIT_DB_VERSION: &str = "20260925120000";
 include!(concat!(env!("OUT_DIR"), "/latest_db_version.rs"));
 
 // --- Callback types for platform-specific UI ---
@@ -103,7 +117,7 @@ impl std::fmt::Display for MigrateError {
                 write!(
                     f,
                     "Database version {} is too old. Minimum supported version is {}. \
-                     Close old channels with the original binary, then use a new database. Existing data is preserved.",
+                     Use the matching old binary to finish V1 channels and upgrade to a recognized database layout. Existing data is preserved.",
                     db_version, min_version
                 )
             }
@@ -229,6 +243,19 @@ impl Migrations {
         }
     }
 
+    /// Validate all migrations without changing any stored record or version.
+    pub fn preflight(&self, store: &dyn MigrationStore) -> Result<(), MigrateError> {
+        for migration in self.migrations.values() {
+            migration
+                .preflight(store)
+                .map_err(|error| MigrateError::MigrationFailed {
+                    version: migration.version().to_string(),
+                    error,
+                })?;
+        }
+        Ok(())
+    }
+
     /// Run the full auto-migration flow.
     pub fn auto_migrate<S: StorageBackend>(
         &self,
@@ -238,17 +265,7 @@ impl Migrations {
     ) -> Result<(), MigrateError> {
         let latest_version = self.effective_latest_version();
 
-        // Run every preflight before stamping unversioned databases or applying
-        // earlier migrations. Validation while migrating can corrupt a mixed DB
-        // before an incompatible record is discovered.
-        for migration in self.migrations.values() {
-            migration
-                .preflight(store)
-                .map_err(|error| MigrateError::MigrationFailed {
-                    version: migration.version().to_string(),
-                    error,
-                })?;
-        }
+        self.preflight(store)?;
 
         let db_version = match self.get_db_version(store) {
             None => {

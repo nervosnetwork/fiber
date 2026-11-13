@@ -85,23 +85,30 @@ Fiber release tags publish official container images to Docker Hub at `nervos/fi
 
 ## Upgrading to the V2-only release
 
-This release only supports V2 peers and channels. It does not load or migrate
-databases from earlier releases, including databases that already contain V2
-channels. An old node is disconnected during the Fiber Init handshake.
+This release only supports V2 peers and channels. Peers without the `CHANNEL_V2`
+feature are rejected during the Fiber Init handshake.
 
-Before replacing the binary:
+Existing databases at epoch `20260925120000` can be upgraded in place when all
+unfinished channels have valid, persisted V2 signing sessions. V2 channels do not
+need to be closed. The new storage epoch is `20261113000001`.
 
-1. Use the **old binary** to [list all channels](./crates/fiber-lib/src/rpc/README.md#channel-list_channels)
-   and [close them](./crates/fiber-lib/src/rpc/README.md#channel-shutdown_channel).
-   Wait for pending payments and on-chain settlement to finish.
-2. Stop the node and back up its complete data directory. Keep the old binary and
-   data until all funds have been recovered; do not delete an open channel's data.
-3. Start the new binary with a **new, empty database directory** and connect only
-   to V2-capable peers. Do not restore an old database into the new store.
+1. Stop the node and back up its complete data directory before upgrading.
+2. Start the new binary with the existing database and confirm the migration.
+   Preflight lists unfinished V1 channels and refuses the upgrade without changing
+   records or the database version. If refused, use the **old binary** to
+   [close those V1 channels](./crates/fiber-lib/src/rpc/README.md#channel-shutdown_channel)
+   and finish pending payments, delivery and on-chain settlement, then retry.
+3. The migration retains V2 signing intents, nonce seeds, signatures and replay
+   history unchanged. Fully completed V1 records and their indexes are retained
+   byte-for-byte in a read-only archive, outside the V2 runtime's channel tables.
 
-The node refuses old-version and nonempty unversioned databases without converting
-or clearing them. Historical migration tools and guides apply only to their
-matching old releases; they cannot upgrade a database into this release.
+Unfinished legacy watchtower duties and opening records that cannot be proven V2
+also require the old binary. Unsupported, corrupt and nonempty unversioned stores
+are not cleared or silently initialized. Older database layouts must first be
+upgraded with their matching old release's migration tools.
+
+Do not run the old binary on the migrated database, or restore a stale backup as a
+live channel after the upgraded node has signed new commitments.
 
 ## Documentation
 

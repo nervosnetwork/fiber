@@ -283,44 +283,12 @@ pub(crate) fn open_store_with_migrations<P: AsRef<Path>>(
     confirm_fn: MigrateConfirmFn,
     progress_fn: MigrateProgressFn,
 ) -> Result<Store, String> {
-    use bincode::Options;
-
     #[allow(unused_mut)]
     let mut db = fiber_store::Store::open_db(path.as_ref())?;
     #[cfg(not(target_arch = "wasm32"))]
     db.set_sync_writes(sync_writes);
     #[cfg(target_arch = "wasm32")]
     let _ = sync_writes;
-    if db
-        .get(MIGRATION_VERSION_KEY)
-        .is_some_and(|version| version == fiber_store::migration::LATEST_DB_VERSION.as_bytes())
-    {
-        for (_, value) in db.prefix_iterator([CHANNEL_ACTOR_STATE_PREFIX].to_vec()) {
-            fiber_types::channel_v2_validation::decode_and_validate_channel_actor_data(&value)
-                .map_err(|error| {
-                    format!("Invalid current channel schema; database preserved: {error}")
-                })?;
-        }
-        for (_, value) in db.prefix_iterator(vec![CHANNEL_OPEN_RECORD_PREFIX]) {
-            bincode::DefaultOptions::new()
-                .with_fixint_encoding()
-                .reject_trailing_bytes()
-                .deserialize::<ChannelOpenRecord>(&value)
-                .map_err(|error| {
-                    format!("Invalid current channel open record; database preserved: {error}")
-                })?;
-        }
-        #[cfg(feature = "watchtower")]
-        for (_, value) in db.prefix_iterator(vec![WATCHTOWER_CHANNEL_PREFIX]) {
-            bincode::DefaultOptions::new()
-                .with_fixint_encoding()
-                .reject_trailing_bytes()
-                .deserialize::<ChannelData>(&value)
-                .map_err(|error| {
-                    format!("Invalid current watchtower channel; database preserved: {error}")
-                })?;
-        }
-    }
     migrate
         .auto_migrate(&db, confirm_fn, progress_fn)
         .map_err(|e| e.to_string())?;
@@ -336,6 +304,21 @@ pub(crate) fn open_store_with_migrations<P: AsRef<Path>>(
 
 pub fn check_validate<P: AsRef<Path>>(path: P) -> Result<(), String> {
     let db = fiber_store::Store::open_db(path.as_ref())?;
+    let mut migrate = DbMigrate::new();
+    fiber_store::migrations::register_all_migrations(&mut migrate);
+    migrate.preflight(&db).map_err(|error| error.to_string())?;
+    let version = db
+        .get(MIGRATION_VERSION_KEY)
+        .ok_or("Database has no version; use its matching old binary first")?;
+    let version = std::str::from_utf8(&version).map_err(|_| "Invalid database version")?;
+    if !(INIT_DB_VERSION..=fiber_store::migration::LATEST_DB_VERSION).contains(&version) {
+        return Err(format!(
+            "Unsupported database version {version}; supported upgrade base is {INIT_DB_VERSION}"
+        ));
+    }
+    if migrate.check(&db) == std::cmp::Ordering::Less {
+        info!("Database is eligible for migration at startup");
+    }
     let store = Store {
         inner: db,
         watcher: None,
@@ -363,16 +346,7 @@ pub fn check_validate<P: AsRef<Path>>(path: P) -> Result<(), String> {
         }
 
         match key[0] {
-            CHANNEL_ACTOR_STATE_PREFIX => {
-                if let Err(e) =
-                    fiber_types::channel_v2_validation::decode_and_validate_channel_actor_data(
-                        &value,
-                    )
-                {
-                    errors.insert(format!(
-                        "Failed to deserialize CHANNEL_ACTOR_STATE_PREFIX: {e}"
-                    ));
-                }
+            CHANNEL_ACTOR_STATE_PREFIX | CHANNEL_OPEN_RECORD_PREFIX | WATCHTOWER_CHANNEL_PREFIX => {
             }
             PUBLIC_KEY_NETWORK_ACTOR_STATE_PREFIX => {
                 check_deserialization::<PersistentNetworkActorState>(
@@ -455,14 +429,6 @@ pub fn check_validate<P: AsRef<Path>>(path: P) -> Result<(), String> {
                 );
             }
             #[cfg(feature = "watchtower")]
-            WATCHTOWER_CHANNEL_PREFIX => {
-                check_deserialization::<ChannelData>(
-                    &value,
-                    "WATCHTOWER_CHANNEL_PREFIX",
-                    &mut errors,
-                );
-            }
-            #[cfg(feature = "watchtower")]
             WATCHTOWER_SUPERSEDED_SETTLEMENT_PREFIX => {
                 check_deserialization::<Vec<SettlementData>>(
                     &value,
@@ -483,46 +449,7 @@ pub fn check_validate<P: AsRef<Path>>(path: P) -> Result<(), String> {
     }
 
     let mut errors: Vec<String> = errors.into_iter().collect();
-    {
-        let mut migrate = DbMigrate::new();
-        fiber_store::migrations::register_all_migrations(&mut migrate);
-        let ordering = migrate.check(&store.inner);
-        match ordering {
-            std::cmp::Ordering::Greater => {
-                let db_version = store
-                    .inner
-                    .get(MIGRATION_VERSION_KEY)
-                    .map(|v| String::from_utf8(v).unwrap_or_default())
-                    .unwrap_or_default();
-                errors.push(format!(
-                    "Database version ({}) is newer than the binary. \
-                     Please upgrade fiber to a newer version.",
-                    db_version
-                ));
-            }
-            std::cmp::Ordering::Less => {
-                let db_version = store
-                    .inner
-                    .get(MIGRATION_VERSION_KEY)
-                    .map(|v| String::from_utf8(v).unwrap_or_default())
-                    .unwrap_or_default();
-                let mut msg = format!(
-                    "Database version ({}) is older than the binary.",
-                    db_version
-                );
-                // A pre-V2-only database cannot be migrated in place.
-                if db_version.as_str() < INIT_DB_VERSION {
-                    msg.push_str(&format!(
-                        " DB version {} predates the V2-only epoch ({}). \
-                         Close channels with the old binary, back up the data, and use a new database.",
-                        db_version, INIT_DB_VERSION
-                    ));
-                }
-                errors.push(msg);
-            }
-            std::cmp::Ordering::Equal => {}
-        }
-    }
+    errors.sort();
     if errors.is_empty() {
         info!("All keys and values in the store are valid.");
         Ok(())

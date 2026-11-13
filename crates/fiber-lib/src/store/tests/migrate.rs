@@ -1,5 +1,9 @@
 use fiber_store::backend::StorageBackend;
 use fiber_store::db_migrate::DbMigrate;
+use fiber_store::migrations::decode_as_new;
+
+#[path = "../../../../fiber-store/src/migrations/v2_only/test_utils.rs"]
+mod migration_fixtures;
 use fiber_store::migration::{
     MigrateError, Migration, Migrations, INIT_DB_VERSION, LATEST_DB_VERSION, MIGRATION_VERSION_KEY,
 };
@@ -200,7 +204,7 @@ fn test_db_migrate_check() {
 }
 
 #[test]
-fn test_previous_epochs_are_rejected_without_changing_records() {
+fn test_invalid_previous_epochs_are_rejected_without_changing_records() {
     for version in [b"20260925120000", b"20261113000000"] {
         let path = gen_path();
         {
@@ -211,7 +215,11 @@ fn test_previous_epochs_are_rejected_without_changing_records() {
         let Err(error) = crate::store::open_store(&path) else {
             panic!("old database must be rejected");
         };
-        assert!(error.contains("new database"), "{error}");
+        assert!(
+            error.contains("Invalid channel record")
+                || error.contains("Unsupported database layout"),
+            "{error}"
+        );
         let store = fiber_store::Store::open_db(&path).unwrap();
         assert_eq!(store.get(MIGRATION_VERSION_KEY).unwrap(), version);
         assert_eq!(store.get([0, 1]).unwrap(), b"old channel bytes");
@@ -351,4 +359,49 @@ fn test_v2_current_epoch_rejects_bootstrap_session_as_closed_channel() {
     );
     let store = fiber_store::Store::open_db(&path).unwrap();
     assert_eq!(store.get(&key).unwrap(), encoded);
+}
+
+#[tokio::test]
+async fn test_upgrade_retains_real_v2_signed_history_and_remains_valid() {
+    use crate::fiber::channel::ChannelActorStateStore;
+    use crate::tests::test_utils::create_nodes_with_established_channel;
+    let (a, b, id) = create_nodes_with_established_channel(100000000000, 11800000000, false).await;
+    let payment = a.send_payment_keysend(&b, 1000, false).await.unwrap();
+    a.wait_until_success(payment.payment_hash).await;
+    crate::tests::test_utils::wait_until_timeout(5000, || {
+        let channel = a.get_channel_actor_state(id);
+        channel.get_offered_tlc_balance().unwrap() == 0 && !channel.tlc_state.waiting_ack
+    })
+    .await;
+    let channel = a.get_channel_actor_state(id);
+    assert!(channel.session.own.number > 2);
+    assert!(channel.session.outgoing.is_some());
+    assert!(channel.session.incoming.is_some());
+    let original = bincode::serialize(&channel.core).unwrap();
+    let old = migration_fixtures::released_v2(channel.core.clone());
+    let key = [&[0], id.as_ref()].concat();
+    let path = gen_path();
+    {
+        let store = fiber_store::Store::open_db(&path).unwrap();
+        store.put(MIGRATION_VERSION_KEY, INIT_DB_VERSION);
+        store.put(&key, bincode::serialize(&old).unwrap());
+    }
+    crate::store::check_validate(&path)
+        .expect("read-only validation accepts an upgradeable V2 store");
+    {
+        let store = fiber_store::Store::open_db(&path).unwrap();
+        assert_eq!(
+            store.get(MIGRATION_VERSION_KEY).unwrap(),
+            INIT_DB_VERSION.as_bytes()
+        );
+    }
+    let store = crate::store::open_store(&path).expect("migrate existing V2 channel");
+    let restored = store.get_channel_actor_state(&id).unwrap();
+    assert_eq!(bincode::serialize(&restored.core).unwrap(), original);
+    assert_eq!(
+        store.get(MIGRATION_VERSION_KEY).unwrap(),
+        LATEST_DB_VERSION.as_bytes()
+    );
+    drop(store);
+    crate::store::check_validate(&path).expect("upgraded signed history remains valid");
 }

@@ -14,4 +14,18 @@ use crate::db_migrate::DbMigrate;
 #[allow(unused_imports)]
 use std::sync::Arc;
 
+/// Convert a field between the published and current crate's data types.
+pub fn decode_as_new<TOld: serde::Serialize, TNew: serde::de::DeserializeOwned>(
+    value: TOld,
+) -> Result<TNew, String> {
+    use bincode::Options;
+    let bytes = bincode::serialize(&value)
+        .map_err(|error| format!("Failed to serialize legacy field: {error}"))?;
+    bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .reject_trailing_bytes()
+        .deserialize(&bytes)
+        .map_err(|error| format!("Failed to deserialize migrated field: {error}"))
+}
+
 include!(concat!(env!("OUT_DIR"), "/register_migrations.rs"));

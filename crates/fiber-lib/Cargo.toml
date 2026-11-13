@@ -135,6 +135,7 @@ futures = "0.3.31"
 tempfile = "3.10.1"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+fiber-types-0100 = { package = "fiber-types", version = "=0.10.0-rc1", features = ["watchtower"] }
 criterion = { version = "0.5", features = ["html_reports"] }
 hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "http2", "tokio"] }
 jsonrpsee = { version = "0.25.1", features = [
