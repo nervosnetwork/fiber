@@ -3085,12 +3085,7 @@ where
                     .offered_tlcs
                     .tlcs
                     .iter()
-                    .chain(
-                        source
-                            .session_v2
-                            .iter()
-                            .flat_map(|session| session.remove_effects.iter().map(|(tlc, _)| tlc)),
-                    )
+                    .chain(source.session.remove_effects.iter().map(|(tlc, _)| tlc))
                     .any(|tlc| {
                         tlc.payment_hash == command.payment_hash
                             && tlc.attempt_id == command.attempt_id
@@ -3138,14 +3133,15 @@ where
                 let Some(source) = self.store.get_channel_actor_state(&channel_id) else {
                     return Ok(());
                 };
-                if !source.session_v2.as_ref().is_some_and(|session| {
+                if !{
+                    let session = &source.session;
                     session.remove_effects.iter().any(|(pending, bound)| {
                         pending.tlc_id == tlc.tlc_id
                             && pending.payment_hash == tlc.payment_hash
                             && pending.removed_reason == tlc.removed_reason
                             && *bound == execution
                     })
-                }) {
+                } {
                     return Ok(());
                 }
                 if let Some((upstream, upstream_tlc)) = tlc.forwarding_tlc {
@@ -3223,12 +3219,10 @@ where
                         .store
                         .get_channel_actor_state(&downstream_channel_id)
                         .is_some_and(|source| {
-                            if source.session_v2.as_ref().is_some_and(|session| {
-                                session.remove_effects.iter().any(|(tlc, _)| {
-                                    tlc.tlc_id == downstream_tlc_id
-                                        && tlc.payment_hash == payment_hash
-                                        && tlc.removed_reason.as_ref() == Some(&reason)
-                                })
+                            if source.session.remove_effects.iter().any(|(tlc, _)| {
+                                tlc.tlc_id == downstream_tlc_id
+                                    && tlc.payment_hash == payment_hash
+                                    && tlc.removed_reason.as_ref() == Some(&reason)
                             }) {
                                 return true;
                             }
@@ -3915,11 +3909,10 @@ where
             .store
             .get_channel_actor_state(&downstream_channel_id)
             .is_some_and(|source| {
-                source.session_v2.as_ref().is_some_and(|session| {
-                    !session.remove_effects.iter().any(|(tlc, _)| {
-                        tlc.tlc_id == downstream_tlc_id && tlc.payment_hash == payment_hash
-                    }) && source.tlc_state.get(&downstream_tlc_id).is_none()
-                })
+                let session = &source.session;
+                !session.remove_effects.iter().any(|(tlc, _)| {
+                    tlc.tlc_id == downstream_tlc_id && tlc.payment_hash == payment_hash
+                }) && source.tlc_state.get(&downstream_tlc_id).is_none()
             })
         {
             // A duplicate receipt for a drained V2 outbox is a no-op, including
@@ -3932,15 +3925,14 @@ where
             .store
             .get_channel_actor_state(&downstream_channel_id)
             .and_then(|source| {
-                source.session_v2.as_ref().and_then(|session| {
-                    session
-                        .remove_effects
-                        .iter()
-                        .find(|(tlc, _)| {
-                            tlc.tlc_id == downstream_tlc_id && tlc.payment_hash == payment_hash
-                        })
-                        .and_then(|(tlc, _)| tlc.removed_reason.clone())
-                })
+                let session = &source.session;
+                session
+                    .remove_effects
+                    .iter()
+                    .find(|(tlc, _)| {
+                        tlc.tlc_id == downstream_tlc_id && tlc.payment_hash == payment_hash
+                    })
+                    .and_then(|(tlc, _)| tlc.removed_reason.clone())
             })
             .unwrap_or(reason);
         if let RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill { payment_preimage }) = &reason {
@@ -3958,7 +3950,8 @@ where
             if let Some(mut channel_state) =
                 self.store.get_channel_actor_state(&downstream_channel_id)
             {
-                if let Some(session) = &mut channel_state.session_v2 {
+                {
+                    let session = &mut channel_state.session;
                     let before = session.remove_effects.len();
                     session.remove_effects.retain(|(tlc, _)| {
                         tlc.tlc_id != downstream_tlc_id || tlc.payment_hash != payment_hash
@@ -6271,7 +6264,6 @@ where
         } = open_channel;
         let remote_pubkey = pubkey;
         self.check_feature_compatibility(&remote_pubkey)?;
-        let channel_features = self.required_new_channel_features(&remote_pubkey)?;
 
         if public && one_way {
             return Err(ProcessingChannelError::InvalidParameter(
@@ -6353,7 +6345,6 @@ where
                         .unwrap_or(DEFAULT_MAX_TLC_VALUE_IN_FLIGHT),
                     max_tlc_number_in_flight: max_tlc_number_in_flight
                         .unwrap_or(MAX_TLC_NUMBER_IN_FLIGHT),
-                    channel_features,
                 }),
                 ephemeral_config: self.channel_ephemeral_config.clone(),
                 private_key: self.private_key.clone(),
@@ -6367,12 +6358,7 @@ where
         self.on_channel_created(temp_channel_id, remote_pubkey, channel.clone());
 
         // Record the channel opening attempt so it can be queried via RPC.
-        let record = ChannelOpenRecord::new_with_features(
-            temp_channel_id,
-            remote_pubkey,
-            funding_amount,
-            channel_features,
-        );
+        let record = ChannelOpenRecord::new(temp_channel_id, remote_pubkey, funding_amount);
         self.store.insert_channel_open_record(record);
 
         Ok((channel, temp_channel_id))
@@ -6415,7 +6401,6 @@ where
             )))?;
 
         self.check_feature_compatibility(&remote_pubkey)?;
-        let channel_features = self.required_new_channel_features(&remote_pubkey)?;
 
         if let Some(udt_type_script) = funding_udt_type_script.as_ref() {
             if !check_udt_script(udt_type_script) {
@@ -6479,7 +6464,6 @@ where
                             .unwrap_or(DEFAULT_MAX_TLC_VALUE_IN_FLIGHT),
                         max_tlc_number_in_flight: max_tlc_number_in_flight
                             .unwrap_or(MAX_TLC_NUMBER_IN_FLIGHT),
-                        channel_features,
                     },
                 ),
                 ephemeral_config: self.channel_ephemeral_config.clone(),
@@ -6495,12 +6479,7 @@ where
 
         // Record the external-funding opening attempt under the temporary id.
         // It will be re-keyed once the peer accepts and the final channel id is known.
-        let record = ChannelOpenRecord::new_with_features(
-            temp_channel_id,
-            remote_pubkey,
-            funding_amount,
-            channel_features,
-        );
+        let record = ChannelOpenRecord::new(temp_channel_id, remote_pubkey, funding_amount);
         self.store.insert_channel_open_record(record);
 
         Ok((channel, temp_channel_id))
@@ -6535,7 +6514,6 @@ where
             funding_amount,
             &shutdown_script,
             &pending_open.open_channel.funding_udt_type_script,
-            pending_open.channel_features,
         )?;
 
         let network = self.network.clone();
@@ -6581,7 +6559,6 @@ where
                     max_tlc_number_in_flight: max_tlc_number_in_flight
                         .unwrap_or(MAX_TLC_NUMBER_IN_FLIGHT),
                     max_tlc_value_in_flight: max_tlc_value_in_flight.unwrap_or(u128::MAX),
-                    channel_features: pending_open.channel_features,
                 }),
                 ephemeral_config: self.channel_ephemeral_config.clone(),
                 private_key: self.private_key.clone(),
@@ -6654,14 +6631,6 @@ where
             )));
         }
         Ok(())
-    }
-
-    fn required_new_channel_features(
-        &self,
-        peer_pubkey: &Pubkey,
-    ) -> Result<ChannelFeatures, ProcessingChannelError> {
-        self.check_feature_compatibility(peer_pubkey)?;
-        Ok(ChannelFeatures::V2)
     }
 
     fn only_abort_funding_on_input_spent(&self, channel_id: &Hash256) -> bool {
@@ -7402,7 +7371,8 @@ where
                         _ => None,
                     }),
             );
-            if let Some(session) = &channel_actor_state.session_v2 {
+            {
+                let session = &channel_actor_state.session;
                 payment_hashes.extend(
                     session
                         .remove_effects
@@ -7410,9 +7380,7 @@ where
                         .filter_map(|(tlc, _)| tlc.attempt_id.map(|_| tlc.payment_hash)),
                 );
             }
-            if channel_actor_state.channel_features.is_v2()
-                && matches!(channel_actor_state.state, ChannelState::Closed(_))
-            {
+            if matches!(channel_actor_state.state, ChannelState::Closed(_)) {
                 // A receipt can retire the source before a persisted payment retry's timer runs.
                 if let Some(outpoint) = channel_actor_state.get_funding_transaction_outpoint() {
                     let attempts = self
@@ -7433,13 +7401,13 @@ where
                     for attempt in attempts {
                         // Recovery keys follow the current first hop; recheck durable ownership.
                         let owned = attempt.first_hop_channel_outpoint_eq(&outpoint)
-                            && (channel_actor_state.owns_payment_attempt(&attempt)
-                                || channel_actor_state.session_v2.iter().any(|session| {
-                                    session.remove_effects.iter().any(|(tlc, _)| {
-                                        tlc.payment_hash == attempt.payment_hash
-                                            && tlc.attempt_id == Some(attempt.id)
-                                    })
-                                }));
+                            && (channel_actor_state.owns_payment_attempt(&attempt) || {
+                                let session = &channel_actor_state.session;
+                                session.remove_effects.iter().any(|(tlc, _)| {
+                                    tlc.payment_hash == attempt.payment_hash
+                                        && tlc.attempt_id == Some(attempt.id)
+                                })
+                            });
                         if !owned {
                             let _ = self.network.send_message(NetworkActorMessage::new_event(
                                 NetworkActorEvent::ResumePaymentAfterClosedChannel(
@@ -7949,9 +7917,8 @@ where
             )));
         }
 
-        let channel_features = ChannelFeatures::V2;
         let result = self
-            .required_new_channel_features(&peer_pubkey)
+            .check_feature_compatibility(&peer_pubkey)
             .and_then(|_| {
                 check_open_channel_parameters(
                     &open_channel.funding_udt_type_script,
@@ -7959,7 +7926,6 @@ where
                     open_channel.reserved_ckb_amount,
                     open_channel.funding_fee_rate,
                     open_channel.commitment_fee_rate,
-                    channel_features,
                     open_channel.commitment_delay_epoch,
                     open_channel.max_tlc_number_in_flight,
                 )
@@ -7968,24 +7934,15 @@ where
                 if !self.to_be_accepted_channels.map.contains_key(&id) {
                     self.check_pending_channel_limit(peer_pubkey)?;
                 }
-                self.to_be_accepted_channels.try_insert(
-                    id,
-                    peer_pubkey,
-                    open_channel,
-                    channel_features,
-                )
+                self.to_be_accepted_channels
+                    .try_insert(id, peer_pubkey, open_channel)
             });
 
         match result {
             Ok(_) => {
                 // Create a persistent record so the accepting side can see this pending channel
                 // via list_channels(only_pending=true) and across node restarts.
-                let record = ChannelOpenRecord::new_inbound_with_features(
-                    id,
-                    peer_pubkey,
-                    remote_funding_amount,
-                    channel_features,
-                );
+                let record = ChannelOpenRecord::new_inbound(id, peer_pubkey, remote_funding_amount);
                 self.store.insert_channel_open_record(record);
 
                 // Notify outside observers.
@@ -9243,7 +9200,6 @@ struct ToBeAcceptedChannels {
 #[derive(Debug)]
 struct PendingOpenChannel {
     open_channel: OpenChannelV2,
-    channel_features: ChannelFeatures,
 }
 
 impl Default for ToBeAcceptedChannels {
@@ -9293,7 +9249,6 @@ impl ToBeAcceptedChannels {
         id: Hash256,
         pubkey: Pubkey,
         open_channel: OpenChannelV2,
-        channel_features: ChannelFeatures,
     ) -> ProcessingChannelResult {
         if let Some(existing_value) = self.map.get(&id) {
             let err_message = format!(
@@ -9332,16 +9287,8 @@ impl ToBeAcceptedChannels {
             "Channel from {:?} of id {:?} is now awaiting to be accepted: {:?}",
             &pubkey, &id, &open_channel
         );
-        self.map.insert(
-            id,
-            (
-                pubkey,
-                PendingOpenChannel {
-                    open_channel,
-                    channel_features,
-                },
-            ),
-        );
+        self.map
+            .insert(id, (pubkey, PendingOpenChannel { open_channel }));
         Ok(())
     }
 }

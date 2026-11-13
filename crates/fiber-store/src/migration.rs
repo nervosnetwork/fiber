@@ -53,7 +53,7 @@ impl<T: StorageBackend + ?Sized> MigrationStore for T {
 
 pub const MIGRATION_VERSION_KEY: &[u8] = b"db-version";
 // V2-only storage epoch: older databases must never be migrated in place.
-pub const INIT_DB_VERSION: &str = "20261113000000";
+pub const INIT_DB_VERSION: &str = "20261113000001";
 include!(concat!(env!("OUT_DIR"), "/latest_db_version.rs"));
 
 // --- Callback types for platform-specific UI ---

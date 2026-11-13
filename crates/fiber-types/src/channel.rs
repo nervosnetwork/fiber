@@ -1547,40 +1547,12 @@ impl ChannelOpenRecord {
         }
     }
 
-    /// Create a new opening record with the negotiated channel features.
-    pub fn new_with_features(
-        channel_id: Hash256,
-        pubkey: Pubkey,
-        funding_amount: u128,
-        channel_features: ChannelFeatures,
-    ) -> Self {
-        let mut record = Self::new(channel_id, pubkey, funding_amount);
-        record.channel_features = channel_features;
-        record
-    }
-
     /// Create a new inbound record in the `WaitingForPeer` state.
     /// Used when a remote peer's `OpenChannel` request is queued for local acceptance.
     pub fn new_inbound(channel_id: Hash256, pubkey: Pubkey, remote_funding_amount: u128) -> Self {
         let mut record = Self::new(channel_id, pubkey, remote_funding_amount);
         record.is_acceptor = true;
         record
-    }
-
-    /// Create a new inbound record with the negotiated channel features.
-    pub fn new_inbound_with_features(
-        channel_id: Hash256,
-        pubkey: Pubkey,
-        remote_funding_amount: u128,
-        channel_features: ChannelFeatures,
-    ) -> Self {
-        Self::new_with_features(channel_id, pubkey, remote_funding_amount, channel_features)
-            .with_acceptor()
-    }
-
-    fn with_acceptor(mut self) -> Self {
-        self.is_acceptor = true;
-        self
     }
 
     /// Transition to a new status.
@@ -1637,7 +1609,7 @@ impl PendingNotifySettleTlc {
     }
 }
 
-/// Channel version features selecting the nonce protocol and commitment layout.
+/// Validated feature byte for the supported commitment-lock format.
 ///
 /// Only bit 0 is supported, appended to the 58-byte commitment-lock args.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize)]
@@ -1661,20 +1633,11 @@ impl ChannelFeatures {
         self.0
     }
 
-    /// Whether this persisted feature byte selects Channel V2 in the node.
-    pub fn is_v2(self) -> bool {
-        self.0 & Self::V2.0 != 0
-    }
+    /// Length of the supported commitment-lock args.
+    pub const LOCK_ARGS_LEN: usize = 58;
 
-    /// Length of the commitment-lock args in bytes.
-    pub fn lock_args_len(self) -> usize {
-        58
-    }
-
-    /// Length of a TLC payment hash in the settlement witness.
-    pub fn payment_hash_len(self) -> usize {
-        32
-    }
+    /// Length of the complete TLC payment hash in settlement witnesses.
+    pub const PAYMENT_HASH_LEN: usize = 32;
 }
 
 impl Default for ChannelFeatures {
@@ -1821,7 +1784,7 @@ pub struct ChannelActorData {
     #[serde(default)]
     pub channel_features: ChannelFeatures,
     /// Independent owner signing sessions.
-    pub session_v2: Option<ChannelSessionV2>,
+    pub session: ChannelSessionV2,
 }
 
 impl From<PubNonce> for molecule_fiber::PubNonce {

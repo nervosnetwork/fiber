@@ -604,7 +604,7 @@ fn test_store_watchtower_v1_registration_round_trip() {
         tlcs: vec![],
     };
 
-    store.insert_watch_channel_with_features(
+    store.insert_watch_channel(
         node_id,
         channel_id,
         None,
@@ -613,7 +613,6 @@ fn test_store_watchtower_v1_registration_round_trip() {
         Privkey::from(&[3; 32]).pubkey(),
         Privkey::from(&[4; 32]).pubkey(),
         settlement_data,
-        ChannelFeatures::V2,
     );
 
     assert_eq!(
@@ -1270,8 +1269,7 @@ fn test_channel_actor_state_store() {
     let sec_nonce = SecNonce::build(seckey).build();
     let pub_nonce = sec_nonce.public_nonce();
     let channel_id = gen_rand_sha256_hash();
-
-    let mut state = ChannelActorState {
+    let state = ChannelActorState {
         core: ChannelActorData {
             state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::THEIR_INIT_SENT),
             public_channel_info: Some(PublicChannelInfo {
@@ -1316,6 +1314,7 @@ fn test_channel_actor_state_store() {
                 funding_pubkey: gen_rand_fiber_public_key(),
                 tlc_base_key: gen_rand_fiber_public_key(),
             },
+            session: crate::fiber::session::new_session(channel_id, &signer.funding_key, None),
             signer,
             remote_channel_public_keys: Some(ChannelBasePublicKeys {
                 funding_pubkey: gen_rand_fiber_public_key(),
@@ -1350,7 +1349,6 @@ fn test_channel_actor_state_store() {
             external_funding: None,
             channel_features: Default::default(),
             created_at: SystemTime::now(),
-            session_v2: None,
         },
         waiting_peer_response: None,
         reestablish_timer: None,
@@ -1368,7 +1366,6 @@ fn test_channel_actor_state_store() {
         pending_payment_notifications: Default::default(),
         replayed_tlc_updates_v2: 0,
     };
-    state.initialize_session_v2(None);
 
     let bincode_encoded = bincode::serialize(&state).unwrap();
     let _new_state: ChannelActorState = bincode::deserialize(&bincode_encoded).unwrap();
@@ -1421,7 +1418,8 @@ fn sample_channel_actor_state(
     let sec_nonce = SecNonce::build(seckey).build();
     let pub_nonce = sec_nonce.public_nonce();
 
-    let mut state = ChannelActorState {
+    let channel_id = gen_rand_sha256_hash();
+    ChannelActorState {
         core: ChannelActorData {
             state,
             public_channel_info: Some(PublicChannelInfo {
@@ -1457,7 +1455,7 @@ fn sample_channel_actor_state(
             commitment_fee_rate: 100,
             commitment_delay_epoch: 100,
             funding_fee_rate: 100,
-            id: gen_rand_sha256_hash(),
+            id: channel_id,
             tlc_state: Default::default(),
             retryable_tlc_operations: Default::default(),
             waiting_forward_tlc_tasks: Default::default(),
@@ -1466,6 +1464,7 @@ fn sample_channel_actor_state(
                 funding_pubkey: gen_rand_fiber_public_key(),
                 tlc_base_key: gen_rand_fiber_public_key(),
             },
+            session: crate::fiber::session::new_session(channel_id, &signer.funding_key, None),
             signer,
             remote_channel_public_keys: Some(ChannelBasePublicKeys {
                 funding_pubkey: gen_rand_fiber_public_key(),
@@ -1492,7 +1491,6 @@ fn sample_channel_actor_state(
             external_funding: None,
             channel_features: Default::default(),
             created_at: SystemTime::now(),
-            session_v2: None,
         },
         waiting_peer_response: None,
         reestablish_timer: None,
@@ -1509,9 +1507,7 @@ fn sample_channel_actor_state(
         pending_remove_effects_v2: 0,
         pending_payment_notifications: Default::default(),
         replayed_tlc_updates_v2: 0,
-    };
-    state.initialize_session_v2(None);
-    state
+    }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), test)]

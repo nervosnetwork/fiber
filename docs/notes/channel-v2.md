@@ -136,7 +136,7 @@ Ordinary restart from the same database image retains Ready/ShuttingDown state a
 its exact durable signing intents, so the normal reconciliation/replay path still
 works. There is no peer-audit unquarantine path for an old channel.
 
-The V2-only database epoch is `20261113000000`. Older databases and nonempty
+The V2-only database epoch is `20261113000001`. Older databases and nonempty
 unversioned databases are refused without conversion, clearing or version stamping.
 Before upgrading, close all channels with the old binary, complete settlement,
 back up the data and start the new binary with an empty database.
@@ -148,7 +148,7 @@ channel iteration and raw `fiber_types::deserialize::<ChannelActorData>` calls
 share that codec, without revalidating all cryptographic snapshots on every read.
 Opening a current database validates every channel's retained signing intents,
 including closed history, before writes. Actor restoration also invokes
-`validate_session_v2` before writes or signing.
+`validate_session` before writes or signing.
 
 The public raw-KV helper `fiber_types::deserialize` now requires
 `DeserializeOwned + 'static` rather than `Deserialize<'a>`. This source-level
@@ -289,7 +289,7 @@ Two candidate fixes, both of which need a design decision because they change
 what is replayed:
 
 1. Never replay a persisted CS after a reconnect; always abandon the session and
-   sign a fresh CS. Nonce-safe (`session_v2::allocate_nonce` uses a fresh random
+   sign a fresh CS. Nonce-safe (`session::allocate_nonce` uses a fresh random
    seed per session), but still racy: the fresh CS is also built at handshake
    time, before the peer's replayed `AddTlc` messages arrive.
 2. Add an explicit "peer replay complete" marker to reestablishment and only

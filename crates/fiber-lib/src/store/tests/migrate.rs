@@ -200,21 +200,22 @@ fn test_db_migrate_check() {
 }
 
 #[test]
-fn test_v1_epoch_is_rejected_without_changing_records() {
-    let path = gen_path();
-    let version = b"20260925120000";
-    {
+fn test_previous_epochs_are_rejected_without_changing_records() {
+    for version in [b"20260925120000", b"20261113000000"] {
+        let path = gen_path();
+        {
+            let store = fiber_store::Store::open_db(&path).unwrap();
+            store.put(MIGRATION_VERSION_KEY, version);
+            store.put([0, 1], b"old channel bytes");
+        }
+        let Err(error) = crate::store::open_store(&path) else {
+            panic!("old database must be rejected");
+        };
+        assert!(error.contains("new database"), "{error}");
         let store = fiber_store::Store::open_db(&path).unwrap();
-        store.put(MIGRATION_VERSION_KEY, version);
-        store.put([0, 1], b"old channel bytes");
+        assert_eq!(store.get(MIGRATION_VERSION_KEY).unwrap(), version);
+        assert_eq!(store.get([0, 1]).unwrap(), b"old channel bytes");
     }
-    let Err(error) = crate::store::open_store(&path) else {
-        panic!("old database must be rejected");
-    };
-    assert!(error.contains("new database"), "{error}");
-    let store = fiber_store::Store::open_db(&path).unwrap();
-    assert_eq!(store.get(MIGRATION_VERSION_KEY).unwrap(), version);
-    assert_eq!(store.get([0, 1]).unwrap(), b"old channel bytes");
 }
 
 #[test]
@@ -311,9 +312,9 @@ fn test_v2_current_epoch_rejects_missing_session_before_writes() {
     let mut record = ChannelActorData::samples(1561).remove(0);
     record.channel_features = fiber_types::ChannelFeatures::V2;
     record.state = ChannelState::Closed(CloseFlags::COOPERATIVE);
-    record.session_v2 = None;
     let key = [&[0], record.id.as_ref()].concat();
-    let original = bincode::serialize(&record).unwrap();
+    let mut original = bincode::serialize(&record).unwrap();
+    original.truncate(original.len() - bincode::serialize(&record.session).unwrap().len());
     {
         let store = fiber_store::Store::open_db(&path).unwrap();
         store.put(MIGRATION_VERSION_KEY, LATEST_DB_VERSION);

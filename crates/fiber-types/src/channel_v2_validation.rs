@@ -21,10 +21,7 @@ pub fn decode_channel_actor_data(bytes: &[u8]) -> Result<ChannelActorData, Strin
         "Trailing bytes in channel record",
     )?;
     check(
-        channel
-            .session_v2
-            .as_ref()
-            .is_some_and(|session| session.marker == 0x56320001),
+        channel.session.marker == 0x56320001,
         "Missing or invalid V2 session",
     )?;
     Ok(channel)
@@ -207,7 +204,6 @@ fn commitment_snapshot(
     let witness = crate::watchtower::settlement_data_witness(
         settlement,
         for_remote,
-        channel.channel_features,
         channel.signer.tlc_base_key.pubkey(),
         remote.tlc_base_key,
     )?;
@@ -246,11 +242,9 @@ fn commitment_snapshot(
 /// Validate the V2 session and all retained cryptographic signing intents.
 /// Bound-but-unsigned records are legitimate crash-recovery intents.
 pub fn validate_channel_v2(channel: &ChannelActorData) -> Result<(), String> {
-    let Some(session) = &channel.session_v2 else {
-        return Err("Missing V2 session".to_owned());
-    };
+    let session = &channel.session;
     check(
-        channel.channel_features.is_v2() && session.marker == 0x56320001,
+        session.marker == 0x56320001,
         "Invalid V2 feature/session marker",
     )?;
     let funded = matches!(

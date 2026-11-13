@@ -615,24 +615,24 @@ pub(crate) fn attempt_has_channel_work(
         .first_hop_channel_outpoint()
         .and_then(|outpoint| store.get_channel_state_by_outpoint(outpoint))
         .is_some_and(|channel| {
-            channel.owns_payment_attempt(attempt)
-                || channel.session_v2.as_ref().is_some_and(|session| {
-                    session.remove_effects.iter().any(|(tlc, execution)| {
-                        tlc.payment_hash == attempt.payment_hash
-                            && tlc.attempt_id == Some(attempt.id)
-                            && (attempt.status == AttemptStatus::Created
-                                || execution.is_none_or(|number| {
-                                    number == attempt.tried_times
-                                        || (attempt.is_retrying()
-                                            && number.saturating_add(1) == attempt.tried_times)
-                                })
-                                || (attempt.preimage.is_none()
-                                    && matches!(
-                                        tlc.removed_reason,
-                                        Some(RemoveTlcReason::RemoveTlcFulfill(_))
-                                    )))
-                    })
+            channel.owns_payment_attempt(attempt) || {
+                let session = &channel.session;
+                session.remove_effects.iter().any(|(tlc, execution)| {
+                    tlc.payment_hash == attempt.payment_hash
+                        && tlc.attempt_id == Some(attempt.id)
+                        && (attempt.status == AttemptStatus::Created
+                            || execution.is_none_or(|number| {
+                                number == attempt.tried_times
+                                    || (attempt.is_retrying()
+                                        && number.saturating_add(1) == attempt.tried_times)
+                            })
+                            || (attempt.preimage.is_none()
+                                && matches!(
+                                    tlc.removed_reason,
+                                    Some(RemoveTlcReason::RemoveTlcFulfill(_))
+                                )))
                 })
+            }
         })
 }
 
@@ -1386,12 +1386,7 @@ where
                 .offered_tlcs
                 .tlcs
                 .iter()
-                .chain(
-                    channel
-                        .session_v2
-                        .iter()
-                        .flat_map(|session| session.remove_effects.iter().map(|(tlc, _)| tlc)),
-                )
+                .chain(channel.session.remove_effects.iter().map(|(tlc, _)| tlc))
                 .find_map(|tlc| {
                     if tlc.payment_hash != payment_hash
                         || tlc.attempt_id != Some(attempt.id)
@@ -1970,15 +1965,15 @@ where
                 } else {
                     channel_state.owns_payment_attempt(attempt)
                 };
-                owns_update
-                    || channel_state.session_v2.iter().any(|session| {
-                        session.remove_effects.iter().any(|(tlc, execution)| {
-                            tlc.payment_hash == attempt.payment_hash
-                                && tlc.attempt_id == Some(attempt.id)
-                                && (attempt.status == AttemptStatus::Created
-                                    || execution.is_none_or(|number| number == attempt.tried_times))
-                        })
+                owns_update || {
+                    let session = &channel_state.session;
+                    session.remove_effects.iter().any(|(tlc, execution)| {
+                        tlc.payment_hash == attempt.payment_hash
+                            && tlc.attempt_id == Some(attempt.id)
+                            && (attempt.status == AttemptStatus::Created
+                                || execution.is_none_or(|number| number == attempt.tried_times))
                     })
+                }
             })
     }
 
@@ -3226,9 +3221,7 @@ mod closed_add_tests {
         attempt.status = AttemptStatus::Retrying;
         tlc.applied_flags.insert(fiber_types::AppliedFlags::REMOVE);
         source
-            .session_v2
-            .as_mut()
-            .unwrap()
+            .session
             .remove_effects
             .push((tlc, Some(attempt.tried_times)));
         a.store.insert_channel_actor_state(source.clone());
@@ -3236,20 +3229,20 @@ mod closed_add_tests {
             actor.channel_owns_attempt(&attempt),
             "the current execution's outbox must prevent a duplicate retry"
         );
-        source.session_v2.as_mut().unwrap().remove_effects[0].1 = Some(attempt.tried_times - 1);
+        source.session.remove_effects[0].1 = Some(attempt.tried_times - 1);
         a.store.insert_channel_actor_state(source.clone());
         assert!(
             !actor.channel_owns_attempt(&attempt),
             "an older failed execution must not prevent retrying"
         );
-        source.session_v2.as_mut().unwrap().remove_effects[0].1 = None;
+        source.session.remove_effects[0].1 = None;
         a.store.insert_channel_actor_state(source.clone());
         assert!(
             actor.channel_owns_attempt(&attempt),
             "an unbound result must be resolved before retrying"
         );
         source.retryable_tlc_operations.clear();
-        source.session_v2.as_mut().unwrap().remove_effects.clear();
+        source.session.remove_effects.clear();
         a.store.insert_channel_actor_state(source);
         attempt.last_error = Some("persisted failure awaiting retry".to_owned());
         a.store.insert_attempt(attempt.clone());

@@ -82,9 +82,8 @@ Concretely:
 3. On reestablishment, verify a replayed CS against the canonical set (or, when
    available, against the persisted `settlement` snapshot of the accepted
    round), so a byte-identical replay verifies even if the ladder drifted.
-4. Keep V1 behaviour unchanged: gate the selector on `channel_features.is_v2()`
-   or prove equivalence for the legacy layout, because `build_settlement_data`
-   is shared with V1 and the V1 commitment layout must not change.
+4. In the former dual-protocol implementation, this selector needed a version
+   gate to preserve the legacy layout. That gate is obsolete in the V2-only release.
 
 This removes the need for a new wire message. The remaining wire-level question
 is whether a replayed CS must also carry the settlement snapshot to be verified
@@ -107,7 +106,7 @@ Our commitment is a MuSig2 aggregation, so the constraint is stricter:
 - Therefore only two moves are legal after a reconnect: **replay the exact
   bytes** that were signed, or **burn that session and sign with a fresh
   nonce**. "Re-sign the same state until the peer accepts" is not a safe loop.
-- V2 already provides this: `session_v2::allocate_nonce` uses a fresh random
+- V2 already provides this: `session::allocate_nonce` uses a fresh random
   seed per session (not derived from the commitment number), the exact
   transaction, settlement and signing context are persisted in
   `session.outgoing` before the message leaves, and `bind_context` refuses to

@@ -392,7 +392,7 @@ pub(crate) fn create_test_channel_state_with_tlc(
     let seed = [0u8; 32];
     let signer = InMemorySigner::generate_from_seed(&seed);
 
-    let mut state = ChannelActorState {
+    ChannelActorState {
         core: ChannelActorData {
             state: ChannelState::ChannelReady,
             public_channel_info: None,
@@ -413,6 +413,7 @@ pub(crate) fn create_test_channel_state_with_tlc(
             commitment_fee_rate: 0,
             commitment_delay_epoch: 0,
             funding_fee_rate: 0,
+            session: crate::fiber::session::new_session(channel_id, &signer.funding_key, None),
             signer,
             local_channel_public_keys: ChannelBasePublicKeys {
                 funding_pubkey: gen_rand_fiber_public_key(),
@@ -438,7 +439,7 @@ pub(crate) fn create_test_channel_state_with_tlc(
             last_was_revoke: false,
             external_funding: None,
             channel_features: Default::default(),
-            session_v2: None,
+
             created_at: SystemTime::now(),
         },
         waiting_peer_response: None,
@@ -456,9 +457,7 @@ pub(crate) fn create_test_channel_state_with_tlc(
         funding_abort_detail: None,
         private_key: None,
         needs_backup: false,
-    };
-    state.initialize_session_v2(None);
-    state
+    }
 }
 
 fn is_fulfill_settlement(settlement: &TlcSettlement) -> bool {
