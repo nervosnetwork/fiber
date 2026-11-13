@@ -1,11 +1,9 @@
 //! Tests for SettleTlcSetCommand
 
 use crate::fiber::channel::{
-    has_pending_tlc_for_payment_hash, ChannelActorState, ChannelActorStateStore, CommitDiff,
+    has_pending_tlc_for_payment_hash, ChannelActorState, ChannelActorStateStore,
 };
-use crate::fiber::onchain_tlc_reconcile::{
-    LegacyOnChainTlcSettlement, OnChainTlcSettlement, StoredOnChainTlcSettlement,
-};
+use crate::fiber::onchain_tlc_reconcile::OnChainTlcSettlement;
 use crate::fiber::settle_tlc_set_command::{
     SettleOnChainFulfilledInvoiceCommand, SettleTlcSetCommand, TlcSettlement,
 };
@@ -39,7 +37,7 @@ pub(crate) struct MockStore {
     channel_states: RefCell<HashMap<Hash256, ChannelActorState>>,
     pub(crate) channel_state_writes: Cell<usize>,
     pub(crate) preimage_removal_writes: RefCell<Vec<usize>>,
-    pub(crate) onchain_settlements: RefCell<HashMap<(Hash256, TLCId), StoredOnChainTlcSettlement>>,
+    pub(crate) onchain_settlements: RefCell<HashMap<(Hash256, TLCId), OnChainTlcSettlement>>,
     pub(crate) shutdown_settlements: RefCell<HashMap<Hash256, ShutdownSettlementRecord>>,
     pub(crate) watch_channels: RefCell<HashMap<Hash256, fiber_types::ChannelData>>,
 }
@@ -99,10 +97,9 @@ impl MockStore {
         tlc_id: TLCId,
         settlement: OnChainTlcSettlement,
     ) -> Self {
-        self.onchain_settlements.borrow_mut().insert(
-            (channel_id, tlc_id),
-            StoredOnChainTlcSettlement::Exact(settlement),
-        );
+        self.onchain_settlements
+            .borrow_mut()
+            .insert((channel_id, tlc_id), settlement);
         self
     }
 
@@ -145,19 +142,6 @@ impl MockStore {
                 tlc_index: 0,
             },
         )
-    }
-
-    pub(crate) fn with_legacy_onchain_settlement(
-        self,
-        channel_id: Hash256,
-        tlc_id: TLCId,
-        settlement: LegacyOnChainTlcSettlement,
-    ) -> Self {
-        self.onchain_settlements.borrow_mut().insert(
-            (channel_id, tlc_id),
-            StoredOnChainTlcSettlement::Legacy(settlement),
-        );
-        self
     }
 
     #[allow(dead_code)]
@@ -327,23 +311,11 @@ impl ChannelActorStateStore for MockStore {
         channel_id: &Hash256,
         tlc_id: TLCId,
         _payment_hash: &Hash256,
-    ) -> Option<StoredOnChainTlcSettlement> {
+    ) -> Option<OnChainTlcSettlement> {
         self.onchain_settlements
             .borrow()
             .get(&(*channel_id, tlc_id))
             .cloned()
-    }
-
-    fn store_pending_commit_diff(&self, _channel_id: &Hash256, _diff: &CommitDiff) {
-        // No-op for tests
-    }
-
-    fn get_pending_commit_diff(&self, _channel_id: &Hash256) -> Option<CommitDiff> {
-        None
-    }
-
-    fn delete_pending_commit_diff(&self, _channel_id: &Hash256) {
-        // No-op for tests
     }
 
     fn store_shutdown_settlement_record(
@@ -420,7 +392,7 @@ pub(crate) fn create_test_channel_state_with_tlc(
     let seed = [0u8; 32];
     let signer = InMemorySigner::generate_from_seed(&seed);
 
-    ChannelActorState {
+    let mut state = ChannelActorState {
         core: ChannelActorData {
             state: ChannelState::ChannelReady,
             public_channel_info: None,
@@ -454,10 +426,6 @@ pub(crate) fn create_test_channel_state_with_tlc(
             waiting_forward_tlc_tasks: HashMap::new(),
             remote_shutdown_script: None,
             local_shutdown_script: Script::default(),
-            last_committed_remote_nonce: None,
-            remote_revocation_nonce_for_verify: None,
-            remote_revocation_nonce_for_send: None,
-            remote_revocation_nonce_for_next: None,
             remote_commitment_points: vec![],
             remote_channel_public_keys: None,
             local_shutdown_info: None,
@@ -466,7 +434,6 @@ pub(crate) fn create_test_channel_state_with_tlc(
             latest_commitment_transaction: None,
             reestablishing: false,
             connectivity_state: fiber_types::ChannelConnectivityState::Online,
-            last_revoke_ack_msg: None,
             pending_replay_updates: vec![],
             last_was_revoke: false,
             external_funding: None,
@@ -475,7 +442,6 @@ pub(crate) fn create_test_channel_state_with_tlc(
             created_at: SystemTime::now(),
         },
         waiting_peer_response: None,
-        revocation_nonce_unbalanced_since: None,
         reestablish_timer: None,
         recovery_peer_v2: None,
         network: None,
@@ -484,14 +450,15 @@ pub(crate) fn create_test_channel_state_with_tlc(
         pending_remove_effects_v2: 0,
         pending_payment_notifications: Default::default(),
         replayed_tlc_updates_v2: 0,
-        pending_reestablish_channel_ready: false,
         defer_peer_tlc_updates: false,
         deferred_peer_tlc_updates: std::collections::VecDeque::new(),
         ephemeral_config: Default::default(),
         funding_abort_detail: None,
         private_key: None,
         needs_backup: false,
-    }
+    };
+    state.initialize_session_v2(None);
+    state
 }
 
 fn is_fulfill_settlement(settlement: &TlcSettlement) -> bool {

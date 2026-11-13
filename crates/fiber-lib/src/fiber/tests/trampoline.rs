@@ -4153,20 +4153,15 @@ async fn test_trampoline_partial_mpp_preimage_settles_upstream() {
 
 #[tokio::test]
 async fn test_trampoline_success_drains_remaining_failure() {
-    assert_trampoline_success_drains_remaining_tlc(false, false).await;
+    assert_trampoline_success_drains_remaining_tlc(false).await;
 }
 
 #[tokio::test]
 async fn test_trampoline_success_survives_restart() {
-    assert_trampoline_success_drains_remaining_tlc(true, false).await;
+    assert_trampoline_success_drains_remaining_tlc(true).await;
 }
 
-#[tokio::test]
-async fn test_trampoline_success_legacy_drains_remaining_failure() {
-    assert_trampoline_success_drains_remaining_tlc(false, true).await;
-}
-
-async fn assert_trampoline_success_drains_remaining_tlc(restart: bool, legacy: bool) {
+async fn assert_trampoline_success_drains_remaining_tlc(restart: bool) {
     init_tracing();
 
     // A funds one incoming TLC at B; B must split it across two channels to C.
@@ -4187,57 +4182,12 @@ async fn assert_trampoline_success_drains_remaining_tlc(restart: bool, legacy: b
             false,
         ),
     ];
-    let (nodes, channels) = if legacy {
-        let mut nodes = vec![
-            NetworkNode::new().await,
-            NetworkNode::new().await,
-            NetworkNode::new().await,
-        ];
-        for node in &nodes {
-            let mut features = crate::fiber::FeatureVector::default();
-            features.unset_channel_v2_optional();
-            features.unset_channel_v2_required();
-            node.update_node_features_and_wait(features).await;
-            call!(
-                node.network_actor,
-                |reply| NetworkActorMessage::new_command(
-                    NetworkActorCommand::TestEnableLegacyFixture(reply)
-                )
-            )
-            .unwrap();
-        }
-        for (from, to) in [(0, 1), (1, 2)] {
-            let (left, right) = nodes.split_at_mut(to);
-            left[from].connect_to(&mut right[0]).await;
-        }
-        let mut ids = Vec::new();
-        for ((from, to), (amount_a, amount_b), public) in specifications {
-            let (left, right) = nodes.split_at_mut(to);
-            let (id, _) = establish_channel_between_nodes(
-                &mut left[from],
-                &mut right[0],
-                ChannelParameters {
-                    public,
-                    node_a_funding_amount: amount_a,
-                    node_b_funding_amount: amount_b,
-                    ..Default::default()
-                },
-            )
-            .await;
-            ids.push(id);
-        }
-        (nodes, ids)
-    } else {
-        create_n_nodes_network_with_visibility(&specifications, 3).await
-    };
+    let (nodes, channels) = create_n_nodes_network_with_visibility(&specifications, 3).await;
     let [node_a, mut node_b, mut node_c] = nodes.try_into().expect("three nodes");
-    assert_eq!(
-        node_b
-            .get_channel_actor_state(channels[0])
-            .session_v2
-            .is_none(),
-        legacy
-    );
+    assert!(node_b
+        .get_channel_actor_state(channels[0])
+        .session_v2
+        .is_some());
     wait_until_node_supports_trampoline_routing(&node_a, &node_b).await;
 
     let amount = 1_500_000_000_u128;

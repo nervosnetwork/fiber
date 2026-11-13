@@ -302,26 +302,19 @@ async fn test_review_payment_actor_panic_does_not_loop() {
 
 #[tokio::test]
 async fn test_payment_waits_for_durable_channel_admission() {
-    for legacy in [false, true] {
-        assert_durable_channel_admission(legacy, false).await;
-    }
+    assert_durable_channel_admission(false).await;
 }
 
 #[tokio::test]
 async fn test_queued_payment_admission_is_durable_before_send_returns() {
-    for legacy in [false, true] {
-        assert_durable_channel_admission(legacy, true).await;
-    }
+    assert_durable_channel_admission(true).await;
 }
 
-async fn assert_durable_channel_admission(legacy: bool, queued: bool) {
+async fn assert_durable_channel_admission(queued: bool) {
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    let (payer, payee, id) = if legacy {
-        create_legacy_nodes_with_established_channel(100000000000, 11800000000, false).await
-    } else {
-        create_nodes_with_established_channel(100000000000, 11800000000, false).await
-    };
+    let (payer, payee, id) =
+        create_nodes_with_established_channel(100000000000, 11800000000, false).await;
     let channel = payer.get_channel_actor(id).await.unwrap();
     let mut preceding = None;
     if queued {
@@ -5306,7 +5299,17 @@ async fn test_send_payment_middle_hop_update_fee_should_recovery() {
     }
 
     assert_eq!(succ_count, tx_count);
+    // Payment success can precede the final V2 remove acknowledgement.
+    wait_until_timeout(10_000, || {
+        nodes[0]
+            .get_channel_actor_state(channels[0])
+            .get_offered_tlc_balance()
+            .unwrap()
+            == 0
+    })
+    .await;
     let channel_state = nodes[0].get_channel_actor_state(channels[0]);
+    assert!(channel_state.is_ready());
     assert_eq!(channel_state.get_offered_tlc_balance().unwrap(), 0);
 }
 

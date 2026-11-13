@@ -1,16 +1,14 @@
 # Channel V2 capability and durable close
 
-The node capability `CHANNEL_V2` uses the existing required/optional feature pair
-at bits 6/7. It combines independent commitment-owner nonce sessions with full
-32-byte on-chain payment hashes. The commitment contract feature byte remains
-`1`; released legacy channels with byte `0` continue to use V1 messages and their
-original contract layout. `ChannelFeatures::V2` has value `1` and selects both
-nonce sessions and the full payment hash layout; `LEGACY` is `0`.
-`has_full_payment_hash()` delegates to `is_v2()`, without a separate feature bit.
+The node capability `CHANNEL_V2` uses required/optional feature bits 6/7.
+This release advertises bit 6 as required and disconnects peers without V2 support
+during Init. V2 is the only channel protocol: the feature byte is always `1`,
+with independent commitment-owner nonce sessions and full 32-byte on-chain payment
+hashes. V1 messages, zero-feature channels and old-database migrations are removed.
 
 Deployment prerequisite: a node must only advertise `CHANNEL_V2` once its
-configured commitment-lock contract accepts the 58-byte V2 arguments (the legacy
-57-byte args plus the trailing feature byte) and the full 32-byte on-chain
+configured commitment-lock contract accepts the 58-byte V2 arguments (including
+the trailing feature byte `1`) and the full 32-byte on-chain
 payment hash. The code hash of the deployed contract is not versioned in this
 repository, so enabling the capability on a network requires confirming the
 resolved mainnet/testnet commitment-lock binary from the deployment records
@@ -63,8 +61,8 @@ V2 Add/Remove updates stay pending until the outgoing CS save records their TLC
 IDs, contents, counters and replay log together. They are then sent in FIFO order
 before the CS, with no extra per-TLC save. Reestablishment replays the durable log
 in its original order; a runtime prefix prevents those updates being published
-again when the CS is regenerated. Unsent persisted updates request a CS instead
-of using the V1 raw-TLC resend path. V1 keeps its immediate update publication.
+again when the CS is regenerated. Unsent persisted updates request a CS rather
+than publishing raw TLC updates outside the durable commitment boundary.
 
 Offered TLC removals bind their execution and append an in-memory outbox intent
 before applying balances and flags. The normal actor message-tail save commits
@@ -136,28 +134,21 @@ in this implementation. Replacing a nonce would not make the old commitment safe
 
 Ordinary restart from the same database image retains Ready/ShuttingDown state and
 its exact durable signing intents, so the normal reconciliation/replay path still
-works. Released V1 channels retain their historical stale peer audit behavior.
+works. There is no peer-audit unquarantine path for an old channel.
 
-Database preflight decodes the complete current `ChannelActorData` for every
-current-epoch channel, including closed channels, and validates its cryptographic
-intents before any migration writes. An epoch alone cannot establish that a
-full-hash record contains genuine V2 state. Unsupported unpublished full-hash V1
-databases are refused without conversion; released zero-feature records retain
-their legacy payload and an empty V2 session.
+The V2-only database epoch is `20261113000000`. Older databases and nonempty
+unversioned databases are refused without conversion, clearing or version stamping.
+Before upgrading, close all channels with the old binary, complete settlement,
+back up the data and start the new binary with an empty database.
 
-The latest migration epoch remains `20260925120000` from #1665. Its frozen
-published target ends at the feature byte. The shared
-`fiber_types::channel_v2_validation::decode_channel_actor_data` decoder reads
-that exact legacy-zero shape by appending only a serialized `None` in memory,
-then decoding the complete current schema and checking feature/session
-correspondence. Store getters,
-channel iteration, and raw `fiber_types::deserialize::<ChannelActorData>` calls
-use this codec without revalidating cryptographic snapshots or counters on every
-runtime read. `decode_and_validate_channel_actor_data` additionally invokes the
-full intent validator for September preflight and database validation. Actor
-restore invokes `validate_session_v2` before any writes or signing. Opening an
-already-current published database does not rewrite records or its version.
-V2 sessions, signed history, and trailing bytes must always decode exactly.
+The shared `fiber_types::channel_v2_validation::decode_channel_actor_data` codec
+requires an exact current record, feature byte `1` and a V2 session marker. It
+does not synthesize missing fields or accept an old suffix. Store getters,
+channel iteration and raw `fiber_types::deserialize::<ChannelActorData>` calls
+share that codec, without revalidating all cryptographic snapshots on every read.
+Opening a current database validates every channel's retained signing intents,
+including closed history, before writes. Actor restoration also invokes
+`validate_session_v2` before writes or signing.
 
 The public raw-KV helper `fiber_types::deserialize` now requires
 `DeserializeOwned + 'static` rather than `Deserialize<'a>`. This source-level
@@ -171,9 +162,8 @@ commitments require exactly one canonical 112-byte funding witness: the 16-byte
 XUDT-compatible prefix, aggregate key, and aggregate signature. Production and
 validation use the same encoder.
 
-Deterministic schema/store samples have three variants: minimal V1, fully
-populated V1, and genuine V2 bootstrap. Each variant has a distinct deterministic
-channel ID so storing one cannot overwrite another.
+Deterministic schema/store samples use a genuine V2 bootstrap session with a
+seed-derived channel ID and nonce.
 
 ## Queued TLC updates
 
@@ -183,7 +173,7 @@ not confirm those queued updates. Once unblocked, the actor drains the queue in
 order, checks each operation against the updated channel limits, and signs the
 successful updates in one commitment. Successful add results are notified only
 after that commitment intent is stored. Peer updates already awaiting a follow-up
-commitment share this round. V1 retains its single-success retry behavior.
+commitment share this round.
 
 ## Retry queues after confirmed close
 
@@ -260,8 +250,7 @@ answered messages that were outstanding while it was unreachable.
   `ShuttingDown` recovery paths).
 
 A peer that keeps reconnecting before each window expires can therefore postpone the
-force close, exactly as with the V1 revocation-nonce watchdog, which also restarts its
-window on reconnect. A reconnect that never completes is still bounded by
+force close. A reconnect that never completes is still bounded by
 `REESTABLISH_TIMEOUT`.
 
 ## Reestablishment cursor reconciliation

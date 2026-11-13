@@ -1,5 +1,5 @@
-//! On-chain identity invariant: a settlement witness only exposes a 20-byte payment-hash
-//! prefix and an unlock index. The watchtower must resolve that index against the immutable
+//! On-chain identity invariant: a V2 settlement witness exposes the full payment hash
+//! and an unlock index. The watchtower must resolve that index against the immutable
 //! settlement snapshot committed by the force-closed commitment transaction before persisting
 //! a settlement proof for an exact local TLC id and full 32-byte payment hash.
 
@@ -52,7 +52,7 @@ pub fn parse_commitment_lock(
         return None;
     }
     let lock_args = commitment_lock.args().raw_data();
-    if lock_args.len() < 56 {
+    if lock_args.len() != 58 || lock_args[57] != ChannelFeatures::V2.bits() {
         return None;
     }
     let pubkey_hash = &lock_args[0..20];
@@ -254,38 +254,12 @@ pub struct OnChainTlcSettlement {
     pub tlc_index: u8,
 }
 
-/// Prefix-keyed settlement records written by older versions.
-///
-/// These records are retained for database compatibility. A matching preimage can still safely
-/// prove fulfillment after validating the complete hash, but a no-preimage record cannot prove
-/// which TLC sharing the prefix was consumed.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LegacyOnChainTlcSettlement {
-    /// Preimage observed in the old prefix-keyed settlement record.
-    pub preimage: Option<Hash256>,
-    /// Settlement transaction hash when recorded by a newer legacy writer.
-    pub tx_hash: Option<Hash256>,
-    /// Witness index when recorded by a newer legacy writer.
-    pub tlc_index: Option<u8>,
-}
-
-/// A settlement record decoded from either the exact current key format or the legacy
-/// payment-hash-prefix key format.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum StoredOnChainTlcSettlement {
-    /// An exact record keyed by `(channel_id, TLCId)`.
-    Exact(OnChainTlcSettlement),
-    /// A prefix-keyed record written by an older version.
-    Legacy(LegacyOnChainTlcSettlement),
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OnChainTlcResolution {
     Unknown,
     Fulfilled(Hash256),
     SettledWithoutPreimage,
-    /// The output was consumed with a preimage matching the committed 20-byte prefix but not
-    /// the full payment hash, so the settlement must fail forward rather than remain unresolved.
+    /// The output was consumed with a preimage that does not match the full payment hash.
     SettledWithInvalidPreimage,
 }
 
@@ -348,51 +322,32 @@ pub(crate) fn resolve_onchain_tlc(
     else {
         return OnChainTlcResolution::Unknown;
     };
-    match settlement {
-        StoredOnChainTlcSettlement::Exact(settlement) => {
-            if settlement.payment_hash != payment_hash
-                || settlement.hash_algorithm != hash_algorithm
-            {
-                warn!(
-                    "Ignoring mismatched on-chain settlement identity for channel {:?} tlc {:?} tx {:?}: stored hash {:?}/{:?}, expected {:?}/{:?}",
-                    channel_id,
-                    tlc_id,
-                    settlement.tx_hash,
-                    settlement.payment_hash,
-                    settlement.hash_algorithm,
-                    payment_hash,
-                    hash_algorithm
-                );
-                return OnChainTlcResolution::Unknown;
-            }
-            let Some(preimage) = settlement.preimage else {
-                return OnChainTlcResolution::SettledWithoutPreimage;
-            };
-            let discovered_payment_hash: Hash256 = hash_algorithm.hash(preimage).into();
-            if discovered_payment_hash == payment_hash {
-                return OnChainTlcResolution::Fulfilled(preimage);
-            }
-            error!(
-                "On-chain preimage for channel {:?} tlc {:?} tx {:?} hashes to {:?}, expected full hash {:?}: treat as failed settlement",
-                channel_id, tlc_id, settlement.tx_hash, discovered_payment_hash, payment_hash
-            );
-            OnChainTlcResolution::SettledWithInvalidPreimage
-        }
-        StoredOnChainTlcSettlement::Legacy(legacy) => {
-            let Some(preimage) = legacy.preimage else {
-                return OnChainTlcResolution::Unknown;
-            };
-            let discovered_payment_hash: Hash256 = hash_algorithm.hash(preimage).into();
-            if discovered_payment_hash == payment_hash {
-                return OnChainTlcResolution::Fulfilled(preimage);
-            }
-            warn!(
-                "Ignoring legacy prefix-keyed settlement for channel {:?} tlc {:?} tx {:?}: preimage hash {:?}, expected {:?}",
-                channel_id, tlc_id, legacy.tx_hash, discovered_payment_hash, payment_hash
-            );
-            OnChainTlcResolution::Unknown
-        }
+
+    if settlement.payment_hash != payment_hash || settlement.hash_algorithm != hash_algorithm {
+        warn!(
+            "Ignoring mismatched on-chain settlement identity for channel {:?} tlc {:?} tx {:?}: stored hash {:?}/{:?}, expected {:?}/{:?}",
+            channel_id,
+            tlc_id,
+            settlement.tx_hash,
+            settlement.payment_hash,
+            settlement.hash_algorithm,
+            payment_hash,
+            hash_algorithm
+        );
+        return OnChainTlcResolution::Unknown;
     }
+    let Some(preimage) = settlement.preimage else {
+        return OnChainTlcResolution::SettledWithoutPreimage;
+    };
+    let discovered_payment_hash: Hash256 = hash_algorithm.hash(preimage).into();
+    if discovered_payment_hash == payment_hash {
+        return OnChainTlcResolution::Fulfilled(preimage);
+    }
+    error!(
+        "On-chain preimage for channel {:?} tlc {:?} tx {:?} hashes to {:?}, expected full hash {:?}: treat as failed settlement",
+        channel_id, tlc_id, settlement.tx_hash, discovered_payment_hash, payment_hash
+    );
+    OnChainTlcResolution::SettledWithInvalidPreimage
 }
 
 pub(crate) fn onchain_fulfilled_preimage(

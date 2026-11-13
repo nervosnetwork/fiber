@@ -9,9 +9,11 @@ use crate::fiber::network::{
     FiberMessageWithTarget, NetworkActorCommand, NetworkActorMessage, NetworkServiceEvent,
 };
 use crate::fiber::session_v2::{allocate_nonce, bind_context, guarded_sign, SESSION_MARKER};
+#[cfg(test)]
+use crate::fiber::types::FiberChannelMessage;
 use crate::fiber::types::{
-    ChannelReady, ChannelReadyV2, ClosingSignedV2, CommitmentSignedV2, FiberChannelMessage,
-    FiberMessage, ReestablishChannelV2, RevokeAndAckV2, ShutdownV2, TxComplete, TxCompleteV2,
+    ChannelReadyV2, ClosingSignedV2, CommitmentSignedV2, FiberMessage, ReestablishChannelV2,
+    RevokeAndAckV2, ShutdownV2, TxCompleteV2,
 };
 use crate::fiber::ASSUME_NETWORK_ACTOR_ALIVE;
 use crate::invoice::{InvoiceStore, PreimageStore};
@@ -229,10 +231,65 @@ impl ChannelActorState {
         fiber_types::channel_v2_validation::validate_channel_v2(&self.core).map_err(invalid)
     }
 
-    pub(super) fn initialize_session_v2(&mut self, remote_nonce: Option<PubNonce>) {
-        if !self.channel_features.is_v2() {
-            return;
+    /// Give synthetic on-chain fixtures genuine signed V2 bootstrap history.
+    #[cfg(test)]
+    pub(crate) fn sign_test_bootstrap_v2(&mut self) -> ProcessingChannelResult {
+        let state = self.state;
+        let tlcs = std::mem::take(&mut self.tlc_state);
+        self.state = ChannelState::NegotiatingFunding(NegotiatingFundingFlags::empty());
+        self.funding_tx.get_or_insert_with(Default::default);
+        self.local_channel_public_keys = self.signer.get_base_public_keys();
+        let remote_signer = fiber_types::InMemorySigner::generate_from_seed(&[1; 32]);
+        self.remote_channel_public_keys = Some(remote_signer.get_base_public_keys());
+        self.commitment_numbers = fiber_types::CommitmentNumbers {
+            local: 1,
+            remote: 1,
+        };
+        let mut peer = self.clone();
+        peer.signer = remote_signer;
+        peer.local_channel_public_keys = peer.signer.get_base_public_keys();
+        peer.remote_channel_public_keys = Some(self.local_channel_public_keys.clone());
+        peer.to_local_amount = self.to_remote_amount;
+        peer.to_remote_amount = self.to_local_amount;
+        peer.local_reserved_ckb_amount = self.remote_reserved_ckb_amount;
+        peer.remote_reserved_ckb_amount = self.local_reserved_ckb_amount;
+        self.initialize_session_v2(None);
+        let local_nonce = self.session_v2.as_ref().unwrap().own.public_nonce.clone();
+        peer.initialize_session_v2(Some(local_nonce));
+        let remote_nonce = peer.session_v2.as_ref().unwrap().own.public_nonce.clone();
+        let session = self.session_v2.as_mut().unwrap();
+        session.remote_nonce = Some(remote_nonce.clone());
+        session.bootstrap_remote_nonce = Some(remote_nonce);
+        let (ours, _) = self.prepare_outgoing_v2(true)?;
+        let (theirs, _) = peer.prepare_outgoing_v2(true)?;
+        let verified = self.stage_incoming_v2(&theirs, true)?;
+        self.accept_commitment_v2(&theirs, true, verified)?;
+        let verified = peer.stage_incoming_v2(&ours, true)?;
+        peer.accept_commitment_v2(&ours, true, verified)?;
+        self.commitment_numbers = fiber_types::CommitmentNumbers {
+            local: 2,
+            remote: 2,
+        };
+        peer.commitment_numbers = self.commitment_numbers;
+        self.ready_wire_message()?;
+        let FiberMessage::ChannelNormalOperation(FiberChannelMessage::ChannelReadyV2(ready)) =
+            peer.ready_wire_message()?
+        else {
+            return Err(invalid("Expected V2 bootstrap Ready"));
+        };
+        let session = self.session_v2.as_mut().unwrap();
+        session.remote_number = ready.next_commitment_number;
+        session.remote_nonce = Some(ready.next_commitment_nonce.clone());
+        session.remote_ready = Some(ready.into());
+        if tlcs.waiting_ack {
+            self.prepare_outgoing_v2(false)?;
         }
+        self.tlc_state = tlcs;
+        self.state = state;
+        self.validate_session_v2()
+    }
+
+    pub(crate) fn initialize_session_v2(&mut self, remote_nonce: Option<PubNonce>) {
         self.session_v2 = Some(ChannelSessionV2 {
             marker: SESSION_MARKER,
             own: allocate_nonce(
@@ -257,42 +314,14 @@ impl ChannelActorState {
             remove_effects: Vec::new(),
             closing: None,
         });
-        self.last_committed_remote_nonce = None;
-        self.remote_revocation_nonce_for_send = None;
-        self.remote_revocation_nonce_for_verify = None;
-        self.remote_revocation_nonce_for_next = None;
-    }
-
-    pub(super) fn opening_wire_message(&self, message: FiberMessage) -> FiberMessage {
-        let Some(session) = &self.session_v2 else {
-            return message;
-        };
-        match message {
-            FiberMessage::ChannelInitialization(open) => {
-                crate::fiber::session_v2::opening_message(open, session.own.public_nonce.clone())
-            }
-            FiberMessage::ChannelNormalOperation(FiberChannelMessage::AcceptChannel(accept)) => {
-                crate::fiber::session_v2::accepting_message(
-                    accept,
-                    session.own.public_nonce.clone(),
-                )
-            }
-            other => other,
-        }
     }
 
     pub(super) fn tx_complete_wire_message(&self) -> FiberMessage {
-        if let Some(session) = &self.session_v2 {
-            FiberMessage::tx_complete_v2(TxCompleteV2 {
-                channel_id: self.id,
-                initial_commitment_nonce: session.own.public_nonce.clone(),
-            })
-        } else {
-            FiberMessage::tx_complete(TxComplete {
-                channel_id: self.id,
-                next_commitment_nonce: self.get_next_commitment_nonce(),
-            })
-        }
+        let session = self.session_v2.as_ref().expect("initialized V2 session");
+        FiberMessage::tx_complete_v2(TxCompleteV2 {
+            channel_id: self.id,
+            initial_commitment_nonce: session.own.public_nonce.clone(),
+        })
     }
 
     /// Normal-round history cannot yet prove that the peer received our opening Ready.
@@ -304,11 +333,6 @@ impl ChannelActorState {
     }
 
     pub(super) fn ready_wire_message(&mut self) -> ProcessingChannelResult<FiberMessage> {
-        if self.session_v2.is_none() {
-            return Ok(FiberMessage::channel_ready(ChannelReady {
-                channel_id: self.id,
-            }));
-        }
         let mut session = self
             .session_v2
             .clone()
@@ -1894,7 +1918,7 @@ where
         let session = state
             .session_v2
             .as_ref()
-            .ok_or_else(|| invalid("V2 CS on legacy channel"))?;
+            .ok_or_else(|| invalid("Missing V2 commitment session"))?;
         if let Some(previous) = &session.incoming {
             let old = CommitmentSignedV2::try_from(previous.request.clone())
                 .map_err(|e| invalid(e.to_string()))?;
@@ -8675,19 +8699,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_v2_channel_ignores_v1_revocation_nonce_watchdog() {
-        // A V2 channel never advances the V1 revocation nonce ledger, so an idle V2 channel used to
-        // look permanently unbalanced and was force-closed after one response timeout.
+    async fn test_idle_v2_channel_has_no_peer_response_deadline() {
         let (a, _, id) =
             create_nodes_with_established_channel(100000000000, 11800000000, false).await;
-        let mut state = a.get_channel_actor_state(id);
+        let state = a.get_channel_actor_state(id);
         assert!(state.session_v2.is_some(), "expected a V2 channel");
-        state.remote_revocation_nonce_for_send = None;
-        state.remote_revocation_nonce_for_verify = None;
-        state.revocation_nonce_unbalanced_since = Some(0);
-        assert!(!state.is_revocation_nonce_ledger_stalled(crate::now_timestamp_as_millis_u64()));
-        state.refresh_revocation_nonce_watchdog();
-        assert!(state.revocation_nonce_unbalanced_since.is_none());
     }
 
     #[tokio::test]

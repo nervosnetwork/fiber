@@ -15,13 +15,9 @@ fn privkey_debug_is_redacted() {
 fn channel_features_roundtrip_as_hex() {
     use crate::watchtower::ChannelFeatures;
 
-    for (hex, bits) in [("0x0", 0), ("0x1", 1)] {
-        let features: ChannelFeatures = serde_json::from_str(&format!("\"{hex}\"")).unwrap();
-        assert_eq!(features.0, bits);
-        assert_eq!(
-            serde_json::to_string(&features).unwrap(),
-            format!("\"{hex}\"")
-        );
-    }
+    let features: ChannelFeatures = serde_json::from_str("\"0x1\"").unwrap();
+    assert_eq!(features.0, 1);
+    assert_eq!(ChannelFeatures::default().0, 1);
+    assert_eq!(serde_json::to_string(&features).unwrap(), "\"0x1\"");
     assert!(serde_json::from_str::<ChannelFeatures>("\"0xz\"").is_err());
 }
