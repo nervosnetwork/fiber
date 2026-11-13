@@ -40,8 +40,8 @@ use crate::{
         XUDT_COMPATIBLE_WITNESS,
     },
     fiber::onchain_tlc_reconcile::{
-        tracked_settlement_tlcs, verify_and_select_settlement_data, OnChainTlcSettlement,
-        TrackedSettlementTlc,
+        tracked_settlement_tlcs, verify_and_select_settlement_data_with_superseded,
+        OnChainTlcSettlement, TrackedSettlementTlc,
     },
     now_timestamp_as_millis_u64,
     utils::{
@@ -582,9 +582,13 @@ fn try_settle_commitment_tx<S: WatchtowerStore>(
 ) {
     // Keep the snapshot verified against the original commitment lock throughout
     // settlement. Successor cells have different witness hashes after each unlock.
-    let Some((direction, _, settlement_data)) =
-        verify_and_select_settlement_data(&channel_data, &commitment_lock)
-    else {
+    let superseded =
+        store.get_superseded_remote_settlements(&self_node_id, &channel_data.channel_id);
+    let Some((direction, _, settlement_data)) = verify_and_select_settlement_data_with_superseded(
+        &channel_data,
+        &superseded,
+        &commitment_lock,
+    ) else {
         error!(
             "Cannot recover settlement snapshot for channel {:?}",
             channel_data.channel_id

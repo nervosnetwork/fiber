@@ -1071,10 +1071,15 @@ where
                 return Ok(());
             }
         }
+        // A close transaction is already published once the confirmation flag is set;
+        // accepting a shutdown here would only clobber that flag and start a second close.
+        let awaiting_confirmation = matches!(state.state, ChannelState::ShuttingDown(flags)
+            if flags.contains(fiber_types::ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION));
         if !matches!(
             state.state,
             ChannelState::ChannelReady | ChannelState::ShuttingDown(_)
-        ) || !state.check_shutdown_fee_valid(&message.close_script, message.fee_rate)
+        ) || awaiting_confirmation
+            || !state.check_shutdown_fee_valid(&message.close_script, message.fee_rate)
         {
             return Err(invalid("Invalid V2 shutdown state or fee"));
         }
@@ -1118,8 +1123,12 @@ where
             .as_mut()
             .expect("closing")
             .remote_shutdown = Some(packed);
+        let flags = match state.state {
+            ChannelState::ShuttingDown(flags) => flags,
+            _ => fiber_types::ShuttingDownFlags::empty(),
+        };
         state.update_state(ChannelState::ShuttingDown(
-            fiber_types::ShuttingDownFlags::AWAITING_PENDING_TLCS,
+            flags | fiber_types::ShuttingDownFlags::AWAITING_PENDING_TLCS,
         ));
         self.progress_close_v2(state).await
     }
@@ -1484,19 +1493,21 @@ where
             state.send_v2_message(ready);
             super::debug_event!(self.network, "Replayed ChannelReady after reestablishment");
         }
-        // The peer has not accepted our outstanding CS (`next_commitment_number == local`), but
-        // the transaction we signed for it no longer matches our TLC state, so replaying it can
-        // only fail verification. Abandon that signing session and sign a fresh CS after
-        // recovery; V2 allocates every session nonce from a fresh random seed, so the burned
-        // nonce is never reused.
-        // `bolt-simple-taproot` retransmits the exact updates and then *regenerates* the partial
-        // signature with a freshly exchanged nonce; it never replays the old signature. V2 does
-        // the same: an outstanding CS whose ACK never arrived is abandoned and signed again after
-        // recovery, which is safe because `allocate_nonce` uses a fresh seed per session.
+        // The peer has not accepted our outstanding CS (`next_commitment_number == local`).
+        // Abandon that signing session and sign a fresh CS after recovery; V2 allocates every
+        // session nonce from a fresh random seed, so the burned nonce is never reused. The
+        // previous signature is retained as a watchtower snapshot, so either same-number
+        // transaction the peer may publish remains recoverable.
         let resign_outstanding_cs = if state.tlc_state.waiting_ack {
             if peer.next_commitment_number == local {
-                true
+                // A closing phase that already published a transaction must not sign again.
+                match state.state {
+                    ChannelState::ChannelReady => true,
+                    ChannelState::ShuttingDown(flags) => flags.is_ok_for_commitment_operation(),
+                    _ => false,
+                }
             } else if local.checked_add(1) == Some(peer.next_commitment_number) {
+                // The peer already accepted the round; its ACK is replayed below.
                 false
             } else {
                 return Err(invalid("Incompatible V2 incoming CS history"));
@@ -1979,9 +1990,8 @@ where
         ack: RevokeAndAckV2,
     ) -> ProcessingChannelResult {
         state.ensure_v2_not_quarantined()?;
-        // A reconnect can replay an ACK we already processed before we re-signed the commitment
-        // it refers to. Its bytes match `last_ack`, so it is an idempotent duplicate: ignore it
-        // instead of trying to verify it against the regenerated session.
+        // A reconnect can replay an ACK we already processed. Its bytes match `last_ack`, so it
+        // is an idempotent duplicate: ignore it instead of trying to verify it again.
         let packed_ack: fiber_types::gen::fiber::RevokeAndAckV2 = ack.clone().into();
         if state
             .session_v2
@@ -1997,11 +2007,9 @@ where
             return Ok(());
         }
         let verified = state.stage_ack_v2(&ack)?;
-        // A reconnect abandons the outstanding commitment and re-signs it with a fresh nonce, so
-        // the peer may still answer the *previous* round with an ACK that can no longer be
-        // verified. Such an ACK is stale by construction: the peer answers the regenerated
-        // commitment with a new ACK, so dropping it costs nothing. Outside recovery an
-        // unverifiable ACK remains a hard error.
+        // While the handshake is still in flight the peer may answer a superseded round with an
+        // ACK that can no longer be verified. The replayed commitment gets its own ACK, so
+        // dropping this one costs nothing. Outside recovery an unverifiable ACK is a hard error.
         let accepted = match state.accept_ack_v2(myself, &ack, verified) {
             Ok(accepted) => accepted,
             Err(err) if state.reestablishing => {
@@ -8039,6 +8047,92 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_v2_shutdown_after_force_close_preserves_confirmation_flag() {
+        let (a, b, id) =
+            create_nodes_with_established_channel(100000000000, 11800000000, false).await;
+        let mut sa = a.get_channel_actor_state(id);
+        let mut sb = b.get_channel_actor_state(id);
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let (network, task) = Actor::spawn(None, CaptureNetwork, captured.clone())
+            .await
+            .unwrap();
+        sa.network = Some(network.clone());
+        sb.network = Some(network.clone());
+        let actor_a = ChannelActor::new(a.pubkey, b.pubkey, network.clone(), a.store.clone(), None);
+        let actor_b = ChannelActor::new(b.pubkey, a.pubkey, network.clone(), b.store.clone(), None);
+
+        actor_b
+            .shutdown_v2(
+                &mut sb,
+                super::super::ShutdownCommand {
+                    force: false,
+                    close_script: None,
+                    fee_rate: None,
+                },
+            )
+            .await
+            .unwrap();
+        let peer_shutdown = ShutdownV2::try_from(
+            sb.session_v2
+                .as_ref()
+                .unwrap()
+                .closing
+                .as_ref()
+                .unwrap()
+                .shutdown
+                .clone(),
+        )
+        .unwrap();
+
+        // Local force close published the commitment transaction and waits for it.
+        sa.state = ChannelState::ShuttingDown(
+            fiber_types::ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION,
+        );
+        sa.session_v2.as_mut().unwrap().closing = None;
+        assert!(actor_a
+            .receive_shutdown_v2(&mut sa, peer_shutdown)
+            .await
+            .is_err());
+        assert_eq!(
+            sa.state,
+            ChannelState::ShuttingDown(
+                fiber_types::ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION
+            )
+        );
+        assert!(sa.remote_shutdown_info.is_none());
+        assert!(sa.session_v2.as_ref().unwrap().closing.is_none());
+
+        capture_barrier(&network, id).await;
+        assert!(
+            !captured.lock().unwrap().iter().any(|message| matches!(
+                message,
+                NetworkActorMessage::Command(NetworkActorCommand::SendFiberMessage(
+                    crate::fiber::network::FiberMessageWithTarget {
+                        message: FiberMessage::ChannelNormalOperation(
+                            FiberChannelMessage::CommitmentSignedV2(_)
+                        ),
+                        ..
+                    }
+                ))
+            )),
+            "a shutdown after force close must not sign a new commitment"
+        );
+
+        // The preserved flag still accepts the confirmation of the published close.
+        sa.update_close_transaction_confirmed([7; 32].into(), true, true)
+            .await
+            .unwrap();
+        assert!(matches!(
+            sa.state,
+            ChannelState::Closed(flags)
+                if flags.contains(fiber_types::CloseFlags::UNCOOPERATIVE_LOCAL)
+        ));
+
+        network.stop(None);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn test_v2_recovery_handshake_precedes_replay_and_watchdog_bounds_wait() {
         let (a, b, id) =
             create_nodes_with_established_channel(100000000000, 11800000000, false).await;
@@ -9011,6 +9105,8 @@ mod tests {
         .await
         .unwrap();
         let state = a.get_channel_actor_state(id);
+        // The spec route regenerates the signature with a fresh nonce instead of replaying the
+        // persisted one, so the commitment number is preserved while the bytes and nonce differ.
         let replayed = state
             .session_v2
             .as_ref()
@@ -9018,8 +9114,6 @@ mod tests {
             .outgoing
             .as_ref()
             .unwrap();
-        // The spec route regenerates the signature with a fresh nonce instead of replaying the
-        // persisted one, so the commitment number is preserved while the bytes and nonce differ.
         let resigned = CommitmentSignedV2::try_from(replayed.request.clone()).expect("CS");
         let original_cs = CommitmentSignedV2::try_from(original.request.clone()).expect("CS");
         assert_eq!(resigned.commitment_number, original_cs.commitment_number);
@@ -9036,6 +9130,132 @@ mod tests {
             state.get_local_commitment_number(),
             request.commitment_number + 1
         );
+    }
+
+    #[tokio::test]
+    async fn test_v2_force_close_reconnect_keeps_outgoing_session_and_restart_state() {
+        let (a, b, id) =
+            create_nodes_with_established_channel(100000000000, 11800000000, false).await;
+        let mut state = a.get_channel_actor_state(id);
+        let receiver = b.get_channel_actor_state(id);
+        let myself = a.get_channel_actor(id).await.unwrap();
+        state.prepare_outgoing_v2(false).unwrap();
+        state.tlc_state.waiting_ack = true;
+        let stored = state
+            .session_v2
+            .as_ref()
+            .unwrap()
+            .outgoing
+            .as_ref()
+            .unwrap()
+            .clone();
+        state.mark_reestablishing_offline();
+        state.state = ChannelState::ShuttingDown(
+            fiber_types::ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION,
+        );
+
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let (network, task) = Actor::spawn(None, CaptureNetwork, captured.clone())
+            .await
+            .unwrap();
+        state.network = Some(network.clone());
+        let actor = ChannelActor::new(a.pubkey, b.pubkey, network.clone(), a.store.clone(), None);
+        actor
+            .reestablish_v2(&myself, &mut state, receiver.reestablish_message_v2())
+            .await
+            .unwrap();
+        capture_barrier(&network, id).await;
+
+        let after = state
+            .session_v2
+            .as_ref()
+            .unwrap()
+            .outgoing
+            .as_ref()
+            .expect("force-close recovery must not drop the outgoing session");
+        assert_eq!(after.request.as_slice(), stored.request.as_slice());
+        assert_eq!(
+            state.state,
+            ChannelState::ShuttingDown(
+                fiber_types::ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION
+            )
+        );
+        // No signature is attempted in a phase that already published a close.
+        assert!(!captured.lock().unwrap().iter().any(|message| matches!(
+            message,
+            NetworkActorMessage::Command(NetworkActorCommand::SendFiberMessage(
+                crate::fiber::network::FiberMessageWithTarget {
+                    message: FiberMessage::ChannelNormalOperation(
+                        FiberChannelMessage::CommitmentSignedV2(_)
+                    ),
+                    ..
+                }
+            ))
+        )));
+
+        // The retained record must still validate (and survive a restart).
+        state.validate_session_v2().unwrap();
+        let encoded = bincode::serialize(&state).unwrap();
+        let restored: ChannelActorState = bincode::deserialize(&encoded).unwrap();
+        restored.validate_session_v2().unwrap();
+
+        network.stop(None);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_v2_force_close_during_ready_keeps_restart_state_valid() {
+        let (a, b, id) =
+            create_nodes_with_established_channel(100000000000, 11800000000, false).await;
+        let mut state = a.get_channel_actor_state(id);
+        // Recreate the pre-peer-Ready window: our Ready rotated the session nonce to 2,
+        // but the commitment counters have not advanced yet.
+        state.state = ChannelState::AwaitingChannelReady(
+            fiber_types::AwaitingChannelReadyFlags::OUR_CHANNEL_READY,
+        );
+        state.commitment_numbers = fiber_types::CommitmentNumbers {
+            local: 1,
+            remote: 1,
+        };
+        {
+            let session = state.session_v2.as_mut().unwrap();
+            session.own.number = 2;
+            session.remote_number = 1;
+        }
+
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let (network, task) = Actor::spawn(None, CaptureNetwork, captured.clone())
+            .await
+            .unwrap();
+        state.network = Some(network.clone());
+        let actor = ChannelActor::new(a.pubkey, b.pubkey, network.clone(), a.store.clone(), None);
+        actor
+            .handle_shutdown_command(
+                &mut state,
+                super::super::ShutdownCommand {
+                    force: true,
+                    close_script: None,
+                    fee_rate: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            state.state,
+            ChannelState::ShuttingDown(flags)
+                if flags.contains(fiber_types::ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION)
+        ));
+        // The persisted record and a restart must both pass V2 validation.
+        state.validate_session_v2().unwrap();
+        assert_eq!(state.commitment_numbers.remote, 2);
+        assert_eq!(state.commitment_numbers.local, 1);
+        let encoded = bincode::serialize(&state).unwrap();
+        let restored: ChannelActorState = bincode::deserialize(&encoded).unwrap();
+        restored.validate_session_v2().unwrap();
+
+        network.stop(None);
+        task.await.unwrap();
     }
 
     #[tokio::test]

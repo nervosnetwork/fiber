@@ -95,8 +95,8 @@ use crate::fiber::onchain_tlc_reconcile::{
     collect_onchain_fulfilled_tlcs, collect_onchain_payer_failures,
     collect_onchain_received_timeout_settled_tlcs, collect_onchain_timeout_settled_tlcs,
     confirm_onchain_payer_fulfill, has_unresolved_onchain_tlcs, onchain_fulfilled_preimage,
-    recover_shutdown_settlement_data, verify_and_select_settlement_data, OnChainConfirmedPayerTlc,
-    OnChainTimeoutTlcRole,
+    recover_shutdown_settlement_data_with_superseded, verify_and_select_settlement_data,
+    OnChainConfirmedPayerTlc, OnChainTimeoutTlcRole,
 };
 use crate::fiber::payment::{
     PaymentActor, PaymentActorArguments, PaymentActorMessage, PaymentSessionExt,
@@ -4657,8 +4657,13 @@ where
         let lock = output.lock();
         if !has_valid_snapshot {
             if let Some(channel_data) = store.get_local_watch_channel(&channel_id) {
+                let superseded = store.get_local_superseded_remote_settlements(&channel_id);
                 if let Some((for_remote, commitment_number, settlement_data)) =
-                    recover_shutdown_settlement_data(&channel_data, &lock)
+                    recover_shutdown_settlement_data_with_superseded(
+                        &channel_data,
+                        &superseded,
+                        &lock,
+                    )
                 {
                     let record = ShutdownSettlementRecord {
                         shutdown_tx_hash: tx_hash.clone(),
@@ -7168,6 +7173,7 @@ where
                                 ))
                                 .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
+                            state.align_force_close_commitment_numbers();
                             state.update_state(ChannelState::ShuttingDown(
                                 ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION,
                             ));

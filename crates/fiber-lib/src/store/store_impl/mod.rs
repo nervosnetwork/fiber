@@ -432,6 +432,14 @@ pub fn check_validate<P: AsRef<Path>>(path: P) -> Result<(), String> {
                     &mut errors,
                 );
             }
+            #[cfg(feature = "watchtower")]
+            WATCHTOWER_SUPERSEDED_SETTLEMENT_PREFIX => {
+                check_deserialization::<Vec<SettlementData>>(
+                    &value,
+                    "WATCHTOWER_SUPERSEDED_SETTLEMENT_PREFIX",
+                    &mut errors,
+                );
+            }
             CHANNEL_SHUTDOWN_SETTLEMENT_PREFIX
                 if bincode::deserialize::<ShutdownSettlementRecord>(&value).is_err()
                     && bincode::deserialize::<SettlementData>(&value).is_err() =>
@@ -865,49 +873,58 @@ impl Store {
         channel_data: &ChannelData,
         payment_hash: &Hash256,
     ) -> bool {
-        let snapshot_statuses = [
-            (&channel_data.remote_settlement_data, true),
-            (&channel_data.pending_remote_settlement_data, true),
-            (&channel_data.local_settlement_data, false),
-        ]
-        .into_iter()
-        .filter_map(|(settlement_data, for_remote)| {
-            let mut has_matching_tlc = false;
-            let mut has_exact_settlement = false;
-            let mut has_unsettled_tlc = false;
-            for tlc in settlement_data
-                .tlcs
-                .iter()
-                .filter(|tlc| &tlc.payment_hash == payment_hash)
-            {
-                has_matching_tlc = true;
-                let tlc_id = if for_remote {
-                    tlc.tlc_id
-                } else {
-                    tlc.tlc_id.flip()
-                };
-                let is_exactly_settled = self
-                    .get(Self::tlc_on_chain_settled_key(
-                        node_id,
-                        &channel_data.channel_id,
-                        tlc_id,
-                    ))
-                    .map(|value| {
-                        deserialize_from::<OnChainTlcSettlement>(
-                            value.as_ref(),
-                            "OnChainTlcSettlement",
-                        )
-                    })
-                    .is_some_and(|settlement| {
-                        settlement.payment_hash == tlc.payment_hash
-                            && settlement.hash_algorithm == tlc.hash_algorithm
-                    });
-                has_exact_settlement |= is_exactly_settled;
-                has_unsettled_tlc |= !is_exactly_settled;
-            }
-            has_matching_tlc.then_some((has_exact_settlement, has_unsettled_tlc))
-        })
-        .collect::<Vec<_>>();
+        let superseded = self.get_superseded_remote_settlements(node_id, &channel_data.channel_id);
+        let snapshot_statuses = std::iter::once((&channel_data.remote_settlement_data, true))
+            .chain(std::iter::once((
+                &channel_data.pending_remote_settlement_data,
+                true,
+            )))
+            .chain(
+                superseded
+                    .iter()
+                    .map(|settlement_data| (settlement_data, true)),
+            )
+            .chain(std::iter::once((
+                &channel_data.local_settlement_data,
+                false,
+            )))
+            .filter_map(|(settlement_data, for_remote)| {
+                let mut has_matching_tlc = false;
+                let mut has_exact_settlement = false;
+                let mut has_unsettled_tlc = false;
+                for tlc in settlement_data
+                    .tlcs
+                    .iter()
+                    .filter(|tlc| &tlc.payment_hash == payment_hash)
+                {
+                    has_matching_tlc = true;
+                    let tlc_id = if for_remote {
+                        tlc.tlc_id
+                    } else {
+                        tlc.tlc_id.flip()
+                    };
+                    let is_exactly_settled = self
+                        .get(Self::tlc_on_chain_settled_key(
+                            node_id,
+                            &channel_data.channel_id,
+                            tlc_id,
+                        ))
+                        .map(|value| {
+                            deserialize_from::<OnChainTlcSettlement>(
+                                value.as_ref(),
+                                "OnChainTlcSettlement",
+                            )
+                        })
+                        .is_some_and(|settlement| {
+                            settlement.payment_hash == tlc.payment_hash
+                                && settlement.hash_algorithm == tlc.hash_algorithm
+                        });
+                    has_exact_settlement |= is_exactly_settled;
+                    has_unsettled_tlc |= !is_exactly_settled;
+                }
+                has_matching_tlc.then_some((has_exact_settlement, has_unsettled_tlc))
+            })
+            .collect::<Vec<_>>();
 
         // ChannelData retains several candidate commitment snapshots. Once an exact settlement
         // exists, only snapshots containing exact evidence can represent the active on-chain
@@ -928,15 +945,18 @@ impl Store {
         }
     }
 
-    fn watch_channel_payment_hashes(channel_data: &ChannelData) -> HashSet<Hash256> {
-        [
-            &channel_data.remote_settlement_data,
-            &channel_data.pending_remote_settlement_data,
-            &channel_data.local_settlement_data,
-        ]
-        .into_iter()
-        .flat_map(|settlement_data| settlement_data.tlcs.iter().map(|tlc| tlc.payment_hash))
-        .collect()
+    fn watch_channel_payment_hashes(
+        channel_data: &ChannelData,
+        superseded: &[SettlementData],
+    ) -> HashSet<Hash256> {
+        std::iter::once(&channel_data.remote_settlement_data)
+            .chain(std::iter::once(
+                &channel_data.pending_remote_settlement_data,
+            ))
+            .chain(superseded.iter())
+            .chain(std::iter::once(&channel_data.local_settlement_data))
+            .flat_map(|settlement_data| settlement_data.tlcs.iter().map(|tlc| tlc.payment_hash))
+            .collect()
     }
 
     fn watch_preimage_in_use(&self, node_id: &NodeId, payment_hash: &Hash256) -> bool {
@@ -1374,6 +1394,11 @@ impl ChannelActorStateStore for Store {
     #[cfg(not(feature = "watchtower"))]
     fn get_local_watch_channel(&self, _channel_id: &Hash256) -> Option<ChannelData> {
         None
+    }
+
+    #[cfg(feature = "watchtower")]
+    fn get_local_superseded_remote_settlements(&self, channel_id: &Hash256) -> Vec<SettlementData> {
+        self.get_superseded_remote_settlements(&NodeId::local(), channel_id)
     }
 }
 
@@ -2043,12 +2068,21 @@ impl WatchtowerStore for Store {
         .concat();
         let lock = self.watchtower_write_lock(&node_id);
         let _guard = lock.lock();
+        let superseded = self.get_superseded_remote_settlements(&node_id, &channel_id);
         let payment_hashes = self
             .get(key.clone())
             .map(|v| deserialize_from::<ChannelData>(v.as_ref(), "ChannelData"))
-            .map(|channel_data| Self::watch_channel_payment_hashes(&channel_data))
+            .map(|channel_data| Self::watch_channel_payment_hashes(&channel_data, &superseded))
             .unwrap_or_default();
         self.delete(key);
+        self.delete(
+            [
+                &[WATCHTOWER_SUPERSEDED_SETTLEMENT_PREFIX],
+                node_id.as_ref(),
+                channel_id.as_ref(),
+            ]
+            .concat(),
+        );
         self.cleanup_unused_watch_preimages_locked(
             &node_id,
             WatchtowerPreimageCleanupTarget::ExactSet(&payment_hashes),
@@ -2107,16 +2141,71 @@ impl WatchtowerStore for Store {
             channel_id.as_ref(),
         ]
         .concat();
+        let superseded_key = [
+            &[WATCHTOWER_SUPERSEDED_SETTLEMENT_PREFIX],
+            node_id.as_ref(),
+            channel_id.as_ref(),
+        ]
+        .concat();
         if let Some(mut channel_data) = self
             .get(key)
             .map(|v| deserialize_from::<ChannelData>(v.as_ref(), "ChannelData"))
         {
-            channel_data.pending_remote_settlement_data = pending_remote_settlement_data;
+            // A replay of a snapshot we already hold must not rotate anything.
+            if pending_remote_settlement_data == channel_data.pending_remote_settlement_data
+                || pending_remote_settlement_data == channel_data.remote_settlement_data
+            {
+                return;
+            }
+            // `remote_settlement_data` is the peer's latest unrevoked commitment and must stay
+            // selectable even after a same-number re-sign. Keep each replaced pending snapshot
+            // in a separate bounded list instead of rotating the remote slot.
+            let previous = std::mem::replace(
+                &mut channel_data.pending_remote_settlement_data,
+                pending_remote_settlement_data,
+            );
+            let keep_previous = previous != channel_data.remote_settlement_data;
             let mut batch = self.batch();
             let kv = KeyValue::WatchtowerChannel(node_id, channel_id, channel_data);
             batch.put(kv.key(), kv.value());
+            if keep_previous {
+                const MAX_SUPERSEDED: usize = 2;
+                let mut superseded: Vec<SettlementData> = self
+                    .get(superseded_key.clone())
+                    .map(|value| {
+                        deserialize_from(value.as_ref(), "WATCHTOWER_SUPERSEDED_SETTLEMENT_PREFIX")
+                    })
+                    .unwrap_or_default();
+                if !superseded.contains(&previous) {
+                    if superseded.len() >= MAX_SUPERSEDED {
+                        superseded.remove(0);
+                    }
+                    superseded.push(previous);
+                }
+                batch.put(
+                    superseded_key,
+                    serialize_to_vec(&superseded, "WATCHTOWER_SUPERSEDED_SETTLEMENT_PREFIX"),
+                );
+            }
             batch.commit();
         }
+    }
+
+    fn get_superseded_remote_settlements(
+        &self,
+        node_id: &NodeId,
+        channel_id: &Hash256,
+    ) -> Vec<SettlementData> {
+        self.get(
+            [
+                &[WATCHTOWER_SUPERSEDED_SETTLEMENT_PREFIX],
+                node_id.as_ref(),
+                channel_id.as_ref(),
+            ]
+            .concat(),
+        )
+        .map(|value| deserialize_from(value.as_ref(), "WATCHTOWER_SUPERSEDED_SETTLEMENT_PREFIX"))
+        .unwrap_or_default()
     }
 
     fn update_local_settlement(

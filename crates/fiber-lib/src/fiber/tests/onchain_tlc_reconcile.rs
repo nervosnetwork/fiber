@@ -40,8 +40,9 @@ use crate::fiber::onchain_tlc_reconcile::{
     can_reconcile_onchain_fulfillment, collect_onchain_fulfilled_tlcs,
     collect_onchain_received_timeout_settled_tlcs, collect_onchain_timeout_settled_tlcs,
     has_unresolved_onchain_tlcs, has_unresolved_onchain_tlcs_for_snapshot, parse_commitment_lock,
-    recover_shutdown_settlement_data, resolve_onchain_tlc, settlement_data_for_commitment,
-    tracked_settlement_tlcs, verify_and_select_settlement_data, LegacyOnChainTlcSettlement,
+    recover_shutdown_settlement_data_with_superseded, resolve_onchain_tlc,
+    settlement_data_for_commitment, tracked_settlement_tlcs, verify_and_select_settlement_data,
+    verify_and_select_settlement_data_with_superseded, LegacyOnChainTlcSettlement,
     OnChainTimeoutTlcRole, OnChainTlcResolution,
 };
 use crate::fiber::tests::settle_tlc_set_command_tests::{
@@ -2102,7 +2103,7 @@ fn test_verify_and_select_settlement_data_preceding_and_pending() {
         args[40] ^= 0xff;
         lock = lock.as_builder().args(args.pack()).build();
         assert!(verify_and_select_settlement_data(&channel_data, &lock).is_none());
-        let recovered = recover_shutdown_settlement_data(&channel_data, &lock);
+        let recovered = recover_shutdown_settlement_data_with_superseded(&channel_data, &[], &lock);
         assert_eq!(recovered.is_some(), accepted);
         if let Some((remote, recovered_number, scope)) = recovered {
             assert!(remote);
@@ -2138,6 +2139,108 @@ fn test_verify_and_select_settlement_data_preceding_and_pending() {
         let tampered_lock = get_script_by_contract(Contract::CommitmentLock, &tampered_args);
         assert!(verify_and_select_settlement_data(&channel_data, &tampered_lock).is_none());
     }
+}
+
+#[test]
+#[cfg(feature = "watchtower")]
+fn test_store_pending_settlement_replay_keeps_unrevoked_witness() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let store = open_store(temp_dir.path()).expect("open store");
+    let node_id = NodeId::local();
+    let channel_id = gen_rand_sha256_hash();
+
+    let local_privkey = Privkey::from_slice(&[11u8; 32]);
+    let remote_privkey = Privkey::from_slice(&[22u8; 32]);
+    let local_settlement_privkey = Privkey::from_slice(&[33u8; 32]);
+    let remote_settlement_pubkey = Privkey::from_slice(&[44u8; 32]).pubkey();
+
+    let settlement_2 = SettlementData {
+        local_amount: 1000,
+        remote_amount: 2000,
+        tlcs: vec![],
+    };
+    let settlement_3 = SettlementData {
+        local_amount: 900,
+        remote_amount: 2100,
+        tlcs: vec![],
+    };
+
+    store.insert_watch_channel(
+        node_id.clone(),
+        channel_id,
+        None,
+        local_settlement_privkey.clone(),
+        remote_settlement_pubkey,
+        local_privkey.pubkey(),
+        remote_privkey.pubkey(),
+        settlement_2.clone(),
+    );
+    // ACK #2 revokes #1 and makes #2 the preceding remote witness.
+    store.update_revocation(
+        node_id.clone(),
+        channel_id,
+        RevocationData {
+            commitment_number: 1,
+            aggregated_signature: CompactSignature::from_bytes(&[0u8; 64]).unwrap(),
+            output: CellOutput::default(),
+            output_data: Default::default(),
+        },
+        settlement_2.clone(),
+    );
+    // Sign #3, then replay the identical pending event.
+    store.update_pending_remote_settlement(node_id.clone(), channel_id, settlement_3.clone());
+    store.update_pending_remote_settlement(node_id.clone(), channel_id, settlement_3.clone());
+    // A reconnect re-signs #3 with different settlement data.
+    let settlement_3_resigned = SettlementData {
+        local_amount: 800,
+        remote_amount: 2200,
+        tlcs: vec![],
+    };
+    store.update_pending_remote_settlement(
+        node_id.clone(),
+        channel_id,
+        settlement_3_resigned.clone(),
+    );
+
+    let channel_data = store
+        .get_local_watch_channel(&channel_id)
+        .expect("stored channel");
+    let superseded = store.get_superseded_remote_settlements(&node_id, &channel_id);
+    assert_eq!(superseded, vec![settlement_3.clone()]);
+
+    let lock = create_test_commitment_lock_with_keys(
+        &local_privkey,
+        &remote_privkey,
+        &local_settlement_privkey,
+        remote_settlement_pubkey,
+        &settlement_2,
+        true,
+        2,
+    );
+    let (for_remote, number, selected) =
+        verify_and_select_settlement_data_with_superseded(&channel_data, &superseded, &lock)
+            .expect("the still-unrevoked #2 witness must remain selectable");
+    assert!(for_remote);
+    assert_eq!(number, 2);
+    assert_eq!(selected, &settlement_2);
+
+    let superseded_lock = create_test_commitment_lock_with_keys(
+        &local_privkey,
+        &remote_privkey,
+        &local_settlement_privkey,
+        remote_settlement_pubkey,
+        &settlement_3,
+        true,
+        3,
+    );
+    let (_, number, selected) = verify_and_select_settlement_data_with_superseded(
+        &channel_data,
+        &superseded,
+        &superseded_lock,
+    )
+    .expect("the superseded same-number witness must remain selectable");
+    assert_eq!(number, 3);
+    assert_eq!(selected, &settlement_3);
 }
 
 #[test]

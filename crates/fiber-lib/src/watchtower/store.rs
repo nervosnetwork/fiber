@@ -80,6 +80,16 @@ pub trait WatchtowerStore {
         pending_remote_settlement_data: SettlementData,
     );
 
+    /// Return superseded same-number remote settlement snapshots that remain valid
+    /// candidates until their commitment number is revoked.
+    fn get_superseded_remote_settlements(
+        &self,
+        _node_id: &NodeId,
+        _channel_id: &Hash256,
+    ) -> Vec<SettlementData> {
+        Vec::new()
+    }
+
     /// Update the settlement data of a channel, the watchtower will use this data to settle the local commitment transaction of a force closed channel
     fn update_local_settlement(
         &self,

@@ -1024,6 +1024,129 @@ async fn test_acceptor_rejects_initial_funding_tx_with_no_inputs() {
     open_channel_with_underfunded_initial_tx(InitialFundingUnderfunding::Inputs, None, true).await;
 }
 
+#[derive(Clone, Debug)]
+struct EchoInitialFundingTx {
+    echoed: Arc<Mutex<bool>>,
+}
+
+#[async_trait::async_trait]
+impl MockChainActorMiddleware for EchoInitialFundingTx {
+    async fn handle(
+        &mut self,
+        _inner_self: ActorRef<CkbChainMessage>,
+        message: CkbChainMessage,
+        _state: &mut MockChainActorState,
+    ) -> Result<Option<CkbChainMessage>, ActorProcessingErr> {
+        let CkbChainMessage::Fund(tx, request, reply) = message else {
+            return Ok(Some(message));
+        };
+        let mut echoed = self.echoed.lock().expect("echo flag");
+        if *echoed {
+            return Ok(Some(CkbChainMessage::Fund(tx, request, reply)));
+        }
+        *echoed = true;
+        // Echo the initiator's transaction unchanged: no acceptor inputs and no
+        // combined funding cell.
+        let _ = reply.send(Ok(tx));
+        Ok(None)
+    }
+
+    fn clone_box(&self) -> Box<dyn MockChainActorMiddleware> {
+        Box::new(self.clone())
+    }
+}
+
+#[tokio::test]
+async fn test_initiator_rejects_echoed_initial_funding_tx() {
+    let echoed = Arc::new(Mutex::new(false));
+    let nodes = NetworkNode::new_n_interconnected_nodes_with_config(2, |i| {
+        let mut builder = NetworkNodeConfigBuilder::new()
+            .node_name(Some(format!("node-{i}")))
+            .base_dir_prefix(&format!("test-fnn-node-{i}-"));
+        if i == 1 {
+            builder = builder.mock_chain_actor_middleware(Box::new(EchoInitialFundingTx {
+                echoed: echoed.clone(),
+            }));
+        }
+        builder.build()
+    })
+    .await;
+    let [mut node_a, mut node_b]: [NetworkNode; 2] = nodes.try_into().expect("two nodes");
+
+    let open_channel_result = call!(node_a.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+            OpenChannelCommand {
+                pubkey: node_b.pubkey,
+                public: false,
+                one_way: false,
+                shutdown_script: None,
+                funding_amount: 100_000_000_000,
+                funding_udt_type_script: None,
+                commitment_fee_rate: None,
+                commitment_delay_epoch: None,
+                funding_fee_rate: None,
+                tlc_expiry_delta: None,
+                tlc_min_value: None,
+                tlc_fee_proportional_millionths: None,
+                max_tlc_number_in_flight: None,
+                max_tlc_value_in_flight: None,
+            },
+            rpc_reply,
+        ))
+    })
+    .expect("node_a alive")
+    .expect("open channel success");
+
+    node_b
+        .expect_event(|event| match event {
+            NetworkServiceEvent::ChannelPendingToBeAccepted(pubkey, _) => pubkey == &node_a.pubkey,
+            _ => false,
+        })
+        .await;
+
+    let accept_channel_result = call!(node_b.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::AcceptChannel(
+            AcceptChannelCommand {
+                temp_channel_id: open_channel_result.channel_id,
+                funding_amount: 50_000_000_000,
+                shutdown_script: None,
+                max_tlc_number_in_flight: None,
+                max_tlc_value_in_flight: None,
+                min_tlc_value: None,
+                tlc_fee_proportional_millionths: None,
+                tlc_expiry_delta: None,
+            },
+            rpc_reply,
+        ))
+    })
+    .expect("node_b alive")
+    .expect("accept channel success");
+    let new_channel_id = accept_channel_result.new_channel_id;
+
+    node_a
+        .expect_event(|event| {
+            matches!(event, NetworkServiceEvent::ChannelFundingAborted(id) if id == &new_channel_id)
+        })
+        .await;
+    assert!(*echoed.lock().expect("echo flag"));
+    assert!(node_a
+        .get_channel_actor_state_unchecked(new_channel_id)
+        .is_none());
+    let record = node_a
+        .store
+        .get_channel_open_record(&new_channel_id)
+        .expect("opening record");
+    assert_eq!(record.status, ChannelOpeningStatus::Failed);
+    assert!(
+        record
+            .failure_detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("less than negotiated total")),
+        "unexpected abort reason: {:?}",
+        record.failure_detail
+    );
+}
+
 #[tokio::test]
 async fn test_create_private_channel() {
     init_tracing();
