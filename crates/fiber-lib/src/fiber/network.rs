@@ -6721,10 +6721,7 @@ where
         self.store
             .get_channel_actor_state(channel_id)
             .is_some_and(|channel_state| {
-                channel_state
-                    .ephemeral_config
-                    .external_funding
-                    .signed_submitted
+                channel_state.has_submitted_local_external_funding()
                     && channel_state.funding_tx_confirmed_at.is_none()
                     && !channel_state.is_ready()
                     && !channel_state.is_closed()
@@ -6941,11 +6938,7 @@ where
 
     pub async fn abandon_channel(&mut self, channel_id: Hash256) -> ProcessingChannelResult {
         if let Some(channel_actor_state) = self.store.get_channel_actor_state(&channel_id) {
-            if channel_actor_state
-                .ephemeral_config
-                .external_funding
-                .signed_submitted
-            {
+            if channel_actor_state.has_submitted_local_external_funding() {
                 return Err(ProcessingChannelError::InvalidParameter(format!(
                     "Channel {} has released a signed external funding transaction and cannot be abandoned",
                     channel_id

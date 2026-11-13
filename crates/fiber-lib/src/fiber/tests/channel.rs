@@ -13823,6 +13823,223 @@ async fn do_test_external_funding_spent_input_automatically_aborts_stuck_channel
 }
 
 #[tokio::test]
+async fn test_external_funding_acceptor_not_locked_by_peer_tx_update_v1() {
+    do_test_external_funding_acceptor_not_locked_by_peer_tx_update(false).await;
+}
+
+#[tokio::test]
+async fn test_external_funding_acceptor_not_locked_by_peer_tx_update_v2() {
+    do_test_external_funding_acceptor_not_locked_by_peer_tx_update(true).await;
+}
+
+async fn do_test_external_funding_acceptor_not_locked_by_peer_tx_update(v2: bool) {
+    use crate::fiber::types::TxUpdate;
+
+    init_tracing();
+
+    // Helper: open an external-funding channel while holding the opener's initial
+    // CommitmentSigned so the acceptor stays in `SigningCommitment(OUR_COMMITMENT_SIGNED_SENT)`
+    // without sending its own `TxSignatures`, then send a peer `TxUpdate` with the same raw tx to
+    // flip the acceptor's `signed_submitted = true` (reproducing audit finding N5).
+    async fn open_and_sync_without_opener_cs(
+        opener: &mut NetworkNode,
+        acceptor: &mut NetworkNode,
+    ) -> Hash256 {
+        let opener_actor = opener.network_actor.clone();
+        let acceptor_pubkey = acceptor.pubkey;
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        crate::tasks::spawn(async move {
+            let message = |rpc_reply| {
+                NetworkActorMessage::Command(NetworkActorCommand::OpenChannelWithExternalFunding(
+                    OpenChannelWithExternalFundingCommand {
+                        pubkey: acceptor_pubkey,
+                        funding_amount: 100_000_000_000,
+                        public: false,
+                        shutdown_script: Script::default(),
+                        funding_lock_script: Script::default(),
+                        funding_lock_script_cell_deps: Vec::new(),
+                        funding_udt_type_script: None,
+                        commitment_fee_rate: None,
+                        commitment_delay_epoch: None,
+                        funding_fee_rate: None,
+                        tlc_expiry_delta: None,
+                        tlc_min_value: None,
+                        tlc_fee_proportional_millionths: None,
+                        max_tlc_value_in_flight: None,
+                        max_tlc_number_in_flight: None,
+                    },
+                    rpc_reply,
+                ))
+            };
+            let result = call!(opener_actor, message).expect("opener alive");
+            let _ = tx.send(result);
+        });
+
+        let opener_pubkey = opener.pubkey;
+        let channel_id = acceptor
+            .expect_to_process_event(|event| match event {
+                NetworkServiceEvent::ChannelCreated(pubkey, id) if *pubkey == opener_pubkey => {
+                    Some(*id)
+                }
+                _ => None,
+            })
+            .await;
+        opener
+            .hold_next_fiber_messages(
+                acceptor.pubkey,
+                channel_id,
+                TestFiberMessageKind::CommitmentSigned,
+                1,
+            )
+            .await;
+
+        let open_res = rx
+            .await
+            .expect("open task")
+            .expect("open external funding channel");
+        assert_eq!(open_res.channel_id, channel_id);
+        opener.wait_for_held_fiber_messages(1).await;
+        opener.discard_held_fiber_messages().await;
+
+        let acceptor_before = acceptor.get_channel_actor_state(channel_id);
+        assert!(acceptor_before.is_acceptor);
+        assert!(matches!(
+            acceptor_before.state,
+            ChannelState::SigningCommitment(SigningCommitmentFlags::OUR_COMMITMENT_SIGNED_SENT)
+        ));
+
+        opener
+            .network_actor
+            .send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                    acceptor.pubkey,
+                    FiberMessage::tx_update(TxUpdate {
+                        channel_id,
+                        tx: open_res.unsigned_funding_tx,
+                    }),
+                )),
+            ))
+            .expect("opener alive");
+
+        wait_until_timeout(5_000, || {
+            acceptor
+                .get_channel_actor_state_unchecked(channel_id)
+                .is_some_and(|s| s.ephemeral_config.external_funding.signed_submitted)
+        })
+        .await;
+        channel_id
+    }
+
+    let [mut node_a, mut node_b] = new_2_nodes_with_auto_accept_version(v2).await;
+
+    // Scenario 1: Peer flips acceptor's `signed_submitted = true` via `TxUpdate` without sending
+    // `CommitmentSigned`. Acceptor must still allow `abandon_channel`.
+    let channel_id_1 = open_and_sync_without_opener_cs(&mut node_a, &mut node_b).await;
+    let synced_state_1 = node_b.get_channel_actor_state(channel_id_1);
+    assert!(
+        synced_state_1
+            .ephemeral_config
+            .external_funding
+            .signed_submitted
+    );
+    assert!(
+        !synced_state_1.has_submitted_local_external_funding(),
+        "peer TxUpdate must not mark acceptor as having submitted local external funding"
+    );
+    assert!(
+        synced_state_1.can_abort_funding_on_timeout(),
+        "acceptor must remain eligible for funding timeout before sending its own TxSignatures"
+    );
+
+    let abandon_message = |reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::AbandonChannel(channel_id_1, reply))
+    };
+    call!(node_b.network_actor, abandon_message)
+        .expect("node_b alive")
+        .expect("acceptor must be able to abandon inbound channel before sending TxSignatures");
+    wait_until_timeout(5_000, || {
+        node_b
+            .get_channel_actor_state_unchecked(channel_id_1)
+            .is_none()
+    })
+    .await;
+
+    // Scenario 2: Same peer TxUpdate sets acceptor `signed_submitted = true`; peer `TxAbort` must
+    // still clean up the inbound channel instead of leaving an undeletable pending slot.
+    let channel_id_2 = open_and_sync_without_opener_cs(&mut node_a, &mut node_b).await;
+    node_a
+        .network_actor
+        .send_message(NetworkActorMessage::new_command(
+            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                node_b.pubkey,
+                FiberMessage::ChannelNormalOperation(FiberChannelMessage::TxAbort(TxAbort {
+                    channel_id: channel_id_2,
+                    message: b"opener aborts".to_vec(),
+                })),
+            )),
+        ))
+        .expect("node_a alive");
+
+    node_b
+        .expect_event(
+            |event| matches!(event, NetworkServiceEvent::ChannelFundingAborted(id) if *id == channel_id_2),
+        )
+        .await;
+    assert!(
+        node_b
+            .get_channel_actor_state_unchecked(channel_id_2)
+            .is_none(),
+        "peer TxAbort must clean up acceptor channel even after peer TxUpdate sync"
+    );
+
+    // Scenario 3: Funding timeout on acceptor must still fire even after peer sets
+    // `signed_submitted = true` via `TxUpdate`.
+    let mut nodes = Vec::new();
+    for i in 0..2 {
+        let mut builder = NetworkNodeConfigBuilder::new()
+            .node_name(Some(format!("acceptor-timeout-node-{}", i)))
+            .base_dir_prefix(&format!("test-acceptor-timeout-node-{}-", i));
+        if i == 1 {
+            builder = builder.fiber_config_updater(|config| {
+                config.auto_accept_channel_ckb_funding_amount =
+                    Some(DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT);
+                config.funding_timeout_seconds = 1;
+                config.external_funding_timeout_seconds = 1;
+            });
+        }
+        let node = NetworkNode::new_with_config(builder.build()).await;
+        if !v2 {
+            let mut features = FeatureVector::default();
+            features.unset_channel_v2_optional();
+            features.unset_channel_v2_required();
+            node.update_node_features_and_wait(features).await;
+            call!(node.network_actor, |reply| {
+                NetworkActorMessage::new_command(NetworkActorCommand::TestEnableLegacyFixture(
+                    reply,
+                ))
+            })
+            .expect("node alive");
+        }
+        nodes.push(node);
+    }
+    let [mut opener, mut acceptor]: [NetworkNode; 2] = nodes.try_into().expect("2 nodes");
+    opener.connect_to(&mut acceptor).await;
+
+    let channel_id_3 = open_and_sync_without_opener_cs(&mut opener, &mut acceptor).await;
+    acceptor
+        .expect_event(
+            |event| matches!(event, NetworkServiceEvent::ChannelFundingAborted(id) if *id == channel_id_3),
+        )
+        .await;
+    assert!(
+        acceptor
+            .get_channel_actor_state_unchecked(channel_id_3)
+            .is_none(),
+        "acceptor funding timeout must still abort stalled external funding channel"
+    );
+}
+
+#[tokio::test]
 async fn test_channel_stale_passive_wait_no_proactive_send() {
     init_tracing();
 
