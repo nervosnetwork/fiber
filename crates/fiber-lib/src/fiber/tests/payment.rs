@@ -8741,9 +8741,7 @@ async fn assert_payer_settlement_completion(peer_failed: bool, offline: bool) {
         .unwrap()
         .tried_times;
     legacy
-        .session_v2
-        .as_mut()
-        .unwrap()
+        .session
         .remove_effects
         .push((old_tlc, Some(execution)));
     node_0.store.insert_channel_actor_state(legacy.clone());
@@ -8751,7 +8749,7 @@ async fn assert_payer_settlement_completion(peer_failed: bool, offline: bool) {
         session.has_pending_payment_work(&node_0.store),
         "historical fulfillment must not hide V2 receipts"
     );
-    legacy.session_v2.as_mut().unwrap().remove_effects.clear();
+    legacy.session.remove_effects.clear();
     node_0.store.insert_channel_actor_state(legacy);
     tokio::time::sleep(Duration::from_secs(1)).await;
     node_0.start().await;

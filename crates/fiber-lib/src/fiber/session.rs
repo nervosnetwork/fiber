@@ -1,11 +1,46 @@
 //! Independent, durable signing sessions for commitment-owner V2 exchanges.
 
-use fiber_types::{Hash256, NoncePurposeV2, Privkey, Pubkey, SigningNonceV2};
+use fiber_types::{
+    ChannelSessionV2, Hash256, NoncePurposeV2, Privkey, Pubkey, SigningNonceV2,
+    INITIAL_COMMITMENT_NUMBER,
+};
 use musig2::{
-    AggNonce, BinaryEncoding, KeyAggContext, PartialSignature, SecNonce, SecNonceBuilder,
+    AggNonce, BinaryEncoding, KeyAggContext, PartialSignature, PubNonce, SecNonce, SecNonceBuilder,
 };
 
 pub(super) const SESSION_MARKER: u32 = 0x56320001;
+
+/// Allocate the initial owner-bound signing session before constructing a channel.
+pub(crate) fn new_session(
+    channel_id: Hash256,
+    key: &Privkey,
+    remote_nonce: Option<PubNonce>,
+) -> ChannelSessionV2 {
+    ChannelSessionV2 {
+        marker: SESSION_MARKER,
+        own: allocate_nonce(
+            channel_id,
+            key.pubkey(),
+            INITIAL_COMMITMENT_NUMBER + 1,
+            NoncePurposeV2::Commitment,
+            key,
+        ),
+        own_retired: Vec::new(),
+        bootstrap_remote_nonce: remote_nonce.clone(),
+        remote_ready: None,
+        remote_nonce,
+        remote_number: INITIAL_COMMITMENT_NUMBER + 1,
+        outgoing: None,
+        incoming: None,
+        pending_incoming: None,
+        pending_ack: None,
+        last_ack: None,
+        revocation_effect: None,
+        bootstrap_settlement: None,
+        remove_effects: Vec::new(),
+        closing: None,
+    }
+}
 
 fn secret_nonce(record: &SigningNonceV2, key: &Privkey) -> SecNonce {
     fiber_types::channel_v2_validation::secret_nonce_v2(record, key)

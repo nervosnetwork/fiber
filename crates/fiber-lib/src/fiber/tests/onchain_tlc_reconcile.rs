@@ -2243,7 +2243,6 @@ fn test_tracked_settlement_tlcs_extraction() {
     let pending_witness = settlement_data_to_witness(
         &pending_settlement,
         true,
-        ChannelFeatures::V2,
         local_settlement_key,
         remote_settlement_key,
     );
@@ -2315,7 +2314,6 @@ fn test_tracked_settlement_tlcs_preserves_verified_empty_snapshot() {
     let witness = settlement_data_to_witness(
         &committed_settlement,
         true,
-        ChannelFeatures::V2,
         local_settlement_key,
         remote_settlement_key,
     );
@@ -2455,7 +2453,6 @@ fn create_test_commitment_lock_with_keys(
     let witness = settlement_data_to_witness(
         settlement_data,
         for_remote,
-        ChannelFeatures::V2,
         local_settlement_privkey.clone(),
         remote_settlement_pubkey,
     );

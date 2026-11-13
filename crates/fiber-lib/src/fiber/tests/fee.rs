@@ -7,7 +7,6 @@ use ckb_types::core::TransactionBuilder;
 use ckb_types::packed::{Bytes, CellInput, CellOutput, Script, WitnessArgs};
 #[cfg(feature = "watchtower")]
 use ckb_types::prelude::Builder;
-use fiber_types::ChannelFeatures;
 #[cfg(feature = "watchtower")]
 use fiber_types::{Hash256, HashAlgorithm, Privkey, SettlementData, TLCId};
 #[cfg(feature = "watchtower")]
@@ -33,14 +32,13 @@ fn settlement_transaction_uses_full_hash_witness() {
         }],
     };
     let unlock = vec![0u8; 67];
-    let settlement_transaction = |version| {
+    let tx = {
         let witness = [
             XUDT_COMPATIBLE_WITNESS.as_slice(),
             &[1u8],
             settlement_data_to_witness(
                 &settlement_data,
                 false,
-                version,
                 Privkey::from(&[3u8; 32]),
                 Privkey::from(&[4u8; 32]).pubkey(),
             )
@@ -59,13 +57,12 @@ fn settlement_transaction_uses_full_hash_witness() {
         .build()
     };
 
-    let tx = settlement_transaction(ChannelFeatures::V2);
     assert_eq!(tx.witnesses().get(0).unwrap().raw_data().len(), 254);
 }
 
 #[test]
 fn checked_commitment_tx_fee_allows_intermediate_u64_overflow_when_final_fee_fits() {
-    let tx_size = checked_calculate_commitment_tx_fee(1_000, &None, ChannelFeatures::V2)
+    let tx_size = checked_calculate_commitment_tx_fee(1_000, &None)
         .expect("fee rate 1000 should return commitment tx size");
     assert!(tx_size > 0);
 
@@ -74,7 +71,7 @@ fn checked_commitment_tx_fee_allows_intermediate_u64_overflow_when_final_fee_fit
     assert!(raw_product > u128::from(u64::MAX));
 
     let expected_fee = u64::try_from(raw_product / 1_000).expect("final fee should fit");
-    let actual_fee = checked_calculate_commitment_tx_fee(fee_rate, &None, ChannelFeatures::V2)
+    let actual_fee = checked_calculate_commitment_tx_fee(fee_rate, &None)
         .expect("intermediate u64 overflow should be allowed when final fee fits");
 
     assert_eq!(actual_fee, expected_fee);
@@ -83,7 +80,7 @@ fn checked_commitment_tx_fee_allows_intermediate_u64_overflow_when_final_fee_fit
 #[test]
 fn full_hash_feature_serializes_full_payment_hash_in_tlc() {
     use crate::fiber::channel::settlement_tlc_to_witness;
-    use fiber_types::{ChannelFeatures as Features, Hash256, HashAlgorithm, Privkey};
+    use fiber_types::{Hash256, HashAlgorithm, Privkey};
 
     let tlc = fiber_types::SettlementTlc {
         tlc_id: fiber_types::TLCId::Offered(0),
@@ -94,7 +91,7 @@ fn full_hash_feature_serializes_full_payment_hash_in_tlc() {
         local_key: Privkey::from(&[1u8; 32]),
         remote_key: Privkey::from(&[2u8; 32]).pubkey(),
     };
-    let full_hash = settlement_tlc_to_witness(&tlc, false, Features::V2);
+    let full_hash = settlement_tlc_to_witness(&tlc, false);
     assert_eq!(full_hash.len(), 97);
     assert_eq!(&full_hash[17..49], tlc.payment_hash.as_ref());
 }

@@ -224,8 +224,8 @@ fn channel_features_are_validated_bytes() {
 
     assert_eq!(Features::default(), Features::V2);
     assert_eq!(Features::V2.bits(), 1);
-    assert_eq!(Features::V2.lock_args_len(), 58);
-    assert_eq!(Features::V2.payment_hash_len(), 32);
+    assert_eq!(Features::LOCK_ARGS_LEN, 58);
+    assert_eq!(Features::PAYMENT_HASH_LEN, 32);
     assert_eq!(bincode::serialize(&Features::V2).unwrap(), vec![1]);
     for bits in [0, 2, 255] {
         assert!(Features::from_bits(bits).is_err());

@@ -59,11 +59,11 @@ use ckb_types::{
 use fiber_types::{
     derive_private_key, is_tlc_key_derivation_safe, try_derive_tlc_pubkey, AddTlcCommand,
     AppliedFlags, AwaitingChannelReadyFlags, AwaitingTxSignaturesFlags, ChannelConstraints,
-    ChannelFeatures, ChannelOpeningStatus, ChannelState, CollaboratingFundingTxFlags,
-    HashAlgorithm, InMemorySigner, InboundTlcStatus, NegotiatingFundingFlags, OutboundTlcStatus,
-    PaymentHopData, PaymentStatus, Privkey, RemoveTlc, RemoveTlcFulfill, RemoveTlcReason,
-    RetryableTlcOperation, SettlementTlc, ShuttingDownFlags, SigningCommitmentFlags, TLCId,
-    TlcErrPacket, TlcErrorCode, TlcInfo, TlcStatus, NO_SHARED_SECRET,
+    ChannelOpeningStatus, ChannelState, CollaboratingFundingTxFlags, HashAlgorithm, InMemorySigner,
+    InboundTlcStatus, NegotiatingFundingFlags, OutboundTlcStatus, PaymentHopData, PaymentStatus,
+    Privkey, RemoveTlc, RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation, SettlementTlc,
+    ShuttingDownFlags, SigningCommitmentFlags, TLCId, TlcErrPacket, TlcErrorCode, TlcInfo,
+    TlcStatus, NO_SHARED_SECRET,
 };
 
 use fiber_types::{CloseFlags, FeatureVector};
@@ -610,16 +610,7 @@ async fn test_revoke_and_ack_rejects_malicious_next_per_commitment_point() {
         loop {
             let state = node_a.get_channel_actor_state(channel_id);
             if state.tlc_state.waiting_ack
-                && state
-                    .session_v2
-                    .as_ref()
-                    .unwrap()
-                    .outgoing
-                    .as_ref()
-                    .unwrap()
-                    .funding
-                    .number
-                    == 2
+                && state.session.outgoing.as_ref().unwrap().funding.number == 2
             {
                 break;
             }
@@ -1893,13 +1884,7 @@ async fn test_v2_retry_queue_batch_settles_payments() {
     a.wait_for_held_fiber_messages(2).await;
     let state = a.get_channel_actor_state(id);
     assert!(state.retryable_tlc_operations.is_empty());
-    let outgoing = state
-        .session_v2
-        .as_ref()
-        .unwrap()
-        .outgoing
-        .as_ref()
-        .unwrap();
+    let outgoing = state.session.outgoing.as_ref().unwrap();
     assert_eq!(
         outgoing
             .updates
@@ -2075,17 +2060,13 @@ async fn test_v2_external_funding_bootstrap_and_payment() {
     let (id, unsigned) = open_external_funding_channel(&a, &b, 100_000_000_000).await;
     let initial_a = a
         .get_channel_actor_state(id)
-        .session_v2
-        .as_ref()
-        .unwrap()
+        .session
         .own
         .public_nonce
         .clone();
     let initial_b = b
         .get_channel_actor_state(id)
-        .session_v2
-        .as_ref()
-        .unwrap()
+        .session
         .own
         .public_nonce
         .clone();
@@ -2114,28 +2095,14 @@ async fn test_v2_external_funding_bootstrap_and_payment() {
     let sa = a.get_channel_actor_state(id);
     let sb = b.get_channel_actor_state(id);
     assert_eq!(
-        sa.session_v2
-            .as_ref()
-            .unwrap()
-            .incoming
-            .as_ref()
-            .unwrap()
-            .funding
-            .public_nonce,
+        sa.session.incoming.as_ref().unwrap().funding.public_nonce,
         initial_a
     );
     assert_eq!(
-        sb.session_v2
-            .as_ref()
-            .unwrap()
-            .incoming
-            .as_ref()
-            .unwrap()
-            .funding
-            .public_nonce,
+        sb.session.incoming.as_ref().unwrap().funding.public_nonce,
         initial_b
     );
-    assert_ne!(sa.session_v2.as_ref().unwrap().own.public_nonce, initial_a);
+    assert_ne!(sa.session.own.public_nonce, initial_a);
     let funding = sa.funding_tx.as_ref().unwrap();
     assert_eq!(funding.raw().as_slice(), signed.raw().as_slice());
     assert_eq!(
@@ -2156,8 +2123,8 @@ async fn test_v2_independent_actor_sessions_duplicates_and_conflicts() {
     let (a, b, id) = create_nodes_with_established_channel(100000000000, 11800000000, false).await;
     let mut sa = a.get_channel_actor_state(id);
     let mut sb = b.get_channel_actor_state(id);
-    let initial_reverse = sa.session_v2.as_ref().unwrap().own.public_nonce.clone();
-    let initial_remote_ready = sb.session_v2.as_ref().unwrap().own.public_nonce.clone();
+    let initial_reverse = sa.session.own.public_nonce.clone();
+    let initial_remote_ready = sb.session.own.public_nonce.clone();
     let ca = Arc::new(Mutex::new(Vec::new()));
     let cb = Arc::new(Mutex::new(Vec::new()));
     let (na, ha) = Actor::spawn(None, CapturingNetworkActor, ca.clone())
@@ -2190,9 +2157,7 @@ async fn test_v2_independent_actor_sessions_duplicates_and_conflicts() {
         let packed: fiber_types::gen::fiber::CommitmentSignedV2 = request.clone().into();
         assert_eq!(
             stored_a
-                .session_v2
-                .as_ref()
-                .unwrap()
+                .session
                 .outgoing
                 .as_ref()
                 .unwrap()
@@ -2224,13 +2189,7 @@ async fn test_v2_independent_actor_sessions_duplicates_and_conflicts() {
         };
         let stored_b = b.get_channel_actor_state(id);
         let packed: fiber_types::gen::fiber::RevokeAndAckV2 = ack.clone().into();
-        let incoming = stored_b
-            .session_v2
-            .as_ref()
-            .unwrap()
-            .incoming
-            .as_ref()
-            .unwrap();
+        let incoming = stored_b.session.incoming.as_ref().unwrap();
         assert_eq!(
             incoming.response.as_ref().unwrap().as_slice(),
             packed.as_slice()
@@ -2293,17 +2252,14 @@ async fn test_v2_independent_actor_sessions_duplicates_and_conflicts() {
             )
             .await
             .is_err());
+        assert_eq!(sa.session.own.public_nonce, initial_reverse);
         assert_eq!(
-            sa.session_v2.as_ref().unwrap().own.public_nonce,
-            initial_reverse
-        );
-        assert_eq!(
-            sa.session_v2.as_ref().unwrap().remote_nonce.as_ref(),
-            Some(&sb.session_v2.as_ref().unwrap().own.public_nonce)
+            sa.session.remote_nonce.as_ref(),
+            Some(&sb.session.own.public_nonce)
         );
         assert!(!sa.is_waiting_tlc_ack());
     }
-    let before_ready_duplicate = sa.session_v2.as_ref().unwrap().remote_nonce.clone();
+    let before_ready_duplicate = sa.session.remote_nonce.clone();
     aa.handle_peer_message(
         &ra,
         &mut sa,
@@ -2316,8 +2272,7 @@ async fn test_v2_independent_actor_sessions_duplicates_and_conflicts() {
     .await
     .unwrap();
     assert_eq!(
-        sa.session_v2.as_ref().unwrap().remote_nonce,
-        before_ready_duplicate,
+        sa.session.remote_nonce, before_ready_duplicate,
         "late Ready must not reactivate a consumed bootstrap nonce"
     );
     // Both owners can have outstanding requests without borrowing each other's slots.
@@ -2378,8 +2333,8 @@ async fn test_v2_opening_and_paired_actor_payments() {
     let (a, b, id) = create_nodes_with_established_channel(100000000000, 11800000000, false).await;
     let initial_a = a.get_channel_actor_state(id);
     let initial_b = b.get_channel_actor_state(id);
-    let sa = initial_a.session_v2.as_ref().expect("V2 opening session");
-    let sb = initial_b.session_v2.as_ref().expect("V2 opening session");
+    let sa = &initial_a.session;
+    let sb = &initial_b.session;
     assert_eq!(sa.remote_nonce.as_ref(), Some(&sb.own.public_nonce));
     assert_eq!(sb.remote_nonce.as_ref(), Some(&sa.own.public_nonce));
     assert_eq!(sa.own.number, 2);
@@ -2404,14 +2359,11 @@ async fn test_v2_opening_and_paired_actor_payments() {
     assert_eq!(a.get_local_balance_from_channel(id), balance - 30000 + 9999);
     let final_a = a.get_channel_actor_state(id);
     let final_b = b.get_channel_actor_state(id);
-    let sa = final_a.session_v2.as_ref().unwrap();
-    let sb = final_b.session_v2.as_ref().unwrap();
+    let sa = &final_a.session;
+    let sb = &final_b.session;
     assert_eq!(sa.remote_nonce.as_ref(), Some(&sb.own.public_nonce));
     assert_eq!(sb.remote_nonce.as_ref(), Some(&sa.own.public_nonce));
-    assert_ne!(
-        sa.own.public_nonce,
-        initial_a.session_v2.as_ref().unwrap().own.public_nonce
-    );
+    assert_ne!(sa.own.public_nonce, initial_a.session.own.public_nonce);
 }
 
 #[tokio::test]
@@ -4896,10 +4848,7 @@ async fn test_received_tlc_claim_force_closes_after_offline_restart_v2() {
     init_tracing();
     let (mut payer, mut payee, channel_id) =
         create_nodes_with_established_channel(HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT, true).await;
-    assert!(payee
-        .get_channel_actor_state(channel_id)
-        .session_v2
-        .is_some());
+    assert!(payee.get_channel_actor_state(channel_id).session.marker == 0x56320001);
     let mut claims = Vec::new();
     for algorithm in [HashAlgorithm::Sha256, HashAlgorithm::CkbHash] {
         let preimage = gen_rand_sha256_hash();
@@ -7305,7 +7254,7 @@ async fn test_reconnect_resolves_awaiting_channel_ready_when_peer_is_already_rea
         .checked_sub(1)
         .expect("established channel has an initial remote commitment");
     // Model an actually missing V2 Ready, including its remote advertisement.
-    let session = node_b_state.session_v2.as_mut().unwrap();
+    let session = &mut node_b_state.session;
     session.remote_ready = None;
     session.remote_number = fiber_types::INITIAL_COMMITMENT_NUMBER + 1;
     session.remote_nonce = session.bootstrap_remote_nonce.clone();
@@ -9659,7 +9608,7 @@ async fn test_abandon_failed_channel_without_accept() {
     let temp_channel_id = open_channel_result.channel_id;
     let node_a_channel_actor_state = node_a.get_channel_actor_state_unchecked(temp_channel_id);
     assert!(
-        node_a_channel_actor_state.unwrap().session_v2.is_some(),
+        node_a_channel_actor_state.unwrap().session.marker == 0x56320001,
         "V2 bootstrap nonce must be durable before advertisement"
     );
 
@@ -9821,7 +9770,7 @@ async fn test_abandon_channel_with_peer_accept() {
     let temp_channel_id = open_channel_result.channel_id;
     let node_a_channel_actor_state = node_a.get_channel_actor_state_unchecked(temp_channel_id);
     assert!(
-        node_a_channel_actor_state.unwrap().session_v2.is_some(),
+        node_a_channel_actor_state.unwrap().session.marker == 0x56320001,
         "V2 bootstrap nonce must be durable before advertisement"
     );
 
@@ -9877,7 +9826,7 @@ async fn test_abandon_channel_with_peer_accept() {
     // so node_b will not received `TxCollaborationCommand::TxUpdate` message
     // V2 has durably advertised its bootstrap nonce before collaboration.
     let channel_actor_state = node_b.get_channel_actor_state_unchecked(new_channel_id);
-    assert!(channel_actor_state.unwrap().session_v2.is_some());
+    assert!(channel_actor_state.unwrap().session.marker == 0x56320001);
 
     let res = node_b.send_abandon_channel(new_channel_id).await;
     eprintln!("res: {:?}", res);
@@ -10480,11 +10429,9 @@ async fn test_v2_reestablish_lost_raa_replays_exact_response_and_gates_ready() {
         .payment_hash;
     b.wait_for_held_fiber_messages(2).await;
     let before = b.get_channel_actor_state(id);
-    let original_nonce = before.session_v2.as_ref().unwrap().own.public_nonce.clone();
+    let original_nonce = before.session.own.public_nonce.clone();
     let original_response = before
-        .session_v2
-        .as_ref()
-        .unwrap()
+        .session
         .incoming
         .as_ref()
         .unwrap()
@@ -10505,12 +10452,7 @@ async fn test_v2_reestablish_lost_raa_replays_exact_response_and_gates_ready() {
     assert_eq!(gated.connectivity_state, ChannelConnectivityState::Syncing);
     assert!(gated.tlc_state.waiting_ack);
     assert_ne!(
-        b.get_channel_actor_state(id)
-            .session_v2
-            .as_ref()
-            .unwrap()
-            .own
-            .public_nonce,
+        b.get_channel_actor_state(id).session.own.public_nonce,
         original_nonce,
         "a reconnect rotates the verification nonce (`next_local_nonces`)"
     );
@@ -10560,9 +10502,7 @@ async fn test_v2_reestablish_lost_raa_replays_exact_response_and_gates_ready() {
     assert!(!a.get_channel_actor_state(id).reestablishing);
     assert!(a
         .get_channel_actor_state(id)
-        .session_v2
-        .as_ref()
-        .unwrap()
+        .session
         .remove_effects
         .is_empty());
 }
@@ -10608,12 +10548,7 @@ async fn test_payments_finish_after_lost_commitment_and_two_rapid_reconnects() {
         "A must await the acknowledgment for its held CommitmentSigned"
     );
     assert!(
-        pre_disconnect_a
-            .session_v2
-            .as_ref()
-            .unwrap()
-            .outgoing
-            .is_some(),
+        pre_disconnect_a.session.outgoing.is_some(),
         "A must persist the held commitment"
     );
 
@@ -10673,8 +10608,8 @@ async fn test_payments_finish_after_lost_commitment_and_two_rapid_reconnects() {
             let all_success = payment_statuses
                 .iter()
                 .all(|status| *status == PaymentStatus::Success);
-            let a_nonces_usable = state_a.session_v2.as_ref().unwrap().remote_nonce.is_some();
-            let b_nonces_usable = state_b.session_v2.as_ref().unwrap().remote_nonce.is_some();
+            let a_nonces_usable = state_a.session.remote_nonce.is_some();
+            let b_nonces_usable = state_b.session.remote_nonce.is_some();
             if all_success
                 && state_a.state == ChannelState::ChannelReady
                 && state_b.state == ChannelState::ChannelReady
@@ -10710,8 +10645,8 @@ async fn test_payments_finish_after_lost_commitment_and_two_rapid_reconnects() {
                     .unwrap_or(PaymentStatus::Created)
             })
             .collect::<Vec<_>>();
-        let session_a = state_a.session_v2.as_ref().unwrap();
-        let session_b = state_b.session_v2.as_ref().unwrap();
+        let session_a = &state_a.session;
+        let session_b = &state_b.session;
         panic!(
             "V2 recovery stalled after lost CommitmentSigned and two rapid reconnects: \
              payment_statuses={payment_statuses:?}; \
@@ -11002,7 +10937,7 @@ fn test_reestablish_stalled_only_for_syncing_force_closable_channels() {
     }));
     // Periodic maintenance also checks the V2 recovery budget.
     assert!(stalled_with(&stalled, after_timeout, |state| {
-        state.session_v2 = ChannelActorState::samples(0).remove(0).session_v2.clone()
+        state.session = ChannelActorState::samples(0).remove(0).session.clone()
     }));
 
     // The peer's ReestablishChannel arrived and stopped the clock.
@@ -11785,13 +11720,7 @@ async fn test_external_funding_duplicate_tx_complete_after_signed_submit_is_igno
 
     let duplicate_tx_complete = FiberMessage::tx_complete_v2(crate::fiber::types::TxCompleteV2 {
         channel_id,
-        initial_commitment_nonce: progressed
-            .session_v2
-            .as_ref()
-            .unwrap()
-            .bootstrap_remote_nonce
-            .clone()
-            .unwrap(),
+        initial_commitment_nonce: progressed.session.bootstrap_remote_nonce.clone().unwrap(),
     });
     node_b
         .network_actor
@@ -12225,7 +12154,7 @@ async fn do_test_external_funding_tx_abort_preserves_recoverable_state() {
 
     // The wallet can sign immediately when open returns; the exit must already be durable.
     let state = node_a.get_channel_actor_state(channel_id);
-    assert!(state.session_v2.is_some());
+    assert!(state.session.marker == 0x56320001);
     assert!(state.latest_commitment_transaction.is_some());
     assert!(!state.ephemeral_config.external_funding.signed_submitted);
     assert!(matches!(state.state, ChannelState::SigningCommitment(flags)
@@ -12365,9 +12294,9 @@ async fn do_test_external_funding_replays_lost_signed_tx_after_restart() {
     let (channel_id, unsigned_tx) =
         open_external_funding_channel(&node_a, &node_b, 100_000_000_000).await;
     let before = node_a.get_channel_actor_state(channel_id);
-    assert!(before.session_v2.is_some());
+    assert!(before.session.marker == 0x56320001);
     assert!(before.latest_commitment_transaction.is_some());
-    let outgoing = before.session_v2.as_ref().and_then(|s| s.outgoing.clone());
+    let outgoing = before.session.outgoing.clone();
     let signed_tx = mock_sign_external_funding_tx(&unsigned_tx);
 
     node_a
@@ -12405,9 +12334,7 @@ async fn do_test_external_funding_replays_lost_signed_tx_after_restart() {
     if let Some(outgoing) = outgoing {
         assert_eq!(
             restored
-                .session_v2
-                .as_ref()
-                .unwrap()
+                .session
                 .outgoing
                 .as_ref()
                 .unwrap()
@@ -13722,7 +13649,6 @@ fn check_accept_channel_parameters_rejects_total_reserved_overflow() {
             &Script::default(),
             MAX_TLC_NUMBER_IN_FLIGHT,
             MAX_TLC_NUMBER_IN_FLIGHT,
-            ChannelFeatures::V2,
         ),
         "Total reserved CKB amount overflows",
     );
@@ -13742,7 +13668,6 @@ fn check_accept_channel_parameters_rejects_commitment_fee_overflow() {
             &Script::default(),
             MAX_TLC_NUMBER_IN_FLIGHT,
             MAX_TLC_NUMBER_IN_FLIGHT,
-            ChannelFeatures::V2,
         ),
         "overflows commitment fee",
     );
@@ -13761,7 +13686,6 @@ fn check_accept_channel_parameters_rejects_non_udt_total_capacity_overflow() {
             &Script::default(),
             MAX_TLC_NUMBER_IN_FLIGHT,
             MAX_TLC_NUMBER_IN_FLIGHT,
-            ChannelFeatures::V2,
         ),
         "The total funding amount",
     );
@@ -13776,7 +13700,6 @@ fn check_open_channel_parameters_rejects_commitment_fee_overflow() {
         u64::MAX - 1_000_000_000_000,
         DEFAULT_FEE_RATE,
         u64::MAX,
-        ChannelFeatures::V2,
         EpochNumberWithFraction::new(MIN_COMMITMENT_DELAY_EPOCHS, 0, 1).full_value(),
         MAX_TLC_NUMBER_IN_FLIGHT,
     )
@@ -13796,7 +13719,6 @@ fn check_open_channel_parameters_rejects_total_reserved_overflow() {
         u64::MAX,
         DEFAULT_FEE_RATE,
         DEFAULT_COMMITMENT_FEE_RATE,
-        ChannelFeatures::V2,
         EpochNumberWithFraction::new(MIN_COMMITMENT_DELAY_EPOCHS, 0, 1).full_value(),
         MAX_TLC_NUMBER_IN_FLIGHT,
     )
@@ -13817,7 +13739,6 @@ fn check_open_channel_parameters_rejects_excessive_funding_fee_rate() {
         100_000_000_000,
         MAX_FUNDING_FEE_RATE + 1,
         DEFAULT_COMMITMENT_FEE_RATE,
-        ChannelFeatures::V2,
         EpochNumberWithFraction::new(MIN_COMMITMENT_DELAY_EPOCHS, 0, 1).full_value(),
         MAX_TLC_NUMBER_IN_FLIGHT,
     )
@@ -13837,7 +13758,6 @@ fn check_open_channel_parameters_accepts_max_funding_fee_rate() {
         100_000_000_000,
         MAX_FUNDING_FEE_RATE,
         DEFAULT_COMMITMENT_FEE_RATE,
-        ChannelFeatures::V2,
         EpochNumberWithFraction::new(MIN_COMMITMENT_DELAY_EPOCHS, 0, 1).full_value(),
         MAX_TLC_NUMBER_IN_FLIGHT,
     )
@@ -13872,6 +13792,7 @@ mod udt_funding_cell_capacity {
         let local_funding = signer.get_base_public_keys().funding_pubkey;
         let remote_funding = gen_rand_fiber_public_key();
 
+        let channel_id = gen_rand_sha256_hash();
         ChannelActorState {
             core: ChannelActorData {
                 state: ChannelState::CollaboratingFundingTx(CollaboratingFundingTxFlags::empty()),
@@ -13880,7 +13801,7 @@ mod udt_funding_cell_capacity {
                 remote_tlc_info: None,
                 local_pubkey: gen_rand_fiber_public_key(),
                 remote_pubkey: gen_rand_fiber_public_key(),
-                id: gen_rand_sha256_hash(),
+                id: channel_id,
                 funding_tx: None,
                 funding_tx_confirmed_at: None,
                 funding_udt_type_script: Some(udt_type_script()),
@@ -13893,6 +13814,7 @@ mod udt_funding_cell_capacity {
                 commitment_fee_rate: 0,
                 commitment_delay_epoch: 0,
                 funding_fee_rate: 0,
+                session: crate::fiber::session::new_session(channel_id, &signer.funding_key, None),
                 signer,
                 local_channel_public_keys: ChannelBasePublicKeys {
                     funding_pubkey: local_funding,
@@ -13922,7 +13844,6 @@ mod udt_funding_cell_capacity {
                 created_at: SystemTime::now(),
                 external_funding: None,
                 channel_features: Default::default(),
-                session_v2: None,
             },
             waiting_peer_response: None,
             reestablish_timer: None,
@@ -14299,12 +14220,12 @@ fn settlement_tlc_to_witness_matches_commitment_contract_layout() {
         local_key: Privkey::from(&[5; 32]),
         remote_key: Privkey::from(&[6; 32]).pubkey(),
     };
-    let witness = settlement_tlc_to_witness(&tlc, false, ChannelFeatures::V2);
+    let witness = settlement_tlc_to_witness(&tlc, false);
     assert_eq!(witness.len(), 97);
     assert_eq!(&witness[17..49], tlc.payment_hash.as_ref());
     assert_eq!(&witness[1..17], &tlc.payment_amount.to_le_bytes());
     assert_eq!(
-        &settlement_tlc_to_witness(&tlc, true, ChannelFeatures::V2)[0..17],
+        &settlement_tlc_to_witness(&tlc, true)[0..17],
         &witness[0..17]
     );
 }
@@ -14312,7 +14233,8 @@ fn settlement_tlc_to_witness_matches_commitment_contract_layout() {
 // Paired V2 recovery probe: lose a signed commitment, then reconnect or restart.
 
 fn describe_1561_v2(tag: &str, state: &ChannelActorState) -> String {
-    let v2 = state.session_v2.as_ref().map(|session| {
+    let v2 = {
+        let session = &state.session;
         format!(
             "outgoing={} incoming={} pending_incoming={} pending_ack={} own_number={} remote_number={}",
             session.outgoing.is_some(),
@@ -14322,17 +14244,16 @@ fn describe_1561_v2(tag: &str, state: &ChannelActorState) -> String {
             session.own.number,
             session.remote_number,
         )
-    });
+    };
     format!(
-        "{tag}: v2={} waiting_ack={} waiting_tlc_ack={} reestablishing={} connectivity={:?} state={:?} commitments={:?} v2_session=[{}]",
-        state.channel_features.is_v2(),
+        "{tag}: waiting_ack={} waiting_tlc_ack={} reestablishing={} connectivity={:?} state={:?} commitments={:?} v2_session=[{}]",
         state.tlc_state.waiting_ack,
         state.is_waiting_tlc_ack(),
         state.reestablishing,
         state.connectivity_state,
         state.state,
         state.get_current_commitment_numbers(),
-        v2.unwrap_or_else(|| "none".to_string()),
+        v2,
     )
 }
 
@@ -14544,7 +14465,7 @@ async fn test_v2_crossed_rounds_do_not_storm_commitments() {
         .await;
     for (tag, node) in [("A pre-reconnect", &node_a), ("B pre-reconnect", &node_b)] {
         let state = node.get_channel_actor_state(channel_id);
-        let session = state.session_v2.as_ref().expect("v2");
+        let session = &state.session;
         let outgoing = session
             .outgoing
             .as_ref()

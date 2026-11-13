@@ -3,8 +3,7 @@ use std::collections::{HashMap, VecDeque};
 
 use crate::channel::{
     ChannelActorData, ChannelBasePublicKeys, ChannelConnectivityState, ChannelConstraints,
-    ChannelFeatures, ChannelState, ChannelTlcInfo, CommitmentNumbers, InMemorySigner, PendingTlcs,
-    TlcState,
+    ChannelState, ChannelTlcInfo, CommitmentNumbers, InMemorySigner, PendingTlcs, TlcState,
 };
 use crate::crate_time::SystemTime;
 use crate::schema::CHANNEL_ACTOR_STATE_PREFIX;
@@ -25,14 +24,13 @@ impl StoreSample for ChannelActorData {
 
 /// A valid V2 bootstrap session for storage codec checks.
 fn sample_v2(seed: u64) -> ChannelActorData {
-    let mut channel = sample_minimal(seed);
-    channel.state = ChannelState::NegotiatingFunding(crate::NegotiatingFundingFlags::empty());
-    channel.id = deterministic_hash256(seed, 1561);
-    channel.channel_features = ChannelFeatures::V2;
+    let signer = deterministic_signer(seed, 0);
+    let local_channel_public_keys = channel_pubkeys_from_signer(&signer);
+    let id = deterministic_hash256(seed, 1561);
     let mut own = crate::SigningNonceV2 {
         seed: deterministic_hash(seed, 1561),
-        channel_id: channel.id,
-        owner: channel.signer.funding_key.pubkey(),
+        channel_id: id,
+        owner: signer.funding_key.pubkey(),
         number: 1,
         purpose: crate::NoncePurposeV2::Commitment,
         public_nonce: deterministic_pub_nonce(seed, 1561),
@@ -40,9 +38,8 @@ fn sample_v2(seed: u64) -> ChannelActorData {
         signature: None,
     };
     own.public_nonce =
-        crate::channel_v2_validation::secret_nonce_v2(&own, &channel.signer.funding_key)
-            .public_nonce();
-    channel.session_v2 = Some(crate::ChannelSessionV2 {
+        crate::channel_v2_validation::secret_nonce_v2(&own, &signer.funding_key).public_nonce();
+    let session = crate::ChannelSessionV2 {
         marker: 0x56320001,
         own,
         own_retired: vec![],
@@ -59,54 +56,16 @@ fn sample_v2(seed: u64) -> ChannelActorData {
         bootstrap_settlement: None,
         remove_effects: vec![],
         closing: None,
-    });
-    channel
-}
-
-/// Create a deterministic InMemorySigner from a seed and index.
-fn deterministic_signer(seed: u64, index: u32) -> InMemorySigner {
-    let funding_key = deterministic_privkey(seed, index);
-    let tlc_base_key = deterministic_privkey(seed, index + 1);
-    let musig2_base_nonce = deterministic_privkey(seed, index + 2);
-    let commitment_seed = super::deterministic_hash(seed, index + 3);
-
-    InMemorySigner {
-        funding_key,
-        tlc_base_key,
-        musig2_base_nonce,
-        commitment_seed,
-    }
-}
-
-/// Create ChannelBasePublicKeys from signer.
-fn channel_pubkeys_from_signer(signer: &InMemorySigner) -> ChannelBasePublicKeys {
-    ChannelBasePublicKeys {
-        funding_pubkey: signer.funding_key.pubkey(),
-        tlc_base_key: signer.tlc_base_key.pubkey(),
-    }
-}
-
-/// Create a deterministic PubNonce from a seed and index.
-fn deterministic_pub_nonce(seed: u64, index: u32) -> musig2::PubNonce {
-    use musig2::SecNonceBuilder;
-    let hash = super::deterministic_hash(seed, index);
-    let sec_nonce = SecNonceBuilder::new(hash).build();
-    sec_nonce.public_nonce()
-}
-
-/// Sample 0: Minimal state — all Option fields are None, all collections empty, all defaults.
-fn sample_minimal(seed: u64) -> ChannelActorData {
-    let signer = deterministic_signer(seed, 0);
-    let local_channel_public_keys = channel_pubkeys_from_signer(&signer);
+    };
 
     ChannelActorData {
-        state: ChannelState::ChannelReady,
+        state: ChannelState::NegotiatingFunding(crate::NegotiatingFundingFlags::empty()),
         public_channel_info: None,
         local_tlc_info: ChannelTlcInfo::default(),
         remote_tlc_info: None,
         local_pubkey: deterministic_pubkey(seed, 10),
         remote_pubkey: deterministic_pubkey(seed, 11),
-        id: deterministic_hash256(seed, 0),
+        id,
         funding_tx: None,
         funding_tx_confirmed_at: None,
         funding_udt_type_script: None,
@@ -151,9 +110,40 @@ fn sample_minimal(seed: u64) -> ChannelActorData {
         last_was_revoke: false,
         external_funding: None,
         channel_features: Default::default(),
-        session_v2: None,
+        session,
         created_at: SystemTime::UNIX_EPOCH,
     }
+}
+
+/// Create a deterministic InMemorySigner from a seed and index.
+fn deterministic_signer(seed: u64, index: u32) -> InMemorySigner {
+    let funding_key = deterministic_privkey(seed, index);
+    let tlc_base_key = deterministic_privkey(seed, index + 1);
+    let musig2_base_nonce = deterministic_privkey(seed, index + 2);
+    let commitment_seed = super::deterministic_hash(seed, index + 3);
+
+    InMemorySigner {
+        funding_key,
+        tlc_base_key,
+        musig2_base_nonce,
+        commitment_seed,
+    }
+}
+
+/// Create ChannelBasePublicKeys from signer.
+fn channel_pubkeys_from_signer(signer: &InMemorySigner) -> ChannelBasePublicKeys {
+    ChannelBasePublicKeys {
+        funding_pubkey: signer.funding_key.pubkey(),
+        tlc_base_key: signer.tlc_base_key.pubkey(),
+    }
+}
+
+/// Create a deterministic PubNonce from a seed and index.
+fn deterministic_pub_nonce(seed: u64, index: u32) -> musig2::PubNonce {
+    use musig2::SecNonceBuilder;
+    let hash = super::deterministic_hash(seed, index);
+    let sec_nonce = SecNonceBuilder::new(hash).build();
+    sec_nonce.public_nonce()
 }
 
 #[cfg(test)]
