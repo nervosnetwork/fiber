@@ -13,7 +13,7 @@ use crate::{
 
 /// Decode an exact persisted channel and check feature/session correspondence.
 ///
-/// Published 0.10.0-rc3 legacy records end at the zero feature byte. Only that
+/// Published 0.10.0 legacy records end at the zero feature byte. Only that
 /// shape may omit the final session `None`: serde defaults cannot supply it at
 /// bincode EOF. No stored bytes are rewritten, and V2 records must be complete.
 /// Signing intents and counters are validated separately at preflight/restore,
