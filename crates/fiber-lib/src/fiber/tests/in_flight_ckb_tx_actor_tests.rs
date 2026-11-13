@@ -181,6 +181,7 @@ async fn spawn_test_actors(
         tx_status,
         error,
         InFlightCkbTxKind::Funding(Hash256::from([1; 32])),
+        false,
     )
     .await
 }
@@ -189,6 +190,7 @@ async fn spawn_test_actors_with(
     tx_status: TxStatus,
     send_tx_error: Option<fn() -> RpcError>,
     tx_kind: InFlightCkbTxKind,
+    only_abort_on_input_spent: bool,
 ) -> (
     ActorRef<InFlightCkbTxActorMessage>,
     mpsc::UnboundedReceiver<NetworkActorEvent>,
@@ -246,6 +248,7 @@ async fn spawn_test_actors_with(
         InFlightCkbTxActorArguments {
             transaction: Some(tx),
             watched_inputs: Vec::new(),
+            only_abort_on_input_spent,
         },
     )
     .await
@@ -323,6 +326,7 @@ async fn a_pool_conflict_fails_a_funding_at_once() {
             TxStatus::Unknown,
             Some(pool_conflict),
             InFlightCkbTxKind::Funding(Hash256::from([1; 32])),
+            false,
         )
         .await;
 
@@ -355,6 +359,7 @@ async fn a_pool_conflict_leaves_a_closing_as_before() {
             TxStatus::Unknown,
             Some(pool_conflict),
             InFlightCkbTxKind::Closing(pubkey, Hash256::from([2; 32]), true),
+            false,
         )
         .await;
 
@@ -369,4 +374,65 @@ async fn a_pool_conflict_leaves_a_closing_as_before() {
     );
     assert_eq!(send_tx_calls.load(Ordering::SeqCst), 1);
     assert_eq!(report_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn only_abort_on_input_spent_ignores_non_spent_rejection_and_fires_on_spent_input() {
+    let (_in_flight_actor, mut event_rx, send_tx_calls, report_calls, tracing_actor, tx_hash) =
+        spawn_test_actors_with(
+            TxStatus::Unknown,
+            Some(pool_conflict),
+            InFlightCkbTxKind::Funding(Hash256::from([3; 32])),
+            true,
+        )
+        .await;
+
+    tokio::time::sleep(TokioDuration::from_millis(100)).await;
+    assert_eq!(send_tx_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        report_calls.load(Ordering::SeqCst),
+        0,
+        "only_abort_on_input_spent must not synthesize SendTx errors into rejections"
+    );
+
+    // Non-double-spend `Rejected` polls across multiple blocks must not fire or stop the actor.
+    for tip in [100, 105, 110] {
+        tracing_actor
+            .send_message(CkbTxTracingMessage::report_tracing_result(
+                CkbTxTracingResult::new(tx_hash, TxStatus::Rejected("PoolRejectedRBF".to_string())),
+                tip,
+            ))
+            .expect("report pool rejection");
+    }
+    let recv_result = timeout(TokioDuration::from_millis(150), event_rx.recv()).await;
+    assert!(
+        recv_result.is_err(),
+        "non-input-spent Rejected status must not emit FundingTransactionFailed"
+    );
+
+    // Once a watched input is confirmed spent on-chain, the actor emits input_spent=true.
+    tracing_actor
+        .send_message(CkbTxTracingMessage::report_tracing_result(
+            CkbTxTracingResult::watched_input_spent(tx_hash),
+            120,
+        ))
+        .expect("report input spent at tip 120");
+    tracing_actor
+        .send_message(CkbTxTracingMessage::report_tracing_result(
+            CkbTxTracingResult::watched_input_spent(tx_hash),
+            121,
+        ))
+        .expect("report input spent at tip 121");
+
+    let event = timeout(TokioDuration::from_secs(1), event_rx.recv())
+        .await
+        .expect("should emit FundingTransactionFailed once input spend confirms")
+        .expect("network event channel open");
+    assert!(matches!(
+        event,
+        NetworkActorEvent::FundingTransactionFailed {
+            input_spent: true,
+            ..
+        }
+    ));
 }

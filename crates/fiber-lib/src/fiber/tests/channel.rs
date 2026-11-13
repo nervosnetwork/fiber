@@ -13747,8 +13747,16 @@ async fn do_test_external_funding_spent_input_automatically_aborts_stuck_channel
         "force shutdown must still be rejected while funding tx is unconfirmed"
     );
 
-    // Non-double-spend funding failures (e.g. pool rejection or send-tx error) must NOT abort
-    // the channel once signed_submitted is true, and must keep the input-spend watcher armed.
+    // Simulate the funding tx having reached CKB's mempool and been evicted (`TxStatus::Rejected`)
+    // before the conflicting spend confirms on-chain: non-double-spend failures must NOT abort the
+    // channel once signed_submitted is true, and must keep the input-spend watcher armed.
+    node_a.chain_client.state.write().unwrap().txs.insert(
+        signed_tx.calc_tx_hash().into(),
+        crate::ckb::GetTxResponse {
+            transaction: Some(signed_tx.clone().into_view()),
+            tx_status: TxStatus::Rejected("PoolRejectedRBF".to_string()),
+        },
+    );
     let funding_outpoint = pending_state
         .get_funding_transaction_outpoint()
         .expect("funding outpoint exists");

@@ -266,7 +266,8 @@ impl Actor for TraceTxReplier {
                 inputs,
             } => {
                 if spending_tx_hash != tx_hash
-                    && mask.contains(CkbTxTracingMask::Rejected)
+                    && (mask.contains(CkbTxTracingMask::Rejected)
+                        || mask.contains(CkbTxTracingMask::WatchedInputSpent))
                     && watched_inputs.iter().any(|w| inputs.contains(w))
                 {
                     Some(CkbTxTracingResult::watched_input_spent(tx_hash))
@@ -331,6 +332,24 @@ impl MockChainState {
             cell_status: HashMap::new(),
             indexer_cells: Vec::new(),
         }
+    }
+
+    pub fn is_input_spent_by_other_committed_tx(
+        &self,
+        tx_hash: Hash256,
+        watched_inputs: &[OutPoint],
+    ) -> bool {
+        if watched_inputs.is_empty() {
+            return false;
+        }
+        self.txs.iter().any(|(other_hash, other_resp)| {
+            *other_hash != tx_hash
+                && matches!(other_resp.tx_status, TxStatus::Committed(..))
+                && other_resp.transaction.as_ref().is_some_and(|tx| {
+                    tx.input_pts_iter()
+                        .any(|input| watched_inputs.contains(&input))
+                })
+        })
     }
 }
 
@@ -705,11 +724,16 @@ impl Actor for MockChainActor {
                 let (maybe_tx, input_already_spent, notifications) = {
                     let guard = state.shared.read().unwrap();
                     let maybe_tx = guard.txs.get(&tracer.tx_hash).cloned();
-                    let input_already_spent = maybe_tx.is_none()
-                        && tracer.mask.contains(CkbTxTracingMask::Rejected)
-                        && tracer.watched_inputs.iter().any(|input| {
-                            guard.cell_status.get(input) == Some(&CellStatus::Consumed)
-                        });
+                    let accepts_input_spent = tracer.mask.contains(CkbTxTracingMask::Rejected)
+                        || tracer.mask.contains(CkbTxTracingMask::WatchedInputSpent);
+                    let input_already_spent = accepts_input_spent
+                        && maybe_tx.as_ref().is_none_or(|tx| {
+                            matches!(tx.tx_status, TxStatus::Unknown | TxStatus::Rejected(_))
+                        })
+                        && guard.is_input_spent_by_other_committed_tx(
+                            tracer.tx_hash,
+                            &tracer.watched_inputs,
+                        );
                     (
                         maybe_tx,
                         input_already_spent,
@@ -718,20 +742,20 @@ impl Actor for MockChainActor {
                 };
 
                 match maybe_tx {
-                    Some(tx) => {
+                    _ if input_already_spent => {
+                        let _ = tracer
+                            .callback
+                            .send(CkbTxTracingResult::watched_input_spent(tracer.tx_hash));
+                    }
+                    Some(tx) if tracer.mask.contains((&tx.tx_status).into()) => {
                         let _ = tracer.callback.send(CkbTxTracingResult::new(
                             tracer.tx_hash,
                             tx.tx_status.clone(),
                         ));
                     }
-                    None if input_already_spent => {
-                        let _ = tracer
-                            .callback
-                            .send(CkbTxTracingResult::watched_input_spent(tracer.tx_hash));
-                    }
-                    // The transaction is not found in the tx_status, we need to wait for the
-                    // tx notification from the mock chain actor.
-                    None => {
+                    // Either the transaction is not found yet, or its current status does not
+                    // match the tracer mask (e.g. Rejected when waiting for Committed | WatchedInputSpent).
+                    _ => {
                         let timeout = tracer
                             .mask
                             .contains(CkbTxTracingMask::Unknown)

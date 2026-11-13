@@ -2025,6 +2025,7 @@ where
                         outpoint.tx_hash().into(),
                         InFlightCkbTxKind::Funding(channel_id),
                         watched_inputs,
+                        true,
                     )
                     .await
                 {
@@ -5832,11 +5833,13 @@ where
         } else {
             Vec::new()
         };
+        let only_abort_on_input_spent = state.only_abort_funding_on_input_spent(&channel_id);
         state
             .trace_tx(
                 tx_hash,
                 InFlightCkbTxKind::Funding(channel_id),
                 watched_inputs,
+                only_abort_on_input_spent,
             )
             .await?;
 
@@ -6714,15 +6717,33 @@ where
         Ok(features)
     }
 
+    fn only_abort_funding_on_input_spent(&self, channel_id: &Hash256) -> bool {
+        self.store
+            .get_channel_actor_state(channel_id)
+            .is_some_and(|channel_state| {
+                channel_state
+                    .ephemeral_config
+                    .external_funding
+                    .signed_submitted
+                    && channel_state.funding_tx_confirmed_at.is_none()
+                    && !channel_state.is_ready()
+                    && !channel_state.is_closed()
+            })
+    }
+
     pub async fn trace_tx(
         &mut self,
         tx_hash: Hash256,
         tx_kind: InFlightCkbTxKind,
         watched_inputs: Vec<OutPoint>,
+        only_abort_on_input_spent: bool,
     ) -> crate::Result<()> {
         if let Some(existing) = self.inflight_tracers.get(&tx_hash) {
-            if !watched_inputs.is_empty() {
-                existing.send_message(InFlightCkbTxActorMessage::WatchInputs(watched_inputs))?;
+            if !watched_inputs.is_empty() || only_abort_on_input_spent {
+                existing.send_message(InFlightCkbTxActorMessage::WatchInputs {
+                    inputs: watched_inputs,
+                    only_abort_on_input_spent,
+                })?;
             } else {
                 debug!("Skipping duplicate tracer for tx {:?}", tx_hash);
             }
@@ -6743,6 +6764,7 @@ where
             InFlightCkbTxActorArguments {
                 transaction: None,
                 watched_inputs,
+                only_abort_on_input_spent,
             },
             self.network.get_cell(),
         )
@@ -6758,6 +6780,12 @@ where
         tx_kind: InFlightCkbTxKind,
     ) -> crate::Result<()> {
         let tx_hash: Hash256 = tx.hash().into();
+        let only_abort_on_input_spent = match &tx_kind {
+            InFlightCkbTxKind::Funding(channel_id) => {
+                self.only_abort_funding_on_input_spent(channel_id)
+            }
+            InFlightCkbTxKind::Closing(..) => false,
+        };
         if let Some(existing) = self.inflight_tracers.get(&tx_hash) {
             // A trace-only actor already exists for this tx_hash.
             // Upgrade it with the actual transaction for broadcasting.
@@ -6765,7 +6793,10 @@ where
                 "Upgrading existing tracer for tx {:?} with transaction payload",
                 tx_hash
             );
-            existing.send_message(InFlightCkbTxActorMessage::SendTx(tx))?;
+            existing.send_message(InFlightCkbTxActorMessage::SendTx {
+                tx,
+                only_abort_on_input_spent,
+            })?;
             return Ok(());
         }
         debug!(
@@ -6798,6 +6829,7 @@ where
             InFlightCkbTxActorArguments {
                 transaction: Some(tx),
                 watched_inputs,
+                only_abort_on_input_spent,
             },
             self.network.get_cell(),
         )
@@ -6810,45 +6842,39 @@ where
     pub async fn on_funding_transaction_failed(&mut self, outpoint: OutPoint, input_spent: bool) {
         if !input_spent {
             if let Some(&channel_id) = self.pending_channels.get(&outpoint) {
-                if let Some(channel_state) = self.store.get_channel_actor_state(&channel_id) {
-                    if channel_state
-                        .ephemeral_config
-                        .external_funding
-                        .signed_submitted
-                        && channel_state.funding_tx_confirmed_at.is_none()
-                        && !channel_state.is_ready()
-                        && !channel_state.is_closed()
-                    {
-                        warn!(
-                            "Keeping pending external-funding channel {} after non-double-spend funding tx failure {:?}: signed funding tx may still confirm",
-                            channel_id, outpoint
-                        );
-                        let watched_inputs = channel_state
-                            .funding_tx
-                            .as_ref()
-                            .map(|tx| {
+                if self.only_abort_funding_on_input_spent(&channel_id) {
+                    warn!(
+                        "Keeping pending external-funding channel {} after non-double-spend funding tx failure {:?}: signed funding tx may still confirm",
+                        channel_id, outpoint
+                    );
+                    let watched_inputs = self
+                        .store
+                        .get_channel_actor_state(&channel_id)
+                        .and_then(|channel_state| {
+                            channel_state.funding_tx.as_ref().map(|tx| {
                                 tx.raw()
                                     .inputs()
                                     .into_iter()
                                     .map(|input| input.previous_output())
                                     .collect()
                             })
-                            .unwrap_or_default();
-                        if let Err(err) = self
-                            .trace_tx(
-                                outpoint.tx_hash().into(),
-                                InFlightCkbTxKind::Funding(channel_id),
-                                watched_inputs,
-                            )
-                            .await
-                        {
-                            error!(
-                                "Failed to re-arm external funding transaction tracer for channel {}: {}",
-                                channel_id, err
-                            );
-                        }
-                        return;
+                        })
+                        .unwrap_or_default();
+                    if let Err(err) = self
+                        .trace_tx(
+                            outpoint.tx_hash().into(),
+                            InFlightCkbTxKind::Funding(channel_id),
+                            watched_inputs,
+                            true,
+                        )
+                        .await
+                    {
+                        error!(
+                            "Failed to re-arm external funding transaction tracer for channel {}: {}",
+                            channel_id, err
+                        );
                     }
+                    return;
                 }
             }
         }

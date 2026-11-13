@@ -526,3 +526,214 @@ async fn watched_input_spent_by_committed_tx_reports_rejected_after_confirmation
     actor.stop(None);
     server.abort();
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
+async fn evicted_rejected_funding_tx_waits_for_committed_input_spend_when_watching_input_spent() {
+    use ckb_types::packed::OutPoint;
+    use std::sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc,
+    };
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let parent_tx_hash = Hash256::from([0x31; 32]);
+    let funding_tx_hash = Hash256::from([0x42; 32]);
+    let input = OutPoint::new(parent_tx_hash.into(), 0);
+
+    let tip = Arc::new(AtomicU64::new(100));
+    let cell_spent = Arc::new(AtomicBool::new(false));
+    let rpc_requests = Arc::new(AtomicU64::new(0));
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+
+    let tip_srv = tip.clone();
+    let cell_spent_srv = cell_spent.clone();
+    let rpc_requests_srv = rpc_requests.clone();
+    let parent_hex = format!("{:#x}", ckb_types::H256::from(parent_tx_hash));
+
+    let server = tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let tip_srv = tip_srv.clone();
+            let cell_spent_srv = cell_spent_srv.clone();
+            let rpc_requests_srv = rpc_requests_srv.clone();
+            let parent_hex = parent_hex.clone();
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 8192];
+                let n = match socket.read(&mut buf).await {
+                    Ok(n) if n > 0 => n,
+                    _ => return,
+                };
+                let req = String::from_utf8_lossy(&buf[..n]);
+                let body_start = req.find("\r\n\r\n").map(|i| i + 4).unwrap_or(0);
+                let json: serde_json::Value =
+                    serde_json::from_str(&req[body_start..]).unwrap_or_default();
+                let id = json.get("id").cloned().unwrap_or(serde_json::Value::Null);
+                let method = json.get("method").and_then(|m| m.as_str()).unwrap_or("");
+                let result = match method {
+                    "get_tip_block_number" => {
+                        serde_json::json!(format!("{:#x}", tip_srv.load(Ordering::SeqCst)))
+                    }
+                    "get_live_cell" => {
+                        if cell_spent_srv.load(Ordering::SeqCst) {
+                            serde_json::json!({ "cell": null, "status": "unknown" })
+                        } else {
+                            serde_json::json!({
+                                "cell": {
+                                    "data": null,
+                                    "output": {
+                                        "capacity": "0x2540be400",
+                                        "lock": {
+                                            "code_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                                            "hash_type": "data",
+                                            "args": "0x"
+                                        },
+                                        "type": null
+                                    }
+                                },
+                                "status": "live"
+                            })
+                        }
+                    }
+                    "get_transaction" => {
+                        let hash = json
+                            .get("params")
+                            .and_then(|p| p.get(0))
+                            .and_then(|h| h.as_str())
+                            .unwrap_or("");
+                        if hash.eq_ignore_ascii_case(&parent_hex) {
+                            serde_json::json!({
+                                "transaction": null,
+                                "cycles": null,
+                                "tx_status": {
+                                    "status": "committed",
+                                    "block_number": "0x50",
+                                    "block_hash": "0x1111111111111111111111111111111111111111111111111111111111111111",
+                                    "tx_index": "0x0"
+                                }
+                            })
+                        } else {
+                            // Funding tx was evicted from CKB's mempool by RBF, so CKB caches `rejected`.
+                            serde_json::json!({
+                                "transaction": null,
+                                "cycles": null,
+                                "tx_status": {
+                                    "status": "rejected",
+                                    "reason": "PoolRejectedRBF: evicted by conflicting transaction"
+                                }
+                            })
+                        }
+                    }
+                    _ => serde_json::Value::Null,
+                };
+                let resp_body = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": result,
+                })
+                .to_string();
+                let http_resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    resp_body.len(),
+                    resp_body
+                );
+                let _ = socket.write_all(http_resp.as_bytes()).await;
+                rpc_requests_srv.fetch_add(1, Ordering::SeqCst);
+            });
+        }
+    });
+
+    let wait_for_rpcs = |target: u64| {
+        let rpc_requests = rpc_requests.clone();
+        async move {
+            timeout(TokioDuration::from_secs(2), async move {
+                while rpc_requests.load(Ordering::SeqCst) < target {
+                    tokio::time::sleep(TokioDuration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("mock CKB server should receive expected RPC calls");
+            tokio::time::sleep(TokioDuration::from_millis(20)).await;
+        }
+    };
+
+    let (actor, _handle) = Actor::spawn(
+        None,
+        CkbTxTracingActor::new(),
+        CkbTxTracingArguments {
+            rpc_url: format!("http://{}", addr),
+            polling_interval: Duration::from_secs(3600),
+        },
+    )
+    .await
+    .expect("spawn tx tracing actor");
+
+    let (send, mut recv) = oneshot::channel();
+    actor
+        .send_message(CkbTxTracingMessage::CreateTracer(CkbTxTracer {
+            tx_hash: funding_tx_hash,
+            confirmations: 4,
+            mask: CkbTxTracingMask::Committed | CkbTxTracingMask::WatchedInputSpent,
+            watched_inputs: vec![input],
+            callback: RpcReplyPort::from(send),
+        }))
+        .expect("create tracer");
+    // Initial poll: tip + get_tx(funding=rejected) + get_live_cell(live) = 3 RPCs.
+    wait_for_rpcs(3).await;
+
+    // Even after > 4 blocks of CKB reporting `Rejected`, unconfirmed RBF (cell still live)
+    // must NOT fire a `WatchedInputSpent` tracer.
+    tip.store(106, Ordering::SeqCst);
+    let before = rpc_requests.load(Ordering::SeqCst);
+    actor
+        .send_message(CkbTxTracingMessage::run_tracers())
+        .expect("run tracers");
+    wait_for_rpcs(before + 3).await;
+    assert!(
+        recv.try_recv().is_err(),
+        "mempool-only RBF rejection must not fire WatchedInputSpent before conflicting tx commits"
+    );
+
+    // Conflicting tx commits at tip 110: `last_block` must reset to 110 (not reuse 100) and wait 4 blocks.
+    cell_spent.store(true, Ordering::SeqCst);
+    tip.store(110, Ordering::SeqCst);
+    let before = rpc_requests.load(Ordering::SeqCst);
+    actor
+        .send_message(CkbTxTracingMessage::run_tracers())
+        .expect("run tracers");
+    wait_for_rpcs(before + 5).await;
+    assert!(
+        recv.try_recv().is_err(),
+        "spent input on evicted tx must wait 4 confirmations from when the spend committed"
+    );
+
+    tip.store(113, Ordering::SeqCst);
+    let before = rpc_requests.load(Ordering::SeqCst);
+    actor
+        .send_message(CkbTxTracingMessage::run_tracers())
+        .expect("run tracers");
+    wait_for_rpcs(before + 5).await;
+    assert!(
+        recv.try_recv().is_err(),
+        "3 confirmations after committed spend must not fire yet"
+    );
+
+    tip.store(114, Ordering::SeqCst);
+    actor
+        .send_message(CkbTxTracingMessage::run_tracers())
+        .expect("run tracers");
+
+    let result = timeout(TokioDuration::from_secs(2), recv)
+        .await
+        .expect("evicted funding tx with committed input spend should fire at tip 114")
+        .expect("receive tracing result");
+    assert!(
+        result.watched_input_spent,
+        "evicted funding tx with committed input spend must report watched_input_spent=true"
+    );
+
+    actor.stop(None);
+    server.abort();
+}
