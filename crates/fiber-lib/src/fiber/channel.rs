@@ -2795,6 +2795,8 @@ where
                 self.restore_received_tlc_claim_preimages(state);
             }
 
+            state.align_force_close_commitment_numbers();
+
             if let Some(close) = state.session_v2.as_mut().and_then(|s| s.closing.as_mut()) {
                 close.superseded_by_force_close = true;
                 self.store.insert_channel_actor_state(state.clone());
@@ -8530,6 +8532,20 @@ impl ChannelActorState {
         self.commitment_numbers.increment_remote();
     }
 
+    /// Sending ReadyV2 rotates the session nonce before the peer Ready advances the channel
+    /// counters. A force close can land in that gap, so align the counters with the persisted
+    /// session before the terminal ShuttingDown state is validated.
+    pub(crate) fn align_force_close_commitment_numbers(&mut self) {
+        if matches!(self.state, ChannelState::AwaitingChannelReady(_)) {
+            if let Some(session) = self.session_v2.as_ref() {
+                self.commitment_numbers = CommitmentNumbers {
+                    local: session.remote_number,
+                    remote: session.own.number,
+                };
+            }
+        }
+    }
+
     pub fn get_current_commitment_number(&self, for_remote: bool) -> u64 {
         if for_remote {
             self.get_local_commitment_number()
@@ -9803,6 +9819,28 @@ impl ChannelActorState {
                     }
                 }
 
+                // The initiator already built its own funding cell. A peer update that only
+                // echoes it back (or otherwise leaves the funding output below the negotiated
+                // total) must not make the local balancer fund the peer's share.
+                if !self.is_acceptor
+                    && self.funding_tx.is_some()
+                    && !self.ephemeral_config.external_funding.enabled
+                {
+                    if let Err(err) = self.check_peer_funding_covers_total(&msg.tx) {
+                        error!(
+                            "Rejecting peer funding tx that does not cover its share: {}",
+                            err
+                        );
+                        let abort_reason = err.to_string();
+                        myself
+                            .send_message(ChannelActorMessage::Event(ChannelEvent::Stop(
+                                StopReason::AbortFundingWithDetail(abort_reason),
+                            )))
+                            .expect("myself alive");
+                        return Ok(());
+                    }
+                }
+
                 self.funding_tx = Some(msg.tx.clone());
                 if self.is_tx_final(&msg.tx)? {
                     self.maybe_complete_tx_collaboration(msg.tx)?;
@@ -9907,6 +9945,66 @@ impl ChannelActorState {
         if current_capacity < required_capacity {
             return Err(ProcessingChannelError::InvalidState(format!(
                 "Initial funding tx CKB capacity {} is less than required remote contribution {}",
+                current_capacity, required_capacity
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Verify that a peer TxUpdate already carries the full negotiated channel funding.
+    /// The local balancer must never be asked to cover the peer's negotiated share.
+    fn check_peer_funding_covers_total(&self, tx: &Transaction) -> ProcessingChannelResult {
+        let tx = tx.clone().into_view();
+        let (output, data) =
+            tx.output_with_data(0)
+                .ok_or(ProcessingChannelError::InvalidParameter(
+                    "Funding transaction should have at least one output".to_string(),
+                ))?;
+        let current_capacity: u64 = output.capacity().unpack();
+        let local_reserved = u128::from(self.local_reserved_ckb_amount);
+        let remote_reserved = u128::from(self.remote_reserved_ckb_amount);
+
+        if self.funding_udt_type_script.is_some() {
+            let required_capacity =
+                checked_add_u128(local_reserved, remote_reserved, "Funding reserved CKB")?;
+            if u128::from(current_capacity) < required_capacity {
+                return Err(ProcessingChannelError::InvalidState(format!(
+                    "Peer funding tx CKB capacity {} is less than required reserved CKB {}",
+                    current_capacity, required_capacity
+                )));
+            }
+            if data.as_ref().len() < 16 {
+                return Err(ProcessingChannelError::InvalidParameter(
+                    "UDT output data too short, expected at least 16 bytes".to_string(),
+                ));
+            }
+            let mut amount_bytes = [0u8; 16];
+            amount_bytes.copy_from_slice(&data.as_ref()[0..16]);
+            let udt_amount = u128::from_le_bytes(amount_bytes);
+            let required_amount =
+                checked_add_u128(self.to_local_amount, self.to_remote_amount, "Funding UDT")?;
+            if udt_amount < required_amount {
+                return Err(ProcessingChannelError::InvalidState(format!(
+                    "Peer funding tx UDT amount {} is less than negotiated total {}",
+                    udt_amount, required_amount
+                )));
+            }
+            return Ok(());
+        }
+
+        let mut required_capacity = checked_add_u128(
+            self.to_local_amount,
+            self.to_remote_amount,
+            "Funding amount",
+        )?;
+        required_capacity =
+            checked_add_u128(required_capacity, local_reserved, "Funding reserved CKB")?;
+        required_capacity =
+            checked_add_u128(required_capacity, remote_reserved, "Funding reserved CKB")?;
+        if u128::from(current_capacity) < required_capacity {
+            return Err(ProcessingChannelError::InvalidState(format!(
+                "Peer funding tx CKB capacity {} is less than negotiated total {}",
                 current_capacity, required_capacity
             )));
         }
@@ -12251,6 +12349,14 @@ pub trait ChannelActorStateStore {
     /// Get watched channel data by channel ID for the local node, if available
     fn get_local_watch_channel(&self, _channel_id: &Hash256) -> Option<fiber_types::ChannelData> {
         None
+    }
+
+    /// Get superseded same-number remote settlement snapshots for the local node's watched channel.
+    fn get_local_superseded_remote_settlements(
+        &self,
+        _channel_id: &Hash256,
+    ) -> Vec<SettlementData> {
+        Vec::new()
     }
 }
 

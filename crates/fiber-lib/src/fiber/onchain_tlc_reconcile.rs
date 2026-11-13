@@ -130,6 +130,16 @@ pub fn verify_and_select_settlement_data<'a>(
     channel_data: &'a ChannelData,
     commitment_lock: &Script,
 ) -> Option<(bool, u64, &'a SettlementData)> {
+    verify_and_select_settlement_data_with_superseded(channel_data, &[], commitment_lock)
+}
+
+/// Like [`verify_and_select_settlement_data`], also accepting superseded same-number
+/// remote snapshots kept outside [`ChannelData`].
+pub fn verify_and_select_settlement_data_with_superseded<'a>(
+    channel_data: &'a ChannelData,
+    superseded: &'a [SettlementData],
+    commitment_lock: &Script,
+) -> Option<(bool, u64, &'a SettlementData)> {
     let parsed = parse_commitment_lock(
         commitment_lock,
         &channel_data.local_funding_pubkey,
@@ -138,10 +148,13 @@ pub fn verify_and_select_settlement_data<'a>(
     // Before the first RAA there is no revocation number to distinguish the initial
     // remote commitment from a newer pending one. Bind candidates to the lock hash
     // instead of treating the commitment-number heuristic as authoritative.
-    let remote_candidates = [
-        &channel_data.remote_settlement_data,
-        &channel_data.pending_remote_settlement_data,
-    ];
+    let remote_candidates: Vec<&SettlementData> =
+        std::iter::once(&channel_data.remote_settlement_data)
+            .chain(std::iter::once(
+                &channel_data.pending_remote_settlement_data,
+            ))
+            .chain(superseded.iter())
+            .collect();
     let local_candidates = [&channel_data.local_settlement_data];
     let candidates: &[&SettlementData] = if parsed.for_remote {
         &remote_candidates
@@ -172,8 +185,9 @@ pub fn verify_and_select_settlement_data<'a>(
 /// Represent their scope as empty; this is not a witness snapshot and must never be used by
 /// the watchtower to decode settlement witnesses. Completion still requires the chain signal
 /// that all commitment cells have been spent.
-pub(crate) fn recover_shutdown_settlement_data(
+pub(crate) fn recover_shutdown_settlement_data_with_superseded(
     channel_data: &ChannelData,
+    superseded: &[SettlementData],
     commitment_lock: &Script,
 ) -> Option<(bool, u64, SettlementData)> {
     let parsed = parse_commitment_lock(
@@ -197,7 +211,7 @@ pub(crate) fn recover_shutdown_settlement_data(
             },
         ));
     }
-    verify_and_select_settlement_data(channel_data, commitment_lock)
+    verify_and_select_settlement_data_with_superseded(channel_data, superseded, commitment_lock)
         .map(|(for_remote, number, data)| (for_remote, number, data.clone()))
 }
 

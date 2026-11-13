@@ -52,6 +52,7 @@ mod watchtower {
     pub const WATCHTOWER_CHANNEL_PREFIX: u8 = 224;
     pub const WATCHTOWER_PREIMAGE_PREFIX: u8 = 225;
     pub const WATCHTOWER_NODE_PAYMENTHASH_PREFIX: u8 = 226;
+    pub const WATCHTOWER_SUPERSEDED_SETTLEMENT_PREFIX: u8 = 227;
 }
 #[cfg(feature = "watchtower")]
 pub use watchtower::*;

@@ -540,6 +540,61 @@ fn test_store_watchtower() {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
+fn test_store_watchtower_keeps_superseded_pending_remote_settlement() {
+    let path = TempDir::new("test-watchtower-superseded-pending");
+    let store = open_store(path).expect("created store failed");
+    let node_id = NodeId::from_bytes(PeerId::random().into_bytes());
+    let channel_id = gen_rand_sha256_hash();
+
+    store.insert_watch_channel(
+        node_id.clone(),
+        channel_id,
+        None,
+        Privkey::from(&[1; 32]),
+        Privkey::from(&[2; 32]).pubkey(),
+        Privkey::from(&[3; 32]).pubkey(),
+        Privkey::from(&[4; 32]).pubkey(),
+        SettlementData {
+            local_amount: 100,
+            remote_amount: 200,
+            tlcs: vec![],
+        },
+    );
+
+    // The same commitment number is signed again after a reconnect.
+    let original = SettlementData {
+        local_amount: 300,
+        remote_amount: 400,
+        tlcs: vec![],
+    };
+    store.update_pending_remote_settlement(node_id.clone(), channel_id, original.clone());
+    let resigned = SettlementData {
+        local_amount: 500,
+        remote_amount: 600,
+        tlcs: vec![],
+    };
+    store.update_pending_remote_settlement(node_id.clone(), channel_id, resigned.clone());
+
+    let stored = store.get_watch_channels().pop().unwrap();
+    assert_eq!(
+        stored.remote_settlement_data,
+        SettlementData {
+            local_amount: 100,
+            remote_amount: 200,
+            tlcs: vec![],
+        },
+        "the peer's latest unrevoked witness must stay in the remote slot"
+    );
+    assert_eq!(stored.pending_remote_settlement_data, resigned);
+    assert_eq!(
+        store.get_superseded_remote_settlements(&node_id, &channel_id),
+        vec![original],
+        "the superseded same-number snapshot must remain matchable"
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
 fn test_store_watchtower_v1_registration_round_trip() {
     let path = TempDir::new("test-watchtower-v1-store");
     let store = open_store(path).expect("created store failed");
