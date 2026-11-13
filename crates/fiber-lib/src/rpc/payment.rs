@@ -326,9 +326,12 @@ where
                 "tenant_id is only supported by the native get_payment RPC",
             ));
         }
-        let payment_hash = params.payment_hash.into();
+        let payment_hash: crate::fiber_types::Hash256 = params.payment_hash.into();
         let message = |rpc_reply| -> FiberActorMessage {
-            FiberActorMessage::new_command(FiberActorCommand::GetPayment(payment_hash, rpc_reply))
+            FiberActorMessage::new_command(FiberActorCommand::GetPayment(
+                payment_hash.into(),
+                rpc_reply,
+            ))
         };
         handle_actor_call!(self.actor()?, message, params)
             .map(|response| send_payment_response_to_json(&response))

@@ -23,6 +23,7 @@ use crate::fiber::onchain_tlc_reconcile::{
     OnChainTimeoutTlcRole, StoredOnChainTlcSettlement,
 };
 use crate::fiber::types::{BroadcastMessageWithTimestamp, TxSignatures};
+use crate::fiber_types::PaymentSessionKey;
 use crate::store::actor::StoreActorMessage;
 use crate::time::{SystemTime, UNIX_EPOCH};
 use crate::utils::actor::ActorHandleLogGuard;
@@ -2013,7 +2014,7 @@ where
                 self.network
                     .send_message(FiberActorMessage::new_event(
                         FiberActorEvent::TlcRemoveReceived(
-                            tlc_info.payment_hash,
+                            tlc_info.session_key(),
                             tlc_info.attempt_id,
                             remove_reason,
                             None,
@@ -2994,6 +2995,7 @@ where
         match self.network.send_message(FiberActorMessage::Command(
             FiberActorCommand::SendPaymentOnionPacket(
                 SendOnionPacketCommand {
+                    execution_id: None,
                     peeled_onion_packet: peeled_onion_packet.clone(),
                     previous_tlc: Some(PrevTlcInfo::new_with_shared_secret(
                         state.get_id(),
@@ -3678,7 +3680,7 @@ where
                     self.network
                         .send_message(FiberActorMessage::new_event(
                             FiberActorEvent::TlcRemoveReceived(
-                                tlc.payment_hash,
+                                tlc.session_key(),
                                 attempt_id,
                                 reason.clone(),
                                 None,
@@ -3979,7 +3981,7 @@ where
                     self.network
                         .send_message(FiberActorMessage::new_event(
                             FiberActorEvent::TlcRemoveReceived(
-                                tlc.payment_hash,
+                                tlc.session_key(),
                                 attempt_id,
                                 reason,
                                 Some((state.get_id(), tlc.tlc_id)),
@@ -4559,7 +4561,7 @@ where
                 // notify the network actor about the add tlc result
                 self.network
                     .send_message(FiberActorMessage::new_event(FiberActorEvent::AddTlcResult(
-                        command.payment_hash,
+                        command.session_key(),
                         command.attempt_id,
                         add_tlc_result,
                         command.previous_tlc,
@@ -9219,6 +9221,7 @@ impl ChannelActorState {
         TlcInfo {
             status: TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced),
             tlc_id,
+            execution_id: command.execution_id,
             attempt_id: command.attempt_id,
             amount: command.amount,
             payment_hash: command.payment_hash,
@@ -9241,6 +9244,7 @@ impl ChannelActorState {
 
     fn create_inbounding_tlc(&self, message: AddTlc) -> Result<TlcInfo, ProcessingChannelError> {
         let tlc_info = TlcInfo {
+            execution_id: None,
             tlc_id: TLCId::Received(message.tlc_id),
             status: TlcStatus::Inbound(InboundTlcStatus::RemoteAnnounced),
             amount: message.amount,
@@ -11905,18 +11909,23 @@ impl ChannelActorState {
         !self.retryable_tlc_operations.is_empty()
     }
 
-    pub(crate) fn owns_payment_attempt(&self, payment_hash: Hash256, attempt_id: u64) -> bool {
+    pub(crate) fn owns_payment_attempt(
+        &self,
+        session_key: impl Into<PaymentSessionKey>,
+        attempt_id: u64,
+    ) -> bool {
+        let session_key = session_key.into();
         let attempt_id = Some(attempt_id);
 
         self.tlc_state.all_tlcs().any(|tlc| {
             !tlc.applied_flags.contains(AppliedFlags::REMOVE)
-                && tlc.payment_hash == payment_hash
+                && tlc.session_key() == session_key
                 && tlc.attempt_id == attempt_id
         }) || self.retryable_tlc_operations.iter().any(|operation| {
             matches!(
                 operation,
                 RetryableTlcOperation::AddTlc(command)
-                    if command.payment_hash == payment_hash && command.attempt_id == attempt_id
+                    if command.session_key() == session_key && command.attempt_id == attempt_id
             )
         })
     }
@@ -12382,6 +12391,7 @@ mod tests {
         };
 
         TlcInfo {
+            execution_id: None,
             status,
             tlc_id,
             amount,
@@ -12416,6 +12426,7 @@ mod tests {
         };
 
         TlcInfo {
+            execution_id: None,
             status,
             tlc_id,
             amount,

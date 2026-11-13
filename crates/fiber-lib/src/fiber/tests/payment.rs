@@ -204,7 +204,7 @@ async fn send_remove_tlc_fail_event(fixture: &RemoveTlcFailEventFixture, packet:
         .network_actor
         .send_message(NetworkActorMessage::new_event(
             FiberActorEvent::TlcRemoveReceived(
-                fixture.payment_hash,
+                fixture.payment_hash.into(),
                 Some(fixture.attempt_id),
                 RemoveTlcReason::RemoveTlcFail(packet),
                 None,
@@ -257,6 +257,7 @@ fn test_attempt(
     now: u64,
 ) -> Attempt {
     Attempt {
+        execution_id: None,
         id,
         hash: payment_hash,
         try_limit: 3,
@@ -307,6 +308,7 @@ fn test_sender_side_trampoline_retry_does_not_reuse_visible_route_amount() {
         },
     ];
     let mut attempt = Attempt {
+        execution_id: None,
         id: 1,
         hash: payment_hash,
         try_limit: 3,
@@ -842,6 +844,7 @@ async fn test_receive_payment_rejects_oversized_custom_records() {
                 channel_id: channels[0],
                 command: ChannelCommand::AddTlc(
                     AddTlcCommand {
+                        execution_id: None,
                         amount,
                         hash_algorithm,
                         payment_hash,
@@ -5483,6 +5486,17 @@ async fn assert_closed_channel_upstream_fulfillment(uncommitted_peer_fulfill: bo
 #[cfg(feature = "watchtower")]
 #[tokio::test]
 async fn test_payer_payment_success_from_onchain_preimage() {
+    check_payer_onchain_execution(false).await;
+}
+
+#[cfg(feature = "watchtower")]
+#[tokio::test]
+async fn test_hosted_onchain_fulfill_does_not_complete_same_hash_public_session() {
+    check_payer_onchain_execution(true).await;
+}
+
+#[cfg(feature = "watchtower")]
+async fn check_payer_onchain_execution(hosted: bool) {
     init_tracing();
 
     let (nodes, channels) =
@@ -5531,6 +5545,37 @@ async fn test_payer_payment_success_from_onchain_preimage() {
         "TLC must be committed before force-close so on-chain fulfillment can settle it"
     );
 
+    let mut key = crate::fiber_types::PaymentSessionKey::from(payment_hash);
+    let original = node_0.store.get_payment_session(key).unwrap();
+    if hosted {
+        let scope = crate::fiber_types::UpstreamTlcKey {
+            incoming_channel_id: gen_rand_sha256_hash(),
+            incoming_tlc_id: 7,
+        };
+        key.execution_id = Some(scope);
+        let mut scoped = original.clone();
+        scoped.request.execution_id = Some(scope);
+        node_0.store.insert_payment_session(scoped);
+        for mut attempt in original.attempts().cloned() {
+            attempt.execution_id = Some(scope);
+            node_0.store.insert_attempt(attempt);
+        }
+        let mut channel = node_0.get_channel_actor_state(channels[0]);
+        channel
+            .tlc_state
+            .get_mut(&offered_tlc_id)
+            .unwrap()
+            .execution_id = Some(scope);
+        node_0
+            .update_channel_actor_state(
+                channel,
+                Some(ReloadParams {
+                    notify_changes: false,
+                }),
+            )
+            .await;
+    }
+
     node_0
         .send_shutdown(channels[0], true)
         .await
@@ -5559,12 +5604,13 @@ async fn test_payer_payment_success_from_onchain_preimage() {
 
     wait_until_timeout(30_000, || {
         node_0
-            .get_payment_session(payment_hash)
+            .store
+            .get_payment_session(key)
             .is_some_and(|session| session.status == PaymentStatus::Success)
     })
     .await;
     assert_eq!(
-        node_0.get_payment_status(payment_hash).await,
+        node_0.store.get_payment_session(key).unwrap().status,
         PaymentStatus::Success
     );
 
@@ -5588,6 +5634,17 @@ async fn test_payer_payment_success_from_onchain_preimage() {
         )),
         "on-chain payment success must persist a normal preimage record so CCH observes the same success signal as off-chain fulfillment"
     );
+    if hosted {
+        let ordinary = node_0.store.get_payment_session(payment_hash).unwrap();
+        assert_eq!(ordinary.status, PaymentStatus::Inflight);
+        assert_eq!(
+            bincode::serialize(&ordinary).unwrap(),
+            bincode::serialize(&original).unwrap()
+        );
+        assert!(ordinary
+            .attempts()
+            .all(|attempt| attempt.preimage.is_none()));
+    }
 }
 
 #[cfg(feature = "watchtower")]
@@ -5802,7 +5859,7 @@ async fn setup_mpp_remote_removed_payer_fixture_with_retry_channels(
         .network_actor
         .send_message(NetworkActorMessage::new_event(
             FiberActorEvent::TlcRemoveReceived(
-                payment_hash,
+                payment_hash.into(),
                 completed_tlc.attempt_id,
                 RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill { payment_preimage }),
                 None,
@@ -6925,6 +6982,7 @@ async fn test_payee_mpp_invoice_paid_from_onchain_preimages_across_channels() {
                     channel_id,
                     command: ChannelCommand::AddTlc(
                         AddTlcCommand {
+                            execution_id: None,
                             amount: 10_000,
                             hash_algorithm,
                             payment_hash,
@@ -8248,6 +8306,7 @@ async fn test_shutdown_with_pending_tlc() {
                 channel_id: channels[0],
                 command: ChannelCommand::AddTlc(
                     AddTlcCommand {
+                        execution_id: None,
                         amount: 1000,
                         hash_algorithm,
                         payment_hash,
@@ -8414,6 +8473,7 @@ async fn test_payment_onion_invoice_udt_type_script_mismatch_fails() {
                 channel_id: channels[0],
                 command: ChannelCommand::AddTlc(
                     AddTlcCommand {
+                        execution_id: None,
                         amount,
                         hash_algorithm,
                         payment_hash,
@@ -8519,6 +8579,7 @@ async fn test_payment_onion_invoice_hash_algorithm_mismatch_fails() {
                 channel_id: channels[0],
                 command: ChannelCommand::AddTlc(
                     AddTlcCommand {
+                        execution_id: None,
                         amount,
                         hash_algorithm: tlc_hash_algorithm,
                         payment_hash,
@@ -8649,6 +8710,7 @@ async fn test_forward_payment_rejects_mismatched_hash_algorithm_between_wire_and
                 channel_id: channels[0],
                 command: ChannelCommand::AddTlc(
                     AddTlcCommand {
+                        execution_id: None,
                         amount: source_amount,
                         hash_algorithm: wire_hash_algorithm,
                         payment_hash,
@@ -10102,6 +10164,7 @@ async fn test_payment_with_payment_data_record() {
                 channel_id: channels[0],
                 command: ChannelCommand::AddTlc(
                     AddTlcCommand {
+                        execution_id: None,
                         amount: 10000000000,
                         hash_algorithm,
                         payment_hash,
@@ -10203,6 +10266,7 @@ async fn test_payment_with_insufficient_total_amount() {
                 channel_id: channels[0],
                 command: ChannelCommand::AddTlc(
                     AddTlcCommand {
+                        execution_id: None,
                         amount: 10000000000,
                         hash_algorithm,
                         payment_hash,
@@ -10408,6 +10472,7 @@ async fn test_payment_with_wrong_payment_secret() {
                 channel_id: channels[0],
                 command: ChannelCommand::AddTlc(
                     AddTlcCommand {
+                        execution_id: None,
                         amount: 10000000000,
                         hash_algorithm,
                         payment_hash,
@@ -10518,6 +10583,7 @@ async fn test_payment_with_insufficient_amount_with_payment_data() {
                 channel_id: channels[0],
                 command: ChannelCommand::AddTlc(
                     AddTlcCommand {
+                        execution_id: None,
                         amount: 9000000000,
                         hash_algorithm,
                         payment_hash,
@@ -10623,6 +10689,7 @@ async fn test_payment_with_insufficient_amount_without_payment_data() {
                 channel_id: channels[0],
                 command: ChannelCommand::AddTlc(
                     AddTlcCommand {
+                        execution_id: None,
                         amount: 9000000000,
                         hash_algorithm,
                         payment_hash,
@@ -11404,7 +11471,7 @@ async fn test_local_remove_notification_reuses_retry_policy_without_double_failu
         crate::fiber::FiberActorRef::from_network(&node.network_actor),
     );
     let mut state = PaymentActorState::new(PaymentActorArguments {
-        payment_hash,
+        session_key: payment_hash.into(),
         init_command: PaymentActorMessage::CheckPaymentStatus,
     });
     let completion = PaymentTlcRemoveContext {
@@ -11454,7 +11521,7 @@ async fn test_local_remove_notification_reuses_retry_policy_without_double_failu
     // Fresh actor state must request recovery of the persisted retry exactly once.
     // This checks the handler result, not timer execution or a full node restart.
     let mut recovered_state = PaymentActorState::new(PaymentActorArguments {
-        payment_hash,
+        session_key: payment_hash.into(),
         init_command: PaymentActorMessage::CheckPaymentStatus,
     });
     assert!(actor

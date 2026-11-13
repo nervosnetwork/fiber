@@ -1,7 +1,7 @@
 {
   "AddTlc": "9b17154e89c4ce73b54bec7180f0870ceac4a7f6705e942d8f3bb029dee35a9a",
-  "AddTlcCommand": "a8895ef5018e633c0409dde08e2cf78b23e78fdffc84a22b469ba33287f457c5",
-  "Attempt": "fc9bca945949fd6ac5591daf8ea2f2ca253698231801c3f6cf03cc01e7f7a94a",
+  "AddTlcCommand": "022515f9a1cb90a2d5254bfa7915947ff98e9399b35b589bd0bd30ef31d14bdf",
+  "Attempt": "7cd6734507bc6c2e353b964189a85f1f168e37eef3dabfb08c6362537a3dc06f",
   "AttemptStatus": "b18d88f1743ca9a7b657daa273e3ec3cab475113c2b34704792f8ca7a382313a",
   "Attribute": "b89fd07c4110d2a19c172121827230fc11678dcbda038e0a62fbf1b59f740fe8",
   "BroadcastMessage": "c15fb7747e489e3ace898276a811a61060f3913bf8d6143ed9ab895d97128469",
@@ -55,6 +55,7 @@
   "PaymentHopData": "4b812c1eccb1e223a39a3835113d13a50784ad7c1f28d369a3f24359fe6a321c",
   "PaymentOnionPacket": "11a21e69fdd950ea7cc46106ec5ae9de73f0de732e0c07a5e57c94e6b1911695",
   "PaymentSession": "f43811eebcfc55f4b78884f6e9c8c7f3e49ebd1d2e0f18e2b384032479089a31",
+  "PaymentSessionKey": "5e75bc76b1617bb7fd501a179b4f3f60ccd20081a5b00361276ea1ebf9b61def",
   "PaymentStatus": "e261dd3257be525ba4bea793efcceb7dffb717a8de82a57bfe8e8b1d2d8913d9",
   "PendingChannelSignature": "3fafe5a38d02e4281adff9e3264dc4d18fc521ce6285a02bf6216956a2ec6d85",
   "PendingTlcs": "820c763de8fc8fe727995346949e5b8f552853492b7ef6ec69161d6926083d31",
@@ -71,7 +72,7 @@
   "RevokeAndAck": "7c2baa88ab2bc21276132deb03d51f61fad24f256678eb538da8139294719394",
   "RouterHop": "10cc5df6c304bc3b2242add0b6a6f297015a09fd7f453667bdf65a5e4e872cd3",
   "SchnorrSignature": "98a79533fba0ecf0731bfc93f7f0c2ea602ce637ca426c1e8921586aef7b7be5",
-  "SendPaymentData": "71d2663c59f59547f38cd59aacd033a896d8d57f66272e9fcb441fca30d32024",
+  "SendPaymentData": "6992bc1f83f9d2e22467f9bdd707ea7f21d6582e1b1d201b6b98130ea5f373dd",
   "SessionRoute": "17ca3487423c528df34fd906b573af20fa2cd3f35c8ecaa9ca8f3138a7b7541f",
   "SessionRouteNode": "3905d18b71ffcaac5abf78441b70b445bf406dd6582aeaa7db354049c05f4395",
   "SettlementData": "d0ba7433dccf965ee9d9dd2b953179c040e5cc9fd7eff9b7d3da1d69862548d9",
@@ -82,10 +83,11 @@
   "TimedResult": "7c79614a5e8c62920bfb3b367747ff014877893c70e55f364bc8e63a1c4f1491",
   "TlcErrPacket": "9beaab8b903ec6d396f922659aafe30f2d140c40cef6eb1b85c67063856ba3b5",
   "TlcErrorCode": "c029749ac03a9c53b0a674ec8c583005f4b114839aec063b324040191df162ca",
-  "TlcInfo": "fdf25e6b8470d7da7676b8885b0e0d34703da3ce698c2fcf3dc8ba5f089b6b6a",
+  "TlcInfo": "4c1ac4bc3b1666b1b9f171540a01d4594f296e3b6700b6a290bf9d273adad642",
   "TlcReplayUpdate": "ac83dcb321742a85b8a8608b7e2fe7b5575347f1c6d5424129ef96759cb17fc4",
   "TlcState": "e76d434a42bc9ee31dcfa22b3c67d41eaa105fefc86a397bcd21f0e94c53765d",
   "TlcStatus": "c6e573785811e5289908255ec8e30c55af5aa9bb6c8b97a90d3d0abace00b983",
   "TrampolineContext": "bdedb8f60731166ba1ba13349e24d7688ad4b684e05eb3766e9ab228684e693f",
-  "UdtCfgInfos": "810d91ca44e779cfebb4ab1dffb1072c7993bdf9af22423abed2e339586d09fa"
+  "UdtCfgInfos": "810d91ca44e779cfebb4ab1dffb1072c7993bdf9af22423abed2e339586d09fa",
+  "UpstreamTlcKey": "2294bd9c38c0d112bfa2affb8fd9d82c25b2d734b51ad45b044a97169d87cc06"
 }

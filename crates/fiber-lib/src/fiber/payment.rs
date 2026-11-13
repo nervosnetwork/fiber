@@ -21,6 +21,7 @@ use crate::fiber::{
     FiberActorCommand, FiberActorEvent, FiberActorMessage, FiberActorRef, KeyPair,
     PublicNetworkCommand, ASSUME_NETWORK_ACTOR_ALIVE,
 };
+use crate::fiber_types::PaymentSessionKey;
 use crate::invoice::{CkbInvoice, Currency, InvoiceError, InvoiceStore, PreimageStore};
 use crate::Error;
 use crate::{debug_event, now_timestamp_as_millis_u64};
@@ -368,6 +369,7 @@ impl SendPaymentDataBuilder {
             dry_run: self.dry_run,
             trampoline_hops: self.trampoline_hops,
             trampoline_context: self.trampoline_context,
+            execution_id: None,
         })
     }
 }
@@ -636,7 +638,7 @@ impl PaymentSessionExt for PaymentSession {
     }
 
     fn flush_attempts(&mut self, store: &impl NetworkGraphStateStore) {
-        self.cached_attempts = store.get_attempts(self.request.payment_hash);
+        self.cached_attempts = store.get_attempts(self.session_key());
         self.status = self.calc_payment_status();
     }
 }
@@ -912,7 +914,7 @@ pub enum PaymentActorMessage {
 }
 
 pub struct PaymentActorState {
-    payment_hash: Hash256,
+    session_key: PaymentSessionKey,
     init_command: Option<PaymentActorMessage>,
     last_error_packet: Option<TlcErrPacket>,
 
@@ -929,11 +931,11 @@ pub struct PaymentActorState {
 impl PaymentActorState {
     pub fn new(args: PaymentActorArguments) -> Self {
         let PaymentActorArguments {
-            payment_hash,
+            session_key,
             init_command,
         } = args;
         Self {
-            payment_hash,
+            session_key,
             init_command: Some(init_command),
             last_error_packet: None,
             retry_send_payment_count: 0,
@@ -943,7 +945,7 @@ impl PaymentActorState {
 }
 
 pub struct PaymentActorArguments {
-    pub payment_hash: Hash256,
+    pub session_key: PaymentSessionKey,
     pub init_command: PaymentActorMessage,
 }
 
@@ -1007,7 +1009,7 @@ where
         self.network
             .send_message(FiberActorMessage::Event(
                 FiberActorEvent::PaymentActorStopped(
-                    state.payment_hash,
+                    state.session_key,
                     state.last_error_packet.clone(),
                 ),
             ))
@@ -1108,7 +1110,7 @@ where
 
     #[instrument(
         skip(self, myself, state, command),
-        fields(payment_hash = ?state.payment_hash)
+        fields(payment_hash = ?state.session_key.payment_hash, execution_id = ?state.session_key.execution_id)
     )]
     pub async fn handle_command(
         &self,
@@ -1173,7 +1175,7 @@ where
                                         downstream_channel_id: completion.channel_id,
                                         downstream_tlc_id: completion.tlc_id,
                                         completion: OnChainTlcRemoveCompletion::Payer,
-                                        payment_hash: state.payment_hash,
+                                        payment_hash: state.session_key.payment_hash,
                                         reason,
                                     },
                                 ))
@@ -1213,8 +1215,8 @@ where
         myself: ActorRef<PaymentActorMessage>,
         state: &mut PaymentActorState,
     ) {
-        let payment_hash = state.payment_hash;
-        if let Some(session) = self.store.get_payment_session(payment_hash) {
+        let session_key = state.session_key;
+        if let Some(session) = self.store.get_payment_session(session_key) {
             if session.status.is_final() {
                 // Payment has reached final status, stop the actor
                 myself.stop(Some(format!(
@@ -1232,7 +1234,7 @@ where
                     "Payment {:?} is still not final after periodic check, maybe the channel is down. \
                     Status: {:?}, Active attempts: {}, Inflight: {}, Failed: {}, Total: {}, \
                     Retry count: {}, Last error: {:?}",
-                    payment_hash,
+                    session_key,
                     session.status,
                     active_attempts,
                     inflight_attempts,
@@ -1252,7 +1254,7 @@ where
         } else {
             error!(
                 "Payment session not found during periodic check: {:?}",
-                payment_hash
+                session_key
             );
             myself.stop(Some("Payment session not found".to_string()));
         }
@@ -1263,7 +1265,7 @@ where
         myself: ActorRef<PaymentActorMessage>,
         state: &mut PaymentActorState,
     ) {
-        if let Some(session) = self.store.get_payment_session(state.payment_hash) {
+        if let Some(session) = self.store.get_payment_session(state.session_key) {
             if session.status.is_final() {
                 myself.stop(Some(format!(
                     "Payment complete with status {:?}",
@@ -1667,6 +1669,7 @@ where
                     SendOnionPacketCommand {
                         peeled_onion_packet,
                         previous_tlc: None,
+                        execution_id: attempt.execution_id,
                         payment_hash: attempt.payment_hash,
                         attempt_id: Some(attempt.id),
                     },
@@ -1718,7 +1721,7 @@ where
             self.store.insert_payment_session(session.clone());
             // Clean up channel index to prevent retries on channel ready
             self.store
-                .clear_attempts_channel_index(session.payment_hash());
+                .clear_attempts_channel_index(session.session_key());
         }
     }
 
@@ -1747,7 +1750,7 @@ where
         self.store
             .get_channel_state_by_outpoint(channel_outpoint)
             .is_some_and(|channel_state| {
-                channel_state.owns_payment_attempt(attempt.payment_hash, attempt.id)
+                channel_state.owns_payment_attempt(attempt.session_key(), attempt.id)
             })
     }
 
@@ -1779,11 +1782,11 @@ where
         state: &mut PaymentActorState,
         attempt_id: Option<u64>,
     ) -> Result<(), Error> {
-        let payment_hash = state.payment_hash;
+        let session_key = state.session_key;
 
         self.update_graph().await;
-        let Some(mut session) = self.store.get_payment_session(payment_hash) else {
-            return Err(Error::InvalidParameter(payment_hash.to_string()));
+        let Some(mut session) = self.store.get_payment_session(session_key) else {
+            return Err(Error::InvalidParameter(session_key.to_string()));
         };
 
         if session.status.is_final() {
@@ -1831,7 +1834,7 @@ where
             return Ok(());
         };
 
-        match self.store.get_attempt(session.payment_hash(), attempt_id) {
+        match self.store.get_attempt(session.session_key(), attempt_id) {
             Some(mut attempt) if attempt.is_retrying() => {
                 match self
                     .resend_payment_attempt(myself, state, session, &mut attempt)
@@ -1892,12 +1895,12 @@ where
 
     fn get_payment_session_with_attempt(
         &self,
-        payment_hash: Hash256,
+        session_key: PaymentSessionKey,
         attempt_id: Option<u64>,
     ) -> (Option<PaymentSession>, Option<Attempt>) {
-        let payment_session = self.store.get_payment_session(payment_hash);
+        let payment_session = self.store.get_payment_session(session_key);
         let attempt =
-            attempt_id.and_then(|attempt_id| self.store.get_attempt(payment_hash, attempt_id));
+            attempt_id.and_then(|attempt_id| self.store.get_attempt(session_key, attempt_id));
 
         (payment_session, attempt)
     }
@@ -1909,13 +1912,13 @@ where
         attempt_id: Option<u64>,
         add_tlc_result: Result<(Hash256, u64), (ProcessingChannelError, TlcErr)>,
     ) {
-        let payment_hash = state.payment_hash;
+        let session_key = state.session_key;
         let (Some(mut session), Some(mut attempt)) =
-            self.get_payment_session_with_attempt(payment_hash, attempt_id)
+            self.get_payment_session_with_attempt(session_key, attempt_id)
         else {
             warn!(
                 "Payment session not found: {:?} attempt_id: {:?}",
-                payment_hash, attempt_id
+                session_key, attempt_id
             );
             return;
         };
@@ -1963,13 +1966,13 @@ where
         local_error: Option<&TlcErr>,
         completion: Option<&PaymentTlcRemoveContext>,
     ) -> Result<bool, String> {
-        let payment_hash = state.payment_hash;
+        let session_key = state.session_key;
         let (Some(mut session), Some(mut attempt)) =
-            self.get_payment_session_with_attempt(payment_hash, attempt_id)
+            self.get_payment_session_with_attempt(session_key, attempt_id)
         else {
             error!(
                 "Payment session or attempt not found for payment hash: {:?}, attempt id: {:?}",
-                payment_hash, attempt_id
+                session_key, attempt_id
             );
             return Err("Payment session or attempt missing for TLC removal".to_string());
         };
@@ -2012,7 +2015,7 @@ where
                         // Clean up channel index to prevent retries on channel ready
                         if session.status.is_final() {
                             self.store
-                                .clear_attempts_channel_index(session.payment_hash());
+                                .clear_attempts_channel_index(session.session_key());
                         }
                     }
                 }
@@ -2048,7 +2051,7 @@ where
                     };
                     debug!(
                         "payment_hash: {:?} set attempt failed with: {:?} need_to_retry: {:?}",
-                        payment_hash,
+                        session_key,
                         tlc_error.error_code.as_ref(),
                         need_to_retry
                     );
@@ -2069,7 +2072,7 @@ where
 
         #[cfg(debug_assertions)]
         {
-            if let Some(payment_session) = self.store.get_payment_session(payment_hash) {
+            if let Some(payment_session) = self.store.get_payment_session(session_key) {
                 debug_event!(
                     self.network,
                     format!(
@@ -2082,8 +2085,7 @@ where
         if let Some(completion) = completion {
             // Finish the session before acknowledging an exhausted or replayed failure.
             // Reuse the existing session API without applying another attempt failure.
-            if let Some(attempt) =
-                attempt_id.and_then(|id| self.store.get_attempt(payment_hash, id))
+            if let Some(attempt) = attempt_id.and_then(|id| self.store.get_attempt(session_key, id))
             {
                 if attempt.is_failed()
                     && !session.status.is_final()
@@ -2115,20 +2117,20 @@ where
         attempt_id: u64,
         payment_preimage: Hash256,
     ) -> Result<(), Error> {
-        let payment_hash = state.payment_hash;
-        let persisted_session_status = self.store.get_persisted_payment_status(payment_hash);
+        let session_key = state.session_key;
+        let persisted_session_status = self.store.get_persisted_payment_status(session_key);
         let (Some(mut session), Some(mut attempt)) =
-            self.get_payment_session_with_attempt(payment_hash, Some(attempt_id))
+            self.get_payment_session_with_attempt(session_key, Some(attempt_id))
         else {
             return Err(Error::InvalidParameter(format!(
-                "Payment session or attempt not found for on-chain fulfill: payment_hash={payment_hash:?}, attempt_id={attempt_id}"
+                "Payment session or attempt not found for on-chain fulfill: session_key={session_key:?}, attempt_id={attempt_id}"
             )));
         };
 
         if let Some(existing_preimage) = attempt.preimage {
             if existing_preimage != payment_preimage {
                 return Err(Error::InvalidParameter(format!(
-                    "On-chain fulfill preimage conflicts with attempt: payment_hash={payment_hash:?}, attempt_id={attempt_id}"
+                    "On-chain fulfill preimage conflicts with attempt: session_key={session_key:?}, attempt_id={attempt_id}"
                 )));
             }
         }
@@ -2168,7 +2170,7 @@ where
             self.store.insert_payment_session(session.clone());
             if session.status.is_final() {
                 self.store
-                    .clear_attempts_channel_index(session.payment_hash());
+                    .clear_attempts_channel_index(session.session_key());
             }
         }
 
@@ -2252,7 +2254,7 @@ where
         payment_data: SendPaymentData,
     ) -> PaymentStartResult {
         // initialize the payment session in db and begin the payment process lifecycle
-        if let Some(payment_session) = self.store.get_payment_session(payment_data.payment_hash) {
+        if let Some(payment_session) = self.store.get_payment_session(payment_data.session_key()) {
             // we only allow retrying payment session with status failed
             if payment_session.status != PaymentStatus::Failed {
                 let error_code = if payment_session.status == PaymentStatus::Success {
@@ -2286,7 +2288,7 @@ where
                     ));
                 }
                 if !payment_data.dry_run {
-                    self.store.delete_attempts(payment_data.payment_hash);
+                    self.store.delete_attempts(payment_data.session_key());
                 }
             }
         }

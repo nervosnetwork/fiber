@@ -2761,3 +2761,5 @@ async fn hosted_tenant_pays_hosted_tenant_across_two_lsps() {
 
     network.stop().await;
 }
+#[path = "same_hash.rs"]
+mod same_hash;

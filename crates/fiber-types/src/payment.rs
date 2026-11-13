@@ -11,6 +11,58 @@ use serde_with::serde_as;
 use std::collections::HashMap;
 use strum::{AsRefStr, EnumString};
 
+/// The upstream TLC identifying one hosted forwarding execution. Never sent on the wire.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+pub struct UpstreamTlcKey {
+    /// Public node's incoming channel for the held upstream TLC.
+    pub incoming_channel_id: Hash256,
+    /// Received TLC ID within that channel.
+    pub incoming_tlc_id: u64,
+}
+
+/// A hashlock is not an execution identity: independent payments may share it.
+/// Ordinary payments retain their hash-only identity; hosted forwarding is scoped
+/// to its incoming TLC so replay resumes the same execution.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+pub struct PaymentSessionKey {
+    /// The actual hashlock, unchanged in invoices, onions and channel messages.
+    pub payment_hash: Hash256,
+    /// Absent for ordinary payments and ordinary trampoline forwarding.
+    pub execution_id: Option<UpstreamTlcKey>,
+}
+
+impl From<Hash256> for PaymentSessionKey {
+    fn from(payment_hash: Hash256) -> Self {
+        Self {
+            payment_hash,
+            execution_id: None,
+        }
+    }
+}
+
+impl std::fmt::Display for PaymentSessionKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.payment_hash)?;
+        if let Some(id) = self.execution_id {
+            write!(f, ":{}:{}", id.incoming_channel_id, id.incoming_tlc_id)?;
+        }
+        Ok(())
+    }
+}
+
+impl PaymentSessionKey {
+    /// Preserve ordinary key bytes. Scoped records append the incoming TLC identity;
+    /// prefix scans must filter by the complete key, not just the hash prefix.
+    pub fn storage_bytes(self) -> Vec<u8> {
+        let mut bytes = self.payment_hash.as_ref().to_vec();
+        if let Some(id) = self.execution_id {
+            bytes.extend_from_slice(id.incoming_channel_id.as_ref());
+            bytes.extend_from_slice(&id.incoming_tlc_id.to_le_bytes());
+        }
+        bytes
+    }
+}
+
 /// The status of a payment, will update as the payment progresses.
 /// The transfer path for payment status is `Created -> Inflight -> Success | Failed`.
 ///
@@ -661,6 +713,8 @@ pub struct Attempt {
     pub created_at: u64,
     pub last_updated_at: u64,
     pub last_error: Option<String>,
+    /// Local execution scope; None preserves ordinary hash-only payments.
+    pub execution_id: Option<UpstreamTlcKey>,
 }
 
 impl std::fmt::Debug for Attempt {
@@ -684,6 +738,14 @@ impl std::fmt::Debug for Attempt {
 }
 
 impl Attempt {
+    /// Identify the owning payment independently of its onion session key.
+    pub fn session_key(&self) -> PaymentSessionKey {
+        PaymentSessionKey {
+            payment_hash: self.payment_hash,
+            execution_id: self.execution_id,
+        }
+    }
+
     pub fn set_inflight_status(&mut self) {
         self.status = AttemptStatus::Inflight;
         self.last_error = None;
@@ -881,6 +943,8 @@ pub struct SendPaymentData {
     pub trampoline_hops: Option<Vec<Pubkey>>,
     #[serde(default)]
     pub trampoline_context: Option<TrampolineContext>,
+    /// Local execution scope; None preserves ordinary hash-only payments.
+    pub execution_id: Option<UpstreamTlcKey>,
 }
 
 /// A payment session tracking the state of a payment attempt.
@@ -908,6 +972,14 @@ pub const DEFAULT_MAX_PARTS: u64 = 12;
 pub const DEFAULT_PAYMENT_MPP_ATTEMPT_TRY_LIMIT: u32 = 3;
 
 impl SendPaymentData {
+    /// Local payment identity; unrelated executions may share the hashlock.
+    pub fn session_key(&self) -> PaymentSessionKey {
+        PaymentSessionKey {
+            payment_hash: self.payment_hash,
+            execution_id: self.execution_id,
+        }
+    }
+
     /// Maximum number of parallel parts for this payment.
     pub fn max_parts(&self) -> usize {
         self.max_parts.unwrap_or(DEFAULT_MAX_PARTS) as usize
@@ -928,6 +1000,11 @@ impl SendPaymentData {
 }
 
 impl PaymentSession {
+    /// Stable key used by the actor, attempts and persisted payment records.
+    pub fn session_key(&self) -> PaymentSessionKey {
+        self.request.session_key()
+    }
+
     pub fn update_with_attempt(&mut self, attempt: Attempt) {
         if let Some(a) = self.cached_attempts.iter_mut().find(|a| a.id == attempt.id) {
             *a = attempt;
@@ -1055,6 +1132,7 @@ impl PaymentSession {
         let route = SessionRoute::new(source, target, &route_hops);
 
         Attempt {
+            execution_id: self.request.execution_id,
             id: attempt_id,
             hash,
             try_limit,

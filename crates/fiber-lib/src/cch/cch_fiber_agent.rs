@@ -830,7 +830,7 @@ impl CchFiberAgentRef {
             Self::InProcess(network_actor) => forward!(
                 network_actor,
                 |port| NetworkActorMessage::new_command(FiberActorCommand::GetPayment(
-                    payment_hash,
+                    payment_hash.into(),
                     port,
                 )),
                 target_ref,

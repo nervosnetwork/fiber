@@ -150,6 +150,22 @@ pub struct LspServiceState {
 }
 
 impl LspServiceState {
+    fn delivery_for_outcome(
+        &self,
+        session_key: crate::fiber_types::PaymentSessionKey,
+    ) -> Result<Option<LspPaymentDelivery>, String> {
+        let Some(id) = session_key.execution_id else {
+            return Ok(None);
+        };
+        let key = LspPaymentDeliveryKey {
+            incoming_channel_id: id.incoming_channel_id,
+            incoming_tlc_id: id.incoming_tlc_id,
+        };
+        Ok(self.delivery_manager.get(&key)?.filter(|delivery| {
+            delivery.payment_hash == session_key.payment_hash && !delivery.status.is_final()
+        }))
+    }
+
     fn tenant_delivery_channels(
         &self,
         tenant_id: &TenantId,
@@ -676,16 +692,13 @@ impl Actor for LspService {
             }
             LspServiceMessage::PaymentOutcomeReady(request, reply) => {
                 let PaymentOutcomeRequest {
-                    payment_hash,
+                    session_key,
                     payment_status,
                     failure,
                     failure_code,
                 } = request;
-                let result = match state
-                    .delivery_manager
-                    .get_active_by_payment_hash(&payment_hash)
-                {
-                    Ok(Some(delivery)) if !delivery.status.is_final() => {
+                let result = match state.delivery_for_outcome(session_key) {
+                    Ok(Some(delivery)) => {
                         let key = delivery.key();
                         let deadline = delivery.buffer_deadline;
                         let decision = state.record_payment_outcome(
@@ -705,10 +718,7 @@ impl Actor for LspService {
                 if matches!(&result, Ok(PaymentOutcomeDecision::SettleUpstream))
                     && payment_status.is_final()
                 {
-                    if let Ok(Some(delivery)) = state
-                        .delivery_manager
-                        .get_active_by_payment_hash(&payment_hash)
-                    {
+                    if let Ok(Some(delivery)) = state.delivery_for_outcome(session_key) {
                         LspServiceState::schedule_reconciliation_retry(&myself, delivery.key());
                     }
                 }
@@ -716,18 +726,13 @@ impl Actor for LspService {
             }
             LspServiceMessage::PaymentOutcomeSettled(outcome) => {
                 let SettledPaymentOutcome {
-                    payment_hash,
+                    session_key,
                     payment_status,
                     failure,
                 } = outcome;
-                if let Some(delivery) = state
-                    .delivery_manager
-                    .get_active_by_payment_hash(&payment_hash)?
-                {
+                if let Some(delivery) = state.delivery_for_outcome(session_key)? {
                     let key = delivery.key();
-                    if !delivery.status.is_final() {
-                        state.finish_upstream_settlement(&key, payment_status, failure)?;
-                    }
+                    state.finish_upstream_settlement(&key, payment_status, failure)?;
                 }
             }
         }
@@ -856,7 +861,7 @@ impl LspService {
             let existing_payment = ractor::call_t!(
                 state.public_network_actor,
                 |reply| NetworkActorMessage::new_command(FiberActorCommand::GetPayment(
-                    payment_hash,
+                    delivery.request.hosted_session_key(),
                     reply,
                 )),
                 5_000
@@ -881,7 +886,7 @@ impl LspService {
                         state.public_network_actor,
                         |reply| NetworkActorMessage::new_command(
                             FiberActorCommand::ReconcileBufferedTrampolineSettlement {
-                                payment_hash,
+                                session_key: delivery.request.hosted_session_key(),
                                 reply,
                             },
                         ),

@@ -4,6 +4,7 @@ use crate::crate_time::SystemTime;
 use crate::gen::fiber as molecule_fiber;
 use crate::invoice::HashAlgorithm;
 use crate::onion::{PaymentOnionPacket, TlcErrPacket, TlcErrPacketError};
+use crate::payment::PaymentSessionKey;
 use crate::protocol::{ChannelAnnouncement, ChannelUpdate, EcdsaSignature};
 use crate::serde_utils::PartialSignatureAsBytes;
 use crate::serde_utils::PubNonceAsBytes;
@@ -522,6 +523,8 @@ pub struct TlcInfo {
     pub forwarding_tlc: Option<(Hash256, u64)>,
     pub removed_confirmed_at: Option<u64>,
     pub applied_flags: AppliedFlags,
+    /// Local payment execution ownership, not part of the peer wire message.
+    pub execution_id: Option<crate::payment::UpstreamTlcKey>,
 }
 
 use std::fmt;
@@ -543,6 +546,14 @@ impl fmt::Debug for TlcInfo {
 }
 
 impl TlcInfo {
+    /// Local payment execution owning this TLC, including its hosted scope.
+    pub fn session_key(&self) -> PaymentSessionKey {
+        PaymentSessionKey {
+            payment_hash: self.payment_hash,
+            execution_id: self.execution_id,
+        }
+    }
+
     pub fn log(&self) -> String {
         format!(
             "id: {:?} status: {:?} amount: {:?} removed: {:?} hash: {:?} ",
@@ -910,6 +921,18 @@ pub struct AddTlcCommand {
     /// not be used for new error attribution logic. Removing it requires a storage migration.
     pub is_trampoline_hop: bool,
     pub previous_tlc: Option<PrevTlcInfo>,
+    /// Local payment execution ownership, not part of the peer wire message.
+    pub execution_id: Option<crate::payment::UpstreamTlcKey>,
+}
+
+impl AddTlcCommand {
+    /// Local payment execution owning this command, including its hosted scope.
+    pub fn session_key(&self) -> PaymentSessionKey {
+        PaymentSessionKey {
+            payment_hash: self.payment_hash,
+            execution_id: self.execution_id,
+        }
+    }
 }
 
 impl fmt::Debug for AddTlcCommand {

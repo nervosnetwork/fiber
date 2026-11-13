@@ -68,7 +68,7 @@ pub enum PaymentOutcomeDecision {
 /// A final downstream payment outcome reported to the delivery service.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PaymentOutcomeRequest {
-    pub payment_hash: Hash256,
+    pub session_key: crate::fiber_types::PaymentSessionKey,
     pub payment_status: crate::fiber_types::PaymentStatus,
     pub failure: Option<String>,
     pub failure_code: Option<TlcErrorCode>,
@@ -78,7 +78,7 @@ pub struct PaymentOutcomeRequest {
 /// Notification that the upstream TLC was settled with this outcome.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SettledPaymentOutcome {
-    pub payment_hash: Hash256,
+    pub session_key: crate::fiber_types::PaymentSessionKey,
     pub payment_status: crate::fiber_types::PaymentStatus,
     pub failure: Option<String>,
 }
@@ -104,6 +104,16 @@ pub struct TrampolineForwardingRequest {
 }
 
 impl TrampolineForwardingRequest {
+    /// Stable local session identity for hosted dispatch and crash recovery.
+    pub fn hosted_session_key(&self) -> crate::fiber_types::PaymentSessionKey {
+        crate::fiber_types::PaymentSessionKey {
+            payment_hash: self.payment_hash,
+            execution_id: Some(crate::fiber_types::UpstreamTlcKey {
+                incoming_channel_id: self.previous_tlc.prev_channel_id,
+                incoming_tlc_id: self.previous_tlc.prev_tlc_id,
+            }),
+        }
+    }
     pub(crate) fn into_send_payment_data(self) -> Result<SendPaymentData, String> {
         SendPaymentDataBuilder::new(self.next_node_id, self.amount_to_forward, self.payment_hash)
             .final_tlc_expiry_delta(self.tlc_expiry_delta)

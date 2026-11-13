@@ -299,11 +299,21 @@ pub(crate) struct OnChainConfirmedPayerTlc {
 /// An offered TLC failed by an on-chain timeout or exclusion from a confirmed commitment.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct OnChainTimeoutSettledTlc {
+    pub execution_id: Option<crate::fiber_types::UpstreamTlcKey>,
     /// The downstream TLC on the force-closed channel that must be marked removed locally.
     pub tlc_id: TLCId,
     pub payment_hash: Hash256,
     pub shared_secret: [u8; 32],
     pub role: OnChainTimeoutTlcRole,
+}
+
+impl OnChainTimeoutSettledTlc {
+    pub(crate) fn session_key(&self) -> crate::fiber_types::PaymentSessionKey {
+        crate::fiber_types::PaymentSessionKey {
+            payment_hash: self.payment_hash,
+            execution_id: self.execution_id,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -550,6 +560,7 @@ pub(crate) fn collect_onchain_excluded_tlcs(
             })
         })
         .map(|tlc| OnChainTimeoutSettledTlc {
+            execution_id: tlc.execution_id,
             tlc_id: tlc.tlc_id,
             payment_hash: tlc.payment_hash,
             shared_secret: tlc.shared_secret,
@@ -611,6 +622,7 @@ pub(crate) fn collect_onchain_timeout_settled_tlcs(
             };
 
             Some(OnChainTimeoutSettledTlc {
+                execution_id: tlc.execution_id,
                 tlc_id: tlc.tlc_id,
                 payment_hash: tlc.payment_hash,
                 shared_secret: tlc.shared_secret,

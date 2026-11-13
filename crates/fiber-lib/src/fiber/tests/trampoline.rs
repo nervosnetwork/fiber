@@ -147,6 +147,7 @@ async fn send_manual_trampoline_final_keysend_tlc(
                 channel_id,
                 command: ChannelCommand::AddTlc(
                     AddTlcCommand {
+                        execution_id: None,
                         amount: actual_amount,
                         payment_hash,
                         attempt_id: None,
@@ -2096,6 +2097,7 @@ async fn test_trampoline_forwarding_rejects_missing_previous_tlc() {
     current_hop.set_trampoline_onion(trampoline_onion_bytes);
 
     let command = SendOnionPacketCommand {
+        execution_id: None,
         peeled_onion_packet: PeeledPaymentOnionPacket {
             current: current_hop,
             next: None,
@@ -2260,6 +2262,7 @@ async fn test_trampoline_forwarding_fee_insufficient_manual_packet() {
     let (sender, receiver) = oneshot::channel();
     let command = FiberActorCommand::SendPaymentOnionPacket(
         SendOnionPacketCommand {
+            execution_id: None,
             peeled_onion_packet: peeled_packet,
             previous_tlc: Some(PrevTlcInfo {
                 prev_channel_id: channel_ab,
@@ -2360,6 +2363,7 @@ async fn test_trampoline_forwarding_fee_insufficient_equal_amount() {
     let (sender, receiver) = oneshot::channel();
     let command = FiberActorCommand::SendPaymentOnionPacket(
         SendOnionPacketCommand {
+            execution_id: None,
             peeled_onion_packet: peeled_packet,
             previous_tlc: Some(PrevTlcInfo {
                 prev_channel_id: channel_ab,
@@ -2417,6 +2421,7 @@ async fn test_trampoline_forwarding_rejects_outgoing_expiry_beyond_upstream_budg
 
     let mut node_b_state = node_b.get_channel_actor_state(channel_ab);
     node_b_state.tlc_state.add_received_tlc(TlcInfo {
+        execution_id: None,
         status: TlcStatus::Inbound(InboundTlcStatus::Committed),
         tlc_id: TLCId::Received(1),
         amount: incoming_amount,
@@ -2484,6 +2489,7 @@ async fn test_trampoline_forwarding_rejects_outgoing_expiry_beyond_upstream_budg
     let (sender, receiver) = oneshot::channel();
     let command = FiberActorCommand::SendPaymentOnionPacket(
         SendOnionPacketCommand {
+            execution_id: None,
             peeled_onion_packet: peeled_packet,
             previous_tlc: Some(PrevTlcInfo::new_with_shared_secret(
                 channel_ab,
@@ -2527,6 +2533,7 @@ async fn send_manual_trampoline_forward(
 
     let mut node_b_state = node_b.get_channel_actor_state(channel_ab);
     node_b_state.tlc_state.add_received_tlc(TlcInfo {
+        execution_id: None,
         status: TlcStatus::Inbound(InboundTlcStatus::Committed),
         tlc_id: TLCId::Received(1),
         amount: incoming_amount,
@@ -2586,6 +2593,7 @@ async fn send_manual_trampoline_forward(
     let (sender, receiver) = oneshot::channel();
     let command = FiberActorCommand::SendPaymentOnionPacket(
         SendOnionPacketCommand {
+            execution_id: None,
             peeled_onion_packet: PeeledPaymentOnionPacket {
                 current: current_hop_data,
                 shared_secret: [0u8; 32],
@@ -2738,6 +2746,7 @@ async fn test_trampoline_final_rejects_expiry_below_inner_delta() {
                 channel_id,
                 command: ChannelCommand::AddTlc(
                     AddTlcCommand {
+                        execution_id: None,
                         amount,
                         payment_hash,
                         attempt_id: None,
@@ -3414,7 +3423,7 @@ async fn test_trampoline_routing_no_path_found() {
 }
 
 #[tokio::test]
-async fn test_trampoline_same_trampoline_buffered_dispatch_rejection() {
+async fn test_trampoline_buffered_dispatch_missing_channel_leaves_upstream_pending() {
     init_tracing();
     let params = ChannelParameters {
         public: true,
@@ -3467,8 +3476,8 @@ async fn test_trampoline_same_trampoline_buffered_dispatch_rejection() {
         previous_tlc: context.previous_tlcs[0],
         max_outgoing_tlc_expiry: context.max_outgoing_tlc_expiry.unwrap(),
     };
-    // Model a different execution of this hash. The buffered caller must receive
-    // the rejection without the payment actor independently failing its upstream.
+    // Model a different execution of this hash. A missing hosted channel must
+    // reject dispatch without touching this unrelated session or failing upstream.
     existing.status = PaymentStatus::Success;
     existing
         .request
@@ -4116,7 +4125,7 @@ async fn test_trampoline_failure_settlement_recovers_after_restart() {
 }
 
 #[tokio::test]
-async fn test_buffered_trampoline_failed_session_settles_upstream() {
+async fn test_buffered_trampoline_failure_uses_request_not_same_hash_session() {
     init_tracing();
 
     let channels = vec![(
@@ -4179,7 +4188,8 @@ async fn test_buffered_trampoline_failed_session_settles_upstream() {
         max_outgoing_tlc_expiry: context.max_outgoing_tlc_expiry.unwrap(),
     };
 
-    // A Failed session alone does not prove its upstream TLC was settled.
+    // Even a corrupt same-hash session must not supply the hosted execution's
+    // upstream identity or shared secret. Only the delivery request is authoritative.
     let mut invalid_session = session.clone();
     invalid_session
         .request
@@ -4189,9 +4199,11 @@ async fn test_buffered_trampoline_failed_session_settles_upstream() {
         .previous_tlcs[0]
         .shared_secret = None;
     node_t.store.insert_payment_session(invalid_session);
+    let mut invalid_request = request.clone();
+    invalid_request.previous_tlc.shared_secret = None;
     let result = call!(node_t.network_actor, |reply| {
         NetworkActorMessage::new_command(FiberActorCommand::FailBufferedTrampoline {
-            request: request.clone(),
+            request: invalid_request,
             reason: "buffer deadline expired".to_string(),
             error_code: TlcErrorCode::PermanentNodeFailure,
             reply,
@@ -4210,7 +4222,8 @@ async fn test_buffered_trampoline_failed_session_settles_upstream() {
             .status,
         PaymentStatus::Inflight
     );
-    node_t.store.insert_payment_session(session);
+    let unrelated =
+        bincode::serialize(&node_t.store.get_payment_session(payment_hash).unwrap()).unwrap();
 
     for _ in 0..2 {
         assert!(call!(node_t.network_actor, |reply| {
@@ -4225,6 +4238,10 @@ async fn test_buffered_trampoline_failed_session_settles_upstream() {
         .unwrap());
         node_a.wait_until_failed(payment_hash).await;
     }
+    assert_eq!(
+        bincode::serialize(&node_t.store.get_payment_session(payment_hash).unwrap()).unwrap(),
+        unrelated
+    );
 }
 
 #[tokio::test]
@@ -4294,6 +4311,7 @@ async fn test_trampoline_forward_invalid_onion_payload_missing_context() {
     };
 
     let command = SendOnionPacketCommand {
+        execution_id: None,
         peeled_onion_packet: peeled_onion,
         previous_tlc: Some(prev_tlc),
         payment_hash,
@@ -4384,6 +4402,7 @@ async fn test_trampoline_forward_invalid_amount_in_onion_packet() {
     };
 
     let command = SendOnionPacketCommand {
+        execution_id: None,
         peeled_onion_packet: peeled_onion,
         previous_tlc: Some(prev_tlc),
         payment_hash,

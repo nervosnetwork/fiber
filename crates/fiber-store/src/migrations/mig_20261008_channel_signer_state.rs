@@ -3,6 +3,7 @@ use tracing::info;
 use crate::migration::{Migration, MigrationStore};
 
 use super::decode_as_new;
+use super::mig_20261113000000_payment_execution::append_execution_scope;
 
 const MIGRATION_DB_VERSION: &str = "20261008120000";
 
@@ -39,8 +40,12 @@ fn convert_channel_actor_data(old: OldChannelActorData) -> Result<NewChannelActo
         commitment_numbers: decode_as_new(old.commitment_numbers)?,
         local_constraints: decode_as_new(old.local_constraints)?,
         remote_constraints: decode_as_new(old.remote_constraints)?,
-        tlc_state: decode_as_new(old.tlc_state)?,
-        retryable_tlc_operations: decode_as_new(old.retryable_tlc_operations)?,
+        tlc_state: convert_tlc_state(old.tlc_state)?,
+        retryable_tlc_operations: old
+            .retryable_tlc_operations
+            .into_iter()
+            .map(convert_operation)
+            .collect::<Result<_, _>>()?,
         waiting_forward_tlc_tasks: decode_as_new(old.waiting_forward_tlc_tasks)?,
         remote_shutdown_script: old.remote_shutdown_script,
         local_shutdown_script: old.local_shutdown_script,
@@ -73,6 +78,41 @@ fn convert_channel_actor_data(old: OldChannelActorData) -> Result<NewChannelActo
         signing_context: Default::default(),
         commitment_contract_features: decode_as_new(old.commitment_contract_features)?,
     })
+}
+
+fn convert_tlc_state(
+    old: fiber_types_0100::channel::TlcState,
+) -> Result<fiber_types_current::channel::TlcState, String> {
+    fn pending(
+        old: fiber_types_0100::channel::PendingTlcs,
+    ) -> Result<fiber_types_current::channel::PendingTlcs, String> {
+        Ok(fiber_types_current::channel::PendingTlcs {
+            tlcs: old
+                .tlcs
+                .into_iter()
+                .map(append_execution_scope)
+                .collect::<Result<_, _>>()?,
+            next_tlc_id: old.next_tlc_id,
+        })
+    }
+    Ok(fiber_types_current::channel::TlcState {
+        offered_tlcs: pending(old.offered_tlcs)?,
+        received_tlcs: pending(old.received_tlcs)?,
+        waiting_ack: old.waiting_ack,
+    })
+}
+
+fn convert_operation(
+    old: fiber_types_0100::channel::RetryableTlcOperation,
+) -> Result<fiber_types_current::channel::RetryableTlcOperation, String> {
+    use fiber_types_0100::channel::RetryableTlcOperation as Old;
+    use fiber_types_current::channel::RetryableTlcOperation as New;
+    match old {
+        Old::AddTlc(command) => Ok(New::AddTlc(append_execution_scope(command)?)),
+        Old::RemoveTlc(id, reason) => {
+            Ok(New::RemoveTlc(decode_as_new(id)?, decode_as_new(reason)?))
+        }
+    }
 }
 
 pub struct MigrationObj {
@@ -135,6 +175,7 @@ impl Migration for MigrationObj {
 
 #[cfg(test)]
 mod tests {
+    use super::{convert_operation, convert_tlc_state};
     use fiber_types_0100::sample::StoreSample;
 
     use crate::backend::StorageBackend;
@@ -181,7 +222,10 @@ mod tests {
                 let new: NewChannelActorData = bincode::deserialize(&new_bytes)
                     .expect("deserialize migrated channel actor data");
                 assert!(new.signer.is_some());
-                assert_eq!(bincode::serialize(&old.signer).unwrap(), bincode::serialize(new.signer.as_ref().unwrap()).unwrap());
+                assert_eq!(
+                    bincode::serialize(&old.signer).unwrap(),
+                    bincode::serialize(new.signer.as_ref().unwrap()).unwrap()
+                );
                 assert!(!new.signing_context.is_awaiting_signature());
                 assert!(new.signing_context.last_applied().is_none());
                 // Added execution fields must not reset any persisted protocol work.
@@ -213,8 +257,6 @@ mod tests {
                     commitment_numbers,
                     local_constraints,
                     remote_constraints,
-                    tlc_state,
-                    retryable_tlc_operations,
                     waiting_forward_tlc_tasks,
                     last_committed_remote_nonce,
                     remote_revocation_nonce_for_verify,
@@ -233,6 +275,25 @@ mod tests {
                     connectivity_state,
                     external_funding
                 );
+                assert_eq!(
+                    bincode::serialize(&convert_tlc_state(old.tlc_state.clone()).unwrap()).unwrap(),
+                    bincode::serialize(&new.tlc_state).unwrap(),
+                );
+                let expected_operations: Vec<_> = old
+                    .retryable_tlc_operations
+                    .clone()
+                    .into_iter()
+                    .map(convert_operation)
+                    .collect::<Result<_, _>>()
+                    .unwrap();
+                assert_eq!(
+                    bincode::serialize(&expected_operations).unwrap(),
+                    bincode::serialize(&new.retryable_tlc_operations).unwrap()
+                );
+                assert!(new
+                    .tlc_state
+                    .all_tlcs()
+                    .all(|tlc| tlc.execution_id.is_none()));
                 assert_eq!(
                     old.funding_tx.as_ref().map(|tx| format!("{tx:x}")),
                     new.funding_tx.as_ref().map(|tx| format!("{tx:x}"))

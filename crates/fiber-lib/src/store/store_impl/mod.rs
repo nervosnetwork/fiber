@@ -1,6 +1,7 @@
 #[cfg(feature = "watchtower")]
 use ckb_types::packed::Script;
 
+use crate::fiber_types::{PaymentSessionKey, UpstreamTlcKey};
 use crate::store::store_trait::{FiberStore, PrefixIterOptions};
 use crate::store::NodeNamespace;
 use fiber_store::backend::{BatchWriter, StorageBackend, TakeWhileFn};
@@ -162,7 +163,7 @@ impl Store {
     fn channel_owns_attempt(&self, channel_outpoint: &OutPoint, attempt: &Attempt) -> bool {
         self.get_channel_state_by_outpoint(channel_outpoint)
             .is_some_and(|channel_state| {
-                channel_state.owns_payment_attempt(attempt.payment_hash, attempt.id)
+                channel_state.owns_payment_attempt(attempt.session_key(), attempt.id)
             })
     }
 
@@ -600,14 +601,14 @@ pub enum KeyValue {
     #[cfg(feature = "watchtower")]
     // Index of NodeId -> Preimage PaymentHash, which allows we query preimages of a node
     WatchtowerNodePaymentHash(NodeId, Hash256),
-    PaymentSession(Hash256, PaymentSession),
+    PaymentSession(PaymentSessionKey, PaymentSession),
     PaymentHistoryTimedResult((OutPoint, Direction), TimedResult),
     PaymentCustomRecord(Hash256, PaymentCustomRecords),
     NetworkActorState(Pubkey, PersistentNetworkActorState),
-    Attempt((Hash256, u64), Attempt),
+    Attempt((PaymentSessionKey, u64), Attempt),
     // Index for attempts by first hop channel outpoint
     // Key: (channel_outpoint, payment_hash, attempt_id), Value: ()
-    AttemptChannelIndex((OutPoint, Hash256, u64)),
+    AttemptChannelIndex((OutPoint, PaymentSessionKey, u64)),
     HoldTlc((Hash256, Hash256, u64), u64),
     #[cfg(not(target_arch = "wasm32"))]
     CchOrder(Hash256, CchOrder),
@@ -672,19 +673,21 @@ impl StoreKeyValue for KeyValue {
             KeyValue::OutPointChannelId(outpoint, _) => {
                 [&[CHANNEL_OUTPOINT_CHANNEL_ID_PREFIX], outpoint.as_slice()].concat()
             }
-            KeyValue::PaymentSession(payment_hash, _) => {
-                [&[PAYMENT_SESSION_PREFIX], payment_hash.as_ref()].concat()
-            }
+            KeyValue::PaymentSession(payment_hash, _) => [
+                &[PAYMENT_SESSION_PREFIX],
+                payment_hash.storage_bytes().as_slice(),
+            ]
+            .concat(),
             KeyValue::Attempt((payment_hash, attempt_id), _) => [
                 &[ATTEMPT_PREFIX],
-                payment_hash.as_ref(),
+                payment_hash.storage_bytes().as_slice(),
                 &attempt_id.to_le_bytes(),
             ]
             .concat(),
             KeyValue::AttemptChannelIndex((channel_outpoint, payment_hash, attempt_id)) => [
                 &[ATTEMPT_CHANNEL_INDEX_PREFIX],
                 channel_outpoint.as_slice(),
-                payment_hash.as_ref(),
+                payment_hash.storage_bytes().as_slice(),
                 &attempt_id.to_le_bytes(),
             ]
             .concat(),
@@ -1626,15 +1629,31 @@ impl PreimageStore for Store {
 }
 
 impl NetworkGraphStateStore for Store {
-    fn get_payment_session(&self, payment_hash: Hash256) -> Option<PaymentSession> {
-        let prefix = [&[PAYMENT_SESSION_PREFIX], payment_hash.as_ref()].concat();
+    fn get_payment_session(
+        &self,
+        session_key: impl Into<PaymentSessionKey>,
+    ) -> Option<PaymentSession> {
+        let session_key = session_key.into();
+        let prefix = [
+            &[PAYMENT_SESSION_PREFIX],
+            session_key.storage_bytes().as_slice(),
+        ]
+        .concat();
         self.get(prefix)
             .map(|v| deserialize_from(v.as_ref(), "PaymentSession"))
             .map(|session: PaymentSession| session.init_attempts(self))
     }
 
-    fn get_persisted_payment_status(&self, payment_hash: Hash256) -> Option<PaymentStatus> {
-        let key = [&[PAYMENT_SESSION_PREFIX], payment_hash.as_ref()].concat();
+    fn get_persisted_payment_status(
+        &self,
+        session_key: impl Into<PaymentSessionKey>,
+    ) -> Option<PaymentStatus> {
+        let session_key = session_key.into();
+        let key = [
+            &[PAYMENT_SESSION_PREFIX],
+            session_key.storage_bytes().as_slice(),
+        ]
+        .concat();
         self.get(key)
             .map(|v| deserialize_from::<PaymentSession>(v.as_ref(), "PaymentSession").status)
     }
@@ -1680,6 +1699,9 @@ impl NetworkGraphStateStore for Store {
 
         iter.filter_map(|(_key, value)| {
             let session: PaymentSession = deserialize_from(&value, "PaymentSession");
+            if session.request.execution_id.is_some() {
+                return None;
+            }
             match status {
                 Some(ref s) if session.status != *s => None,
                 _ => Some(session.init_attempts(self)),
@@ -1696,20 +1718,29 @@ impl NetworkGraphStateStore for Store {
             .then(|| session.attempts().find_map(|attempt| attempt.preimage))
             .flatten();
         let mut batch = self.batch();
-        let kv = KeyValue::PaymentSession(payment_hash, session);
+        let kv = KeyValue::PaymentSession(session.session_key(), session);
         batch.put(kv.key(), kv.value());
         batch.commit();
-        self.notify(StoreChange::PutPaymentSession {
-            payment_hash,
-            payment_session: session_clone,
-            payment_preimage,
-        });
+        // Public payment subscriptions are hash-addressed. Hosted internal
+        // sessions must not publish outcomes as an unrelated ordinary payment.
+        if session_clone.request.execution_id.is_none() {
+            self.notify(StoreChange::PutPaymentSession {
+                payment_hash,
+                payment_session: session_clone,
+                payment_preimage,
+            });
+        }
     }
 
-    fn get_attempt(&self, payment_hash: Hash256, attempt_id: u64) -> Option<Attempt> {
+    fn get_attempt(
+        &self,
+        session_key: impl Into<PaymentSessionKey>,
+        attempt_id: u64,
+    ) -> Option<Attempt> {
+        let session_key = session_key.into();
         let key = [
             &[ATTEMPT_PREFIX],
-            payment_hash.as_ref(),
+            session_key.storage_bytes().as_slice(),
             &attempt_id.to_le_bytes(),
         ]
         .concat();
@@ -1721,94 +1752,73 @@ impl NetworkGraphStateStore for Store {
         assert_ne!(attempt.id, 0, "Attempt ID should not be zero");
 
         let first_hop_outpoint = attempt.first_hop_channel_outpoint().cloned();
-        let is_new = self.get_attempt(attempt.payment_hash, attempt.id).is_none();
+        let is_new = self
+            .get_attempt(attempt.session_key(), attempt.id)
+            .is_none();
 
         let mut batch = self.batch();
 
         // Update the main attempt record
-        let kv = KeyValue::Attempt((attempt.payment_hash, attempt.id), attempt.clone());
+        let kv = KeyValue::Attempt((attempt.session_key(), attempt.id), attempt.clone());
         batch.put(kv.key(), kv.value());
 
         // Add to channel index only for new attempts
         if is_new {
             if let Some(outpoint) = first_hop_outpoint {
                 let kv =
-                    KeyValue::AttemptChannelIndex((outpoint, attempt.payment_hash, attempt.id));
+                    KeyValue::AttemptChannelIndex((outpoint, attempt.session_key(), attempt.id));
                 batch.put(kv.key(), kv.value());
             }
         }
 
         batch.commit();
-        self.notify(StoreChange::PutAttempt {
-            payment_hash: attempt.payment_hash,
-            attempt_status: attempt.status,
-        });
+        if attempt.execution_id.is_none() {
+            self.notify(StoreChange::PutAttempt {
+                payment_hash: attempt.payment_hash,
+                attempt_status: attempt.status,
+            });
+        }
     }
 
-    fn get_attempts(&self, payment_hash: Hash256) -> Vec<Attempt> {
-        let prefix = [&[ATTEMPT_PREFIX], payment_hash.as_ref()].concat();
+    fn get_attempts(&self, session_key: impl Into<PaymentSessionKey>) -> Vec<Attempt> {
+        let session_key = session_key.into();
+        let prefix = [&[ATTEMPT_PREFIX], session_key.storage_bytes().as_slice()].concat();
         self.collect_by_prefix(&prefix)
             .into_iter()
-            .map(|kv| deserialize_from(kv.value.as_ref(), "Attempt"))
+            .map(|kv| deserialize_from::<Attempt>(kv.value.as_ref(), "Attempt"))
+            // A hash-only prefix also matches hosted executions. All callers,
+            // including cleanup, must select the complete execution identity.
+            .filter(|attempt| attempt.session_key() == session_key)
             .collect()
     }
 
-    fn delete_attempts(&self, payment_hash: Hash256) {
-        let prefix = [&[ATTEMPT_PREFIX], payment_hash.as_ref()].concat();
+    fn delete_attempts(&self, session_key: impl Into<PaymentSessionKey>) {
+        let session_key = session_key.into();
         let mut batch = self.batch();
 
-        // Get attempts to find their channel index entries
-        let attempts: Vec<_> = self
-            .collect_by_prefix(&prefix)
-            .into_iter()
-            .map(|kv| {
-                (
-                    kv.key,
-                    deserialize_from::<Attempt>(kv.value.as_ref(), "Attempt"),
-                )
-            })
-            .collect();
-
         // Delete both main records and channel index entries
-        for (key, attempt) in attempts {
-            batch.delete(key);
+        for attempt in self.get_attempts(session_key) {
             if let Some(outpoint) = attempt.first_hop_channel_outpoint() {
-                let index_key = [
-                    &[ATTEMPT_CHANNEL_INDEX_PREFIX],
-                    outpoint.as_slice(),
-                    attempt.payment_hash.as_ref(),
-                    &attempt.id.to_le_bytes(),
-                ]
-                .concat();
-                batch.delete(index_key);
+                let index =
+                    KeyValue::AttemptChannelIndex((outpoint.clone(), session_key, attempt.id));
+                batch.delete(index.key());
             }
+            batch.delete(KeyValue::Attempt((session_key, attempt.id), attempt).key());
         }
 
         batch.commit();
     }
 
-    fn clear_attempts_channel_index(&self, payment_hash: Hash256) {
-        let prefix = [&[ATTEMPT_PREFIX], payment_hash.as_ref()].concat();
+    fn clear_attempts_channel_index(&self, session_key: impl Into<PaymentSessionKey>) {
+        let session_key = session_key.into();
         let mut batch = self.batch();
 
-        // Get attempts to find their channel index entries
-        let attempts: Vec<Attempt> = self
-            .collect_by_prefix(&prefix)
-            .into_iter()
-            .map(|kv| deserialize_from(kv.value.as_ref(), "Attempt"))
-            .collect();
-
         // Only delete channel index entries, keep the attempts themselves
-        for attempt in attempts {
+        for attempt in self.get_attempts(session_key) {
             if let Some(outpoint) = attempt.first_hop_channel_outpoint() {
-                let index_key = [
-                    &[ATTEMPT_CHANNEL_INDEX_PREFIX],
-                    outpoint.as_slice(),
-                    attempt.payment_hash.as_ref(),
-                    &attempt.id.to_le_bytes(),
-                ]
-                .concat();
-                batch.delete(index_key);
+                let index =
+                    KeyValue::AttemptChannelIndex((outpoint.clone(), session_key, attempt.id));
+                batch.delete(index.key());
             }
         }
 
@@ -1824,8 +1834,8 @@ impl NetworkGraphStateStore for Store {
         self.collect_by_prefix(&prefix)
             .into_iter()
             .filter_map(|kv| {
-                // Key format: [PREFIX, channel_outpoint(36 bytes), payment_hash(32 bytes), attempt_id(8 bytes)]
-                // Extract payment_hash and attempt_id from key
+                // [PREFIX, outpoint(36), payment_hash(32), optional upstream TLC(40), attempt_id(8)]
+                // The upstream TLC is incoming_channel_id(32) + incoming_tlc_id(8).
                 let key_slice: &[u8] = &kv.key;
                 let outpoint_len = channel_outpoint.as_slice().len();
                 let prefix_and_outpoint_len = 1 + outpoint_len;
@@ -1836,7 +1846,7 @@ impl NetworkGraphStateStore for Store {
 
                 let payment_hash_start = prefix_and_outpoint_len;
                 let payment_hash_end = payment_hash_start + 32;
-                let attempt_id_start = payment_hash_end;
+                let attempt_id_start = key_slice.len() - 8;
                 let attempt_id_end = attempt_id_start + 8;
 
                 let payment_hash: Hash256 = (&key_slice[payment_hash_start..payment_hash_end])
@@ -1848,7 +1858,27 @@ impl NetworkGraphStateStore for Store {
                         .ok()?,
                 );
 
-                let attempt = self.get_attempt(payment_hash, attempt_id)?;
+                let execution_id = match attempt_id_start - payment_hash_end {
+                    0 => None,
+                    40 => Some(UpstreamTlcKey {
+                        incoming_channel_id: key_slice[payment_hash_end..payment_hash_end + 32]
+                            .try_into()
+                            .ok()?,
+                        incoming_tlc_id: u64::from_le_bytes(
+                            key_slice[payment_hash_end + 32..attempt_id_start]
+                                .try_into()
+                                .ok()?,
+                        ),
+                    }),
+                    _ => return None,
+                };
+                let attempt = self.get_attempt(
+                    PaymentSessionKey {
+                        payment_hash,
+                        execution_id,
+                    },
+                    attempt_id,
+                )?;
                 match attempt.status {
                     AttemptStatus::Retrying => Some(attempt),
                     AttemptStatus::Created

@@ -2119,6 +2119,133 @@ fn test_store_payment_session() {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_hosted_payment_execution_store_isolation() {
+    use crate::fiber_types::UpstreamTlcKey;
+    let (mut store, _dir) = generate_store();
+    let events = std::sync::Arc::new(StoreChangeSaver::default());
+    let watcher = events.clone();
+    store.set_watcher(std::sync::Arc::new(move |event| {
+        watcher.changes.write().unwrap().push(event);
+    }));
+    let hash = gen_rand_sha256_hash();
+    let source = gen_rand_fiber_public_key();
+    let target = gen_rand_fiber_public_key();
+    let data = SendPaymentDataBuilder::new(target, 100, hash)
+        .final_tlc_expiry_delta(DEFAULT_TLC_EXPIRY_DELTA)
+        .tlc_expiry_limit(MAX_PAYMENT_TLC_EXPIRY_LIMIT)
+        .max_fee_amount(Some(1000))
+        .build()
+        .unwrap();
+    let incoming_channel = gen_rand_sha256_hash();
+    let outpoint = OutPoint::new(gen_rand_sha256_hash().into(), 0);
+    let hops = vec![PaymentHopData {
+        amount: 100,
+        expiry: u64::MAX,
+        next_hop: Some(target),
+        funding_tx_hash: outpoint.tx_hash().into(),
+        payment_preimage: None,
+        hash_algorithm: HashAlgorithm::CkbHash,
+        custom_records: None,
+    }];
+    let mut keys = Vec::new();
+    for execution_id in [
+        None,
+        Some(UpstreamTlcKey {
+            incoming_channel_id: incoming_channel,
+            incoming_tlc_id: 1,
+        }),
+        Some(UpstreamTlcKey {
+            incoming_channel_id: incoming_channel,
+            incoming_tlc_id: 2,
+        }),
+    ] {
+        let mut request = data.clone();
+        request.execution_id = execution_id;
+        let session = PaymentSession::new_session(&store, request, 10);
+        let key = session.session_key();
+        assert_eq!(session.attempts_count(), 0);
+        store.insert_payment_session(session.clone());
+        let mut attempt = session.new_attempt(1, source, target, hops.clone());
+        attempt.status = AttemptStatus::Retrying;
+        store.insert_attempt(attempt);
+        keys.push(key);
+    }
+    for key in &keys {
+        let restored = store.get_payment_session(*key).unwrap();
+        assert_eq!(restored.session_key(), *key);
+        assert_eq!(restored.attempts_count(), 1);
+        assert_eq!(restored.attempts().next().unwrap().session_key(), *key);
+    }
+    assert_eq!(store.get_all_payment_sessions().len(), 3);
+    assert_eq!(
+        events.changes.read().unwrap().len(),
+        2,
+        "only the ordinary session and attempt may notify hash-addressed subscribers"
+    );
+    assert_eq!(
+        store.get_payment_sessions_with_limit(10, None, None).len(),
+        1
+    );
+    assert_eq!(
+        store
+            .get_pending_attempts_by_channel_outpoint(&outpoint)
+            .len(),
+        3
+    );
+    // Clearing a hash-only index must preserve both hosted executions and all
+    // attempt records. Repeated cleanup must be harmless.
+    store.clear_attempts_channel_index(hash);
+    store.clear_attempts_channel_index(hash);
+    assert!(store.get_attempt(hash, 1).is_some());
+    let pending = store.get_pending_attempts_by_channel_outpoint(&outpoint);
+    assert_eq!(pending.len(), 2);
+    assert!(pending
+        .iter()
+        .any(|attempt| attempt.session_key() == keys[1]));
+    assert!(pending
+        .iter()
+        .any(|attempt| attempt.session_key() == keys[2]));
+
+    store.clear_attempts_channel_index(keys[1]);
+    store.clear_attempts_channel_index(keys[1]);
+    assert_eq!(
+        store
+            .get_pending_attempts_by_channel_outpoint(&outpoint)
+            .len(),
+        1
+    );
+    assert!(store.get_attempt(keys[1], 1).is_some());
+    // In particular, deleting hash-only attempts must not delete scoped records
+    // that share the same byte prefix.
+    store.delete_attempts(hash);
+    store.delete_attempts(hash);
+    assert!(store.get_attempt(hash, 1).is_none());
+    assert!(store.get_attempt(keys[1], 1).is_some());
+    assert!(store.get_attempt(keys[2], 1).is_some());
+    assert_eq!(
+        store
+            .get_pending_attempts_by_channel_outpoint(&outpoint)
+            .len(),
+        1
+    );
+    store.delete_attempts(keys[2]);
+    store.delete_attempts(keys[2]);
+    assert!(store.get_attempt(keys[2], 1).is_none());
+    assert!(store.get_attempt(keys[1], 1).is_some());
+    assert!(store
+        .get_pending_attempts_by_channel_outpoint(&outpoint)
+        .is_empty());
+    // Removing attempts must also work after their indexes were already cleared.
+    store.delete_attempts(keys[1]);
+    store.delete_attempts(keys[1]);
+    for key in keys {
+        assert!(store.get_attempts(key).is_empty());
+        store.clear_attempts_channel_index(key);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 fn test_channel_ready_retry_index_handles_created_attempt_channel_ownership() {
@@ -2154,6 +2281,7 @@ fn test_channel_ready_retry_index_handles_created_attempt_channel_ownership() {
     }];
     let route = SessionRoute::new(first_hop, target, &route_hops);
     let mut attempt = Attempt {
+        execution_id: None,
         id: 1,
         hash: payment_hash,
         try_limit: 10,
@@ -2178,6 +2306,7 @@ fn test_channel_ready_retry_index_handles_created_attempt_channel_ownership() {
     assert_eq!(orphan_created_attempts[0].status, AttemptStatus::Created);
 
     channel_state.tlc_state.add_offered_tlc(TlcInfo {
+        execution_id: None,
         status: TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced),
         tlc_id: TLCId::Offered(0),
         amount: 100,
@@ -2196,6 +2325,23 @@ fn test_channel_ready_retry_index_handles_created_attempt_channel_ownership() {
         removed_confirmed_at: None,
         applied_flags: AppliedFlags::empty(),
     });
+    let scoped_key = crate::fiber_types::PaymentSessionKey {
+        payment_hash,
+        execution_id: Some(crate::fiber_types::UpstreamTlcKey {
+            incoming_channel_id: gen_rand_sha256_hash(),
+            incoming_tlc_id: 1,
+        }),
+    };
+    assert!(channel_state.owns_payment_attempt(payment_hash, attempt.id));
+    assert!(!channel_state.owns_payment_attempt(scoped_key, attempt.id));
+    channel_state.tlc_state.offered_tlcs.tlcs[0].execution_id = scoped_key.execution_id;
+    assert_eq!(
+        channel_state.tlc_state.offered_tlcs.tlcs[0].session_key(),
+        scoped_key
+    );
+    assert!(channel_state.owns_payment_attempt(scoped_key, attempt.id));
+    assert!(!channel_state.owns_payment_attempt(payment_hash, attempt.id));
+    channel_state.tlc_state.offered_tlcs.tlcs[0].execution_id = None;
     store.insert_channel_actor_state(channel_state.clone());
     assert!(
         store
@@ -2227,6 +2373,7 @@ fn test_channel_ready_retry_index_handles_created_attempt_channel_ownership() {
     channel_state
         .retryable_tlc_operations
         .push_back(RetryableTlcOperation::AddTlc(AddTlcCommand {
+            execution_id: None,
             amount: 100,
             payment_hash,
             attempt_id: Some(attempt.id),
@@ -2237,6 +2384,22 @@ fn test_channel_ready_retry_index_handles_created_attempt_channel_ownership() {
             is_trampoline_hop: false,
             previous_tlc: None,
         }));
+    if let Some(RetryableTlcOperation::AddTlc(command)) =
+        channel_state.retryable_tlc_operations.front_mut()
+    {
+        assert_eq!(command.session_key(), payment_hash.into());
+        command.execution_id = scoped_key.execution_id;
+        assert_eq!(command.session_key(), scoped_key);
+    } else {
+        panic!("expected queued AddTlc");
+    }
+    assert!(channel_state.owns_payment_attempt(scoped_key, attempt.id));
+    assert!(!channel_state.owns_payment_attempt(payment_hash, attempt.id));
+    if let Some(RetryableTlcOperation::AddTlc(command)) =
+        channel_state.retryable_tlc_operations.front_mut()
+    {
+        command.execution_id = None;
+    }
     store.insert_channel_actor_state(channel_state);
     assert!(
         store

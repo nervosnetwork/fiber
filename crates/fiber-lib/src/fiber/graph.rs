@@ -15,6 +15,7 @@ use crate::fiber::history::SentNode;
 use crate::fiber::key::KeyPair;
 use crate::fiber::path::NodeHeapElement;
 use crate::fiber::types::{TrampolineHopPayload, TrampolineOnionPacket};
+use crate::fiber_types::PaymentSessionKey;
 use crate::now_timestamp_as_millis_u64;
 use crate::utils::arithmetic::{
     checked_add_u128, checked_add_u64, checked_f64_to_u128, checked_mul_u128, checked_sum_u128,
@@ -1238,7 +1239,7 @@ where
         self.history.apply_internal_result(internal_result);
         let is_send_payment_with_router = self
             .store
-            .get_payment_session(attempt.payment_hash)
+            .get_payment_session(attempt.session_key())
             .is_some_and(|p| p.is_payment_with_router());
         return need_to_retry && !is_send_payment_with_router;
     }
@@ -1259,7 +1260,7 @@ where
         self.history.apply_internal_result(internal_result);
         let is_send_payment_with_router = self
             .store
-            .get_payment_session(attempt.payment_hash)
+            .get_payment_session(attempt.session_key())
             .is_some_and(|p| p.is_payment_with_router());
         return need_to_retry && !is_send_payment_with_router;
     }
@@ -3124,10 +3125,16 @@ where
 }
 
 pub trait NetworkGraphStateStore {
-    fn get_payment_session(&self, payment_hash: Hash256) -> Option<PaymentSession>;
+    fn get_payment_session(
+        &self,
+        payment_hash: impl Into<PaymentSessionKey>,
+    ) -> Option<PaymentSession>;
     /// Returns the payment status stored in the session record without recomputing it from
     /// separately persisted attempts.
-    fn get_persisted_payment_status(&self, payment_hash: Hash256) -> Option<PaymentStatus>;
+    fn get_persisted_payment_status(
+        &self,
+        payment_hash: impl Into<PaymentSessionKey>,
+    ) -> Option<PaymentStatus>;
     fn get_all_payment_sessions(&self) -> Vec<PaymentSession>;
     fn get_payment_sessions_with_status(&self, status: PaymentStatus) -> Vec<PaymentSession>;
     /// Get payment sessions with pagination support.
@@ -3150,13 +3157,17 @@ pub trait NetworkGraphStateStore {
     );
     fn remove_channel_history(&mut self, channel_outpoint: &OutPoint);
     fn get_payment_history_results(&self) -> Vec<(OutPoint, Direction, TimedResult)>;
-    fn get_attempt(&self, payment_hash: Hash256, attempt_id: u64) -> Option<Attempt>;
+    fn get_attempt(
+        &self,
+        payment_hash: impl Into<PaymentSessionKey>,
+        attempt_id: u64,
+    ) -> Option<Attempt>;
     fn insert_attempt(&self, attempt: Attempt);
-    fn get_attempts(&self, payment_hash: Hash256) -> Vec<Attempt>;
+    fn get_attempts(&self, payment_hash: impl Into<PaymentSessionKey>) -> Vec<Attempt>;
     /// Deletes all attempts and their channel index entries for the given payment hash.
-    fn delete_attempts(&self, payment_hash: Hash256);
+    fn delete_attempts(&self, payment_hash: impl Into<PaymentSessionKey>);
     /// Clears only the channel index entries for attempts, keeping the attempt records.
-    fn clear_attempts_channel_index(&self, payment_hash: Hash256);
+    fn clear_attempts_channel_index(&self, payment_hash: impl Into<PaymentSessionKey>);
     /// Returns attempts that should be woken by a ChannelReady scan.
     ///
     /// Retrying attempts are always returned. Created attempts are returned only

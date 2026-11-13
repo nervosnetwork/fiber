@@ -376,6 +376,7 @@ pub(crate) fn create_test_channel_state_with_tlc(
     total_amount: Option<u128>,
 ) -> ChannelActorState {
     let tlc_info = TlcInfo {
+        execution_id: None,
         status: TlcStatus::Inbound(InboundTlcStatus::Committed),
         tlc_id: TLCId::Received(tlc_id),
         amount,

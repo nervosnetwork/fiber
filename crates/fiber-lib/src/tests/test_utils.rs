@@ -1293,7 +1293,10 @@ impl NetworkNode {
 
     pub async fn get_payment_result(&self, payment_hash: Hash256) -> SendPaymentResponse {
         let message = |rpc_reply| -> NetworkActorMessage {
-            NetworkActorMessage::new_command(FiberActorCommand::GetPayment(payment_hash, rpc_reply))
+            NetworkActorMessage::new_command(FiberActorCommand::GetPayment(
+                payment_hash.into(),
+                rpc_reply,
+            ))
         };
         call!(self.network_actor, message)
             .expect("node_a alive")
@@ -1587,7 +1590,7 @@ impl NetworkNode {
 
     pub async fn retry_send_payment(&self, payment_hash: Hash256, attempt_id: Option<u64>) {
         let message = NetworkActorMessage::new_event(FiberActorEvent::RetrySendPayment(
-            payment_hash,
+            payment_hash.into(),
             attempt_id,
         ));
 

@@ -184,16 +184,41 @@ settlement.
 Each durable delivery is keyed by `(incoming_channel_id, incoming_tlc_id)`, the
 identity of the concrete payer-to-Public-T TLC being held. Replaying the same
 TLC is idempotent, while another TLC with the same `payment_hash` is a distinct
-execution record. `payment_hash` remains a secondary index for invoice lookup,
-PaymentActor outcome callbacks, and the payment-delivery RPC. The RPC returns
+execution record. `payment_hash` remains a secondary index for invoice lookup
+and the payment-delivery RPC. The RPC returns
 the active execution when one exists, otherwise the most recently updated final
 execution. A successfully delivered payment hash cannot be accepted again.
+
+Hosted downstream payments reuse PaymentSession and PaymentActor, including
+attempt retries, route construction, failure classification and expiry limits.
+Their local `PaymentSessionKey` consists of the real `payment_hash` plus an
+optional `UpstreamTlcKey` containing the incoming channel ID and TLC ID.
+Ordinary payments and ordinary trampoline forwarding leave this field absent
+and retain their existing hash-only deduplication behavior. The execution ID is
+not an invoice/RPC parameter and is never sent in peer messages or used as a
+hashlock.
+
+Sessions, attempts, actor lookup, channel retry indexes, and persisted outgoing
+TLC/queued AddTlc ownership use the same execution scope. Replaying a hosted
+dispatch resumes its existing session; a different incoming TLC cannot consume
+its attempts or outcome. LSP result callbacks and restart reconciliation use
+this exact scope, rather than looking up an arbitrary session with the same
+hash. A shared preimage remains valid cryptographic evidence, but is not itself
+proof that a particular delivery has completed.
+
+Ordinary `get_payment`/payment listing and hash-addressed payment store events
+do not expose hosted internal sessions as ordinary outgoing payments. Delivery
+state remains available through LSP inspection. All records still live in the
+same Fiber store. Released payment records are migrated with an absent execution
+scope; the pre-LSP channel migration likewise preserves TLCs and queued operations
+while adding an absent scope. No compatibility layer is maintained for intermediate,
+unreleased LSP development database layouts.
 
 This phase supports downstream MPP: one upstream trampoline TLC may be split by
 Public T into multiple downstream payment attempts when `max_parts > 1`. It does
 not yet aggregate upstream MPP. Multiple concurrently active incoming TLCs with
-the same payment hash are rejected because the existing PaymentActor and its
-outcome callbacks identify one payment session by `payment_hash`. Supporting
+the same payment hash are still rejected by the hosted invoice/delivery policy;
+isolating execution identities does not implement upstream aggregation. Supporting
 upstream MPP requires a payment-level aggregation state machine that validates
 the total amount and compatible deadlines, records every upstream TLC, and
 settles all parts from one downstream outcome.
