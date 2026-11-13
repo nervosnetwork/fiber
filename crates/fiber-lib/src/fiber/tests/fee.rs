@@ -1,4 +1,3 @@
-use crate::fiber::channel::{occupied_capacity, reserved_capacity};
 use crate::fiber::fee::checked_calculate_commitment_tx_fee;
 #[cfg(feature = "watchtower")]
 use crate::watchtower::build_settlement_transaction;
@@ -19,7 +18,7 @@ use crate::fiber::channel::{settlement_data_to_witness, XUDT_COMPATIBLE_WITNESS}
 
 #[test]
 #[cfg(feature = "watchtower")]
-fn settlement_transaction_v1_witness_is_12_bytes_larger_per_pending_htlc() {
+fn settlement_transaction_uses_full_hash_witness() {
     let settlement_data = SettlementData {
         local_amount: 2_000,
         remote_amount: 3_000,
@@ -60,21 +59,13 @@ fn settlement_transaction_v1_witness_is_12_bytes_larger_per_pending_htlc() {
         .build()
     };
 
-    let legacy_tx = settlement_transaction(ChannelFeatures::LEGACY);
-    let v1_tx = settlement_transaction(ChannelFeatures::V2);
-    let legacy_witness_len = legacy_tx.witnesses().get(0).unwrap().raw_data().len();
-    let v1_witness_len = v1_tx.witnesses().get(0).unwrap().raw_data().len();
-
-    assert_eq!(v1_witness_len - legacy_witness_len, 12);
-    assert_eq!(
-        v1_tx.data().serialized_size_in_block() - legacy_tx.data().serialized_size_in_block(),
-        12
-    );
+    let tx = settlement_transaction(ChannelFeatures::V2);
+    assert_eq!(tx.witnesses().get(0).unwrap().raw_data().len(), 254);
 }
 
 #[test]
 fn checked_commitment_tx_fee_allows_intermediate_u64_overflow_when_final_fee_fits() {
-    let tx_size = checked_calculate_commitment_tx_fee(1_000, &None, ChannelFeatures::LEGACY)
+    let tx_size = checked_calculate_commitment_tx_fee(1_000, &None, ChannelFeatures::V2)
         .expect("fee rate 1000 should return commitment tx size");
     assert!(tx_size > 0);
 
@@ -83,51 +74,10 @@ fn checked_commitment_tx_fee_allows_intermediate_u64_overflow_when_final_fee_fit
     assert!(raw_product > u128::from(u64::MAX));
 
     let expected_fee = u64::try_from(raw_product / 1_000).expect("final fee should fit");
-    let actual_fee = checked_calculate_commitment_tx_fee(fee_rate, &None, ChannelFeatures::LEGACY)
+    let actual_fee = checked_calculate_commitment_tx_fee(fee_rate, &None, ChannelFeatures::V2)
         .expect("intermediate u64 overflow should be allowed when final fee fits");
 
     assert_eq!(actual_fee, expected_fee);
-}
-
-#[test]
-fn v1_commitment_reserve_accounts_for_the_extra_lock_arg_byte() {
-    let legacy_occupied = occupied_capacity(
-        &ckb_types::packed::Script::default(),
-        &None,
-        ChannelFeatures::LEGACY,
-    )
-    .expect("Legacy occupied capacity should fit");
-    let v1_occupied = occupied_capacity(
-        &ckb_types::packed::Script::default(),
-        &None,
-        ChannelFeatures::V2,
-    )
-    .expect("V1 occupied capacity should fit");
-    let legacy_reserved = reserved_capacity(
-        &ckb_types::packed::Script::default(),
-        &None,
-        ChannelFeatures::LEGACY,
-    )
-    .expect("Legacy reserved capacity should fit");
-    let v1_reserved = reserved_capacity(
-        &ckb_types::packed::Script::default(),
-        &None,
-        ChannelFeatures::V2,
-    )
-    .expect("V1 reserved capacity should fit");
-
-    assert!(v1_occupied > legacy_occupied);
-    assert!(v1_reserved > legacy_reserved);
-}
-
-#[test]
-fn channel_features_determine_reserve() {
-    use fiber_types::ChannelFeatures as Features;
-
-    let shutdown_script = ckb_types::packed::Script::default();
-    let legacy = reserved_capacity(&shutdown_script, &None, Features::LEGACY).unwrap();
-    let full_hash = reserved_capacity(&shutdown_script, &None, Features::V2).unwrap();
-    assert!(full_hash > legacy);
 }
 
 #[test]
@@ -144,8 +94,7 @@ fn full_hash_feature_serializes_full_payment_hash_in_tlc() {
         local_key: Privkey::from(&[1u8; 32]),
         remote_key: Privkey::from(&[2u8; 32]).pubkey(),
     };
-    let legacy = settlement_tlc_to_witness(&tlc, false, Features::LEGACY);
     let full_hash = settlement_tlc_to_witness(&tlc, false, Features::V2);
-    assert_eq!(full_hash.len() - legacy.len(), 12);
+    assert_eq!(full_hash.len(), 97);
     assert_eq!(&full_hash[17..49], tlc.payment_hash.as_ref());
 }

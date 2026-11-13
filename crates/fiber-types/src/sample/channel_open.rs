@@ -19,7 +19,7 @@ impl StoreSample for ChannelOpenRecord {
                 failure_detail: None,
                 created_at: 1_704_067_200_000,
                 last_updated_at: 1_704_067_200_000,
-                channel_features: ChannelFeatures::LEGACY,
+                channel_features: ChannelFeatures::V2,
             },
             // Funding transaction building
             ChannelOpenRecord {
@@ -31,7 +31,7 @@ impl StoreSample for ChannelOpenRecord {
                 failure_detail: None,
                 created_at: 1_704_067_200_100,
                 last_updated_at: 1_704_067_200_200,
-                channel_features: ChannelFeatures::LEGACY,
+                channel_features: ChannelFeatures::V2,
             },
             // Funding transaction broadcasted
             ChannelOpenRecord {
@@ -43,7 +43,7 @@ impl StoreSample for ChannelOpenRecord {
                 failure_detail: None,
                 created_at: 1_704_067_200_250,
                 last_updated_at: 1_704_067_200_280,
-                channel_features: ChannelFeatures::LEGACY,
+                channel_features: ChannelFeatures::V2,
             },
             // Failed channel with error
             ChannelOpenRecord {
@@ -55,7 +55,7 @@ impl StoreSample for ChannelOpenRecord {
                 failure_detail: Some("Funding timeout".to_string()),
                 created_at: 1_704_067_200_300,
                 last_updated_at: 1_704_067_200_400,
-                channel_features: ChannelFeatures::LEGACY,
+                channel_features: ChannelFeatures::V2,
             },
         ]
     }

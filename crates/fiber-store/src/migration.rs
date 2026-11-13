@@ -52,7 +52,8 @@ impl<T: StorageBackend + ?Sized> MigrationStore for T {
 }
 
 pub const MIGRATION_VERSION_KEY: &[u8] = b"db-version";
-pub const INIT_DB_VERSION: &str = "20260302100001";
+// V2-only storage epoch: older databases must never be migrated in place.
+pub const INIT_DB_VERSION: &str = "20261113000000";
 include!(concat!(env!("OUT_DIR"), "/latest_db_version.rs"));
 
 // --- Callback types for platform-specific UI ---
@@ -102,7 +103,7 @@ impl std::fmt::Display for MigrateError {
                 write!(
                     f,
                     "Database version {} is too old. Minimum supported version is {}. \
-                     Please use fnn-migrate v0.8.x to upgrade first.",
+                     Close old channels with the original binary, then use a new database. Existing data is preserved.",
                     db_version, min_version
                 )
             }
@@ -251,6 +252,12 @@ impl Migrations {
 
         let db_version = match self.get_db_version(store) {
             None => {
+                if store.prefix_iterator(Vec::new()).next().is_some() {
+                    return Err(MigrateError::MigrationFailed {
+                        version: latest_version.to_owned(),
+                        error: "Unversioned nonempty database is unsupported; use a new database. Existing data is preserved.".to_owned(),
+                    });
+                }
                 // New database -- stamp with latest version
                 self.init_db_version(store);
                 return Ok(());

@@ -1,5 +1,5 @@
 //! Validation of the actual current persisted channel schema before database writes.
-use std::io::{Cursor, ErrorKind};
+use std::io::Cursor;
 
 use ckb_types::{packed, prelude::*};
 use molecule::prelude::Entity;
@@ -11,52 +11,22 @@ use crate::{
     ChannelActorData, NoncePurposeV2, Privkey, Pubkey, RevocationContextV2, SigningNonceV2,
 };
 
-/// Decode an exact persisted channel and check feature/session correspondence.
-///
-/// Published 0.10.0 legacy records end at the zero feature byte. Only that
-/// shape may omit the final session `None`: serde defaults cannot supply it at
-/// bincode EOF. No stored bytes are rewritten, and V2 records must be complete.
-/// Signing intents and counters are validated separately at preflight/restore,
-/// rather than on every runtime storage read.
+/// Decode an exact persisted V2 channel and check its session marker.
 pub fn decode_channel_actor_data(bytes: &[u8]) -> Result<ChannelActorData, String> {
-    fn decode_exact(bytes: &[u8]) -> Result<ChannelActorData, bincode::Error> {
-        let mut cursor = Cursor::new(bytes);
-        let channel = bincode::deserialize_from(&mut cursor)?;
-        if cursor.position() != bytes.len() as u64 {
-            return Err(Box::new(bincode::ErrorKind::Custom(
-                "Trailing bytes in channel record".to_owned(),
-            )));
-        }
-        Ok(channel)
-    }
-
-    let channel = match decode_exact(bytes) {
-        Ok(channel) => channel,
-        Err(error) if matches!(error.as_ref(), bincode::ErrorKind::Io(e) if e.kind() == ErrorKind::UnexpectedEof) =>
-        {
-            let mut with_session = bytes.to_vec();
-            with_session
-                .extend(bincode::serialize(&Option::<()>::None).map_err(|e| e.to_string())?);
-            let channel = decode_exact(&with_session).map_err(|e| e.to_string())?;
-            check(
-                channel.channel_features == crate::ChannelFeatures::LEGACY
-                    && channel.session_v2.is_none(),
-                "Only legacy zero channels may omit the final session tag",
-            )?;
-            channel
-        }
-        Err(error) => return Err(error.to_string()),
-    };
-    match &channel.session_v2 {
-        None => check(
-            !channel.channel_features.is_v2(),
-            "Missing V2 session for full-hash channel",
-        )?,
-        Some(session) => check(
-            channel.channel_features.is_v2() && session.marker == 0x56320001,
-            "Invalid V2 feature/session marker",
-        )?,
-    }
+    let mut cursor = Cursor::new(bytes);
+    let channel: ChannelActorData =
+        bincode::deserialize_from(&mut cursor).map_err(|e| e.to_string())?;
+    check(
+        cursor.position() == bytes.len() as u64,
+        "Trailing bytes in channel record",
+    )?;
+    check(
+        channel
+            .session_v2
+            .as_ref()
+            .is_some_and(|session| session.marker == 0x56320001),
+        "Missing or invalid V2 session",
+    )?;
     Ok(channel)
 }
 
@@ -273,14 +243,11 @@ fn commitment_snapshot(
     )
 }
 
-/// Validate legacy/session correspondence and all retained V2 cryptographic intents.
+/// Validate the V2 session and all retained cryptographic signing intents.
 /// Bound-but-unsigned records are legitimate crash-recovery intents.
 pub fn validate_channel_v2(channel: &ChannelActorData) -> Result<(), String> {
     let Some(session) = &channel.session_v2 else {
-        return check(
-            !channel.channel_features.is_v2(),
-            "Missing V2 session for full-hash channel",
-        );
+        return Err("Missing V2 session".to_owned());
     };
     check(
         channel.channel_features.is_v2() && session.marker == 0x56320001,

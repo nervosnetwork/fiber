@@ -28,6 +28,7 @@ mod commitment_feature_tests {
 
     #[test]
     fn create_watch_channel_rejects_unknown_features() {
+        assert!(validate_channel_features(0).is_err());
         assert!(validate_channel_features(2).is_err());
         assert_eq!(
             validate_channel_features(1).unwrap(),

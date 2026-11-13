@@ -9,14 +9,20 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 
-/// Channel version features (0x0: Legacy; 0x1: V2 with full payment hashes).
+/// Channel features. Only "0x1" (V2 with full payment hashes) is supported.
 #[serde_as]
-#[derive(Copy, Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[derive(Copy, Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ChannelFeatures(
     #[serde_as(as = "U8Hex")]
     #[schemars(schema_with = "schema_as_uint_hex")]
     pub u8,
 );
+
+impl Default for ChannelFeatures {
+    fn default() -> Self {
+        Self(1)
+    }
+}
 
 /// The id of a TLC, it can be either offered or received.
 #[serde_as]
@@ -116,7 +122,7 @@ pub struct CreateWatchChannelParams {
     pub remote_funding_pubkey: Pubkey,
     /// Settlement data
     pub settlement_data: SettlementData,
-    /// Channel feature bitmap as hex: "0x0" (Legacy) or "0x1" (V2 with full payment hashes).
+    /// Channel feature bitmap as hex. Only "0x1" (V2 with full payment hashes) is supported.
     #[serde(default)]
     pub channel_features: ChannelFeatures,
 }

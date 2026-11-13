@@ -2,6 +2,8 @@
 
 # Fiber Breaking Change Migration Guide
 
+> Historical guide for old releases only. The V2-only release cannot migrate these databases: close channels with the old binary, back up the data, and use a new empty database. See the [current upgrade instructions](../../README.md#upgrading-to-the-v2-only-release).
+
 ## Why
 
 Fiber's got some big updates, including changes to the database schema that don't play nice with older versions. We introduced our first breaking change to roll out the cool new basic MPP feature and some security patches.

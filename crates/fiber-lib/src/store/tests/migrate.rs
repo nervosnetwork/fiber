@@ -128,8 +128,8 @@ fn test_run_migration() {
 
     let mut migrations = Migrations::default();
     // Add migrations after INIT_DB_VERSION
-    let v1 = "20260302200001";
-    let v2 = "20260302200002";
+    let v1 = "20261114000001";
+    let v2 = "20261114000002";
     migrations.add_migration(Arc::new(DummyMigration::new(v1, run_count.clone())));
     migrations.add_migration(Arc::new(DummyMigration::new(v2, run_count.clone())));
 
@@ -152,7 +152,7 @@ fn test_user_cancel_returns_error() {
 
     let mut migrations = Migrations::default();
     migrations.add_migration(Arc::new(DummyMigration::new(
-        "20260302200001",
+        "20261114000001",
         run_count.clone(),
     )));
 
@@ -170,7 +170,7 @@ fn test_break_change_migration() {
     store.put(MIGRATION_VERSION_KEY, INIT_DB_VERSION);
 
     let mut migrations = Migrations::default();
-    migrations.add_migration(Arc::new(BreakChangeMigration::new("20260302200001")));
+    migrations.add_migration(Arc::new(BreakChangeMigration::new("20261114000001")));
 
     // auto_migrate should present a plan with has_break_change=true
     let result = migrations.auto_migrate(
@@ -200,85 +200,76 @@ fn test_db_migrate_check() {
 }
 
 #[test]
-fn test_v2_migration_rejects_full_hash_v1_without_partial_writes() {
-    use fiber_types_0100::sample::StoreSample;
-    use fiber_types_0100::{ChannelActorData, ChannelState, CloseFlags};
-
-    // Put legacy data first so a migration that validates while writing would
-    // have rewritten it before discovering the incompatible development record.
+fn test_v1_epoch_is_rejected_without_changing_records() {
     let path = gen_path();
-    let before;
-    let affected_ids;
+    let version = b"20260925120000";
     {
         let store = fiber_store::Store::open_db(&path).unwrap();
-        store.put(MIGRATION_VERSION_KEY, INIT_DB_VERSION);
-        let mut samples = ChannelActorData::samples(1561);
-        let mut legacy = samples.remove(0);
-        legacy.commitment_contract_features = fiber_types_0100::CommitmentContractFeatures::LEGACY;
-        let full_hash = samples.remove(0);
-        let mut closed_full_hash = full_hash.clone();
-        closed_full_hash.id = [163; 32].into();
-        closed_full_hash.state = ChannelState::Closed(CloseFlags::empty());
-        affected_ids = [full_hash.id, closed_full_hash.id];
-        for (index, record) in [legacy, full_hash, closed_full_hash].iter().enumerate() {
-            // Actual published schema ends at the feature byte.
-            let encoded = bincode::serialize(record).unwrap();
-            store.put([0, index as u8], &encoded);
-        }
-        store.put(b"unrelated", b"must survive unchanged");
-        before = store.collect_iterator(
-            vec![],
-            fiber_store::iterator::IteratorDirection::Forward,
-            Box::new(|_| true),
-            0,
-        );
+        store.put(MIGRATION_VERSION_KEY, version);
+        store.put([0, 1], b"old channel bytes");
     }
-
-    let result = crate::store::open_store_with_migration(
-        &path,
-        false,
-        Box::new(|_| panic!("incompatible development data must be rejected before confirmation")),
-        Box::new(|_| panic!("incompatible development data must be rejected before migration")),
-    );
-    let error = match result {
-        Err(error) => error,
-        Ok(_) => panic!("full-hash V1 development data cannot become V2"),
+    let Err(error) = crate::store::open_store(&path) else {
+        panic!("old database must be rejected");
     };
-    for id in affected_ids {
-        assert!(
-            error.contains(&id.to_string()),
-            "missing affected channel {id}: {error}"
+    assert!(error.contains("new database"), "{error}");
+    let store = fiber_store::Store::open_db(&path).unwrap();
+    assert_eq!(store.get(MIGRATION_VERSION_KEY).unwrap(), version);
+    assert_eq!(store.get([0, 1]).unwrap(), b"old channel bytes");
+}
+
+#[test]
+fn test_nonempty_unversioned_database_is_not_stamped() {
+    let store = gen_store();
+    store.put([0, 1], b"unversioned channel bytes");
+    let result = Migrations::default().auto_migrate(&store, Box::new(|_| true), Box::new(|_| {}));
+    assert!(result.is_err());
+    assert!(store.get(MIGRATION_VERSION_KEY).is_none());
+    assert_eq!(store.get([0, 1]).unwrap(), b"unversioned channel bytes");
+}
+
+#[test]
+#[cfg(feature = "watchtower")]
+fn test_current_epoch_rejects_other_channel_record_suffixes_without_writes() {
+    use crate::store::sample::StoreSample;
+    use fiber_types::schema::{CHANNEL_OPEN_RECORD_PREFIX, WATCHTOWER_CHANNEL_PREFIX};
+
+    let records = [
+        (
+            CHANNEL_OPEN_RECORD_PREFIX,
+            bincode::serialize(&fiber_types::ChannelOpenRecord::samples(42)[0]).unwrap(),
+        ),
+        (
+            WATCHTOWER_CHANNEL_PREFIX,
+            bincode::serialize(&fiber_types::ChannelData::samples(42)[0]).unwrap(),
+        ),
+    ];
+    for (prefix, mut encoded) in records {
+        let path = gen_path();
+        encoded.push(0);
+        let key = [prefix, 1];
+        {
+            let store = fiber_store::Store::open_db(&path).unwrap();
+            store.put(MIGRATION_VERSION_KEY, LATEST_DB_VERSION);
+            store.put(key, &encoded);
+        }
+        assert!(crate::store::open_store(&path).is_err());
+        let store = fiber_store::Store::open_db(&path).unwrap();
+        assert_eq!(store.get(key).unwrap(), encoded);
+        assert_eq!(
+            store.get(MIGRATION_VERSION_KEY).unwrap(),
+            LATEST_DB_VERSION.as_bytes()
         );
     }
-    let store = fiber_store::Store::open_db(&path).unwrap();
-    let after = store.collect_iterator(
-        vec![],
-        fiber_store::iterator::IteratorDirection::Forward,
-        Box::new(|_| true),
-        0,
-    );
-    assert_eq!(
-        before
-            .iter()
-            .map(|kv| (&kv.key, &kv.value))
-            .collect::<Vec<_>>(),
-        after
-            .iter()
-            .map(|kv| (&kv.key, &kv.value))
-            .collect::<Vec<_>>(),
-        "rejection must preserve every record and the original DB version"
-    );
 }
 
 #[test]
 fn test_v2_current_preflight_pages_closed_history_before_writes() {
     use crate::store::sample::StoreSample;
-    use fiber_types::{ChannelActorData, ChannelFeatures, ChannelState, CloseFlags};
+    use fiber_types::{ChannelActorData, ChannelState, CloseFlags};
     let path = gen_path();
     let mut records = std::collections::BTreeMap::new();
     for seed in 0..205 {
-        let mut channel = ChannelActorData::samples(seed).remove(0);
-        channel.state = ChannelState::Closed(CloseFlags::COOPERATIVE);
+        let channel = ChannelActorData::samples(seed).remove(0);
         records.insert([&[0], channel.id.as_ref()].concat(), channel);
     }
     {
@@ -289,7 +280,7 @@ fn test_v2_current_preflight_pages_closed_history_before_writes() {
         }
     }
     drop(crate::store::open_store(&path).expect("valid multi-page history"));
-    records.last_entry().unwrap().get_mut().channel_features = ChannelFeatures::V2;
+    records.last_entry().unwrap().get_mut().state = ChannelState::Closed(CloseFlags::COOPERATIVE);
     {
         let store = fiber_store::Store::open_db(&path).unwrap();
         let (key, channel) = records.last_key_value().unwrap();
@@ -317,7 +308,7 @@ fn test_v2_current_epoch_rejects_missing_session_before_writes() {
     use crate::store::sample::StoreSample;
     use fiber_types::{ChannelActorData, ChannelState, CloseFlags};
     let path = gen_path();
-    let mut record = ChannelActorData::samples(1561).remove(1);
+    let mut record = ChannelActorData::samples(1561).remove(0);
     record.channel_features = fiber_types::ChannelFeatures::V2;
     record.state = ChannelState::Closed(CloseFlags::COOPERATIVE);
     record.session_v2 = None;
@@ -344,7 +335,7 @@ fn test_v2_current_epoch_rejects_missing_session_before_writes() {
 fn test_v2_current_epoch_rejects_bootstrap_session_as_closed_channel() {
     use crate::store::sample::StoreSample;
     let path = gen_path();
-    let mut record = fiber_types::ChannelActorData::samples(1561).remove(2);
+    let mut record = fiber_types::ChannelActorData::samples(1561).remove(0);
     record.state = fiber_types::ChannelState::Closed(fiber_types::CloseFlags::COOPERATIVE);
     let key = [&[0], record.id.as_ref()].concat();
     let encoded = bincode::serialize(&record).unwrap();
@@ -359,324 +350,4 @@ fn test_v2_current_epoch_rejects_bootstrap_session_as_closed_channel() {
     );
     let store = fiber_store::Store::open_db(&path).unwrap();
     assert_eq!(store.get(&key).unwrap(), encoded);
-}
-
-#[test]
-fn test_v2_migration_preserves_legacy_zero_channel() {
-    use crate::fiber::channel::ChannelActorStateStore;
-    use fiber_types_090::sample::StoreSample;
-
-    let path = gen_path();
-    let legacy = fiber_types_090::ChannelActorData::samples(42).remove(1);
-    let key = [&[0x00], legacy.id.as_ref()].concat();
-    let original = bincode::serialize(&legacy).unwrap();
-    {
-        let store = fiber_store::Store::open_db(&path).unwrap();
-        store.put(MIGRATION_VERSION_KEY, "20260618120000");
-        store.put(&key, &original);
-    }
-    {
-        let store = crate::store::open_store(&path).expect("legacy migration succeeds");
-        let bytes = store.get(&key).expect("legacy channel retained");
-        let migrated = fiber_types::channel_v2_validation::decode_channel_actor_data(&bytes)
-            .expect("released legacy channel readable after V2 migration");
-        assert_eq!(
-            migrated.channel_features,
-            fiber_types::ChannelFeatures::LEGACY
-        );
-        assert_eq!(bytes, [&original[..], &[0]].concat());
-        let id = fiber_types::Hash256::try_from(legacy.id.as_ref()).unwrap();
-        assert!(store
-            .get_channel_actor_state(&id)
-            .unwrap()
-            .session_v2
-            .is_none());
-        assert_eq!(
-            store.get(MIGRATION_VERSION_KEY).unwrap(),
-            LATEST_DB_VERSION.as_bytes()
-        );
-    }
-    let store = crate::store::open_store(&path).expect("migrated legacy DB reopens");
-    assert_eq!(store.get(&key).unwrap(), [&original[..], &[0]].concat());
-}
-
-#[test]
-fn test_payment_session_released_layout_needs_no_migration() {
-    use crate::fiber::graph::NetworkGraphStateStore;
-    use crate::fiber::payment::{PaymentSessionExt, SendPaymentDataBuilder};
-    use fiber_types::{PaymentSession, PaymentStatus};
-    let path = gen_path();
-    let mut expected = Vec::new();
-    {
-        let store = crate::store::open_store(&path).unwrap();
-        for status in [
-            PaymentStatus::Created,
-            PaymentStatus::Inflight,
-            PaymentStatus::Failed,
-            PaymentStatus::Success,
-        ] {
-            let hash = crate::gen_rand_sha256_hash();
-            let request =
-                SendPaymentDataBuilder::new(crate::gen_rand_fiber_public_key(), 100, hash)
-                    .max_fee_amount(Some(10))
-                    .build()
-                    .unwrap();
-            let mut session = PaymentSession::new_session(&store, request, 3);
-            session.status = status;
-            let bytes = bincode::serialize(&session).unwrap();
-            let released: fiber_types_0100::PaymentSession = bincode::deserialize(&bytes).unwrap();
-            assert_eq!(bincode::serialize(&released).unwrap(), bytes);
-            let key = [&[0xC0], hash.as_ref()].concat();
-            store.put(&key, &bytes);
-            expected.push((key, bytes, hash, status));
-        }
-    }
-    let store = crate::store::open_store_with_migration(
-        &path,
-        true,
-        Box::new(|_| panic!("unchanged layout needs no migration")),
-        Box::new(|_| {}),
-    )
-    .unwrap();
-    for (key, bytes, hash, status) in expected {
-        assert_eq!(store.get_payment_session(hash).unwrap().status, status);
-        assert_eq!(
-            store.get(key).unwrap(),
-            bytes,
-            "reading released sessions must not rewrite history"
-        );
-    }
-}
-
-#[test]
-fn test_legacy_derived_failure_needs_no_recovery_index_or_migration() {
-    use crate::fiber::graph::NetworkGraphStateStore;
-    use crate::fiber::payment::{PaymentSessionExt, SendPaymentDataBuilder};
-    use fiber_types::{PaymentSession, PaymentStatus};
-    let path = gen_path();
-    let store = crate::store::open_store(&path).unwrap();
-    let hash = crate::gen_rand_sha256_hash();
-    let target = crate::gen_rand_fiber_public_key();
-    let request = SendPaymentDataBuilder::new(target, 100, hash)
-        .max_fee_amount(Some(10))
-        .build()
-        .unwrap();
-    let session = PaymentSession::new_session(&store, request, 1);
-    store.insert_payment_session(session.clone());
-    let mut attempt = session.new_attempt(
-        1,
-        crate::gen_rand_fiber_public_key(),
-        target,
-        vec![fiber_types::PaymentHopData {
-            amount: 100,
-            ..Default::default()
-        }],
-    );
-    attempt.set_failed_status("exhausted", false);
-    store.insert_attempt(attempt);
-    store.clear_attempts_channel_index(hash);
-    let recovered = store.get_payment_session(hash).unwrap();
-    assert_eq!(recovered.effective_status(&store), PaymentStatus::Failed);
-    assert!(!recovered.can_retry());
-    assert!(store.get_payment_hashes_with_channel_index().is_empty());
-    assert_eq!(
-        store.get_persisted_payment_status(hash),
-        Some(PaymentStatus::Created)
-    );
-}
-
-#[test]
-fn test_published_legacy_at_latest_epoch_reads_without_migration() {
-    use crate::fiber::channel::ChannelActorStateStore;
-    use fiber_types_0100::sample::StoreSample;
-
-    let path = gen_path();
-    let mut originals = Vec::new();
-    {
-        let store = fiber_store::Store::open_db(&path).unwrap();
-        store.put(MIGRATION_VERSION_KEY, "20260925120000");
-        for mut channel in fiber_types_0100::ChannelActorData::samples(42) {
-            channel.commitment_contract_features =
-                fiber_types_0100::CommitmentContractFeatures::LEGACY;
-            let original = bincode::serialize(&channel).unwrap();
-            let id = fiber_types::Hash256::try_from(channel.id.as_ref()).unwrap();
-            let key = [&[0], id.as_ref()].concat();
-            store.put(&key, &original);
-            originals.push((id, key, original));
-        }
-    }
-    assert_eq!(LATEST_DB_VERSION, "20260925120000");
-    for _ in 0..2 {
-        let store = crate::store::open_store_with_migration(
-            &path,
-            false,
-            Box::new(|_| panic!("published latest database needs no migration")),
-            Box::new(|_| panic!("published latest database needs no writes")),
-        )
-        .unwrap();
-        for (id, key, original) in &originals {
-            let read = store.get_channel_actor_state(id).unwrap();
-            assert_eq!(read.channel_features.bits(), 0);
-            assert!(read.session_v2.is_none());
-            let raw: fiber_types::ChannelActorData = fiber_types::deserialize(original).unwrap();
-            assert_eq!(
-                bincode::serialize(&raw).unwrap(),
-                bincode::serialize(&read.core).unwrap()
-            );
-            assert_eq!(&store.get(key).unwrap(), original);
-        }
-        assert_eq!(store.get_all_channel_states().len(), originals.len());
-        assert_eq!(store.get(MIGRATION_VERSION_KEY).unwrap(), b"20260925120000");
-    }
-    crate::store::check_validate(&path).expect("raw database validator shares compatibility");
-}
-
-#[test]
-fn test_upstream_091_migration_all_channel_prefixes_and_stale() {
-    use crate::fiber::channel::{ChannelActorStateStore, ChannelOpenRecordStore};
-    use fiber_types_090::sample::StoreSample;
-
-    let path = gen_path();
-    let mut actors = fiber_types_090::ChannelActorData::samples(42);
-    let mut stale = actors[1].clone();
-    stale.id = [163; 32].into();
-    stale.state = fiber_types_090::ChannelState::Stale;
-    actors.push(stale);
-    let opens = fiber_types_090::ChannelOpenRecord::samples(42);
-    let watches = fiber_types_090::ChannelData::samples(42);
-    let mut originals = Vec::new();
-    {
-        let store = fiber_store::Store::open_db(&path).unwrap();
-        // After the connectivity migration, before #1665.
-        store.put(MIGRATION_VERSION_KEY, "20260618120000");
-        for channel in &actors {
-            let bytes = bincode::serialize(channel).unwrap();
-            let key = [&[0], channel.id.as_ref()].concat();
-            store.put(&key, &bytes);
-            originals.push((key, bytes));
-        }
-        for record in &opens {
-            let bytes = bincode::serialize(record).unwrap();
-            let key = [&[201], record.channel_id.as_ref()].concat();
-            store.put(&key, &bytes);
-            originals.push((key, bytes));
-        }
-        for channel in &watches {
-            let bytes = bincode::serialize(channel).unwrap();
-            let key = [&[224], channel.channel_id.as_ref()].concat();
-            store.put(&key, &bytes);
-            originals.push((key, bytes));
-        }
-    }
-    for _ in 0..2 {
-        let store = crate::store::open_store(&path).unwrap();
-        for (key, bytes) in &originals {
-            assert_eq!(store.get(key).unwrap(), [bytes.as_slice(), &[0]].concat());
-        }
-        for old in &actors {
-            let id = fiber_types::Hash256::try_from(old.id.as_ref()).unwrap();
-            let read = store.get_channel_actor_state(&id).unwrap();
-            assert_eq!(read.channel_features, fiber_types::ChannelFeatures::LEGACY);
-            assert!(read.session_v2.is_none());
-            assert_eq!(
-                bincode::serialize(&read.state).unwrap(),
-                bincode::serialize(&old.state).unwrap()
-            );
-        }
-        assert_eq!(store.get_all_channel_states().len(), actors.len());
-        for old in &opens {
-            let read = store
-                .get_channel_open_record(
-                    &fiber_types::Hash256::try_from(old.channel_id.as_ref()).unwrap(),
-                )
-                .unwrap();
-            assert_eq!(read.channel_features, fiber_types::ChannelFeatures::LEGACY);
-        }
-        for old in &watches {
-            let key = [&[224], old.channel_id.as_ref()].concat();
-            let read: fiber_types::ChannelData =
-                bincode::deserialize(&store.get(key).unwrap()).unwrap();
-            assert_eq!(read.channel_features, fiber_types::ChannelFeatures::LEGACY);
-        }
-        assert_eq!(store.get(MIGRATION_VERSION_KEY).unwrap(), b"20260925120000");
-    }
-    crate::store::check_validate(&path).unwrap();
-}
-
-#[test]
-fn test_channel_decoder_only_accepts_exact_published_legacy_suffix() {
-    use fiber_types::channel_v2_validation::decode_channel_actor_data;
-    use fiber_types_0100::sample::StoreSample;
-
-    for mut old in fiber_types_0100::ChannelActorData::samples(42) {
-        old.commitment_contract_features = fiber_types_0100::CommitmentContractFeatures::LEGACY;
-        let bytes = bincode::serialize(&old).unwrap();
-        let channel = decode_channel_actor_data(&bytes).unwrap();
-        let current = bincode::serialize(&channel).unwrap();
-        assert_eq!(current, [&bytes[..], &[0]].concat());
-        assert!(decode_channel_actor_data(&current).is_ok());
-        assert!(decode_channel_actor_data(&bytes[..bytes.len() - 1]).is_err());
-        assert!(decode_channel_actor_data(&[&current[..], &[0]].concat()).is_err());
-        old.commitment_contract_features =
-            fiber_types_0100::CommitmentContractFeatures::ONCHAIN_FULL_PAYMENT_HASH;
-        let v1 = bincode::serialize(&old).unwrap();
-        assert!(decode_channel_actor_data(&v1).is_err());
-        assert!(decode_channel_actor_data(&[&v1[..], &[0]].concat()).is_err());
-        assert!(fiber_types::deserialize::<fiber_types::ChannelActorData>(&v1).is_err());
-    }
-}
-
-#[test]
-fn test_mixed_upstream_database_invalid_other_prefix_preserves_all_bytes() {
-    use fiber_types_090::sample::StoreSample;
-
-    for prefix in [201, 224] {
-        let path = gen_path();
-        let before;
-        {
-            let store = fiber_store::Store::open_db(&path).unwrap();
-            store.put(MIGRATION_VERSION_KEY, "20260618120000");
-            let actor = fiber_types_090::ChannelActorData::samples(42).remove(1);
-            store.put([0, 1], bincode::serialize(&actor).unwrap());
-            let open = fiber_types_090::ChannelOpenRecord::samples(42).remove(0);
-            store.put([201, 1], bincode::serialize(&open).unwrap());
-            store.put([prefix, 255], b"invalid later record");
-            before = store.collect_iterator(
-                vec![],
-                fiber_store::iterator::IteratorDirection::Forward,
-                Box::new(|_| true),
-                0,
-            );
-        }
-        assert!(crate::store::open_store_with_migration(
-            &path,
-            false,
-            Box::new(|_| panic!("all prefixes must validate before confirmation")),
-            Box::new(|_| panic!("all prefixes must validate before writes")),
-        )
-        .is_err());
-        let store = fiber_store::Store::open_db(&path).unwrap();
-        for kv in before {
-            assert_eq!(store.get(&kv.key).unwrap(), kv.value);
-        }
-    }
-}
-
-#[test]
-fn test_channel_storage_codec_rejects_feature_session_mismatch() {
-    use crate::store::sample::StoreSample;
-    use fiber_types::channel_v2_validation::decode_channel_actor_data;
-
-    let genuine = fiber_types::ChannelActorData::samples(42).remove(2);
-    for mutation in 0..3 {
-        let mut channel = genuine.clone();
-        match mutation {
-            0 => channel.session_v2 = None,
-            1 => channel.channel_features = fiber_types::ChannelFeatures::LEGACY,
-            _ => channel.session_v2.as_mut().unwrap().marker ^= 1,
-        }
-        let bytes = bincode::serialize(&channel).unwrap();
-        assert!(decode_channel_actor_data(&bytes).is_err());
-        assert!(fiber_types::deserialize::<fiber_types::ChannelActorData>(&bytes).is_err());
-    }
 }

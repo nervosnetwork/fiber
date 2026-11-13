@@ -83,36 +83,25 @@ FIBER_SECRET_KEY_PASSWORD='YOUR_PASSWORD' RUST_LOG='info' ./fnn -c config.yml -d
 
 Fiber release tags publish official container images to Docker Hub at `nervos/fiber` and mirror the same tags to GHCR at `ghcr.io/nervosnetwork/fiber`. Detailed Docker usage, including startup, local builds, `fnn-cli`, and migration, is documented in [docker/README.md](./docker/README.md).
 
-## Testnet compatibility issues
+## Upgrading to the V2-only release
 
-FNN is still under development, the protocol and storage format may changed between versions. We strongly recommend you to close the channel before upgrading the node, otherwise, you may lose channel data and funds!
+This release only supports V2 peers and channels. It does not load or migrate
+databases from earlier releases, including databases that already contain V2
+channels. An old node is disconnected during the Fiber Init handshake.
 
-1. [list all channels](./crates/fiber-lib/src/rpc/README.md#channel-list_channels) and [close](./crates/fiber-lib/src/rpc/README.md#channel-shutdown_channel) them via RPC.
+Before replacing the binary:
 
-2. Stop the node and remove the storage of the node:
+1. Use the **old binary** to [list all channels](./crates/fiber-lib/src/rpc/README.md#channel-list_channels)
+   and [close them](./crates/fiber-lib/src/rpc/README.md#channel-shutdown_channel).
+   Wait for pending payments and on-chain settlement to finish.
+2. Stop the node and back up its complete data directory. Keep the old binary and
+   data until all funds have been recovered; do not delete an open channel's data.
+3. Start the new binary with a **new, empty database directory** and connect only
+   to V2-capable peers. Do not restore an old database into the new store.
 
-```bash
-rm -rf /folder-to/my-fnn/fiber/store
-```
-
-3. Replace the fnn binary with the new version and start the node again.
-
-
-If you want to keep the channel state, check whether your upgrade path supports
-in-place migration before replacing binaries. Since v0.9.0, supported storage
-migrations are integrated into the `fnn` startup process, and release bundles no
-longer include a standalone `fnn-migrate` binary.
-
-1. Stop the node.
-
-2. Backup the storage folder `/folder-to/my-fnn/fiber/store`.
-
-3. Replace the `fnn` binary with the new version and start the node again.
-
-If the new `fnn` reports that the database is too old for the built-in migration
-path, use the legacy `fnn-migrate` tool from the matching v0.8.x release first.
-For the v0.7.x to v0.8.0 legacy migration flow, see
-[v0.8.0 Migration Guide](./docs/notes/v0.8.0-migration-guide.md).
+The node refuses old-version and nonempty unversioned databases without converting
+or clearing them. Historical migration tools and guides apply only to their
+matching old releases; they cannot upgrade a database into this release.
 
 ## Documentation
 

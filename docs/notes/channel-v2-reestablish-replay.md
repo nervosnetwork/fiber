@@ -1,5 +1,7 @@
 # Design: reconciling V2 commitment content after a reconnect
 
+> Historical proposal, not the current implementation. See [commitment round findings](channel-v2-commitment-rounds.md) for the subsequent replay fix. V1 compatibility requirements below no longer apply to the V2-only release.
+
 Status: proposal, not implemented. Related: #1561, #1677, and the cursor
 reconciliation section of `channel-v2.md`.
 

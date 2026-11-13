@@ -1113,7 +1113,7 @@ Create a new watched channel
 * `local_funding_pubkey` - <em>[Pubkey](#type-pubkey)</em>, The local party's funding public key (hex without 0x prefix)
 * `remote_funding_pubkey` - <em>[Pubkey](#type-pubkey)</em>, The remote party's funding public key (hex without 0x prefix)
 * `settlement_data` - <em>[SettlementData](#type-settlementdata)</em>, Settlement data
-* `channel_features` - <em>[ChannelFeatures](#type-channelfeatures)</em>, Channel feature bitmap as hex: "0x0" (Legacy) or "0x1" (V2 with full payment hashes).
+* `channel_features` - <em>[ChannelFeatures](#type-channelfeatures)</em>, Channel feature bitmap as hex. Only "0x1" (V2 with full payment hashes) is supported.
 
 ##### Returns
 
@@ -1330,7 +1330,7 @@ The channel data structure.
 <a id="#type-channelfeatures"></a>
 ### Type `ChannelFeatures`
 
-Channel version features (0x0: Legacy; 0x1: V2 with full payment hashes).
+Channel features. Only "0x1" (V2 with full payment hashes) is supported.
 
 
 

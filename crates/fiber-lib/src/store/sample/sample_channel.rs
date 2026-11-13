@@ -14,9 +14,7 @@ impl StoreSample for ChannelActorState {
     const TYPE_NAME: &'static str = "ChannelActorState";
 
     fn samples(seed: u64) -> Vec<Self> {
-        let mut v2 = Self::sample_minimal(seed);
-        v2.core = fiber_types::ChannelActorData::samples(seed).remove(2);
-        vec![Self::sample_minimal(seed), Self::sample_full(seed), v2]
+        vec![Self::sample_minimal(seed)]
     }
 }
 
@@ -31,43 +29,11 @@ impl ChannelActorState {
         ChannelActorState {
             core,
             waiting_peer_response: None,
-            revocation_nonce_unbalanced_since: None,
             reestablish_timer: None,
             recovery_peer_v2: None,
             network: None,
             scheduled_channel_update_handle: None,
             pending_notify_settle_tlcs: vec![],
-            pending_reestablish_channel_ready: false,
-            defer_peer_tlc_updates: false,
-            deferred_peer_tlc_updates: VecDeque::new(),
-            ephemeral_config: Default::default(),
-            funding_abort_detail: None,
-            private_key: None,
-            needs_backup: false,
-            pending_remove_effects_v2: 0,
-            pending_payment_notifications: Default::default(),
-            replayed_tlc_updates_v2: 0,
-        }
-    }
-
-    /// Sample 1: Fully populated state — use ChannelActorData::sample_full from fiber-types.
-    /// All complex types are already populated in fiber-types sample_full.
-    fn sample_full(seed: u64) -> Self {
-        let core = fiber_types::ChannelActorData::samples(seed)
-            .into_iter()
-            .nth(1)
-            .expect("ChannelActorData samples should have at least 2 elements");
-
-        ChannelActorState {
-            core,
-            waiting_peer_response: None,
-            revocation_nonce_unbalanced_since: None,
-            reestablish_timer: None,
-            recovery_peer_v2: None,
-            network: None,
-            scheduled_channel_update_handle: None,
-            pending_notify_settle_tlcs: vec![],
-            pending_reestablish_channel_ready: false,
             defer_peer_tlc_updates: false,
             deferred_peer_tlc_updates: VecDeque::new(),
             ephemeral_config: Default::default(),
@@ -110,11 +76,7 @@ mod tests {
     #[test]
     fn test_channel_actor_state_sample_count() {
         let samples = ChannelActorState::samples(42);
-        assert_eq!(
-            samples.len(),
-            3,
-            "Minimal V1, full V1, and genuine V2 samples"
-        );
+        assert_eq!(samples.len(), 1, "A genuine V2 bootstrap sample");
         let ids = samples
             .iter()
             .map(|sample| sample.id)

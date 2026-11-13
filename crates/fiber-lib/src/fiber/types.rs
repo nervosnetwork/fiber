@@ -3,7 +3,6 @@ use super::network::get_chain_hash;
 use anyhow::anyhow;
 use ckb_jsonrpc_types::CellOutput;
 use ckb_types::{
-    core::FeeRate,
     packed::{Byte32 as MByte32, Bytes, BytesVec, OutPoint, Script, Transaction},
     prelude::{Pack, Unpack},
 };
@@ -17,8 +16,8 @@ pub use fiber_types::{
     ChannelUpdateMessageFlags, Cursor, EcdsaSignature, FeatureVector, Hash256, HashAlgorithm,
     NodeAnnouncement, OnionPacketError, PartialSignatureAsBytes, PaymentCustomRecords,
     PaymentOnionPacket, PeeledPaymentOnionPacket, Privkey, PubNonceAsBytes, Pubkey, RemoveTlc,
-    RemoveTlcReason, RevokeAndAck, TlcErr, UnknownHashAlgorithmError, CURSOR_SIZE,
-    ONION_PACKET_VERSION_V1, ONION_SESSION_KEY_MAX_ATTEMPTS,
+    RemoveTlcReason, TlcErr, UnknownHashAlgorithmError, CURSOR_SIZE, ONION_PACKET_VERSION_V1,
+    ONION_SESSION_KEY_MAX_ATTEMPTS,
 };
 
 use molecule::prelude::{Builder, Byte, Entity};
@@ -130,30 +129,7 @@ impl TryFrom<molecule_fiber::Init> for Init {
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct OpenChannel {
-    pub chain_hash: Hash256,
-    pub channel_id: Hash256,
-    pub funding_udt_type_script: Option<Script>,
-    pub funding_amount: u128,
-    pub shutdown_script: Script,
-    pub reserved_ckb_amount: u64,
-    pub funding_fee_rate: u64,
-    pub commitment_fee_rate: u64,
-    pub commitment_delay_epoch: u64,
-    pub max_tlc_value_in_flight: u128,
-    pub max_tlc_number_in_flight: u64,
-    pub funding_pubkey: Pubkey,
-    pub tlc_basepoint: Pubkey,
-    pub first_per_commitment_point: Pubkey,
-    pub second_per_commitment_point: Pubkey,
-    pub channel_announcement_nonce: Option<PubNonce>,
-    pub next_commitment_nonce: PubNonce,
-    pub next_revocation_nonce: PubNonce,
-    pub channel_flags: ChannelFlags,
-}
-
-impl OpenChannel {
+impl OpenChannelV2 {
     pub fn all_ckb_amount(&self) -> Result<u64, ProcessingChannelError> {
         if self.funding_udt_type_script.is_none() {
             let funding_amount = u64::try_from(self.funding_amount).map_err(|_| {
@@ -199,178 +175,8 @@ impl OpenChannel {
     }
 }
 
-impl From<OpenChannel> for molecule_fiber::OpenChannel {
-    fn from(open_channel: OpenChannel) -> Self {
-        molecule_fiber::OpenChannel::new_builder()
-            .chain_hash(open_channel.chain_hash.into())
-            .channel_id(open_channel.channel_id.into())
-            .funding_udt_type_script(open_channel.funding_udt_type_script.pack())
-            .funding_amount(open_channel.funding_amount.pack())
-            .reserved_ckb_amount(open_channel.reserved_ckb_amount.pack())
-            .funding_fee_rate(open_channel.funding_fee_rate.pack())
-            .commitment_fee_rate(open_channel.commitment_fee_rate.pack())
-            .commitment_delay_epoch(open_channel.commitment_delay_epoch.pack())
-            .max_tlc_value_in_flight(open_channel.max_tlc_value_in_flight.pack())
-            .max_tlc_number_in_flight(open_channel.max_tlc_number_in_flight.pack())
-            .shutdown_script(open_channel.shutdown_script)
-            .funding_pubkey(open_channel.funding_pubkey.into())
-            .tlc_basepoint(open_channel.tlc_basepoint.into())
-            .first_per_commitment_point(open_channel.first_per_commitment_point.into())
-            .second_per_commitment_point(open_channel.second_per_commitment_point.into())
-            .next_commitment_nonce(open_channel.next_commitment_nonce.into())
-            .next_revocation_nonce(open_channel.next_revocation_nonce.into())
-            .channel_announcement_nonce(
-                PubNonceOpt::new_builder()
-                    .set(open_channel.channel_announcement_nonce.map(Into::into))
-                    .build(),
-            )
-            .channel_flags(open_channel.channel_flags.bits().into())
-            .build()
-    }
-}
-
-impl TryFrom<molecule_fiber::OpenChannel> for OpenChannel {
-    type Error = Error;
-
-    fn try_from(open_channel: molecule_fiber::OpenChannel) -> Result<Self, Self::Error> {
-        Ok(OpenChannel {
-            chain_hash: open_channel.chain_hash().into(),
-            channel_id: open_channel.channel_id().into(),
-            funding_udt_type_script: open_channel.funding_udt_type_script().to_opt(),
-            funding_amount: open_channel.funding_amount().unpack(),
-            reserved_ckb_amount: open_channel.reserved_ckb_amount().unpack(),
-            shutdown_script: open_channel.shutdown_script(),
-            funding_fee_rate: open_channel.funding_fee_rate().unpack(),
-            commitment_fee_rate: open_channel.commitment_fee_rate().unpack(),
-            commitment_delay_epoch: open_channel.commitment_delay_epoch().unpack(),
-            max_tlc_value_in_flight: open_channel.max_tlc_value_in_flight().unpack(),
-            max_tlc_number_in_flight: open_channel.max_tlc_number_in_flight().unpack(),
-            funding_pubkey: open_channel.funding_pubkey().try_into()?,
-            tlc_basepoint: open_channel.tlc_basepoint().try_into()?,
-            first_per_commitment_point: open_channel.first_per_commitment_point().try_into()?,
-            second_per_commitment_point: open_channel.second_per_commitment_point().try_into()?,
-            next_commitment_nonce: open_channel.next_commitment_nonce().try_into()?,
-            next_revocation_nonce: open_channel.next_revocation_nonce().try_into()?,
-            channel_announcement_nonce: open_channel
-                .channel_announcement_nonce()
-                .to_opt()
-                .map(TryInto::try_into)
-                .transpose()
-                .map_err(|err| Error::Musig2(format!("{err}")))?,
-            channel_flags: ChannelFlags::from_bits(open_channel.channel_flags().into()).ok_or(
-                anyhow!("Invalid channel flags: {}", open_channel.channel_flags()),
-            )?,
-        })
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct AcceptChannel {
-    pub channel_id: Hash256,
-    pub funding_amount: u128,
-    pub reserved_ckb_amount: u64,
-    pub max_tlc_value_in_flight: u128,
-    pub max_tlc_number_in_flight: u64,
-    pub funding_pubkey: Pubkey,
-    pub shutdown_script: Script,
-    pub tlc_basepoint: Pubkey,
-    pub first_per_commitment_point: Pubkey,
-    pub second_per_commitment_point: Pubkey,
-    pub channel_announcement_nonce: Option<PubNonce>,
-    pub next_commitment_nonce: PubNonce,
-    pub next_revocation_nonce: PubNonce,
-}
-
-impl From<AcceptChannel> for molecule_fiber::AcceptChannel {
-    fn from(accept_channel: AcceptChannel) -> Self {
-        molecule_fiber::AcceptChannel::new_builder()
-            .channel_id(accept_channel.channel_id.into())
-            .funding_amount(accept_channel.funding_amount.pack())
-            .reserved_ckb_amount(accept_channel.reserved_ckb_amount.pack())
-            .max_tlc_value_in_flight(accept_channel.max_tlc_value_in_flight.pack())
-            .max_tlc_number_in_flight(accept_channel.max_tlc_number_in_flight.pack())
-            .shutdown_script(accept_channel.shutdown_script)
-            .funding_pubkey(accept_channel.funding_pubkey.into())
-            .tlc_basepoint(accept_channel.tlc_basepoint.into())
-            .first_per_commitment_point(accept_channel.first_per_commitment_point.into())
-            .second_per_commitment_point(accept_channel.second_per_commitment_point.into())
-            .channel_announcement_nonce(
-                PubNonceOpt::new_builder()
-                    .set(accept_channel.channel_announcement_nonce.map(Into::into))
-                    .build(),
-            )
-            .next_commitment_nonce(accept_channel.next_commitment_nonce.into())
-            .next_revocation_nonce(accept_channel.next_revocation_nonce.into())
-            .build()
-    }
-}
-
-impl TryFrom<molecule_fiber::AcceptChannel> for AcceptChannel {
-    type Error = Error;
-
-    fn try_from(accept_channel: molecule_fiber::AcceptChannel) -> Result<Self, Self::Error> {
-        Ok(AcceptChannel {
-            channel_id: accept_channel.channel_id().into(),
-            funding_amount: accept_channel.funding_amount().unpack(),
-            shutdown_script: accept_channel.shutdown_script(),
-            reserved_ckb_amount: accept_channel.reserved_ckb_amount().unpack(),
-            max_tlc_value_in_flight: accept_channel.max_tlc_value_in_flight().unpack(),
-            max_tlc_number_in_flight: accept_channel.max_tlc_number_in_flight().unpack(),
-            funding_pubkey: accept_channel.funding_pubkey().try_into()?,
-            tlc_basepoint: accept_channel.tlc_basepoint().try_into()?,
-            first_per_commitment_point: accept_channel.first_per_commitment_point().try_into()?,
-            second_per_commitment_point: accept_channel.second_per_commitment_point().try_into()?,
-            channel_announcement_nonce: accept_channel
-                .channel_announcement_nonce()
-                .to_opt()
-                .map(TryInto::try_into)
-                .transpose()
-                .map_err(|err| Error::Musig2(format!("{err}")))?,
-            next_commitment_nonce: accept_channel.next_commitment_nonce().try_into()?,
-            next_revocation_nonce: accept_channel.next_revocation_nonce().try_into()?,
-        })
-    }
-}
-
-#[serde_as]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CommitmentSigned {
-    pub channel_id: Hash256,
-    #[serde_as(as = "PartialSignatureAsBytes")]
-    pub funding_tx_partial_signature: PartialSignature,
-    #[serde_as(as = "PubNonceAsBytes")]
-    pub next_commitment_nonce: PubNonce,
-}
-
 fn partial_signature_to_molecule(partial_signature: PartialSignature) -> MByte32 {
     MByte32::from_slice(partial_signature.serialize().as_ref()).expect("[Byte; 32] from [u8; 32]")
-}
-
-impl From<CommitmentSigned> for molecule_fiber::CommitmentSigned {
-    fn from(commitment_signed: CommitmentSigned) -> Self {
-        molecule_fiber::CommitmentSigned::new_builder()
-            .channel_id(commitment_signed.channel_id.into())
-            .funding_tx_partial_signature(partial_signature_to_molecule(
-                commitment_signed.funding_tx_partial_signature,
-            ))
-            .next_commitment_nonce(commitment_signed.next_commitment_nonce.into())
-            .build()
-    }
-}
-
-impl TryFrom<molecule_fiber::CommitmentSigned> for CommitmentSigned {
-    type Error = Error;
-
-    fn try_from(commitment_signed: molecule_fiber::CommitmentSigned) -> Result<Self, Self::Error> {
-        Ok(CommitmentSigned {
-            channel_id: commitment_signed.channel_id().into(),
-            funding_tx_partial_signature: PartialSignature::from_slice(
-                commitment_signed.funding_tx_partial_signature().as_slice(),
-            )
-            .map_err(|e| anyhow!(e))?,
-            next_commitment_nonce: commitment_signed.next_commitment_nonce().try_into()?,
-        })
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -413,33 +219,10 @@ impl TryFrom<molecule_fiber::TxSignatures> for TxSignatures {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChannelReady {
-    pub channel_id: Hash256,
-}
-
-impl From<ChannelReady> for molecule_fiber::ChannelReady {
-    fn from(channel_ready: ChannelReady) -> Self {
-        molecule_fiber::ChannelReady::new_builder()
-            .channel_id(channel_ready.channel_id.into())
-            .build()
-    }
-}
-
-impl TryFrom<molecule_fiber::ChannelReady> for ChannelReady {
-    type Error = Error;
-
-    fn try_from(channel_ready: molecule_fiber::ChannelReady) -> Result<Self, Self::Error> {
-        Ok(ChannelReady {
-            channel_id: channel_ready.channel_id().into(),
-        })
-    }
-}
-
 #[derive(Debug, Clone)]
 pub enum TxCollaborationMsg {
     TxUpdate(TxUpdate),
-    TxComplete(TxComplete),
+    TxComplete(TxCompleteV2),
 }
 
 #[derive(Debug, Clone)]
@@ -464,32 +247,6 @@ impl TryFrom<molecule_fiber::TxUpdate> for TxUpdate {
         Ok(TxUpdate {
             channel_id: tx_update.channel_id().into(),
             tx: tx_update.tx(),
-        })
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TxComplete {
-    pub channel_id: Hash256,
-    pub next_commitment_nonce: PubNonce,
-}
-
-impl From<TxComplete> for molecule_fiber::TxComplete {
-    fn from(tx_complete: TxComplete) -> Self {
-        molecule_fiber::TxComplete::new_builder()
-            .channel_id(tx_complete.channel_id.into())
-            .next_commitment_nonce(tx_complete.next_commitment_nonce.into())
-            .build()
-    }
-}
-
-impl TryFrom<molecule_fiber::TxComplete> for TxComplete {
-    type Error = Error;
-
-    fn try_from(tx_complete: molecule_fiber::TxComplete) -> Result<Self, Self::Error> {
-        Ok(TxComplete {
-            channel_id: tx_complete.channel_id().into(),
-            next_commitment_nonce: tx_complete.next_commitment_nonce().try_into()?,
         })
     }
 }
@@ -569,66 +326,6 @@ impl TryFrom<molecule_fiber::TxAckRBF> for TxAckRBF {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct Shutdown {
-    pub channel_id: Hash256,
-    pub close_script: Script,
-    pub fee_rate: FeeRate,
-}
-
-impl From<Shutdown> for molecule_fiber::Shutdown {
-    fn from(shutdown: Shutdown) -> Self {
-        molecule_fiber::Shutdown::new_builder()
-            .channel_id(shutdown.channel_id.into())
-            .close_script(shutdown.close_script)
-            .fee_rate(shutdown.fee_rate.as_u64().pack())
-            .build()
-    }
-}
-
-impl TryFrom<molecule_fiber::Shutdown> for Shutdown {
-    type Error = Error;
-
-    fn try_from(shutdown: molecule_fiber::Shutdown) -> Result<Self, Self::Error> {
-        Ok(Shutdown {
-            channel_id: shutdown.channel_id().into(),
-            close_script: shutdown.close_script(),
-            fee_rate: FeeRate::from_u64(shutdown.fee_rate().unpack()),
-        })
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct ClosingSigned {
-    pub channel_id: Hash256,
-    pub partial_signature: PartialSignature,
-}
-
-impl From<ClosingSigned> for molecule_fiber::ClosingSigned {
-    fn from(closing_signed: ClosingSigned) -> Self {
-        molecule_fiber::ClosingSigned::new_builder()
-            .channel_id(closing_signed.channel_id.into())
-            .partial_signature(partial_signature_to_molecule(
-                closing_signed.partial_signature,
-            ))
-            .build()
-    }
-}
-
-impl TryFrom<molecule_fiber::ClosingSigned> for ClosingSigned {
-    type Error = Error;
-
-    fn try_from(closing_signed: molecule_fiber::ClosingSigned) -> Result<Self, Self::Error> {
-        Ok(ClosingSigned {
-            channel_id: closing_signed.channel_id().into(),
-            partial_signature: PartialSignature::from_slice(
-                closing_signed.partial_signature().as_slice(),
-            )
-            .map_err(|e| anyhow!(e))?,
-        })
-    }
-}
-
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UpdateTlcInfo {
     pub channel_id: Hash256,
@@ -680,37 +377,6 @@ impl From<UpdateTlcInfo> for ChannelTlcInfo {
             tlc_minimum_value: update_tlc_info.tlc_minimum_value,
             tlc_fee_proportional_millionths: update_tlc_info.tlc_fee_proportional_millionths,
         }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct ReestablishChannel {
-    pub channel_id: Hash256,
-    pub local_commitment_number: u64,
-    pub remote_commitment_number: u64,
-}
-
-impl From<ReestablishChannel> for molecule_fiber::ReestablishChannel {
-    fn from(reestablish_channel: ReestablishChannel) -> Self {
-        molecule_fiber::ReestablishChannel::new_builder()
-            .channel_id(reestablish_channel.channel_id.into())
-            .local_commitment_number(reestablish_channel.local_commitment_number.pack())
-            .remote_commitment_number(reestablish_channel.remote_commitment_number.pack())
-            .build()
-    }
-}
-
-impl TryFrom<molecule_fiber::ReestablishChannel> for ReestablishChannel {
-    type Error = Error;
-
-    fn try_from(
-        reestablish_channel: molecule_fiber::ReestablishChannel,
-    ) -> Result<Self, Self::Error> {
-        Ok(ReestablishChannel {
-            channel_id: reestablish_channel.channel_id().into(),
-            local_commitment_number: reestablish_channel.local_commitment_number().unpack(),
-            remote_commitment_number: reestablish_channel.remote_commitment_number().unpack(),
-        })
     }
 }
 
@@ -894,7 +560,7 @@ pub struct ShutdownV2 {
     pub closing_nonce: PubNonce,
 }
 
-/// V2 closing signature, distinct from V1 for protocol version gating.
+/// Closing signature bound to the independent V2 closing session.
 #[serde_as]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClosingSignedV2 {
@@ -1216,13 +882,12 @@ pub enum FiberQueryInformation {
 #[derive(Debug, Clone)]
 pub enum FiberMessage {
     Init(Init),
-    ChannelInitialization(OpenChannel),
     ChannelNormalOperation(FiberChannelMessage),
     ChannelInitializationV2(OpenChannelV2),
 }
 
 impl FiberMessage {
-    /// Creates a V2 opening offer without activating the protocol.
+    /// Creates a V2 opening offer.
     pub fn open_channel_v2(message: OpenChannelV2) -> Self {
         Self::ChannelInitializationV2(message)
     }
@@ -1271,34 +936,12 @@ impl FiberMessage {
         FiberMessage::Init(init_message)
     }
 
-    pub fn open_channel(open_channel: OpenChannel) -> Self {
-        FiberMessage::ChannelInitialization(open_channel)
-    }
-
-    pub fn accept_channel(accept_channel: AcceptChannel) -> Self {
-        FiberMessage::ChannelNormalOperation(FiberChannelMessage::AcceptChannel(accept_channel))
-    }
-
-    pub fn commitment_signed(commitment_signed: CommitmentSigned) -> Self {
-        FiberMessage::ChannelNormalOperation(FiberChannelMessage::CommitmentSigned(
-            commitment_signed,
-        ))
-    }
-
     pub fn tx_signatures(tx_signatures: TxSignatures) -> Self {
         FiberMessage::ChannelNormalOperation(FiberChannelMessage::TxSignatures(tx_signatures))
     }
 
-    pub fn channel_ready(channel_ready: ChannelReady) -> Self {
-        FiberMessage::ChannelNormalOperation(FiberChannelMessage::ChannelReady(channel_ready))
-    }
-
     pub fn tx_update(tx_update: TxUpdate) -> Self {
         FiberMessage::ChannelNormalOperation(FiberChannelMessage::TxUpdate(tx_update))
-    }
-
-    pub fn tx_complete(tx_complete: TxComplete) -> Self {
-        FiberMessage::ChannelNormalOperation(FiberChannelMessage::TxComplete(tx_complete))
     }
 
     pub fn tx_abort(tx_abort: TxAbort) -> Self {
@@ -1313,30 +956,12 @@ impl FiberMessage {
         FiberMessage::ChannelNormalOperation(FiberChannelMessage::TxAckRBF(tx_ack_rbf))
     }
 
-    pub fn shutdown(shutdown: Shutdown) -> Self {
-        FiberMessage::ChannelNormalOperation(FiberChannelMessage::Shutdown(shutdown))
-    }
-
-    pub fn closing_signed(closing_signed: ClosingSigned) -> Self {
-        FiberMessage::ChannelNormalOperation(FiberChannelMessage::ClosingSigned(closing_signed))
-    }
-
     pub fn add_tlc(add_tlc: AddTlc) -> Self {
         FiberMessage::ChannelNormalOperation(FiberChannelMessage::AddTlc(add_tlc))
     }
 
-    pub fn revoke_and_ack(revoke_and_ack: RevokeAndAck) -> Self {
-        FiberMessage::ChannelNormalOperation(FiberChannelMessage::RevokeAndAck(revoke_and_ack))
-    }
-
     pub fn remove_tlc(remove_tlc: RemoveTlc) -> Self {
         FiberMessage::ChannelNormalOperation(FiberChannelMessage::RemoveTlc(remove_tlc))
-    }
-
-    pub fn reestablish_channel(reestablish_channel: ReestablishChannel) -> Self {
-        FiberMessage::ChannelNormalOperation(FiberChannelMessage::ReestablishChannel(
-            reestablish_channel,
-        ))
     }
 
     pub fn announcement_signatures(announcement_signatures: AnnouncementSignatures) -> Self {
@@ -1348,22 +973,14 @@ impl FiberMessage {
 
 #[derive(Debug, Clone)]
 pub enum FiberChannelMessage {
-    AcceptChannel(AcceptChannel),
-    CommitmentSigned(CommitmentSigned),
     TxSignatures(TxSignatures),
-    ChannelReady(ChannelReady),
     TxUpdate(TxUpdate),
-    TxComplete(TxComplete),
     TxAbort(TxAbort),
     TxInitRBF(TxInitRBF),
     TxAckRBF(TxAckRBF),
-    Shutdown(Shutdown),
-    ClosingSigned(ClosingSigned),
     UpdateTlcInfo(UpdateTlcInfo),
     AddTlc(AddTlc),
-    RevokeAndAck(RevokeAndAck),
     RemoveTlc(RemoveTlc),
-    ReestablishChannel(ReestablishChannel),
     AnnouncementSignatures(AnnouncementSignatures),
     AcceptChannelV2(AcceptChannelV2),
     CommitmentSignedV2(CommitmentSignedV2),
@@ -1386,22 +1003,20 @@ impl Display for FiberChannelMessage {
             FiberChannelMessage::ShutdownV2(_) => write!(f, "ShutdownV2"),
             FiberChannelMessage::ClosingSignedV2(_) => write!(f, "ClosingSignedV2"),
             FiberChannelMessage::TxCompleteV2(_) => write!(f, "TxCompleteV2"),
-            FiberChannelMessage::AcceptChannel(_) => write!(f, "AcceptChannel"),
-            FiberChannelMessage::CommitmentSigned(_) => write!(f, "CommitmentSigned"),
+
             FiberChannelMessage::TxSignatures(_) => write!(f, "TxSignatures"),
-            FiberChannelMessage::ChannelReady(_) => write!(f, "ChannelReady"),
+
             FiberChannelMessage::TxUpdate(_) => write!(f, "TxUpdate"),
-            FiberChannelMessage::TxComplete(_) => write!(f, "TxComplete"),
+
             FiberChannelMessage::TxAbort(_) => write!(f, "TxAbort"),
             FiberChannelMessage::TxInitRBF(_) => write!(f, "TxInitRBF"),
             FiberChannelMessage::TxAckRBF(_) => write!(f, "TxAckRBF"),
-            FiberChannelMessage::Shutdown(_) => write!(f, "Shutdown"),
-            FiberChannelMessage::ClosingSigned(_) => write!(f, "ClosingSigned"),
+
             FiberChannelMessage::UpdateTlcInfo(_) => write!(f, "UpdateTlcInfo"),
             FiberChannelMessage::AddTlc(_) => write!(f, "AddTlc"),
-            FiberChannelMessage::RevokeAndAck(_) => write!(f, "RevokeAndAck"),
+
             FiberChannelMessage::RemoveTlc(_) => write!(f, "RemoveTlc"),
-            FiberChannelMessage::ReestablishChannel(_) => write!(f, "ReestablishChannel"),
+
             FiberChannelMessage::AnnouncementSignatures(_) => write!(f, "AnnouncementSignatures"),
         }
     }
@@ -1418,26 +1033,20 @@ impl FiberChannelMessage {
             FiberChannelMessage::ShutdownV2(m) => m.channel_id,
             FiberChannelMessage::ClosingSignedV2(m) => m.channel_id,
             FiberChannelMessage::TxCompleteV2(m) => m.channel_id,
-            FiberChannelMessage::AcceptChannel(accept_channel) => accept_channel.channel_id,
-            FiberChannelMessage::CommitmentSigned(commitment_signed) => {
-                commitment_signed.channel_id
-            }
+
             FiberChannelMessage::TxSignatures(tx_signatures) => tx_signatures.channel_id,
-            FiberChannelMessage::ChannelReady(channel_ready) => channel_ready.channel_id,
+
             FiberChannelMessage::TxUpdate(tx_update) => tx_update.channel_id,
-            FiberChannelMessage::TxComplete(tx_complete) => tx_complete.channel_id,
+
             FiberChannelMessage::TxAbort(tx_abort) => tx_abort.channel_id,
             FiberChannelMessage::TxInitRBF(tx_init_rbf) => tx_init_rbf.channel_id,
             FiberChannelMessage::TxAckRBF(tx_ack_rbf) => tx_ack_rbf.channel_id,
-            FiberChannelMessage::Shutdown(shutdown) => shutdown.channel_id,
-            FiberChannelMessage::ClosingSigned(closing_signed) => closing_signed.channel_id,
+
             FiberChannelMessage::UpdateTlcInfo(update_tlc_info) => update_tlc_info.channel_id,
             FiberChannelMessage::AddTlc(add_tlc) => add_tlc.channel_id,
-            FiberChannelMessage::RevokeAndAck(revoke_and_ack) => revoke_and_ack.channel_id,
+
             FiberChannelMessage::RemoveTlc(remove_tlc) => remove_tlc.channel_id,
-            FiberChannelMessage::ReestablishChannel(reestablish_channel) => {
-                reestablish_channel.channel_id
-            }
+
             FiberChannelMessage::AnnouncementSignatures(announcement_signatures) => {
                 announcement_signatures.channel_id
             }
@@ -2044,9 +1653,7 @@ impl From<FiberMessage> for molecule_fiber::FiberMessageUnion {
         match fiber_message {
             FiberMessage::ChannelInitializationV2(m) => Self::OpenChannelV2(m.into()),
             FiberMessage::Init(init) => molecule_fiber::FiberMessageUnion::Init(init.into()),
-            FiberMessage::ChannelInitialization(open_channel) => {
-                molecule_fiber::FiberMessageUnion::OpenChannel(open_channel.into())
-            }
+
             FiberMessage::ChannelNormalOperation(m) => match m {
                 FiberChannelMessage::AcceptChannelV2(m) => Self::AcceptChannelV2(m.into()),
                 FiberChannelMessage::CommitmentSignedV2(m) => Self::CommitmentSignedV2(m.into()),
@@ -2058,24 +1665,15 @@ impl From<FiberMessage> for molecule_fiber::FiberMessageUnion {
                 FiberChannelMessage::ShutdownV2(m) => Self::ShutdownV2(m.into()),
                 FiberChannelMessage::ClosingSignedV2(m) => Self::ClosingSignedV2(m.into()),
                 FiberChannelMessage::TxCompleteV2(m) => Self::TxCompleteV2(m.into()),
-                FiberChannelMessage::AcceptChannel(accept_channel) => {
-                    molecule_fiber::FiberMessageUnion::AcceptChannel(accept_channel.into())
-                }
-                FiberChannelMessage::CommitmentSigned(commitment_signed) => {
-                    molecule_fiber::FiberMessageUnion::CommitmentSigned(commitment_signed.into())
-                }
+
                 FiberChannelMessage::TxSignatures(tx_signatures) => {
                     molecule_fiber::FiberMessageUnion::TxSignatures(tx_signatures.into())
                 }
-                FiberChannelMessage::ChannelReady(channel_ready) => {
-                    molecule_fiber::FiberMessageUnion::ChannelReady(channel_ready.into())
-                }
+
                 FiberChannelMessage::TxUpdate(tx_update) => {
                     molecule_fiber::FiberMessageUnion::TxUpdate(tx_update.into())
                 }
-                FiberChannelMessage::TxComplete(tx_complete) => {
-                    molecule_fiber::FiberMessageUnion::TxComplete(tx_complete.into())
-                }
+
                 FiberChannelMessage::TxAbort(tx_abort) => {
                     molecule_fiber::FiberMessageUnion::TxAbort(tx_abort.into())
                 }
@@ -2085,12 +1683,7 @@ impl From<FiberMessage> for molecule_fiber::FiberMessageUnion {
                 FiberChannelMessage::TxAckRBF(tx_ack_rbf) => {
                     molecule_fiber::FiberMessageUnion::TxAckRBF(tx_ack_rbf.into())
                 }
-                FiberChannelMessage::Shutdown(shutdown) => {
-                    molecule_fiber::FiberMessageUnion::Shutdown(shutdown.into())
-                }
-                FiberChannelMessage::ClosingSigned(closing_signed) => {
-                    molecule_fiber::FiberMessageUnion::ClosingSigned(closing_signed.into())
-                }
+
                 FiberChannelMessage::UpdateTlcInfo(update_tlc_info) => {
                     molecule_fiber::FiberMessageUnion::UpdateTlcInfo(update_tlc_info.into())
                 }
@@ -2100,14 +1693,7 @@ impl From<FiberMessage> for molecule_fiber::FiberMessageUnion {
                 FiberChannelMessage::RemoveTlc(remove_tlc) => {
                     molecule_fiber::FiberMessageUnion::RemoveTlc(remove_tlc.into())
                 }
-                FiberChannelMessage::RevokeAndAck(revoke_and_ack) => {
-                    molecule_fiber::FiberMessageUnion::RevokeAndAck(revoke_and_ack.into())
-                }
-                FiberChannelMessage::ReestablishChannel(reestablish_channel) => {
-                    molecule_fiber::FiberMessageUnion::ReestablishChannel(
-                        reestablish_channel.into(),
-                    )
-                }
+
                 FiberChannelMessage::AnnouncementSignatures(announcement_signatures) => {
                     molecule_fiber::FiberMessageUnion::AnnouncementSignatures(
                         announcement_signatures.into(),
@@ -2149,39 +1735,19 @@ impl TryFrom<molecule_fiber::FiberMessageUnion> for FiberMessage {
                 Self::tx_complete_v2(m.try_into()?)
             }
             molecule_fiber::FiberMessageUnion::Init(init) => FiberMessage::Init(init.try_into()?),
-            molecule_fiber::FiberMessageUnion::OpenChannel(open_channel) => {
-                FiberMessage::ChannelInitialization(open_channel.try_into()?)
-            }
-            molecule_fiber::FiberMessageUnion::AcceptChannel(accept_channel) => {
-                FiberMessage::ChannelNormalOperation(FiberChannelMessage::AcceptChannel(
-                    accept_channel.try_into()?,
-                ))
-            }
-            molecule_fiber::FiberMessageUnion::CommitmentSigned(commitment_signed) => {
-                FiberMessage::ChannelNormalOperation(FiberChannelMessage::CommitmentSigned(
-                    commitment_signed.try_into()?,
-                ))
-            }
+
             molecule_fiber::FiberMessageUnion::TxSignatures(tx_signatures) => {
                 FiberMessage::ChannelNormalOperation(FiberChannelMessage::TxSignatures(
                     tx_signatures.try_into()?,
                 ))
             }
-            molecule_fiber::FiberMessageUnion::ChannelReady(channel_ready) => {
-                FiberMessage::ChannelNormalOperation(FiberChannelMessage::ChannelReady(
-                    channel_ready.try_into()?,
-                ))
-            }
+
             molecule_fiber::FiberMessageUnion::TxUpdate(tx_update) => {
                 FiberMessage::ChannelNormalOperation(FiberChannelMessage::TxUpdate(
                     tx_update.try_into()?,
                 ))
             }
-            molecule_fiber::FiberMessageUnion::TxComplete(tx_complete) => {
-                FiberMessage::ChannelNormalOperation(FiberChannelMessage::TxComplete(
-                    tx_complete.try_into()?,
-                ))
-            }
+
             molecule_fiber::FiberMessageUnion::TxAbort(tx_abort) => {
                 FiberMessage::ChannelNormalOperation(FiberChannelMessage::TxAbort(
                     tx_abort.try_into()?,
@@ -2197,16 +1763,7 @@ impl TryFrom<molecule_fiber::FiberMessageUnion> for FiberMessage {
                     tx_ack_rbf.try_into()?,
                 ))
             }
-            molecule_fiber::FiberMessageUnion::Shutdown(shutdown) => {
-                FiberMessage::ChannelNormalOperation(FiberChannelMessage::Shutdown(
-                    shutdown.try_into()?,
-                ))
-            }
-            molecule_fiber::FiberMessageUnion::ClosingSigned(closing_signed) => {
-                FiberMessage::ChannelNormalOperation(FiberChannelMessage::ClosingSigned(
-                    closing_signed.try_into()?,
-                ))
-            }
+
             molecule_fiber::FiberMessageUnion::UpdateTlcInfo(update_tlc_info) => {
                 FiberMessage::ChannelNormalOperation(FiberChannelMessage::UpdateTlcInfo(
                     update_tlc_info.into(),
@@ -2222,16 +1779,7 @@ impl TryFrom<molecule_fiber::FiberMessageUnion> for FiberMessage {
                     remove_tlc.try_into()?,
                 ))
             }
-            molecule_fiber::FiberMessageUnion::RevokeAndAck(revoke_and_ack) => {
-                FiberMessage::ChannelNormalOperation(FiberChannelMessage::RevokeAndAck(
-                    revoke_and_ack.try_into()?,
-                ))
-            }
-            molecule_fiber::FiberMessageUnion::ReestablishChannel(reestablish_channel) => {
-                FiberMessage::ChannelNormalOperation(FiberChannelMessage::ReestablishChannel(
-                    reestablish_channel.try_into()?,
-                ))
-            }
+
             molecule_fiber::FiberMessageUnion::AnnouncementSignatures(announcement_signatures) => {
                 FiberMessage::ChannelNormalOperation(FiberChannelMessage::AnnouncementSignatures(
                     announcement_signatures.try_into()?,

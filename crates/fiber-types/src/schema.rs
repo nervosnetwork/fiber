@@ -8,7 +8,6 @@
 //! | 33           | Payment_hash         | CkbInvoice Preimage         |
 //! | 34           | Payment_hash         | CkbInvoice Status           |
 //! | 35           | Payment_hash         | Invoice-created preimage marker |
-//! | 48           | Hash256              | PendingCommitDiff           |
 //! | 49           | Hash256              | SettlementData               |
 //! | 64           | Pubkey | Hash256     | ChannelState                |
 //! | 65           | OutPoint             | ChannelId                   |
@@ -30,7 +29,6 @@ pub const CKB_INVOICE_PREFIX: u8 = 32;
 pub const PREIMAGE_PREFIX: u8 = 33;
 pub const CKB_INVOICE_STATUS_PREFIX: u8 = 34;
 pub const INVOICE_PREIMAGE_PREFIX: u8 = 35;
-pub const PENDING_COMMIT_DIFF_PREFIX: u8 = 48;
 pub const CHANNEL_SHUTDOWN_SETTLEMENT_PREFIX: u8 = 49;
 pub const PUBKEY_CHANNEL_ID_PREFIX: u8 = 64;
 pub const CHANNEL_OUTPOINT_CHANNEL_ID_PREFIX: u8 = 65;
