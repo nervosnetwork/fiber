@@ -13559,6 +13559,238 @@ async fn test_external_funding_signed_submission_not_aborted_by_stale_timeout() 
     );
 }
 
+#[derive(Clone, Debug)]
+struct InjectExternalFundingInputMiddleware {
+    input_outpoint: ckb_types::packed::OutPoint,
+    cell_deps: ckb_types::packed::CellDepVec,
+}
+
+#[async_trait::async_trait]
+impl MockChainActorMiddleware for InjectExternalFundingInputMiddleware {
+    async fn handle(
+        &mut self,
+        _inner_self: ActorRef<CkbChainMessage>,
+        message: CkbChainMessage,
+        _state: &mut MockChainActorState,
+    ) -> Result<Option<CkbChainMessage>, ActorProcessingErr> {
+        match message {
+            CkbChainMessage::BuildUnsignedFundingTx {
+                mut funding_tx,
+                request,
+                funding_source_lock_script,
+                funding_source_lock_script_cell_deps,
+                funding_cell_lock_script,
+                reply,
+            } => {
+                let tx_builder = funding_tx
+                    .take()
+                    .map(|tx| tx.as_advanced_builder())
+                    .unwrap_or_default()
+                    .cell_deps(self.cell_deps.clone())
+                    .input(
+                        CellInput::new_builder()
+                            .previous_output(self.input_outpoint.clone())
+                            .build(),
+                    );
+                funding_tx.update_for_self(tx_builder.build());
+                Ok(Some(CkbChainMessage::BuildUnsignedFundingTx {
+                    funding_tx,
+                    request,
+                    funding_source_lock_script,
+                    funding_source_lock_script_cell_deps,
+                    funding_cell_lock_script,
+                    reply,
+                }))
+            }
+            _ => Ok(Some(message)),
+        }
+    }
+
+    fn clone_box(&self) -> Box<dyn MockChainActorMiddleware> {
+        Box::new(self.clone())
+    }
+}
+
+#[tokio::test]
+async fn test_external_funding_spent_input_automatically_aborts_stuck_channel_v1() {
+    do_test_external_funding_spent_input_automatically_aborts_stuck_channel(false).await;
+}
+
+#[tokio::test]
+async fn test_external_funding_spent_input_automatically_aborts_stuck_channel_v2() {
+    do_test_external_funding_spent_input_automatically_aborts_stuck_channel(true).await;
+}
+
+async fn do_test_external_funding_spent_input_automatically_aborts_stuck_channel(v2: bool) {
+    use crate::ckb::contracts::{get_cell_deps_by_contracts, get_script_by_contract};
+    use ckb_types::packed::CellOutput;
+
+    init_tracing();
+
+    let wallet_lock = get_script_by_contract(Contract::Secp256k1Lock, &b"ext-wallet-1674"[..]);
+    let wallet_cell_deps = get_cell_deps_by_contracts(vec![Contract::Secp256k1Lock])
+        .await
+        .expect("secp cell deps");
+
+    // Pre-create a live wallet cell on the mock chain so we can spend it in a self-transfer.
+    let funding_input_capacity: u64 = 200_000_000_000;
+    let seed_tx = TransactionView::new_advanced_builder()
+        .output(
+            CellOutput::new_builder()
+                .capacity(Capacity::shannons(funding_input_capacity).pack())
+                .lock(wallet_lock.clone())
+                .build(),
+        )
+        .output_data(Bytes::default())
+        .build();
+
+    let mut node_b = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .node_name(Some("ext-spent-node-b".to_string()))
+            .base_dir_prefix("test-ext-spent-node-b-")
+            .fiber_config_updater(|config| {
+                config.auto_accept_channel_ckb_funding_amount =
+                    Some(DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT);
+            })
+            .build(),
+    )
+    .await;
+
+    // Submit the seed transaction to obtain its outpoint, then wire it into node_a's mock builder.
+    assert!(matches!(
+        node_b.submit_tx(seed_tx.clone()).await,
+        TxStatus::Committed(..)
+    ));
+    let wallet_outpoint = seed_tx.output_pts_iter().next().expect("seed output");
+
+    let middleware = Box::new(InjectExternalFundingInputMiddleware {
+        input_outpoint: wallet_outpoint.clone(),
+        cell_deps: wallet_cell_deps.clone(),
+    });
+    let mut node_a = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .node_name(Some("ext-spent-node-a".to_string()))
+            .base_dir_prefix("test-ext-spent-node-a-")
+            .mock_chain_actor_middleware(middleware)
+            .build(),
+    )
+    .await;
+    // Register the same seed cell on node_a's mock chain state.
+    assert!(matches!(
+        node_a.submit_tx(seed_tx).await,
+        TxStatus::Committed(..)
+    ));
+
+    for node in [&mut node_a, &mut node_b] {
+        if !v2 {
+            let mut features = FeatureVector::default();
+            features.unset_channel_v2_optional();
+            features.unset_channel_v2_required();
+            node.update_node_features_and_wait(features).await;
+            call!(node.network_actor, |reply| {
+                NetworkActorMessage::new_command(NetworkActorCommand::TestEnableLegacyFixture(
+                    reply,
+                ))
+            })
+            .expect("node alive");
+        }
+    }
+    node_a.connect_to(&mut node_b).await;
+
+    let (channel_id, unsigned_tx) =
+        open_external_funding_channel(&node_a, &node_b, 100_000_000_000).await;
+    assert_eq!(
+        unsigned_tx.clone().into_view().input_pts_iter().next(),
+        Some(wallet_outpoint.clone()),
+        "unsigned funding tx should consume the wallet input"
+    );
+    let signed_tx = mock_sign_external_funding_tx(&unsigned_tx);
+
+    // Peer goes offline before submit_signed_funding_tx (#1674 follow-up reproduction).
+    node_b.stop().await;
+
+    let submit_message = |reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::SubmitSignedFundingTx {
+            channel_id,
+            signed_tx: signed_tx.clone(),
+            reply,
+        })
+    };
+    call!(node_a.network_actor, submit_message)
+        .expect("node_a alive")
+        .expect("signed funding tx submitted while peer offline");
+
+    let pending_state = node_a.get_channel_actor_state(channel_id);
+    assert!(matches!(
+        pending_state.state,
+        ChannelState::AwaitingTxSignatures(_)
+    ));
+    assert!(
+        pending_state
+            .ephemeral_config
+            .external_funding
+            .signed_submitted
+    );
+
+    // While the input is unspent, manual abandon and force shutdown remain rejected.
+    let abandon_message = |reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::AbandonChannel(channel_id, reply))
+    };
+    assert!(
+        call!(node_a.network_actor, abandon_message)
+            .expect("node_a alive")
+            .is_err(),
+        "abandon_channel must still be rejected while funding input is live"
+    );
+    assert!(
+        node_a.send_shutdown(channel_id, true).await.is_err(),
+        "force shutdown must still be rejected while funding tx is unconfirmed"
+    );
+
+    // External wallet spends its funding input in a self-transfer on-chain.
+    let self_transfer_tx = TransactionView::new_advanced_builder()
+        .cell_deps(wallet_cell_deps)
+        .input(
+            CellInput::new_builder()
+                .previous_output(wallet_outpoint)
+                .build(),
+        )
+        .output(
+            CellOutput::new_builder()
+                .capacity(Capacity::shannons(funding_input_capacity - 1000).pack())
+                .lock(wallet_lock)
+                .build(),
+        )
+        .output_data(Bytes::default())
+        .build();
+    assert!(matches!(
+        node_a.submit_tx(self_transfer_tx).await,
+        TxStatus::Committed(..)
+    ));
+
+    // Node A automatically observes the spent funding input and aborts the stuck channel.
+    node_a
+        .expect_event(|event| {
+            matches!(
+                event,
+                NetworkServiceEvent::ChannelFundingAborted(id) if *id == channel_id
+            )
+        })
+        .await;
+
+    assert!(
+        node_a
+            .get_channel_actor_state_unchecked(channel_id)
+            .is_none(),
+        "aborted channel state should be cleaned up after funding input double-spend"
+    );
+    let open_record = node_a
+        .store
+        .get_channel_open_record(&channel_id)
+        .expect("channel open record should be retained as failed");
+    assert_eq!(open_record.status, ChannelOpeningStatus::Failed);
+}
+
 #[tokio::test]
 async fn test_channel_stale_passive_wait_no_proactive_send() {
     init_tracing();

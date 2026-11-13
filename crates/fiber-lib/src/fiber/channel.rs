@@ -4499,6 +4499,25 @@ where
         }
     }
 
+    fn notify_external_funding_submitted(&self, state: &ChannelActorState) {
+        let watched_inputs = state
+            .must_get_funding_transaction()
+            .raw()
+            .inputs()
+            .into_iter()
+            .map(|input| input.previous_output())
+            .collect();
+        self.network
+            .send_message(NetworkActorMessage::new_event(
+                NetworkActorEvent::ExternalFundingTransactionSubmitted(
+                    state.must_get_funding_transaction_outpoint(),
+                    state.get_id(),
+                    watched_inputs,
+                ),
+            ))
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+    }
+
     async fn handle_external_funding_tx_sync(
         &self,
         myself: &ActorRef<ChannelActorMessage>,
@@ -4517,14 +4536,7 @@ where
                 if flags.contains(SigningCommitmentFlags::OUR_COMMITMENT_SIGNED_SENT)
         );
         self.install_external_funding_signed_tx(state, signed_tx, already_sent_commitment);
-        self.network
-            .send_message(NetworkActorMessage::new_event(
-                NetworkActorEvent::ExternalFundingTransactionSubmitted(
-                    state.must_get_funding_transaction_outpoint(),
-                    state.get_id(),
-                ),
-            ))
-            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        self.notify_external_funding_submitted(state);
         if !already_sent_commitment {
             self.handle_commitment_signed_command(myself, state).await?;
         } else if let ChannelState::SigningCommitment(flags) = state.state {
@@ -4621,14 +4633,7 @@ where
                 "Cannot release signed funding tx without a local commitment".to_string(),
             ));
         }
-        self.network
-            .send_message(NetworkActorMessage::new_event(
-                NetworkActorEvent::ExternalFundingTransactionSubmitted(
-                    state.must_get_funding_transaction_outpoint(),
-                    state.get_id(),
-                ),
-            ))
-            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        self.notify_external_funding_submitted(state);
         self.network
             .send_message(NetworkActorMessage::new_command(
                 NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
@@ -4790,8 +4795,13 @@ where
             }
             ChannelEvent::Stop(reason) => {
                 debug_event!(self.network, "ChannelActorStopped");
+                let onchain_funding_failed = reason == StopReason::FundingFailed
+                    && state.funding_tx_confirmed_at.is_none()
+                    && !state.is_ready()
+                    && !state.is_closed();
                 if (reason == StopReason::Abandon || reason.is_abort_funding())
                     && state.ephemeral_config.external_funding.signed_submitted
+                    && !onchain_funding_failed
                 {
                     warn!(
                         "Ignoring funding abort for channel {}: signed external funding tx may still confirm",
@@ -4893,14 +4903,7 @@ where
                 if state.ephemeral_config.external_funding.signed_submitted
                     && state.funding_tx_confirmed_at.is_none()
                 {
-                    self.network
-                        .send_message(NetworkActorMessage::new_event(
-                            NetworkActorEvent::ExternalFundingTransactionSubmitted(
-                                state.must_get_funding_transaction_outpoint(),
-                                state.get_id(),
-                            ),
-                        ))
-                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                    self.notify_external_funding_submitted(state);
                 }
                 self.finalize_closed_retryable_tlc_operations(myself, state)
                     .await;
@@ -5988,14 +5991,7 @@ where
         if state.ephemeral_config.external_funding.signed_submitted
             && state.funding_tx_confirmed_at.is_none()
         {
-            self.network
-                .send_message(NetworkActorMessage::new_event(
-                    NetworkActorEvent::ExternalFundingTransactionSubmitted(
-                        state.must_get_funding_transaction_outpoint(),
-                        state.get_id(),
-                    ),
-                ))
-                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+            self.notify_external_funding_submitted(state);
         }
         // A forward dispatched before the process exit has no in-memory result left, and
         // reestablishment does not replay it. Resolve it from the persisted downstream link.

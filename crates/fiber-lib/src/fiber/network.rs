@@ -1388,8 +1388,8 @@ pub enum NetworkActorEvent {
     FundingTransactionPending(Transaction, OutPoint, Hash256),
 
     /// An externally signed funding transaction was released to the peer. Watch
-    /// for confirmation without broadcasting it before signatures are complete.
-    ExternalFundingTransactionSubmitted(OutPoint, Hash256),
+    /// for confirmation or input double-spends without broadcasting it before signatures are complete.
+    ExternalFundingTransactionSubmitted(OutPoint, Hash256, Vec<OutPoint>),
 
     /// A funding transaction has been confirmed. The transaction was included in the
     /// block with the given transaction index, and the timestamp in the block header.
@@ -2011,12 +2011,17 @@ where
                     .on_funding_transaction_pending(channel_id, transaction, outpoint)
                     .await;
             }
-            NetworkActorEvent::ExternalFundingTransactionSubmitted(outpoint, channel_id) => {
+            NetworkActorEvent::ExternalFundingTransactionSubmitted(
+                outpoint,
+                channel_id,
+                watched_inputs,
+            ) => {
                 state.pending_channels.insert(outpoint.clone(), channel_id);
                 if let Err(err) = state
                     .trace_tx(
                         outpoint.tx_hash().into(),
                         InFlightCkbTxKind::Funding(channel_id),
+                        watched_inputs,
                     )
                     .await
                 {
@@ -5805,8 +5810,13 @@ where
             )),
         };
 
+        let watched_inputs: Vec<OutPoint> = funding_tx.input_pts_iter().collect();
         state
-            .trace_tx(tx_hash, InFlightCkbTxKind::Funding(channel_id))
+            .trace_tx(
+                tx_hash,
+                InFlightCkbTxKind::Funding(channel_id),
+                watched_inputs,
+            )
             .await?;
 
         myself
@@ -6687,9 +6697,14 @@ where
         &mut self,
         tx_hash: Hash256,
         tx_kind: InFlightCkbTxKind,
+        watched_inputs: Vec<OutPoint>,
     ) -> crate::Result<()> {
-        if self.inflight_tracers.contains_key(&tx_hash) {
-            debug!("Skipping duplicate tracer for tx {:?}", tx_hash);
+        if let Some(existing) = self.inflight_tracers.get(&tx_hash) {
+            if !watched_inputs.is_empty() {
+                existing.send_message(InFlightCkbTxActorMessage::WatchInputs(watched_inputs))?;
+            } else {
+                debug!("Skipping duplicate tracer for tx {:?}", tx_hash);
+            }
             return Ok(());
         }
         let handler = InFlightCkbTxActor {
@@ -6704,7 +6719,10 @@ where
         let (actor_ref, _) = Actor::spawn_linked(
             None,
             handler,
-            InFlightCkbTxActorArguments { transaction: None },
+            InFlightCkbTxActorArguments {
+                transaction: None,
+                watched_inputs,
+            },
             self.network.get_cell(),
         )
         .await?;
@@ -6747,11 +6765,18 @@ where
             confirmations: CKB_TX_TRACING_CONFIRMATIONS,
         };
 
+        let watched_inputs = if matches!(handler.tx_kind, InFlightCkbTxKind::Funding(_)) {
+            tx.input_pts_iter().collect()
+        } else {
+            Vec::new()
+        };
+
         let (actor_ref, _) = Actor::spawn_linked(
             None,
             handler,
             InFlightCkbTxActorArguments {
                 transaction: Some(tx),
+                watched_inputs,
             },
             self.network.get_cell(),
         )

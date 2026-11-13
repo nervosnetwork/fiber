@@ -205,20 +205,35 @@ impl MockContext {
 // mock chain actor.
 struct TraceTxReplier {
     tx_hash: Hash256,
+    mask: CkbTxTracingMask,
+    watched_inputs: Vec<OutPoint>,
 }
 
 impl TraceTxReplier {
-    pub fn new(tx_hash: Hash256) -> Self {
-        Self { tx_hash }
+    pub fn new(tx_hash: Hash256, mask: CkbTxTracingMask, watched_inputs: Vec<OutPoint>) -> Self {
+        Self {
+            tx_hash,
+            mask,
+            watched_inputs,
+        }
     }
+}
+
+#[derive(Clone, Debug)]
+pub enum MockTxNotification {
+    Tx(CkbTxTracingResult),
+    ConsumedInputs {
+        spending_tx_hash: Hash256,
+        inputs: Vec<OutPoint>,
+    },
 }
 
 #[async_trait::async_trait]
 impl Actor for TraceTxReplier {
     type Msg = CkbTxTracingResult;
     type Arguments = (
-        Arc<OutputPort<CkbTxTracingResult>>,
-        Duration,
+        Arc<OutputPort<MockTxNotification>>,
+        Option<Duration>,
         RpcReplyPort<CkbTxTracingResult>,
     );
     type State = Option<RpcReplyPort<CkbTxTracingResult>>;
@@ -228,18 +243,44 @@ impl Actor for TraceTxReplier {
         myself: ActorRef<Self::Msg>,
         (notifier, timeout, reply_port): Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
-        let tx_hash = self.tx_hash;
-        myself.send_after(timeout, move || CkbTxTracingResult {
-            tx_hash,
-            tx_status: TxStatus::Unknown,
-        });
+        if let Some(timeout) = timeout {
+            let tx_hash = self.tx_hash;
+            myself.send_after(timeout, move || CkbTxTracingResult {
+                tx_hash,
+                tx_status: TxStatus::Unknown,
+            });
+        }
 
         let tx_hash = self.tx_hash;
-        notifier.subscribe(myself, move |notification| {
-            if notification.tx_hash == tx_hash {
-                Some(notification)
-            } else {
-                None
+        let mask = self.mask;
+        let watched_inputs = self.watched_inputs.clone();
+        notifier.subscribe(myself, move |notification| match notification {
+            MockTxNotification::Tx(tx_notification) => {
+                if tx_notification.tx_hash == tx_hash
+                    && mask.contains((&tx_notification.tx_status).into())
+                {
+                    Some(tx_notification)
+                } else {
+                    None
+                }
+            }
+            MockTxNotification::ConsumedInputs {
+                spending_tx_hash,
+                inputs,
+            } => {
+                if spending_tx_hash != tx_hash
+                    && mask.contains(CkbTxTracingMask::Rejected)
+                    && watched_inputs.iter().any(|w| inputs.contains(w))
+                {
+                    Some(CkbTxTracingResult {
+                        tx_hash,
+                        tx_status: TxStatus::Rejected(
+                            "Funding input spent by another committed transaction".to_string(),
+                        ),
+                    })
+                } else {
+                    None
+                }
             }
         });
         Ok(Some(reply_port))
@@ -278,7 +319,7 @@ pub trait MockChainActorMiddleware: Send + std::fmt::Debug {
 pub struct MockChainState {
     pub txs: HashMap<Hash256, GetTxResponse>,
     pub tx_tracing_tasks: HashMap<Hash256, Vec<ActorRef<CkbTxTracingResult>>>,
-    pub tx_notifications: Arc<OutputPort<CkbTxTracingResult>>,
+    pub tx_notifications: Arc<OutputPort<MockTxNotification>>,
     pub cell_status: HashMap<OutPoint, CellStatus>,
     pub indexer_cells: Vec<ckb_sdk::rpc::ckb_indexer::Cell>,
 }
@@ -343,19 +384,21 @@ impl MockChainActor {
     pub async fn start_trace_tx_replier(
         &self,
         myself: ActorRef<CkbChainMessage>,
-        tx_hash: Hash256,
-        notifier: Arc<OutputPort<CkbTxTracingResult>>,
-        timeout: Duration,
-        reply_port: RpcReplyPort<CkbTxTracingResult>,
-    ) {
-        let _ = Actor::spawn_linked(
+        tracer: CkbTxTracer,
+        notifier: Arc<OutputPort<MockTxNotification>>,
+        timeout: Option<Duration>,
+    ) -> ActorRef<CkbTxTracingResult> {
+        let tx_hash = tracer.tx_hash;
+        let replier = TraceTxReplier::new(tx_hash, tracer.mask, tracer.watched_inputs);
+        let (actor, _) = Actor::spawn_linked(
             None,
-            TraceTxReplier::new(tx_hash),
-            (notifier, timeout, reply_port),
+            replier,
+            (notifier, timeout, tracer.callback),
             myself.get_cell(),
         )
         .await
         .expect("start trace tx replier");
+        actor
     }
 }
 #[async_trait::async_trait]
@@ -632,12 +675,23 @@ impl Actor for MockChainActor {
                     "Transaction verification result: tx {:?}, status: {:?}",
                     &tx, &tx_status
                 );
-                let tx_hash = tx.hash().into();
+                let tx_hash: Hash256 = tx.hash().into();
+                let consumed_inputs: Vec<OutPoint> = tx.input_pts_iter().collect();
                 let mut state_guard = state.shared.write().unwrap();
-                state_guard.tx_notifications.send(CkbTxTracingResult {
-                    tx_hash,
-                    tx_status: tx_status.clone(),
-                });
+                state_guard
+                    .tx_notifications
+                    .send(MockTxNotification::Tx(CkbTxTracingResult {
+                        tx_hash,
+                        tx_status: tx_status.clone(),
+                    }));
+                if matches!(tx_status, TxStatus::Committed(..)) && !consumed_inputs.is_empty() {
+                    state_guard
+                        .tx_notifications
+                        .send(MockTxNotification::ConsumedInputs {
+                            spending_tx_hash: tx_hash,
+                            inputs: consumed_inputs,
+                        });
+                }
                 state_guard.txs.insert(
                     tx_hash,
                     GetTxResponse {
@@ -656,10 +710,17 @@ impl Actor for MockChainActor {
 
             CreateTxTracer(tracer) => {
                 debug!("Tracing transaction: {:?}", &tracer);
-                let (maybe_tx, notifications) = {
+                let (maybe_tx, input_already_spent, notifications) = {
                     let guard = state.shared.read().unwrap();
+                    let maybe_tx = guard.txs.get(&tracer.tx_hash).cloned();
+                    let input_already_spent = maybe_tx.is_none()
+                        && tracer.mask.contains(CkbTxTracingMask::Rejected)
+                        && tracer.watched_inputs.iter().any(|input| {
+                            guard.cell_status.get(input) == Some(&CellStatus::Consumed)
+                        });
                     (
-                        guard.txs.get(&tracer.tx_hash).cloned(),
+                        maybe_tx,
+                        input_already_spent,
                         guard.tx_notifications.clone(),
                     )
                 };
@@ -671,17 +732,33 @@ impl Actor for MockChainActor {
                             tx_status: tx.tx_status.clone(),
                         });
                     }
+                    None if input_already_spent => {
+                        let _ = tracer.callback.send(CkbTxTracingResult {
+                            tx_hash: tracer.tx_hash,
+                            tx_status: TxStatus::Rejected(
+                                "Funding input spent by another committed transaction".to_string(),
+                            ),
+                        });
+                    }
                     // The transaction is not found in the tx_status, we need to wait for the
                     // tx notification from the mock chain actor.
                     None => {
-                        self.start_trace_tx_replier(
-                            myself,
-                            tracer.tx_hash,
-                            notifications,
-                            Duration::from_millis(TRACE_TX_WAITING_FOR_NOTIFICATION_MS),
-                            tracer.callback,
-                        )
-                        .await;
+                        let timeout = tracer
+                            .mask
+                            .contains(CkbTxTracingMask::Unknown)
+                            .then_some(Duration::from_millis(TRACE_TX_WAITING_FOR_NOTIFICATION_MS));
+                        let tx_hash = tracer.tx_hash;
+                        let actor = self
+                            .start_trace_tx_replier(myself, tracer, notifications, timeout)
+                            .await;
+                        state
+                            .shared
+                            .write()
+                            .unwrap()
+                            .tx_tracing_tasks
+                            .entry(tx_hash)
+                            .or_default()
+                            .push(actor);
                     }
                 };
             }
@@ -834,6 +911,7 @@ pub async fn trace_tx(mock_actor: ActorRef<CkbChainMessage>, tx_hash: Hash256) -
             tx_hash,
             confirmations: 1,
             mask: CkbTxTracingMask::Committed,
+            watched_inputs: Vec::new(),
             callback,
         })
     };

@@ -56,10 +56,12 @@ const ACTOR_HANDLE_WARN_THRESHOLD_MS: u64 = 15_000;
 
 pub struct InFlightCkbTxActorArguments {
     pub transaction: Option<TransactionView>,
+    pub watched_inputs: Vec<OutPoint>,
 }
 
 pub struct InFlightCkbTxActorState {
     transaction: Option<TransactionView>,
+    watched_inputs: Vec<OutPoint>,
     result: Option<CkbTxTracingResult>,
 }
 
@@ -75,6 +77,8 @@ pub enum InternalMessage {
 pub enum InFlightCkbTxActorMessage {
     /// Send the transaction. The actor may start with only tx tracer first.
     SendTx(TransactionView),
+    /// Register funding inputs to watch for double-spends while the tx is unbroadcast.
+    WatchInputs(Vec<OutPoint>),
     /// Message for the actor itself
     Internal(InternalMessage),
 }
@@ -93,8 +97,19 @@ where
         _myself: ActorRef<Self::Msg>,
         args: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
+        let mut watched_inputs = args.watched_inputs;
+        if matches!(self.tx_kind, InFlightCkbTxKind::Funding(_)) {
+            if let Some(tx) = args.transaction.as_ref() {
+                for input in tx.input_pts_iter() {
+                    if !watched_inputs.contains(&input) {
+                        watched_inputs.push(input);
+                    }
+                }
+            }
+        }
         Ok(InFlightCkbTxActorState {
             transaction: args.transaction,
+            watched_inputs,
             result: None,
         })
     }
@@ -137,12 +152,25 @@ where
                 // ignore if the tx has does not match
                 if tx_hash == self.tx_hash {
                     let should_send_tx = state.transaction.is_none();
+                    if matches!(self.tx_kind, InFlightCkbTxKind::Funding(_)) {
+                        self.register_watched_inputs(
+                            &myself,
+                            state,
+                            tx.input_pts_iter().collect(),
+                        )?;
+                    }
                     state.transaction = Some(tx);
                     if should_send_tx {
                         self.send_tx_interval(myself).await?;
                     }
                 } else {
                     tracing::error!("expected tx hash {}, got {}", self.tx_hash, tx_hash);
+                }
+                Ok(())
+            }
+            InFlightCkbTxActorMessage::WatchInputs(inputs) => {
+                if matches!(self.tx_kind, InFlightCkbTxKind::Funding(_)) {
+                    self.register_watched_inputs(&myself, state, inputs)?;
                 }
                 Ok(())
             }
@@ -164,6 +192,53 @@ where
         8000
     }
 
+    fn spawn_tracer(
+        &self,
+        myself: &ActorRef<InFlightCkbTxActorMessage>,
+        watched_inputs: Vec<OutPoint>,
+    ) -> Result<(), ActorProcessingErr> {
+        let tracing_request = |tx| {
+            CkbChainMessage::CreateTxTracer(CkbTxTracer {
+                tx_hash: self.tx_hash,
+                confirmations: self.confirmations,
+                mask: CkbTxTracingMask::Committed | CkbTxTracingMask::Rejected,
+                watched_inputs,
+                callback: tx,
+            })
+        };
+
+        self.chain_actor.call_and_forward(
+            tracing_request,
+            myself,
+            |tracing_result| {
+                InFlightCkbTxActorMessage::Internal(InternalMessage::ReportTracingResult(
+                    tracing_result,
+                ))
+            },
+            None,
+        )?;
+        Ok(())
+    }
+
+    fn register_watched_inputs(
+        &self,
+        myself: &ActorRef<InFlightCkbTxActorMessage>,
+        state: &mut InFlightCkbTxActorState,
+        inputs: Vec<OutPoint>,
+    ) -> Result<(), ActorProcessingErr> {
+        let mut added = false;
+        for input in inputs {
+            if !state.watched_inputs.contains(&input) {
+                state.watched_inputs.push(input);
+                added = true;
+            }
+        }
+        if added && state.result.is_none() {
+            self.spawn_tracer(myself, state.watched_inputs.clone())?;
+        }
+        Ok(())
+    }
+
     async fn start(
         &self,
         myself: ActorRef<InFlightCkbTxActorMessage>,
@@ -177,25 +252,7 @@ where
             state.transaction.is_some(),
         );
         // start tx tracer
-        let tracing_request = |tx| {
-            CkbChainMessage::CreateTxTracer(CkbTxTracer {
-                tx_hash: self.tx_hash,
-                confirmations: self.confirmations,
-                mask: CkbTxTracingMask::Committed | CkbTxTracingMask::Rejected,
-                callback: tx,
-            })
-        };
-
-        self.chain_actor.call_and_forward(
-            tracing_request,
-            &myself,
-            |tracing_result| {
-                InFlightCkbTxActorMessage::Internal(InternalMessage::ReportTracingResult(
-                    tracing_result,
-                ))
-            },
-            None,
-        )?;
+        self.spawn_tracer(&myself, state.watched_inputs.clone())?;
 
         if state.transaction.is_some() {
             self.send_tx_interval(myself).await?;

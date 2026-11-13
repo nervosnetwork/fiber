@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use bitmask_enum::bitmask;
 use ckb_sdk::RpcError;
-use ckb_types::core::tx_pool::TxStatus;
+use ckb_types::{core::tx_pool::TxStatus, packed::OutPoint, prelude::*};
 use ractor::{concurrency::Duration, Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
 
 use crate::ckb::config::new_ckb_rpc_async_client;
@@ -11,6 +11,8 @@ use fiber_types::Hash256;
 use super::jsonrpc_types_convert::tx_status_from_json;
 
 const SYNTHETIC_REJECT_REASON: &str = "Transaction rejected when submitting";
+const FUNDING_INPUT_SPENT_REJECT_REASON: &str =
+    "Funding input spent by another committed transaction";
 
 /// CKB's `PoolRejectedRBF`: another transaction in the pool spends an input of this one.
 pub(crate) fn is_pool_conflict_code(code: i64) -> bool {
@@ -93,6 +95,7 @@ pub struct CkbTxTracer {
     pub tx_hash: Hash256,
     pub confirmations: u64,
     pub mask: CkbTxTracingMask,
+    pub watched_inputs: Vec<OutPoint>,
     pub callback: RpcReplyPort<CkbTxTracingResult>,
 }
 
@@ -101,6 +104,7 @@ struct CkbTxTracersForTheSameTx {
     last_status: TxStatus,
     last_block: u64,
     tracers: Vec<CkbTxTracer>,
+    watched_inputs: Vec<OutPoint>,
     send_tx_error: Option<RpcError>,
 }
 
@@ -110,6 +114,7 @@ impl Default for CkbTxTracersForTheSameTx {
             last_status: TxStatus::Unknown,
             last_block: 0,
             tracers: Default::default(),
+            watched_inputs: Default::default(),
             send_tx_error: None,
         }
     }
@@ -189,7 +194,7 @@ impl Actor for CkbTxTracingActor {
 struct TracingTask {
     actor: ActorRef<CkbTxTracingMessage>,
     rpc_url: String,
-    tx_hashes: Vec<Hash256>,
+    targets: Vec<(Hash256, Vec<OutPoint>)>,
 }
 
 impl CkbTxTracingState {
@@ -200,10 +205,18 @@ impl CkbTxTracingState {
     ) -> Result<(), ActorProcessingErr> {
         let tx_hash = tracer.tx_hash;
         let tx_tracers = self.tracers.entry(tx_hash).or_default();
+        let mut added_watched_input = false;
+        for input in &tracer.watched_inputs {
+            if !tx_tracers.watched_inputs.contains(input) {
+                tx_tracers.watched_inputs.push(input.clone());
+                added_watched_input = true;
+            }
+        }
         tx_tracers.tracers.push(tracer);
 
-        if tx_tracers.tracers.len() == 1 {
-            // If there's no existing tracer for the tx, trigger the tracing task now
+        if tx_tracers.tracers.len() == 1 || added_watched_input {
+            // If there's no existing tracer for the tx (or new watched inputs were registered),
+            // trigger the tracing task now.
             self.run_tracers(myself, Some(vec![tx_hash])).await?
         }
 
@@ -223,12 +236,26 @@ impl CkbTxTracingState {
         myself: ActorRef<CkbTxTracingMessage>,
         tx_hashes: Option<Vec<Hash256>>,
     ) -> Result<(), ActorProcessingErr> {
-        let tx_hashes = tx_hashes.unwrap_or_else(|| self.tracers.keys().cloned().collect());
-        if !tx_hashes.is_empty() {
+        let targets: Vec<(Hash256, Vec<OutPoint>)> = match tx_hashes {
+            Some(tx_hashes) => tx_hashes
+                .into_iter()
+                .filter_map(|tx_hash| {
+                    self.tracers
+                        .get(&tx_hash)
+                        .map(|entry| (tx_hash, entry.watched_inputs.clone()))
+                })
+                .collect(),
+            None => self
+                .tracers
+                .iter()
+                .map(|(tx_hash, entry)| (*tx_hash, entry.watched_inputs.clone()))
+                .collect(),
+        };
+        if !targets.is_empty() {
             let task = TracingTask {
                 actor: myself,
                 rpc_url: self.rpc_url.clone(),
-                tx_hashes,
+                targets,
             };
             task.spawn();
         }
@@ -346,15 +373,29 @@ impl TracingTask {
         let ckb_client = new_ckb_rpc_async_client(&self.rpc_url);
         let tip_block_number: u64 = ckb_client.get_tip_block_number().await?.into();
 
-        for tx_hash in self.tx_hashes {
+        for (tx_hash, watched_inputs) in self.targets {
             match ckb_client.get_transaction(tx_hash.into()).await {
                 Ok(response_opt) => {
-                    let result = response_opt
+                    let mut result = response_opt
                         .map(|response| CkbTxTracingResult {
                             tx_hash,
                             tx_status: tx_status_from_json(response.tx_status),
                         })
                         .unwrap_or_else(|| CkbTxTracingResult::unknown(tx_hash));
+
+                    if matches!(result.tx_status, TxStatus::Unknown)
+                        && !watched_inputs.is_empty()
+                        && Self::any_watched_input_spent_by_other_tx(
+                            &ckb_client,
+                            tx_hash,
+                            &watched_inputs,
+                        )
+                        .await
+                    {
+                        result.tx_status =
+                            TxStatus::Rejected(FUNDING_INPUT_SPENT_REJECT_REASON.to_string());
+                    }
+
                     let _ = self
                         .actor
                         .send_message(CkbTxTracingMessage::report_tracing_result(
@@ -369,5 +410,78 @@ impl TracingTask {
         }
 
         Ok(())
+    }
+
+    async fn any_watched_input_spent_by_other_tx(
+        ckb_client: &ckb_sdk::CkbRpcAsyncClient,
+        tx_hash: Hash256,
+        watched_inputs: &[OutPoint],
+    ) -> bool {
+        for input in watched_inputs {
+            let live_cell = match ckb_client.get_live_cell(input.clone().into(), false).await {
+                Ok(cell) => cell,
+                Err(err) => {
+                    tracing::warn!(
+                        "Failed to query live cell {:?} for traced tx {}: {:?}",
+                        input,
+                        tx_hash,
+                        err
+                    );
+                    continue;
+                }
+            };
+            if live_cell.cell.is_some() || live_cell.status == "live" {
+                continue;
+            }
+
+            // Confirm the parent transaction creating this input is actually committed
+            // on-chain (rather than still unconfirmed or rolled back), so a missing live
+            // cell proves it was consumed by a committed transaction.
+            let prev_tx_hash: ckb_types::H256 = input.tx_hash().unpack();
+            let prev_committed = match ckb_client.get_transaction(prev_tx_hash).await {
+                Ok(Some(prev_tx)) => {
+                    matches!(
+                        tx_status_from_json(prev_tx.tx_status),
+                        TxStatus::Committed(..)
+                    )
+                }
+                Ok(None) => false,
+                Err(err) => {
+                    tracing::warn!(
+                        "Failed to query input parent tx {:x} for traced tx {}: {:?}",
+                        input.tx_hash(),
+                        tx_hash,
+                        err
+                    );
+                    false
+                }
+            };
+            if !prev_committed {
+                continue;
+            }
+
+            // Re-check the traced transaction itself to avoid racing with the funding
+            // transaction being the very transaction that just consumed `input`.
+            match ckb_client.get_transaction(tx_hash.into()).await {
+                Ok(Some(response)) => {
+                    if !matches!(tx_status_from_json(response.tx_status), TxStatus::Unknown) {
+                        return false;
+                    }
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    tracing::warn!(
+                        "Failed to re-verify traced tx {} after observing spent input {:?}: {:?}",
+                        tx_hash,
+                        input,
+                        err
+                    );
+                    return false;
+                }
+            }
+
+            return true;
+        }
+        false
     }
 }

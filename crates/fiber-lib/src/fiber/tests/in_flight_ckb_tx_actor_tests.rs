@@ -245,6 +245,7 @@ async fn spawn_test_actors_with(
         },
         InFlightCkbTxActorArguments {
             transaction: Some(tx),
+            watched_inputs: Vec::new(),
         },
     )
     .await
