@@ -136,10 +136,21 @@ Ordinary restart from the same database image retains Ready/ShuttingDown state a
 its exact durable signing intents, so the normal reconciliation/replay path still
 works. There is no peer-audit unquarantine path for an old channel.
 
-The V2-only database epoch is `20261113000001`. Older databases and nonempty
-unversioned databases are refused without conversion, clearing or version stamping.
-Before upgrading, close all channels with the old binary, complete settlement,
-back up the data and start the new binary with an empty database.
+The V2-only database epoch is `20261113000001`. Migration from the recognized
+`20260925120000` layout uses the published `fiber-types 0.10.0-rc1` types and the
+current V2 session type to decode develop's appended session field. The full-hash
+contract flag alone does not establish that a channel speaks V2. Migration never
+creates a missing signing session or re-signs a transaction.
+
+Preflight checks all records before writing. Unfinished V1 channels, settlement,
+delivery and legacy watchtower obligations require the old binary to finish;
+rejection preserves records and the version. Valid V2 channels are converted
+without changing their signing intents or replay history. Fully completed V1
+records and indexes are archived byte-for-byte and never restored as actors.
+Each archive move is atomic; interrupted upgrades recognize already-converted V2
+records and archived V1 records on retry. Back up the complete data directory
+before confirming the migration. Unknown layouts (including unpublished PR
+intermediate epochs), corrupt records and nonempty unversioned stores are refused.
 
 The shared `fiber_types::channel_v2_validation::decode_channel_actor_data` codec
 requires an exact current record, feature byte `1` and a V2 session marker. It

@@ -45,6 +45,8 @@ pub const HOLD_TLC_PREFIX: u8 = 197;
 // A shared prefix for watchtower and channel store
 pub const WATCHTOWER_TLC_SETTLED_PREFIX: u8 = 200;
 pub const CHANNEL_OPEN_RECORD_PREFIX: u8 = 201;
+/// Original keys and bytes of safely retired V1 records; never loaded by the V2 runtime.
+pub const ARCHIVED_V1_PREFIX: u8 = 240;
 #[cfg(feature = "watchtower")]
 mod watchtower {
     pub const WATCHTOWER_CHANNEL_PREFIX: u8 = 224;

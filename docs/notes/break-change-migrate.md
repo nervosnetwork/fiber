@@ -2,7 +2,7 @@
 
 # Fiber Breaking Change Migration Guide
 
-> Historical guide for old releases only. The V2-only release cannot migrate these databases: close channels with the old binary, back up the data, and use a new empty database. See the [current upgrade instructions](../../README.md#upgrading-to-the-v2-only-release).
+> Historical guide for old releases only. These older layouts must first be upgraded with their matching old migration tools. The V2-only release can then migrate the recognized layout if all unfinished channels are V2; unfinished V1 work must finish with the old binary. See the [current upgrade instructions](../../README.md#upgrading-to-the-v2-only-release).
 
 ## Why
 

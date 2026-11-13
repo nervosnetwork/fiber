@@ -57,11 +57,13 @@ The full CLI reference is available in [../crates/fiber-cli/README.md](../crates
 
 ## Upgrading to the V2-only image
 
-This release does not migrate databases from older images. While still running
-the old image, close all channels and wait for payments and on-chain settlement
-to finish. Stop the container and back up its complete mounted data directory.
+Stop the container and back up its complete mounted data directory. The new image
+can migrate the recognized old database layout in the same mount without closing
+V2 channels. Migration refuses unfinished V1 channels, settlement or legacy
+watchtower work before changing records or the database version. Use the old
+image to finish that work, then retry with the new image.
 
-Start the new image with a new empty database directory or a fresh bind mount;
-do not reuse an old store or delete data that may still be needed to recover
-funds. Historical `fnn-migrate` binaries cannot convert a database into this
-release. See the [upgrade instructions](../README.md#upgrading-to-the-v2-only-release).
+Completed V1 history is archived without deletion, and V2 signing sessions are
+preserved. Do not run an old image against the migrated store or restore stale
+channel data after new commitments have been signed. See the
+[upgrade instructions](../README.md#upgrading-to-the-v2-only-release).

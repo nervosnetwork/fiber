@@ -33,6 +33,11 @@ impl DbMigrate {
         self.migrations.auto_migrate(store, confirm_fn, progress_fn)
     }
 
+    /// Check migration eligibility without writing data or changing its version.
+    pub fn preflight<S: StorageBackend>(&self, store: &S) -> Result<(), MigrateError> {
+        self.migrations.preflight(store)
+    }
+
     /// Check database version ordering (for external queries).
     pub fn check<S: StorageBackend>(&self, store: &S) -> std::cmp::Ordering {
         self.migrations.check(store)
