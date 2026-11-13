@@ -259,6 +259,7 @@ async fn non_unknown_poll_clears_send_tx_error() {
     actor.stop(None);
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[tokio::test]
 async fn watched_input_spent_by_committed_tx_reports_rejected_after_confirmations() {
     use ckb_types::packed::OutPoint;
