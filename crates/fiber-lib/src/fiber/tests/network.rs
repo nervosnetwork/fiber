@@ -2972,10 +2972,10 @@ impl MockChainActorMiddleware for CkbTxFailureMockMiddleware {
     ) -> Result<Option<CkbChainMessage>, ActorProcessingErr> {
         match message {
             CkbChainMessage::CreateTxTracer(tracer) => {
-                let _ = tracer.callback.send(CkbTxTracingResult {
-                    tx_hash: tracer.tx_hash,
-                    tx_status: TxStatus::Rejected("mock".to_string()),
-                });
+                let _ = tracer.callback.send(CkbTxTracingResult::new(
+                    tracer.tx_hash,
+                    TxStatus::Rejected("mock".to_string()),
+                ));
                 Ok(None)
             }
             _ => Ok(Some(message)),

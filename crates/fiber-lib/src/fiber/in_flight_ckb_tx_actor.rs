@@ -395,14 +395,15 @@ where
             }
             (InFlightCkbTxKind::Funding(_channel_id), status) => {
                 tracing::error!(
-                    "Funding transaction {:?} failed to be confirmed with final status {:?}",
+                    "Funding transaction {:?} failed to be confirmed with final status {:?} (watched_input_spent={})",
                     self.tx_hash,
-                    status
+                    status,
+                    result.watched_input_spent,
                 );
-                NetworkActorEvent::FundingTransactionFailed(OutPoint::new(
-                    self.tx_hash.into(),
-                    DUMMY_FUNDING_TX_INDEX,
-                ))
+                NetworkActorEvent::FundingTransactionFailed {
+                    outpoint: OutPoint::new(self.tx_hash.into(), DUMMY_FUNDING_TX_INDEX),
+                    input_spent: result.watched_input_spent,
+                }
             }
             (
                 InFlightCkbTxKind::Closing(pubkey, channel_id, force_closing),

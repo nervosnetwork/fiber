@@ -245,10 +245,7 @@ impl Actor for TraceTxReplier {
     ) -> Result<Self::State, ActorProcessingErr> {
         if let Some(timeout) = timeout {
             let tx_hash = self.tx_hash;
-            myself.send_after(timeout, move || CkbTxTracingResult {
-                tx_hash,
-                tx_status: TxStatus::Unknown,
-            });
+            myself.send_after(timeout, move || CkbTxTracingResult::unknown(tx_hash));
         }
 
         let tx_hash = self.tx_hash;
@@ -272,12 +269,7 @@ impl Actor for TraceTxReplier {
                     && mask.contains(CkbTxTracingMask::Rejected)
                     && watched_inputs.iter().any(|w| inputs.contains(w))
                 {
-                    Some(CkbTxTracingResult {
-                        tx_hash,
-                        tx_status: TxStatus::Rejected(
-                            "Funding input spent by another committed transaction".to_string(),
-                        ),
-                    })
+                    Some(CkbTxTracingResult::watched_input_spent(tx_hash))
                 } else {
                     None
                 }
@@ -680,10 +672,10 @@ impl Actor for MockChainActor {
                 let mut state_guard = state.shared.write().unwrap();
                 state_guard
                     .tx_notifications
-                    .send(MockTxNotification::Tx(CkbTxTracingResult {
+                    .send(MockTxNotification::Tx(CkbTxTracingResult::new(
                         tx_hash,
-                        tx_status: tx_status.clone(),
-                    }));
+                        tx_status.clone(),
+                    )));
                 if matches!(tx_status, TxStatus::Committed(..)) && !consumed_inputs.is_empty() {
                     state_guard
                         .tx_notifications
@@ -727,18 +719,15 @@ impl Actor for MockChainActor {
 
                 match maybe_tx {
                     Some(tx) => {
-                        let _ = tracer.callback.send(CkbTxTracingResult {
-                            tx_hash: tracer.tx_hash,
-                            tx_status: tx.tx_status.clone(),
-                        });
+                        let _ = tracer.callback.send(CkbTxTracingResult::new(
+                            tracer.tx_hash,
+                            tx.tx_status.clone(),
+                        ));
                     }
                     None if input_already_spent => {
-                        let _ = tracer.callback.send(CkbTxTracingResult {
-                            tx_hash: tracer.tx_hash,
-                            tx_status: TxStatus::Rejected(
-                                "Funding input spent by another committed transaction".to_string(),
-                            ),
-                        });
+                        let _ = tracer
+                            .callback
+                            .send(CkbTxTracingResult::watched_input_spent(tracer.tx_hash));
                     }
                     // The transaction is not found in the tx_status, we need to wait for the
                     // tx notification from the mock chain actor.

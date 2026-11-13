@@ -142,10 +142,7 @@ async fn unknown_poll_with_permanent_send_tx_error_reports_rejected() {
         .expect("create tracer");
     actor
         .send_message(CkbTxTracingMessage::report_tracing_result(
-            CkbTxTracingResult {
-                tx_hash,
-                tx_status: TxStatus::Pending,
-            },
+            CkbTxTracingResult::new(tx_hash, TxStatus::Pending),
             100,
         ))
         .expect("report pending");
@@ -209,10 +206,7 @@ async fn non_unknown_poll_clears_send_tx_error() {
         .expect("create tracer");
     actor
         .send_message(CkbTxTracingMessage::report_tracing_result(
-            CkbTxTracingResult {
-                tx_hash,
-                tx_status: TxStatus::Pending,
-            },
+            CkbTxTracingResult::new(tx_hash, TxStatus::Pending),
             100,
         ))
         .expect("report pending");
@@ -224,10 +218,7 @@ async fn non_unknown_poll_clears_send_tx_error() {
         .expect("report send tx error");
     actor
         .send_message(CkbTxTracingMessage::report_tracing_result(
-            CkbTxTracingResult {
-                tx_hash,
-                tx_status: TxStatus::Pending,
-            },
+            CkbTxTracingResult::new(tx_hash, TxStatus::Pending),
             101,
         ))
         .expect("report pending again");
@@ -276,14 +267,18 @@ async fn watched_input_spent_by_committed_tx_reports_rejected_after_confirmation
 
     let tip = Arc::new(AtomicU64::new(100));
     let cell_spent = Arc::new(AtomicBool::new(false));
+    let fail_live_cell_rpc = Arc::new(AtomicBool::new(false));
     let funding_committed = Arc::new(AtomicBool::new(false));
+    let rpc_requests = Arc::new(AtomicU64::new(0));
 
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
 
     let tip_srv = tip.clone();
     let cell_spent_srv = cell_spent.clone();
+    let fail_live_cell_rpc_srv = fail_live_cell_rpc.clone();
     let funding_committed_srv = funding_committed.clone();
+    let rpc_requests_srv = rpc_requests.clone();
     let parent_hex = format!("{:#x}", ckb_types::H256::from(parent_tx_hash));
     let funding_hex = format!("{:#x}", ckb_types::H256::from(funding_tx_hash));
 
@@ -291,7 +286,9 @@ async fn watched_input_spent_by_committed_tx_reports_rejected_after_confirmation
         while let Ok((mut socket, _)) = listener.accept().await {
             let tip_srv = tip_srv.clone();
             let cell_spent_srv = cell_spent_srv.clone();
+            let fail_live_cell_rpc_srv = fail_live_cell_rpc_srv.clone();
             let funding_committed_srv = funding_committed_srv.clone();
+            let rpc_requests_srv = rpc_requests_srv.clone();
             let parent_hex = parent_hex.clone();
             let funding_hex = funding_hex.clone();
             tokio::spawn(async move {
@@ -306,6 +303,24 @@ async fn watched_input_spent_by_committed_tx_reports_rejected_after_confirmation
                     serde_json::from_str(&req[body_start..]).unwrap_or_default();
                 let id = json.get("id").cloned().unwrap_or(serde_json::Value::Null);
                 let method = json.get("method").and_then(|m| m.as_str()).unwrap_or("");
+                if method == "get_live_cell" && fail_live_cell_rpc_srv.load(Ordering::SeqCst) {
+                    let resp_body = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "error": { "code": -32603, "message": "transient rpc failure" }
+                    })
+                    .to_string();
+                    let header = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n";
+                    let http_resp = format!(
+                        "{}Content-Length: {}\r\n\r\n{}",
+                        header,
+                        resp_body.len(),
+                        resp_body
+                    );
+                    let _ = socket.write_all(http_resp.as_bytes()).await;
+                    rpc_requests_srv.fetch_add(1, Ordering::SeqCst);
+                    return;
+                }
                 let result = match method {
                     "get_tip_block_number" => {
                         serde_json::json!(format!("{:#x}", tip_srv.load(Ordering::SeqCst)))
@@ -385,16 +400,31 @@ async fn watched_input_spent_by_committed_tx_reports_rejected_after_confirmation
                     resp_body
                 );
                 let _ = socket.write_all(http_resp.as_bytes()).await;
+                rpc_requests_srv.fetch_add(1, Ordering::SeqCst);
             });
         }
     });
+
+    let wait_for_rpcs = |target: u64| {
+        let rpc_requests = rpc_requests.clone();
+        async move {
+            timeout(TokioDuration::from_secs(2), async move {
+                while rpc_requests.load(Ordering::SeqCst) < target {
+                    tokio::time::sleep(TokioDuration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("mock CKB server should receive expected RPC calls");
+            tokio::time::sleep(TokioDuration::from_millis(20)).await;
+        }
+    };
 
     let (actor, _handle) = Actor::spawn(
         None,
         CkbTxTracingActor::new(),
         CkbTxTracingArguments {
             rpc_url: format!("http://{}", addr),
-            polling_interval: Duration::from_millis(30),
+            polling_interval: Duration::from_secs(3600),
         },
     )
     .await
@@ -410,18 +440,29 @@ async fn watched_input_spent_by_committed_tx_reports_rejected_after_confirmation
             callback: RpcReplyPort::from(send),
         }))
         .expect("create tracer");
+    // Initial CreateTracer triggers 1 poll: tip + get_tx(funding) + get_live_cell = 3 RPCs.
+    wait_for_rpcs(3).await;
 
     // Input is still live: advancing tip must not reject the unknown funding tx.
     tip.store(110, Ordering::SeqCst);
-    tokio::time::sleep(TokioDuration::from_millis(80)).await;
+    let before = rpc_requests.load(Ordering::SeqCst);
+    actor
+        .send_message(CkbTxTracingMessage::run_tracers())
+        .expect("run tracers");
+    wait_for_rpcs(before + 3).await;
     assert!(
         recv.try_recv().is_err(),
         "live input must keep unknown funding tx pending"
     );
 
     // Spend the input in another committed tx at tip 110; callback must wait until tip >= 114.
+    // Spent poll performs 5 RPCs: tip + get_tx(funding) + get_live_cell + get_tx(parent) + re-check get_tx(funding).
     cell_spent.store(true, Ordering::SeqCst);
-    tokio::time::sleep(TokioDuration::from_millis(80)).await;
+    let before = rpc_requests.load(Ordering::SeqCst);
+    actor
+        .send_message(CkbTxTracingMessage::run_tracers())
+        .expect("run tracers");
+    wait_for_rpcs(before + 5).await;
     assert!(
         recv.try_recv().is_err(),
         "spent input rejection must wait for confirmations"
@@ -430,22 +471,52 @@ async fn watched_input_spent_by_committed_tx_reports_rejected_after_confirmation
     // Shallow reorg restores the live cell before 4 confirmations: must reset and not fire.
     cell_spent.store(false, Ordering::SeqCst);
     tip.store(115, Ordering::SeqCst);
-    tokio::time::sleep(TokioDuration::from_millis(80)).await;
+    let before = rpc_requests.load(Ordering::SeqCst);
+    actor
+        .send_message(CkbTxTracingMessage::run_tracers())
+        .expect("run tracers");
+    wait_for_rpcs(before + 3).await;
     assert!(
         recv.try_recv().is_err(),
         "reorg restoring live cell must cancel pending rejection"
     );
 
-    // Spend again at tip 120 and advance to 124 (4 confirmations).
+    // Spend again at tip 120; inject a transient RPC failure at tip 122 and verify it does
+    // not reset `last_block = 120`, so reaching tip 124 (124 - 120 == 4) still fires on time.
     cell_spent.store(true, Ordering::SeqCst);
     tip.store(120, Ordering::SeqCst);
-    tokio::time::sleep(TokioDuration::from_millis(80)).await;
-    tip.store(124, Ordering::SeqCst);
+    let before = rpc_requests.load(Ordering::SeqCst);
+    actor
+        .send_message(CkbTxTracingMessage::run_tracers())
+        .expect("run tracers");
+    wait_for_rpcs(before + 5).await;
 
-    let result = timeout(TokioDuration::from_secs(1), recv)
+    fail_live_cell_rpc.store(true, Ordering::SeqCst);
+    tip.store(122, Ordering::SeqCst);
+    let before = rpc_requests.load(Ordering::SeqCst);
+    actor
+        .send_message(CkbTxTracingMessage::run_tracers())
+        .expect("run tracers");
+    wait_for_rpcs(before + 3).await;
+    assert!(
+        recv.try_recv().is_err(),
+        "transient RPC failure at tip 122 should neither fire early nor reset last_block"
+    );
+
+    fail_live_cell_rpc.store(false, Ordering::SeqCst);
+    tip.store(124, Ordering::SeqCst);
+    actor
+        .send_message(CkbTxTracingMessage::run_tracers())
+        .expect("run tracers");
+
+    let result = timeout(TokioDuration::from_secs(2), recv)
         .await
-        .expect("spent watched input should reject after confirmations")
+        .expect("spent watched input should reject at tip 124 without resetting at tip 122")
         .expect("receive tracing result");
+    assert!(
+        result.watched_input_spent,
+        "result must carry watched_input_spent=true"
+    );
     assert!(
         matches!(result.tx_status, TxStatus::Rejected(ref msg) if msg.contains("Funding input spent")),
         "unexpected tracing status: {:?}",

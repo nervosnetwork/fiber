@@ -291,7 +291,10 @@ async fn permanent_send_tx_error_on_unknown_tx_emits_funding_transaction_failed(
         .expect("network event channel open");
     assert!(matches!(
         event,
-        NetworkActorEvent::FundingTransactionFailed(_)
+        NetworkActorEvent::FundingTransactionFailed {
+            input_spent: false,
+            ..
+        }
     ));
     assert_eq!(send_tx_calls.load(Ordering::SeqCst), 1);
     assert!(report_calls.load(Ordering::SeqCst) >= 1);
@@ -335,7 +338,10 @@ async fn a_pool_conflict_fails_a_funding_at_once() {
         .expect("network event channel open");
     assert!(matches!(
         event,
-        NetworkActorEvent::FundingTransactionFailed(_)
+        NetworkActorEvent::FundingTransactionFailed {
+            input_spent: false,
+            ..
+        }
     ));
     assert_eq!(send_tx_calls.load(Ordering::SeqCst), 1);
 }

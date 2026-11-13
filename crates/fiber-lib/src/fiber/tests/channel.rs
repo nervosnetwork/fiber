@@ -13747,6 +13747,29 @@ async fn do_test_external_funding_spent_input_automatically_aborts_stuck_channel
         "force shutdown must still be rejected while funding tx is unconfirmed"
     );
 
+    // Non-double-spend funding failures (e.g. pool rejection or send-tx error) must NOT abort
+    // the channel once signed_submitted is true, and must keep the input-spend watcher armed.
+    let funding_outpoint = pending_state
+        .get_funding_transaction_outpoint()
+        .expect("funding outpoint exists");
+    node_a
+        .network_actor
+        .send_message(NetworkActorMessage::new_event(
+            NetworkActorEvent::FundingTransactionFailed {
+                outpoint: funding_outpoint,
+                input_spent: false,
+            },
+        ))
+        .expect("node_a alive");
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    assert!(
+        matches!(
+            node_a.get_channel_actor_state(channel_id).state,
+            ChannelState::AwaitingTxSignatures(_)
+        ),
+        "non-double-spend FundingTransactionFailed must not abort signed external funding channel"
+    );
+
     // External wallet spends its funding input in a self-transfer on-chain.
     let self_transfer_tx = TransactionView::new_advanced_builder()
         .cell_deps(wallet_cell_deps)

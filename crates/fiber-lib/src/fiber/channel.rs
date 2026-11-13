@@ -4795,13 +4795,13 @@ where
             }
             ChannelEvent::Stop(reason) => {
                 debug_event!(self.network, "ChannelActorStopped");
-                let onchain_funding_failed = reason == StopReason::FundingFailed
+                let funding_input_spent_onchain = reason == StopReason::FundingInputSpent
                     && state.funding_tx_confirmed_at.is_none()
                     && !state.is_ready()
                     && !state.is_closed();
                 if (reason == StopReason::Abandon || reason.is_abort_funding())
                     && state.ephemeral_config.external_funding.signed_submitted
-                    && !onchain_funding_failed
+                    && !funding_input_spent_onchain
                 {
                     warn!(
                         "Ignoring funding abort for channel {}: signed external funding tx may still confirm",
@@ -4825,14 +4825,19 @@ where
                     }
                     if let Some(detail) = reason.funding_abort_detail() {
                         state.funding_abort_detail = Some(detail.to_string());
+                    } else if reason == StopReason::FundingInputSpent {
+                        state.funding_abort_detail = Some(format!(
+                            "[Channel {}] Funding input spent by another committed transaction",
+                            state.get_id()
+                        ));
                     }
                     // Do not send local diagnostics to the peer. The detailed reason is
                     // retained for the local RPC/history path, while the wire message is
                     // deliberately stable and public-safe.
                     let public_abort_message = match reason {
-                        StopReason::FundingFailed | StopReason::FundingFailedWithDetail(_) => {
-                            "Funding failed"
-                        }
+                        StopReason::FundingFailed
+                        | StopReason::FundingInputSpent
+                        | StopReason::FundingFailedWithDetail(_) => "Funding failed",
                         StopReason::AbortFunding | StopReason::AbortFundingWithDetail(_) => {
                             "Funding aborted"
                         }
@@ -6437,6 +6442,7 @@ pub enum StopReason {
     AbortFunding,
     AbortFundingWithDetail(String),
     FundingFailed,
+    FundingInputSpent,
     FundingFailedWithDetail(String),
     Closed,
     PeerDisConnected,
@@ -6449,6 +6455,7 @@ impl StopReason {
             StopReason::AbortFunding
                 | StopReason::AbortFundingWithDetail(_)
                 | StopReason::FundingFailed
+                | StopReason::FundingInputSpent
                 | StopReason::FundingFailedWithDetail(_)
         )
     }

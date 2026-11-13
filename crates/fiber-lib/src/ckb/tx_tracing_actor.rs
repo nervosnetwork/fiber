@@ -44,13 +44,27 @@ pub(crate) fn is_permanent_send_tx_error(err: &RpcError) -> bool {
 pub struct CkbTxTracingResult {
     pub tx_hash: Hash256,
     pub tx_status: TxStatus,
+    pub watched_input_spent: bool,
 }
 
 impl CkbTxTracingResult {
-    pub fn unknown(tx_hash: Hash256) -> Self {
+    pub fn new(tx_hash: Hash256, tx_status: TxStatus) -> Self {
         Self {
             tx_hash,
-            tx_status: TxStatus::Unknown,
+            tx_status,
+            watched_input_spent: false,
+        }
+    }
+
+    pub fn unknown(tx_hash: Hash256) -> Self {
+        Self::new(tx_hash, TxStatus::Unknown)
+    }
+
+    pub fn watched_input_spent(tx_hash: Hash256) -> Self {
+        Self {
+            tx_hash,
+            tx_status: TxStatus::Rejected(FUNDING_INPUT_SPENT_REJECT_REASON.to_string()),
+            watched_input_spent: true,
         }
     }
 }
@@ -102,6 +116,7 @@ pub struct CkbTxTracer {
 #[derive(Debug)]
 struct CkbTxTracersForTheSameTx {
     last_status: TxStatus,
+    last_watched_input_spent: bool,
     last_block: u64,
     tracers: Vec<CkbTxTracer>,
     watched_inputs: Vec<OutPoint>,
@@ -112,6 +127,7 @@ impl Default for CkbTxTracersForTheSameTx {
     fn default() -> Self {
         Self {
             last_status: TxStatus::Unknown,
+            last_watched_input_spent: false,
             last_block: 0,
             tracers: Default::default(),
             watched_inputs: Default::default(),
@@ -142,7 +158,7 @@ pub enum CkbTxTracingMessage {
 }
 
 impl CkbTxTracingMessage {
-    fn run_tracers() -> Self {
+    pub(crate) fn run_tracers() -> Self {
         Self::Internal(InternalMessage::RunTracers)
     }
 
@@ -297,21 +313,26 @@ impl CkbTxTracingState {
             tx_tracers.send_tx_error = None;
         }
 
-        let synthesized_rejection = matches!(polled_status, TxStatus::Unknown)
+        let synthesized_rejection = !result.watched_input_spent
+            && matches!(polled_status, TxStatus::Unknown)
             && tx_tracers
                 .send_tx_error
                 .as_ref()
                 .is_some_and(is_permanent_send_tx_error);
 
-        let tx_status = if synthesized_rejection {
-            TxStatus::Rejected(SYNTHETIC_REJECT_REASON.to_string())
+        let (tx_status, watched_input_spent) = if synthesized_rejection {
+            (
+                TxStatus::Rejected(SYNTHETIC_REJECT_REASON.to_string()),
+                false,
+            )
         } else {
-            polled_status.clone()
+            (polled_status.clone(), result.watched_input_spent)
         };
 
         let effective_result = CkbTxTracingResult {
             tx_hash: result.tx_hash,
             tx_status: tx_status.clone(),
+            watched_input_spent,
         };
 
         if let Some(tip_block_number) = tip_block_number {
@@ -322,13 +343,17 @@ impl CkbTxTracingState {
                 }
                 _ => {
                     // Otherwise, use tip block number when first entered this status
-                    if tx_tracers.last_block == 0 || tx_status != tx_tracers.last_status {
+                    if tx_tracers.last_block == 0
+                        || tx_status != tx_tracers.last_status
+                        || watched_input_spent != tx_tracers.last_watched_input_spent
+                    {
                         tx_tracers.last_block = tip_block_number
                     }
                 }
             }
         }
         tx_tracers.last_status = tx_status.clone();
+        tx_tracers.last_watched_input_spent = watched_input_spent;
 
         let last_block = tx_tracers.last_block;
         let has_enough_confirmations = |tracer: &CkbTxTracer| {
@@ -377,23 +402,32 @@ impl TracingTask {
             match ckb_client.get_transaction(tx_hash.into()).await {
                 Ok(response_opt) => {
                     let mut result = response_opt
-                        .map(|response| CkbTxTracingResult {
-                            tx_hash,
-                            tx_status: tx_status_from_json(response.tx_status),
+                        .map(|response| {
+                            CkbTxTracingResult::new(
+                                tx_hash,
+                                tx_status_from_json(response.tx_status),
+                            )
                         })
                         .unwrap_or_else(|| CkbTxTracingResult::unknown(tx_hash));
 
-                    if matches!(result.tx_status, TxStatus::Unknown)
-                        && !watched_inputs.is_empty()
-                        && Self::any_watched_input_spent_by_other_tx(
+                    if matches!(result.tx_status, TxStatus::Unknown) && !watched_inputs.is_empty() {
+                        match Self::any_watched_input_spent_by_other_tx(
                             &ckb_client,
                             tx_hash,
                             &watched_inputs,
                         )
                         .await
-                    {
-                        result.tx_status =
-                            TxStatus::Rejected(FUNDING_INPUT_SPENT_REJECT_REASON.to_string());
+                        {
+                            Ok(true) => {
+                                result = CkbTxTracingResult::watched_input_spent(tx_hash);
+                            }
+                            Ok(false) => {}
+                            Err(_) => {
+                                // Skip reporting this poll so transient RPC failures do not
+                                // reset `last_status` / `last_block` confirmation progress.
+                                continue;
+                            }
+                        }
                     }
 
                     let _ = self
@@ -416,7 +450,8 @@ impl TracingTask {
         ckb_client: &ckb_sdk::CkbRpcAsyncClient,
         tx_hash: Hash256,
         watched_inputs: &[OutPoint],
-    ) -> bool {
+    ) -> Result<bool, RpcError> {
+        let mut transient_err: Option<RpcError> = None;
         for input in watched_inputs {
             let live_cell = match ckb_client.get_live_cell(input.clone().into(), false).await {
                 Ok(cell) => cell,
@@ -427,6 +462,7 @@ impl TracingTask {
                         tx_hash,
                         err
                     );
+                    transient_err.get_or_insert(err);
                     continue;
                 }
             };
@@ -453,7 +489,8 @@ impl TracingTask {
                         tx_hash,
                         err
                     );
-                    false
+                    transient_err.get_or_insert(err);
+                    continue;
                 }
             };
             if !prev_committed {
@@ -465,7 +502,7 @@ impl TracingTask {
             match ckb_client.get_transaction(tx_hash.into()).await {
                 Ok(Some(response)) => {
                     if !matches!(tx_status_from_json(response.tx_status), TxStatus::Unknown) {
-                        return false;
+                        return Ok(false);
                     }
                 }
                 Ok(None) => {}
@@ -476,12 +513,15 @@ impl TracingTask {
                         input,
                         err
                     );
-                    return false;
+                    return Err(err);
                 }
             }
 
-            return true;
+            return Ok(true);
         }
-        false
+        if let Some(err) = transient_err {
+            return Err(err);
+        }
+        Ok(false)
     }
 }
