@@ -12,6 +12,10 @@ use tokio::{
 };
 use tracing::info;
 
+#[cfg(test)]
+#[path = "tests/control_server.rs"]
+mod control_server_tests;
+
 #[derive(Debug, Parser)]
 #[command(
     name = "fiber-lsp-sdk-agent",
@@ -109,15 +113,19 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Bind the test control server before initialize so wait.sh / Bruno can
+    // Bind the control server before initialize so wait.sh / Bruno can
     // connect while the agent retries tenant registration against node RPC.
     let (control_tx, mut control_rx) = mpsc::channel::<ControlRequest>(4);
     let (control, mut shutdown_rx) = match (args.control_addr, status_file) {
         (Some(address), Some(status_file)) => {
+            let listener = TcpListener::bind(&address)
+                .await
+                .with_context(|| format!("bind control server at {address}"))?;
+            info!(%address, "control server ready");
             let (shutdown_tx, shutdown_rx) = oneshot::channel();
             (
                 Some(tokio::spawn(run_control_server(
-                    address,
+                    listener,
                     status_file,
                     control_tx,
                     shutdown_tx,
@@ -129,10 +137,7 @@ async fn main() -> Result<()> {
         (None, _) => (None, None),
     };
     if !initialize_with_retry(&mut agent, &mut shutdown_rx).await? {
-        if let Some(control) = control {
-            control.abort();
-        }
-        return Ok(());
+        return finish_control_server(control).await;
     }
 
     agent
@@ -148,7 +153,7 @@ async fn main() -> Result<()> {
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => break,
-            _ = wait_for_shutdown(&mut shutdown_rx) => break,
+            _ = wait_for_shutdown(&mut shutdown_rx) => return finish_control_server(control).await,
             Some((request, reply)) = control_rx.recv() => {
                 let result = match request {
                     ControlCommand::Open(request) => open_request(&mut agent, *request, &args.contracts_dir, &args.ckb_rpc)
@@ -252,21 +257,40 @@ async fn wait_for_shutdown(receiver: &mut Option<oneshot::Receiver<()>>) {
     }
 }
 
+// The shutdown receiver wakes both for POST /shutdown and when the control
+// task dies. Inspect the task result so a failure cannot become a successful
+// agent exit, including while tenant initialization is still retrying.
+async fn finish_control_server(control: Option<tokio::task::JoinHandle<Result<()>>>) -> Result<()> {
+    if let Some(control) = control {
+        control
+            .await
+            .context("control server task failed")?
+            .context("control server failed")?;
+    }
+    Ok(())
+}
+
+// Connection errors affect only that client. Listener failures propagate to
+// main as errors; an explicit shutdown request returns Ok(()).
 async fn run_control_server(
-    address: String,
+    listener: TcpListener,
     status_file: PathBuf,
     control_tx: mpsc::Sender<ControlRequest>,
     shutdown: oneshot::Sender<()>,
 ) -> Result<()> {
-    let listener = TcpListener::bind(&address)
-        .await
-        .with_context(|| format!("bind test control server at {address}"))?;
-    info!(%address, "test control server ready");
     let mut shutdown = Some(shutdown);
     loop {
-        let (stream, _) = listener.accept().await?;
-        if handle_control_connection(stream, &status_file, &control_tx, &mut shutdown).await? {
-            return Ok(());
+        let stream = match listener.accept().await {
+            Ok((stream, _)) => stream,
+            Err(error) => {
+                tracing::error!("control server accept failed: {error}");
+                return Err(error).context("accept control connection");
+            }
+        };
+        match handle_control_connection(stream, &status_file, &control_tx, &mut shutdown).await {
+            Ok(true) => return Ok(()),
+            Ok(false) => {}
+            Err(error) => tracing::debug!("control connection failed: {error:#}"),
         }
     }
 }
@@ -278,6 +302,11 @@ async fn handle_control_connection(
     shutdown: &mut Option<oneshot::Sender<()>>,
 ) -> Result<bool> {
     let request = read_http_request(&mut stream).await?;
+    // wait.sh uses nc -z: it connects and closes without sending HTTP. There
+    // is nothing to answer, and writing a 404 to that socket may fail.
+    if request.is_empty() {
+        return Ok(false);
+    }
     let (status, body, should_shutdown) = if request.starts_with("GET /status ") {
         match tokio::fs::read(status_file).await {
             Ok(body) => ("200 OK", body, false),
