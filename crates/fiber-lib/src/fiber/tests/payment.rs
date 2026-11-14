@@ -257,7 +257,7 @@ fn test_attempt(
     now: u64,
 ) -> Attempt {
     Attempt {
-        execution_id: None,
+        upstream_tlc_key: None,
         id,
         hash: payment_hash,
         try_limit: 3,
@@ -308,7 +308,7 @@ fn test_sender_side_trampoline_retry_does_not_reuse_visible_route_amount() {
         },
     ];
     let mut attempt = Attempt {
-        execution_id: None,
+        upstream_tlc_key: None,
         id: 1,
         hash: payment_hash,
         try_limit: 3,
@@ -844,7 +844,7 @@ async fn test_receive_payment_rejects_oversized_custom_records() {
                 channel_id: channels[0],
                 command: ChannelCommand::AddTlc(
                     AddTlcCommand {
-                        execution_id: None,
+                        upstream_tlc_key: None,
                         amount,
                         hash_algorithm,
                         payment_hash,
@@ -5552,12 +5552,12 @@ async fn check_payer_onchain_execution(hosted: bool) {
             incoming_channel_id: gen_rand_sha256_hash(),
             incoming_tlc_id: 7,
         };
-        key.execution_id = Some(scope);
+        key.upstream_tlc_key = Some(scope);
         let mut scoped = original.clone();
-        scoped.request.execution_id = Some(scope);
+        scoped.request.upstream_tlc_key = Some(scope);
         node_0.store.insert_payment_session(scoped);
         for mut attempt in original.attempts().cloned() {
-            attempt.execution_id = Some(scope);
+            attempt.upstream_tlc_key = Some(scope);
             node_0.store.insert_attempt(attempt);
         }
         let mut channel = node_0.get_channel_actor_state(channels[0]);
@@ -5565,7 +5565,7 @@ async fn check_payer_onchain_execution(hosted: bool) {
             .tlc_state
             .get_mut(&offered_tlc_id)
             .unwrap()
-            .execution_id = Some(scope);
+            .upstream_tlc_key = Some(scope);
         node_0
             .update_channel_actor_state(
                 channel,
@@ -6982,7 +6982,7 @@ async fn test_payee_mpp_invoice_paid_from_onchain_preimages_across_channels() {
                     channel_id,
                     command: ChannelCommand::AddTlc(
                         AddTlcCommand {
-                            execution_id: None,
+                            upstream_tlc_key: None,
                             amount: 10_000,
                             hash_algorithm,
                             payment_hash,
@@ -8306,7 +8306,7 @@ async fn test_shutdown_with_pending_tlc() {
                 channel_id: channels[0],
                 command: ChannelCommand::AddTlc(
                     AddTlcCommand {
-                        execution_id: None,
+                        upstream_tlc_key: None,
                         amount: 1000,
                         hash_algorithm,
                         payment_hash,
@@ -8473,7 +8473,7 @@ async fn test_payment_onion_invoice_udt_type_script_mismatch_fails() {
                 channel_id: channels[0],
                 command: ChannelCommand::AddTlc(
                     AddTlcCommand {
-                        execution_id: None,
+                        upstream_tlc_key: None,
                         amount,
                         hash_algorithm,
                         payment_hash,
@@ -8579,7 +8579,7 @@ async fn test_payment_onion_invoice_hash_algorithm_mismatch_fails() {
                 channel_id: channels[0],
                 command: ChannelCommand::AddTlc(
                     AddTlcCommand {
-                        execution_id: None,
+                        upstream_tlc_key: None,
                         amount,
                         hash_algorithm: tlc_hash_algorithm,
                         payment_hash,
@@ -8710,7 +8710,7 @@ async fn test_forward_payment_rejects_mismatched_hash_algorithm_between_wire_and
                 channel_id: channels[0],
                 command: ChannelCommand::AddTlc(
                     AddTlcCommand {
-                        execution_id: None,
+                        upstream_tlc_key: None,
                         amount: source_amount,
                         hash_algorithm: wire_hash_algorithm,
                         payment_hash,
@@ -10164,7 +10164,7 @@ async fn test_payment_with_payment_data_record() {
                 channel_id: channels[0],
                 command: ChannelCommand::AddTlc(
                     AddTlcCommand {
-                        execution_id: None,
+                        upstream_tlc_key: None,
                         amount: 10000000000,
                         hash_algorithm,
                         payment_hash,
@@ -10266,7 +10266,7 @@ async fn test_payment_with_insufficient_total_amount() {
                 channel_id: channels[0],
                 command: ChannelCommand::AddTlc(
                     AddTlcCommand {
-                        execution_id: None,
+                        upstream_tlc_key: None,
                         amount: 10000000000,
                         hash_algorithm,
                         payment_hash,
@@ -10472,7 +10472,7 @@ async fn test_payment_with_wrong_payment_secret() {
                 channel_id: channels[0],
                 command: ChannelCommand::AddTlc(
                     AddTlcCommand {
-                        execution_id: None,
+                        upstream_tlc_key: None,
                         amount: 10000000000,
                         hash_algorithm,
                         payment_hash,
@@ -10583,7 +10583,7 @@ async fn test_payment_with_insufficient_amount_with_payment_data() {
                 channel_id: channels[0],
                 command: ChannelCommand::AddTlc(
                     AddTlcCommand {
-                        execution_id: None,
+                        upstream_tlc_key: None,
                         amount: 9000000000,
                         hash_algorithm,
                         payment_hash,
@@ -10689,7 +10689,7 @@ async fn test_payment_with_insufficient_amount_without_payment_data() {
                 channel_id: channels[0],
                 command: ChannelCommand::AddTlc(
                     AddTlcCommand {
-                        execution_id: None,
+                        upstream_tlc_key: None,
                         amount: 9000000000,
                         hash_algorithm,
                         payment_hash,

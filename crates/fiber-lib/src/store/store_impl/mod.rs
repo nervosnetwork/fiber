@@ -1699,7 +1699,7 @@ impl NetworkGraphStateStore for Store {
 
         iter.filter_map(|(_key, value)| {
             let session: PaymentSession = deserialize_from(&value, "PaymentSession");
-            if session.request.execution_id.is_some() {
+            if session.request.upstream_tlc_key.is_some() {
                 return None;
             }
             match status {
@@ -1723,7 +1723,7 @@ impl NetworkGraphStateStore for Store {
         batch.commit();
         // Public payment subscriptions are hash-addressed. Hosted internal
         // sessions must not publish outcomes as an unrelated ordinary payment.
-        if session_clone.request.execution_id.is_none() {
+        if session_clone.request.upstream_tlc_key.is_none() {
             self.notify(StoreChange::PutPaymentSession {
                 payment_hash,
                 payment_session: session_clone,
@@ -1772,7 +1772,7 @@ impl NetworkGraphStateStore for Store {
         }
 
         batch.commit();
-        if attempt.execution_id.is_none() {
+        if attempt.upstream_tlc_key.is_none() {
             self.notify(StoreChange::PutAttempt {
                 payment_hash: attempt.payment_hash,
                 attempt_status: attempt.status,
@@ -1858,7 +1858,7 @@ impl NetworkGraphStateStore for Store {
                         .ok()?,
                 );
 
-                let execution_id = match attempt_id_start - payment_hash_end {
+                let upstream_tlc_key = match attempt_id_start - payment_hash_end {
                     0 => None,
                     40 => Some(UpstreamTlcKey {
                         incoming_channel_id: key_slice[payment_hash_end..payment_hash_end + 32]
@@ -1875,7 +1875,7 @@ impl NetworkGraphStateStore for Store {
                 let attempt = self.get_attempt(
                     PaymentSessionKey {
                         payment_hash,
-                        execution_id,
+                        upstream_tlc_key,
                     },
                     attempt_id,
                 )?;

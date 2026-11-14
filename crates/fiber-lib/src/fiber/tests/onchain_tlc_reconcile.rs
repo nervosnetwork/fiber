@@ -147,7 +147,7 @@ fn tlc_info(
     hash_algorithm: HashAlgorithm,
 ) -> TlcInfo {
     TlcInfo {
-        execution_id: None,
+        upstream_tlc_key: None,
         status,
         tlc_id,
         amount: 1000,

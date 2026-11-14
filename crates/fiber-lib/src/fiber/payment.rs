@@ -369,7 +369,7 @@ impl SendPaymentDataBuilder {
             dry_run: self.dry_run,
             trampoline_hops: self.trampoline_hops,
             trampoline_context: self.trampoline_context,
-            execution_id: None,
+            upstream_tlc_key: None,
         })
     }
 }
@@ -1110,7 +1110,7 @@ where
 
     #[instrument(
         skip(self, myself, state, command),
-        fields(payment_hash = ?state.session_key.payment_hash, execution_id = ?state.session_key.execution_id)
+        fields(payment_hash = ?state.session_key.payment_hash, upstream_tlc_key = ?state.session_key.upstream_tlc_key)
     )]
     pub async fn handle_command(
         &self,
@@ -1669,7 +1669,7 @@ where
                     SendOnionPacketCommand {
                         peeled_onion_packet,
                         previous_tlc: None,
-                        execution_id: attempt.execution_id,
+                        upstream_tlc_key: attempt.upstream_tlc_key,
                         payment_hash: attempt.payment_hash,
                         attempt_id: Some(attempt.id),
                     },

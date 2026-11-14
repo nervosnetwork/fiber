@@ -28,14 +28,14 @@ pub struct PaymentSessionKey {
     /// The actual hashlock, unchanged in invoices, onions and channel messages.
     pub payment_hash: Hash256,
     /// Absent for ordinary payments and ordinary trampoline forwarding.
-    pub execution_id: Option<UpstreamTlcKey>,
+    pub upstream_tlc_key: Option<UpstreamTlcKey>,
 }
 
 impl From<Hash256> for PaymentSessionKey {
     fn from(payment_hash: Hash256) -> Self {
         Self {
             payment_hash,
-            execution_id: None,
+            upstream_tlc_key: None,
         }
     }
 }
@@ -43,7 +43,7 @@ impl From<Hash256> for PaymentSessionKey {
 impl std::fmt::Display for PaymentSessionKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.payment_hash)?;
-        if let Some(id) = self.execution_id {
+        if let Some(id) = self.upstream_tlc_key {
             write!(f, ":{}:{}", id.incoming_channel_id, id.incoming_tlc_id)?;
         }
         Ok(())
@@ -55,7 +55,7 @@ impl PaymentSessionKey {
     /// prefix scans must filter by the complete key, not just the hash prefix.
     pub fn storage_bytes(self) -> Vec<u8> {
         let mut bytes = self.payment_hash.as_ref().to_vec();
-        if let Some(id) = self.execution_id {
+        if let Some(id) = self.upstream_tlc_key {
             bytes.extend_from_slice(id.incoming_channel_id.as_ref());
             bytes.extend_from_slice(&id.incoming_tlc_id.to_le_bytes());
         }
@@ -714,7 +714,7 @@ pub struct Attempt {
     pub last_updated_at: u64,
     pub last_error: Option<String>,
     /// Local execution scope; None preserves ordinary hash-only payments.
-    pub execution_id: Option<UpstreamTlcKey>,
+    pub upstream_tlc_key: Option<UpstreamTlcKey>,
 }
 
 impl std::fmt::Debug for Attempt {
@@ -742,7 +742,7 @@ impl Attempt {
     pub fn session_key(&self) -> PaymentSessionKey {
         PaymentSessionKey {
             payment_hash: self.payment_hash,
-            execution_id: self.execution_id,
+            upstream_tlc_key: self.upstream_tlc_key,
         }
     }
 
@@ -944,7 +944,7 @@ pub struct SendPaymentData {
     #[serde(default)]
     pub trampoline_context: Option<TrampolineContext>,
     /// Local execution scope; None preserves ordinary hash-only payments.
-    pub execution_id: Option<UpstreamTlcKey>,
+    pub upstream_tlc_key: Option<UpstreamTlcKey>,
 }
 
 /// A payment session tracking the state of a payment attempt.
@@ -976,7 +976,7 @@ impl SendPaymentData {
     pub fn session_key(&self) -> PaymentSessionKey {
         PaymentSessionKey {
             payment_hash: self.payment_hash,
-            execution_id: self.execution_id,
+            upstream_tlc_key: self.upstream_tlc_key,
         }
     }
 
@@ -1132,7 +1132,7 @@ impl PaymentSession {
         let route = SessionRoute::new(source, target, &route_hops);
 
         Attempt {
-            execution_id: self.request.execution_id,
+            upstream_tlc_key: self.request.upstream_tlc_key,
             id: attempt_id,
             hash,
             try_limit,

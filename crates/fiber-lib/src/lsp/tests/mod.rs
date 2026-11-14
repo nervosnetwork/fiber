@@ -3245,10 +3245,10 @@ async fn transient_payment_outcome_retries_delivery_before_deadline() {
     let before = manager.get_by_payment_hash(&payment_hash).unwrap().unwrap();
     let owner = before.request.hosted_session_key();
     let mut wrong_tlc = owner;
-    wrong_tlc.execution_id.as_mut().unwrap().incoming_tlc_id += 1;
+    wrong_tlc.upstream_tlc_key.as_mut().unwrap().incoming_tlc_id += 1;
     let mut wrong_channel = owner;
     wrong_channel
-        .execution_id
+        .upstream_tlc_key
         .as_mut()
         .unwrap()
         .incoming_channel_id = crate::gen_rand_sha256_hash();

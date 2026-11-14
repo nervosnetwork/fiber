@@ -32,7 +32,7 @@ fn invoice(payment_hash: Hash256) -> CkbInvoice {
 fn payment_session(payment_hash: Hash256, target_pubkey: Pubkey) -> PaymentSession {
     PaymentSession {
         request: SendPaymentData {
-            execution_id: None,
+            upstream_tlc_key: None,
             target_pubkey,
             amount: 1_000,
             payment_hash,

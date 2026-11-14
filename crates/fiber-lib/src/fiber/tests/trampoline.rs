@@ -147,7 +147,7 @@ async fn send_manual_trampoline_final_keysend_tlc(
                 channel_id,
                 command: ChannelCommand::AddTlc(
                     AddTlcCommand {
-                        execution_id: None,
+                        upstream_tlc_key: None,
                         amount: actual_amount,
                         payment_hash,
                         attempt_id: None,
@@ -2097,7 +2097,7 @@ async fn test_trampoline_forwarding_rejects_missing_previous_tlc() {
     current_hop.set_trampoline_onion(trampoline_onion_bytes);
 
     let command = SendOnionPacketCommand {
-        execution_id: None,
+        upstream_tlc_key: None,
         peeled_onion_packet: PeeledPaymentOnionPacket {
             current: current_hop,
             next: None,
@@ -2262,7 +2262,7 @@ async fn test_trampoline_forwarding_fee_insufficient_manual_packet() {
     let (sender, receiver) = oneshot::channel();
     let command = FiberActorCommand::SendPaymentOnionPacket(
         SendOnionPacketCommand {
-            execution_id: None,
+            upstream_tlc_key: None,
             peeled_onion_packet: peeled_packet,
             previous_tlc: Some(PrevTlcInfo {
                 prev_channel_id: channel_ab,
@@ -2363,7 +2363,7 @@ async fn test_trampoline_forwarding_fee_insufficient_equal_amount() {
     let (sender, receiver) = oneshot::channel();
     let command = FiberActorCommand::SendPaymentOnionPacket(
         SendOnionPacketCommand {
-            execution_id: None,
+            upstream_tlc_key: None,
             peeled_onion_packet: peeled_packet,
             previous_tlc: Some(PrevTlcInfo {
                 prev_channel_id: channel_ab,
@@ -2421,7 +2421,7 @@ async fn test_trampoline_forwarding_rejects_outgoing_expiry_beyond_upstream_budg
 
     let mut node_b_state = node_b.get_channel_actor_state(channel_ab);
     node_b_state.tlc_state.add_received_tlc(TlcInfo {
-        execution_id: None,
+        upstream_tlc_key: None,
         status: TlcStatus::Inbound(InboundTlcStatus::Committed),
         tlc_id: TLCId::Received(1),
         amount: incoming_amount,
@@ -2489,7 +2489,7 @@ async fn test_trampoline_forwarding_rejects_outgoing_expiry_beyond_upstream_budg
     let (sender, receiver) = oneshot::channel();
     let command = FiberActorCommand::SendPaymentOnionPacket(
         SendOnionPacketCommand {
-            execution_id: None,
+            upstream_tlc_key: None,
             peeled_onion_packet: peeled_packet,
             previous_tlc: Some(PrevTlcInfo::new_with_shared_secret(
                 channel_ab,
@@ -2533,7 +2533,7 @@ async fn send_manual_trampoline_forward(
 
     let mut node_b_state = node_b.get_channel_actor_state(channel_ab);
     node_b_state.tlc_state.add_received_tlc(TlcInfo {
-        execution_id: None,
+        upstream_tlc_key: None,
         status: TlcStatus::Inbound(InboundTlcStatus::Committed),
         tlc_id: TLCId::Received(1),
         amount: incoming_amount,
@@ -2593,7 +2593,7 @@ async fn send_manual_trampoline_forward(
     let (sender, receiver) = oneshot::channel();
     let command = FiberActorCommand::SendPaymentOnionPacket(
         SendOnionPacketCommand {
-            execution_id: None,
+            upstream_tlc_key: None,
             peeled_onion_packet: PeeledPaymentOnionPacket {
                 current: current_hop_data,
                 shared_secret: [0u8; 32],
@@ -2746,7 +2746,7 @@ async fn test_trampoline_final_rejects_expiry_below_inner_delta() {
                 channel_id,
                 command: ChannelCommand::AddTlc(
                     AddTlcCommand {
-                        execution_id: None,
+                        upstream_tlc_key: None,
                         amount,
                         payment_hash,
                         attempt_id: None,
@@ -4311,7 +4311,7 @@ async fn test_trampoline_forward_invalid_onion_payload_missing_context() {
     };
 
     let command = SendOnionPacketCommand {
-        execution_id: None,
+        upstream_tlc_key: None,
         peeled_onion_packet: peeled_onion,
         previous_tlc: Some(prev_tlc),
         payment_hash,
@@ -4402,7 +4402,7 @@ async fn test_trampoline_forward_invalid_amount_in_onion_packet() {
     };
 
     let command = SendOnionPacketCommand {
-        execution_id: None,
+        upstream_tlc_key: None,
         peeled_onion_packet: peeled_onion,
         previous_tlc: Some(prev_tlc),
         payment_hash,

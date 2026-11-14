@@ -551,7 +551,7 @@ async fn test_mpp_tlc_set() {
                 channel_id: channels[0],
                 command: ChannelCommand::AddTlc(
                     AddTlcCommand {
-                        execution_id: None,
+                        upstream_tlc_key: None,
                         amount: 10000000000,
                         hash_algorithm,
                         payment_hash,
@@ -576,7 +576,7 @@ async fn test_mpp_tlc_set() {
                 channel_id: channels[1],
                 command: ChannelCommand::AddTlc(
                     AddTlcCommand {
-                        execution_id: None,
+                        upstream_tlc_key: None,
                         amount: 10000000000,
                         hash_algorithm,
                         payment_hash,
@@ -691,7 +691,7 @@ async fn test_mpp_tlc_set_with_insufficient_total_amount() {
                 channel_id: channels[0],
                 command: ChannelCommand::AddTlc(
                     AddTlcCommand {
-                        execution_id: None,
+                        upstream_tlc_key: None,
                         amount: 10000000000,
                         hash_algorithm,
                         payment_hash,
@@ -828,7 +828,7 @@ async fn test_mpp_tlc_set_with_only_1_tlc() {
                 channel_id: channels[0],
                 command: ChannelCommand::AddTlc(
                     AddTlcCommand {
-                        execution_id: None,
+                        upstream_tlc_key: None,
                         amount: 10000000000,
                         hash_algorithm,
                         payment_hash,
@@ -925,7 +925,7 @@ async fn test_mpp_tlc_set_with_only_1_tlc_without_payment_data_is_rejected() {
                 channel_id: channels[0],
                 command: ChannelCommand::AddTlc(
                     AddTlcCommand {
-                        execution_id: None,
+                        upstream_tlc_key: None,
                         amount: 10000000000,
                         hash_algorithm,
                         payment_hash,
@@ -1037,7 +1037,7 @@ async fn test_mpp_tlc_set_total_amount_mismatch() {
                 channel_id: channels[0],
                 command: ChannelCommand::AddTlc(
                     AddTlcCommand {
-                        execution_id: None,
+                        upstream_tlc_key: None,
                         amount: 10000000000,
                         hash_algorithm,
                         payment_hash,
@@ -1062,7 +1062,7 @@ async fn test_mpp_tlc_set_total_amount_mismatch() {
                 channel_id: channels[1],
                 command: ChannelCommand::AddTlc(
                     AddTlcCommand {
-                        execution_id: None,
+                        upstream_tlc_key: None,
                         amount: 10000000000,
                         hash_algorithm,
                         payment_hash,
@@ -1199,7 +1199,7 @@ async fn test_mpp_tlc_set_total_amount_should_be_consistent() {
                 channel_id: channels[0],
                 command: ChannelCommand::AddTlc(
                     AddTlcCommand {
-                        execution_id: None,
+                        upstream_tlc_key: None,
                         amount: 10000000000,
                         hash_algorithm,
                         payment_hash,
@@ -1225,7 +1225,7 @@ async fn test_mpp_tlc_set_total_amount_should_be_consistent() {
                 channel_id: channels[1],
                 command: ChannelCommand::AddTlc(
                     AddTlcCommand {
-                        execution_id: None,
+                        upstream_tlc_key: None,
                         amount: 10000000000,
                         hash_algorithm,
                         payment_hash,
@@ -1363,7 +1363,7 @@ async fn test_mpp_tlc_set_payment_secret_mismatch() {
                 channel_id: channels[0],
                 command: ChannelCommand::AddTlc(
                     AddTlcCommand {
-                        execution_id: None,
+                        upstream_tlc_key: None,
                         amount: 10000000000,
                         hash_algorithm,
                         payment_hash,
@@ -1388,7 +1388,7 @@ async fn test_mpp_tlc_set_payment_secret_mismatch() {
                 channel_id: channels[1],
                 command: ChannelCommand::AddTlc(
                     AddTlcCommand {
-                        execution_id: None,
+                        upstream_tlc_key: None,
                         amount: 10000000000,
                         hash_algorithm,
                         payment_hash,
@@ -1517,7 +1517,7 @@ async fn test_mpp_tlc_set_timeout_1_of_2() {
                 channel_id: channels[0],
                 command: ChannelCommand::AddTlc(
                     AddTlcCommand {
-                        execution_id: None,
+                        upstream_tlc_key: None,
                         amount: 10000000000,
                         hash_algorithm,
                         payment_hash,
@@ -1548,7 +1548,7 @@ async fn test_mpp_tlc_set_timeout_1_of_2() {
                 channel_id: channels[1],
                 command: ChannelCommand::AddTlc(
                     AddTlcCommand {
-                        execution_id: None,
+                        upstream_tlc_key: None,
                         amount: 10000000000,
                         hash_algorithm,
                         payment_hash,
@@ -1733,7 +1733,7 @@ async fn test_mpp_tlc_set_timeout() {
                 channel_id: channels[0],
                 command: ChannelCommand::AddTlc(
                     AddTlcCommand {
-                        execution_id: None,
+                        upstream_tlc_key: None,
                         amount: 10000000000,
                         hash_algorithm,
                         payment_hash,
@@ -1790,7 +1790,7 @@ async fn test_mpp_tlc_set_timeout() {
                 channel_id: channels[1],
                 command: ChannelCommand::AddTlc(
                     AddTlcCommand {
-                        execution_id: None,
+                        upstream_tlc_key: None,
                         amount: 10000000000,
                         hash_algorithm,
                         payment_hash,
@@ -1907,7 +1907,7 @@ async fn test_mpp_tlc_set_without_payment_data() {
                 channel_id: channels[0],
                 command: ChannelCommand::AddTlc(
                     AddTlcCommand {
-                        execution_id: None,
+                        upstream_tlc_key: None,
                         amount: 10000000000,
                         hash_algorithm,
                         payment_hash,
@@ -1932,7 +1932,7 @@ async fn test_mpp_tlc_set_without_payment_data() {
                 channel_id: channels[1],
                 command: ChannelCommand::AddTlc(
                     AddTlcCommand {
-                        execution_id: None,
+                        upstream_tlc_key: None,
                         amount: 10000000000,
                         hash_algorithm,
                         payment_hash,
@@ -2572,7 +2572,7 @@ async fn test_mpp_tlc_set_without_invoice_should_not_be_accepted() {
                     channel_id: channels[0],
                     command: ChannelCommand::AddTlc(
                         AddTlcCommand {
-                            execution_id: None,
+                            upstream_tlc_key: None,
                             amount: 10000000000,
                             hash_algorithm,
                             payment_hash,
@@ -2736,7 +2736,7 @@ async fn test_mpp_tlc_with_invoice_not_allow_mpp_should_not_be_accepted() {
                 channel_id: channels[0],
                 command: ChannelCommand::AddTlc(
                     AddTlcCommand {
-                        execution_id: None,
+                        upstream_tlc_key: None,
                         amount: 10000000000,
                         hash_algorithm,
                         payment_hash,

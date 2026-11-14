@@ -16,7 +16,7 @@ impl HostedTlcLookup for crate::fiber::channel::ChannelActorState {
     ) -> Option<&TlcInfo> {
         self.tlc_state.offered_tlcs.tlcs.iter().find(|tlc| {
             tlc.payment_hash == hash
-                && tlc.execution_id
+                && tlc.upstream_tlc_key
                     == Some(UpstreamTlcKey {
                         incoming_channel_id: previous.prev_channel_id,
                         incoming_tlc_id: previous.prev_tlc_id,
@@ -511,7 +511,7 @@ async fn unknown_incoming_execution_is_not_reported_inflight() {
         |reply| NetworkActorMessage::new_command(FiberActorCommand::GetPayment(
             PaymentSessionKey {
                 payment_hash: hash,
-                execution_id: Some(UpstreamTlcKey {
+                upstream_tlc_key: Some(UpstreamTlcKey {
                     incoming_channel_id: closed_id,
                     incoming_tlc_id: previous.prev_tlc_id
                 })

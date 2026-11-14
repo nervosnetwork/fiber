@@ -108,7 +108,7 @@ impl TrampolineForwardingRequest {
     pub fn hosted_session_key(&self) -> crate::fiber_types::PaymentSessionKey {
         crate::fiber_types::PaymentSessionKey {
             payment_hash: self.payment_hash,
-            execution_id: Some(crate::fiber_types::UpstreamTlcKey {
+            upstream_tlc_key: Some(crate::fiber_types::UpstreamTlcKey {
                 incoming_channel_id: self.previous_tlc.prev_channel_id,
                 incoming_tlc_id: self.previous_tlc.prev_tlc_id,
             }),

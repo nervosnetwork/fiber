@@ -307,7 +307,7 @@ fn create_mock_pending_add_tlc_command(
     .expect("create mock pending onion packet");
 
     AddTlcCommand {
-        execution_id: None,
+        upstream_tlc_key: None,
         amount,
         payment_hash,
         attempt_id: None,
@@ -3526,7 +3526,7 @@ async fn test_network_send_previous_tlc_error() {
                 channel_id: new_channel_id,
                 command: ChannelCommand::AddTlc(
                     AddTlcCommand {
-                        execution_id: None,
+                        upstream_tlc_key: None,
                         amount: 10000,
                         payment_hash: generated_payment_hash,
                         attempt_id: None,
@@ -3622,7 +3622,7 @@ async fn test_network_send_previous_tlc_error_with_limit_amount_error() {
                 channel_id: new_channel_id,
                 command: ChannelCommand::AddTlc(
                     AddTlcCommand {
-                        execution_id: None,
+                        upstream_tlc_key: None,
                         amount: 300300000,
                         payment_hash: generated_payment_hash,
                         attempt_id: None,
@@ -4729,7 +4729,7 @@ async fn do_test_channel_add_tlc_amount_invalid() {
                     channel_id: new_channel_id,
                     command: ChannelCommand::AddTlc(
                         AddTlcCommand {
-                            execution_id: None,
+                            upstream_tlc_key: None,
                             attempt_id: None,
                             amount: send_amount,
                             hash_algorithm,
@@ -4807,7 +4807,7 @@ async fn test_network_add_tlc_amount_overflow_error() {
                     channel_id,
                     command: ChannelCommand::AddTlc(
                         AddTlcCommand {
-                            execution_id: None,
+                            upstream_tlc_key: None,
                             amount,
                             hash_algorithm,
                             payment_hash: digest.into(),
@@ -5052,7 +5052,7 @@ async fn test_remove_tlc_with_expiry_error() {
 
     // add tlc command with expiry soon
     let add_tlc_command = AddTlcCommand {
-        execution_id: None,
+        upstream_tlc_key: None,
         amount: tlc_amount,
         hash_algorithm: HashAlgorithm::CkbHash,
         payment_hash: digest.into(),
@@ -5078,7 +5078,7 @@ async fn test_remove_tlc_with_expiry_error() {
 
     // add tlc command with expiry soon
     let add_tlc_command = AddTlcCommand {
-        execution_id: None,
+        upstream_tlc_key: None,
         amount: tlc_amount,
         hash_algorithm: HashAlgorithm::CkbHash,
         payment_hash: digest.into(),
@@ -5104,7 +5104,7 @@ async fn test_remove_tlc_with_expiry_error() {
 
     // add tlc command with expiry is OK
     let add_tlc_command = AddTlcCommand {
-        execution_id: None,
+        upstream_tlc_key: None,
         amount: tlc_amount,
         hash_algorithm: HashAlgorithm::CkbHash,
         payment_hash: digest.into(),
@@ -5132,7 +5132,7 @@ async fn test_remove_tlc_with_expiry_error() {
 
     // add tlc command with expiry in the future too long
     let add_tlc_command = AddTlcCommand {
-        execution_id: None,
+        upstream_tlc_key: None,
         amount: tlc_amount,
         hash_algorithm: HashAlgorithm::CkbHash,
         payment_hash: digest.into(),
@@ -5209,7 +5209,7 @@ async fn test_remove_expired_tlc_in_background() {
 
     let a_valid_but_small_expiry = now_timestamp_as_millis_u64() + epoch_delay_milliseconds + 5000;
     let add_tlc_command = AddTlcCommand {
-        execution_id: None,
+        upstream_tlc_key: None,
         amount: tlc_amount,
         hash_algorithm: HashAlgorithm::CkbHash,
         payment_hash: digest.into(),
@@ -5871,7 +5871,7 @@ async fn do_test_add_tlc_duplicated() {
 
     for i in 1..=2 {
         let add_tlc_command = AddTlcCommand {
-            execution_id: None,
+            upstream_tlc_key: None,
             amount: tlc_amount,
             hash_algorithm: HashAlgorithm::CkbHash,
             payment_hash: digest.into(),
@@ -5915,7 +5915,7 @@ async fn do_test_add_tlc_waiting_ack() {
 
     for i in 1..=2 {
         let add_tlc_command = AddTlcCommand {
-            execution_id: None,
+            upstream_tlc_key: None,
             amount: tlc_amount,
             hash_algorithm: HashAlgorithm::CkbHash,
             payment_hash: gen_rand_sha256_hash(),
@@ -5950,7 +5950,7 @@ async fn do_test_add_tlc_waiting_ack() {
     // send from b to a
     for i in 1..=2 {
         let add_tlc_command = AddTlcCommand {
-            execution_id: None,
+            upstream_tlc_key: None,
             amount: tlc_amount,
             hash_algorithm: HashAlgorithm::CkbHash,
             payment_hash: gen_rand_sha256_hash(),
@@ -6528,7 +6528,7 @@ async fn do_test_add_tlc_min_tlc_value_limit() {
     // A -> B will be no limit
     let tlc_amount = 200;
     let add_tlc_command = AddTlcCommand {
-        execution_id: None,
+        upstream_tlc_key: None,
         amount: tlc_amount,
         hash_algorithm: HashAlgorithm::CkbHash,
         payment_hash: gen_rand_sha256_hash(),
@@ -6555,7 +6555,7 @@ async fn do_test_add_tlc_min_tlc_value_limit() {
     // since it's not under the tlc relay context
     let tlc_amount = 99;
     let add_tlc_command = AddTlcCommand {
-        execution_id: None,
+        upstream_tlc_key: None,
         amount: tlc_amount,
         hash_algorithm: HashAlgorithm::CkbHash,
         payment_hash: gen_rand_sha256_hash(),
@@ -6582,7 +6582,7 @@ async fn do_test_add_tlc_min_tlc_value_limit() {
     // B -> A can send at least 100
     let tlc_amount = 100;
     let add_tlc_command = AddTlcCommand {
-        execution_id: None,
+        upstream_tlc_key: None,
         amount: tlc_amount,
         hash_algorithm: HashAlgorithm::CkbHash,
         payment_hash: gen_rand_sha256_hash(),
@@ -6885,7 +6885,7 @@ async fn test_forward_payment_tlc_minimum_value() {
     // AddTlc from A to B is OK because we didn't update the channel
     let tlc_amount = 99;
     let add_tlc_command = AddTlcCommand {
-        execution_id: None,
+        upstream_tlc_key: None,
         amount: tlc_amount,
         hash_algorithm: HashAlgorithm::CkbHash,
         payment_hash: gen_rand_sha256_hash(),
@@ -8510,7 +8510,7 @@ async fn test_remove_tlc_fulfill_persists_preimage_while_reestablishing() {
                 channel_id,
                 command: ChannelCommand::AddTlc(
                     AddTlcCommand {
-                        execution_id: None,
+                        upstream_tlc_key: None,
                         amount: 1000,
                         hash_algorithm: HashAlgorithm::CkbHash,
                         payment_hash,
@@ -15074,7 +15074,7 @@ mod udt_funding_cell_capacity {
         // TLC 1: confirmed and flagged for removal → clean_up_failed_tlcs will remove it.
         // It references commitment number 3 which should be pruned after removal.
         let tlc_to_remove = TlcInfo {
-            execution_id: None,
+            upstream_tlc_key: None,
             status: TlcStatus::Inbound(InboundTlcStatus::RemoveAckConfirmed),
             tlc_id: TLCId::Received(1),
             amount: 1000,
@@ -15103,7 +15103,7 @@ mod udt_funding_cell_capacity {
         // TLC 2: NOT confirmed, NOT flagged → NOT removed.
         // It references commitment number 5 which should be retained.
         let tlc_to_keep = TlcInfo {
-            execution_id: None,
+            upstream_tlc_key: None,
             status: TlcStatus::Inbound(InboundTlcStatus::RemoveAckConfirmed),
             tlc_id: TLCId::Received(2),
             amount: 1000,
@@ -15273,7 +15273,7 @@ mod udt_funding_cell_capacity {
 
     fn committed_received_tlc(tlc_id: TLCId) -> TlcInfo {
         TlcInfo {
-            execution_id: None,
+            upstream_tlc_key: None,
             status: TlcStatus::Inbound(InboundTlcStatus::Committed),
             tlc_id,
             amount: 1000,

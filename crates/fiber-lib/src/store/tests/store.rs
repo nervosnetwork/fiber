@@ -2149,7 +2149,7 @@ fn test_hosted_payment_execution_store_isolation() {
         custom_records: None,
     }];
     let mut keys = Vec::new();
-    for execution_id in [
+    for upstream_tlc_key in [
         None,
         Some(UpstreamTlcKey {
             incoming_channel_id: incoming_channel,
@@ -2161,7 +2161,7 @@ fn test_hosted_payment_execution_store_isolation() {
         }),
     ] {
         let mut request = data.clone();
-        request.execution_id = execution_id;
+        request.upstream_tlc_key = upstream_tlc_key;
         let session = PaymentSession::new_session(&store, request, 10);
         let key = session.session_key();
         assert_eq!(session.attempts_count(), 0);
@@ -2281,7 +2281,7 @@ fn test_channel_ready_retry_index_handles_created_attempt_channel_ownership() {
     }];
     let route = SessionRoute::new(first_hop, target, &route_hops);
     let mut attempt = Attempt {
-        execution_id: None,
+        upstream_tlc_key: None,
         id: 1,
         hash: payment_hash,
         try_limit: 10,
@@ -2306,7 +2306,7 @@ fn test_channel_ready_retry_index_handles_created_attempt_channel_ownership() {
     assert_eq!(orphan_created_attempts[0].status, AttemptStatus::Created);
 
     channel_state.tlc_state.add_offered_tlc(TlcInfo {
-        execution_id: None,
+        upstream_tlc_key: None,
         status: TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced),
         tlc_id: TLCId::Offered(0),
         amount: 100,
@@ -2327,21 +2327,21 @@ fn test_channel_ready_retry_index_handles_created_attempt_channel_ownership() {
     });
     let scoped_key = crate::fiber_types::PaymentSessionKey {
         payment_hash,
-        execution_id: Some(crate::fiber_types::UpstreamTlcKey {
+        upstream_tlc_key: Some(crate::fiber_types::UpstreamTlcKey {
             incoming_channel_id: gen_rand_sha256_hash(),
             incoming_tlc_id: 1,
         }),
     };
     assert!(channel_state.owns_payment_attempt(payment_hash, attempt.id));
     assert!(!channel_state.owns_payment_attempt(scoped_key, attempt.id));
-    channel_state.tlc_state.offered_tlcs.tlcs[0].execution_id = scoped_key.execution_id;
+    channel_state.tlc_state.offered_tlcs.tlcs[0].upstream_tlc_key = scoped_key.upstream_tlc_key;
     assert_eq!(
         channel_state.tlc_state.offered_tlcs.tlcs[0].session_key(),
         scoped_key
     );
     assert!(channel_state.owns_payment_attempt(scoped_key, attempt.id));
     assert!(!channel_state.owns_payment_attempt(payment_hash, attempt.id));
-    channel_state.tlc_state.offered_tlcs.tlcs[0].execution_id = None;
+    channel_state.tlc_state.offered_tlcs.tlcs[0].upstream_tlc_key = None;
     store.insert_channel_actor_state(channel_state.clone());
     assert!(
         store
@@ -2373,7 +2373,7 @@ fn test_channel_ready_retry_index_handles_created_attempt_channel_ownership() {
     channel_state
         .retryable_tlc_operations
         .push_back(RetryableTlcOperation::AddTlc(AddTlcCommand {
-            execution_id: None,
+            upstream_tlc_key: None,
             amount: 100,
             payment_hash,
             attempt_id: Some(attempt.id),
@@ -2388,7 +2388,7 @@ fn test_channel_ready_retry_index_handles_created_attempt_channel_ownership() {
         channel_state.retryable_tlc_operations.front_mut()
     {
         assert_eq!(command.session_key(), payment_hash.into());
-        command.execution_id = scoped_key.execution_id;
+        command.upstream_tlc_key = scoped_key.upstream_tlc_key;
         assert_eq!(command.session_key(), scoped_key);
     } else {
         panic!("expected queued AddTlc");
@@ -2398,7 +2398,7 @@ fn test_channel_ready_retry_index_handles_created_attempt_channel_ownership() {
     if let Some(RetryableTlcOperation::AddTlc(command)) =
         channel_state.retryable_tlc_operations.front_mut()
     {
-        command.execution_id = None;
+        command.upstream_tlc_key = None;
     }
     store.insert_channel_actor_state(channel_state);
     assert!(

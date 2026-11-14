@@ -192,9 +192,9 @@ execution. A successfully delivered payment hash cannot be accepted again.
 Hosted downstream payments reuse PaymentSession and PaymentActor, including
 attempt retries, route construction, failure classification and expiry limits.
 Their local `PaymentSessionKey` consists of the real `payment_hash` plus an
-optional `UpstreamTlcKey` containing the incoming channel ID and TLC ID.
+optional `upstream_tlc_key: UpstreamTlcKey` containing the incoming channel ID and TLC ID.
 Ordinary payments and ordinary trampoline forwarding leave this field absent
-and retain their existing hash-only deduplication behavior. The execution ID is
+and retain their existing hash-only deduplication behavior. The upstream TLC key is
 not an invoice/RPC parameter and is never sent in peer messages or used as a
 hashlock.
 

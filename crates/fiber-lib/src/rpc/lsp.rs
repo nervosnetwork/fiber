@@ -206,7 +206,7 @@ impl From<InternalTenantStatus> for LspTenantStatus {
 
 impl From<InternalPaymentDelivery> for LspPaymentDelivery {
     fn from(delivery: InternalPaymentDelivery) -> Self {
-        let execution_key = delivery.key();
+        let upstream_tlc_key = delivery.key();
         let (status, failure_reason) = match delivery.status {
             InternalPaymentDeliveryStatus::Deferred => (LspPaymentDeliveryStatus::Deferred, None),
             InternalPaymentDeliveryStatus::Dispatching => {
@@ -223,8 +223,8 @@ impl From<InternalPaymentDelivery> for LspPaymentDelivery {
         };
         Self {
             payment_hash: delivery.payment_hash.into(),
-            incoming_channel_id: execution_key.incoming_channel_id.into(),
-            incoming_tlc_id: execution_key.incoming_tlc_id,
+            incoming_channel_id: upstream_tlc_key.incoming_channel_id.into(),
+            incoming_tlc_id: upstream_tlc_key.incoming_tlc_id,
             tenant_id: delivery.tenant_id.to_string(),
             private_channel_id: delivery.private_channel_id.into(),
             buffer_deadline: delivery.buffer_deadline,

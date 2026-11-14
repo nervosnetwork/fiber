@@ -154,7 +154,7 @@ impl LspServiceState {
         &self,
         session_key: crate::fiber_types::PaymentSessionKey,
     ) -> Result<Option<LspPaymentDelivery>, String> {
-        let Some(id) = session_key.execution_id else {
+        let Some(id) = session_key.upstream_tlc_key else {
             return Ok(None);
         };
         let key = LspPaymentDeliveryKey {

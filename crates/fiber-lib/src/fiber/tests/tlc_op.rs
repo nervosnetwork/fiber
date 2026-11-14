@@ -203,7 +203,7 @@ impl Actor for TlcActor {
                 );
                 let next_offer_id = state.tlc_state.get_next_offering();
                 let add_tlc = TlcInfo {
-                    execution_id: None,
+                    upstream_tlc_key: None,
                     tlc_id: TLCId::Offered(next_offer_id),
                     amount: command.amount,
                     payment_hash: command.payment_hash,
@@ -473,7 +473,7 @@ fn test_tlc_state_v2() {
     use fiber_types::TlcState;
     let mut tlc_state = TlcState::default();
     let mut add_tlc1 = TlcInfo {
-        execution_id: None,
+        upstream_tlc_key: None,
         amount: 10000,
         status: TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced),
         payment_hash: gen_rand_sha256_hash(),
@@ -493,7 +493,7 @@ fn test_tlc_state_v2() {
         payment_secret: None,
     };
     let mut add_tlc2 = TlcInfo {
-        execution_id: None,
+        upstream_tlc_key: None,
         amount: 20000,
         status: TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced),
         payment_hash: gen_rand_sha256_hash(),

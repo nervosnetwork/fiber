@@ -3,7 +3,7 @@ use tracing::info;
 use crate::migration::{Migration, MigrationStore};
 
 use super::decode_as_new;
-use super::mig_20261113000000_payment_execution::append_execution_scope;
+use super::mig_20261113000000_payment_execution::append_upstream_tlc_key;
 
 const MIGRATION_DB_VERSION: &str = "20261008120000";
 
@@ -90,7 +90,7 @@ fn convert_tlc_state(
             tlcs: old
                 .tlcs
                 .into_iter()
-                .map(append_execution_scope)
+                .map(append_upstream_tlc_key)
                 .collect::<Result<_, _>>()?,
             next_tlc_id: old.next_tlc_id,
         })
@@ -108,7 +108,7 @@ fn convert_operation(
     use fiber_types_0100::channel::RetryableTlcOperation as Old;
     use fiber_types_current::channel::RetryableTlcOperation as New;
     match old {
-        Old::AddTlc(command) => Ok(New::AddTlc(append_execution_scope(command)?)),
+        Old::AddTlc(command) => Ok(New::AddTlc(append_upstream_tlc_key(command)?)),
         Old::RemoveTlc(id, reason) => {
             Ok(New::RemoveTlc(decode_as_new(id)?, decode_as_new(reason)?))
         }
@@ -293,7 +293,7 @@ mod tests {
                 assert!(new
                     .tlc_state
                     .all_tlcs()
-                    .all(|tlc| tlc.execution_id.is_none()));
+                    .all(|tlc| tlc.upstream_tlc_key.is_none()));
                 assert_eq!(
                     old.funding_tx.as_ref().map(|tx| format!("{tx:x}")),
                     new.funding_tx.as_ref().map(|tx| format!("{tx:x}"))

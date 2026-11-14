@@ -1001,7 +1001,7 @@ pub struct PeerInfo {
 
 #[derive(Debug, Clone)]
 pub struct SendOnionPacketCommand {
-    pub execution_id: Option<UpstreamTlcKey>,
+    pub upstream_tlc_key: Option<UpstreamTlcKey>,
     pub peeled_onion_packet: PeeledPaymentOnionPacket,
     // We are currently forwarding a previous tlc. The previous tlc's channel id, tlc id
     // and the fee paid are included here.
@@ -3455,7 +3455,7 @@ where
                             state,
                             PaymentSessionKey {
                                 payment_hash: command.payment_hash,
-                                execution_id: command.execution_id,
+                                upstream_tlc_key: command.upstream_tlc_key,
                             },
                             command.attempt_id,
                             Err((
@@ -3668,9 +3668,9 @@ where
                         return Ok(());
                     }
                 }
-                let execution_id = request.hosted_session_key().execution_id;
+                let upstream_tlc_key = request.hosted_session_key().upstream_tlc_key;
                 match self
-                    .try_dispatch_trampoline_payment(state, request, execution_id)
+                    .try_dispatch_trampoline_payment(state, request, upstream_tlc_key)
                     .await
                 {
                     Ok(receiver) => {
@@ -5095,7 +5095,7 @@ where
     ) -> Result<(), TlcErr> {
         trace!("Entering handle_send_onion_packet_command");
         let SendOnionPacketCommand {
-            execution_id,
+            upstream_tlc_key,
             peeled_onion_packet,
             previous_tlc,
             payment_hash,
@@ -5141,7 +5141,7 @@ where
         let rpc_reply = RpcReplyPort::from(send);
         let command = ChannelCommand::AddTlc(
             AddTlcCommand {
-                execution_id,
+                upstream_tlc_key,
                 amount: info.amount,
                 payment_hash,
                 attempt_id,
@@ -5383,7 +5383,7 @@ where
         &self,
         state: &mut FiberActorState<S, C>,
         request: TrampolineForwardingRequest,
-        execution_id: Option<UpstreamTlcKey>,
+        upstream_tlc_key: Option<UpstreamTlcKey>,
     ) -> Result<oneshot::Receiver<PaymentStartResult>, DeliveryDispatchError> {
         let mut payment_data = request.into_send_payment_data().map_err(|reason| {
             DeliveryDispatchError::Permanent {
@@ -5391,7 +5391,7 @@ where
                 error_code: TlcErrorCode::InvalidOnionPayload,
             }
         })?;
-        payment_data.execution_id = execution_id;
+        payment_data.upstream_tlc_key = upstream_tlc_key;
         let session_key = payment_data.session_key();
         let (send, receiver) = oneshot::channel();
         self.start_payment_actor(
@@ -5458,7 +5458,7 @@ where
         }
 
         let mut payment_data = request.into_send_payment_data()?;
-        payment_data.execution_id = session_key.execution_id;
+        payment_data.upstream_tlc_key = session_key.upstream_tlc_key;
         let now = now_timestamp_as_millis_u64();
         let mut session = PaymentSession::new_session(&state.store, payment_data, 0);
         session.status = PaymentStatus::Failed;

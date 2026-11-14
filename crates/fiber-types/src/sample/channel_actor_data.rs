@@ -181,7 +181,7 @@ fn sample_full(seed: u64) -> ChannelActorData {
 
     // --- TLCs with all fields populated ---
     let offered_tlc = TlcInfo {
-        execution_id: None,
+        upstream_tlc_key: None,
         status: TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced),
         tlc_id: TLCId::Offered(0),
         amount: 50_000_000,
@@ -206,7 +206,7 @@ fn sample_full(seed: u64) -> ChannelActorData {
     };
 
     let received_tlc = TlcInfo {
-        execution_id: None,
+        upstream_tlc_key: None,
         status: TlcStatus::Inbound(InboundTlcStatus::Committed),
         tlc_id: TLCId::Received(0),
         amount: 30_000_000,
@@ -239,7 +239,7 @@ fn sample_full(seed: u64) -> ChannelActorData {
             }),
         ),
         RetryableTlcOperation::AddTlc(AddTlcCommand {
-            execution_id: None,
+            upstream_tlc_key: None,
             amount: 10_000_000,
             payment_hash: deterministic_hash256(seed, 351),
             attempt_id: Some(3),

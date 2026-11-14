@@ -188,7 +188,7 @@ pub trait LspPaymentDeliveryStore: Clone + Send + Sync + 'static {
     ) -> Result<Vec<LspPaymentDelivery>, String>;
 }
 
-fn append_execution_key(bytes: &mut Vec<u8>, key: &LspPaymentDeliveryKey) {
+fn append_upstream_tlc_key(bytes: &mut Vec<u8>, key: &LspPaymentDeliveryKey) {
     bytes.extend_from_slice(key.incoming_channel_id.as_ref());
     bytes.extend_from_slice(&key.incoming_tlc_id.to_be_bytes());
 }
@@ -196,7 +196,7 @@ fn append_execution_key(bytes: &mut Vec<u8>, key: &LspPaymentDeliveryKey) {
 fn delivery_key(key: &LspPaymentDeliveryKey) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(PAYMENT_DELIVERY_PREFIX.len() + 40);
     bytes.extend_from_slice(PAYMENT_DELIVERY_PREFIX);
-    append_execution_key(&mut bytes, key);
+    append_upstream_tlc_key(&mut bytes, key);
     bytes
 }
 
@@ -206,11 +206,11 @@ fn payment_hash_index_prefix(payment_hash: &Hash256) -> Vec<u8> {
 
 fn payment_hash_index_key(payment_hash: &Hash256, key: &LspPaymentDeliveryKey) -> Vec<u8> {
     let mut bytes = payment_hash_index_prefix(payment_hash);
-    append_execution_key(&mut bytes, key);
+    append_upstream_tlc_key(&mut bytes, key);
     bytes
 }
 
-fn parse_indexed_execution_key(bytes: &[u8]) -> Result<LspPaymentDeliveryKey, String> {
+fn parse_indexed_upstream_tlc_key(bytes: &[u8]) -> Result<LspPaymentDeliveryKey, String> {
     let key_offset = PAYMENT_DELIVERY_HASH_INDEX_PREFIX.len() + 32;
     if bytes.len() != key_offset + 40 {
         return Err(format!(
@@ -265,7 +265,7 @@ impl LspPaymentDeliveryStore for Store {
         self.collect_by_prefix(&payment_hash_index_prefix(payment_hash))
             .into_iter()
             .map(|pair| {
-                let key = parse_indexed_execution_key(&pair.key)?;
+                let key = parse_indexed_upstream_tlc_key(&pair.key)?;
                 self.get_lsp_payment_delivery(&key)?.ok_or_else(|| {
                     format!(
                         "hosted payment delivery index points to missing execution {:?}",

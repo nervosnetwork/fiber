@@ -524,7 +524,7 @@ pub struct TlcInfo {
     pub removed_confirmed_at: Option<u64>,
     pub applied_flags: AppliedFlags,
     /// Local payment execution ownership, not part of the peer wire message.
-    pub execution_id: Option<crate::payment::UpstreamTlcKey>,
+    pub upstream_tlc_key: Option<crate::payment::UpstreamTlcKey>,
 }
 
 use std::fmt;
@@ -550,7 +550,7 @@ impl TlcInfo {
     pub fn session_key(&self) -> PaymentSessionKey {
         PaymentSessionKey {
             payment_hash: self.payment_hash,
-            execution_id: self.execution_id,
+            upstream_tlc_key: self.upstream_tlc_key,
         }
     }
 
@@ -922,7 +922,7 @@ pub struct AddTlcCommand {
     pub is_trampoline_hop: bool,
     pub previous_tlc: Option<PrevTlcInfo>,
     /// Local payment execution ownership, not part of the peer wire message.
-    pub execution_id: Option<crate::payment::UpstreamTlcKey>,
+    pub upstream_tlc_key: Option<crate::payment::UpstreamTlcKey>,
 }
 
 impl AddTlcCommand {
@@ -930,7 +930,7 @@ impl AddTlcCommand {
     pub fn session_key(&self) -> PaymentSessionKey {
         PaymentSessionKey {
             payment_hash: self.payment_hash,
-            execution_id: self.execution_id,
+            upstream_tlc_key: self.upstream_tlc_key,
         }
     }
 }

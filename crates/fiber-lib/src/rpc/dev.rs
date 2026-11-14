@@ -200,7 +200,7 @@ impl DevRpcServerImpl {
                     channel_id,
                     command: ChannelCommand::AddTlc(
                         AddTlcCommand {
-                            execution_id: None,
+                            upstream_tlc_key: None,
                             amount: params.amount,
                             payment_hash,
                             attempt_id: None,

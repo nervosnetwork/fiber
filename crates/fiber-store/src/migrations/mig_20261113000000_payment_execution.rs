@@ -8,10 +8,10 @@ use super::decode_as_new;
 
 const MIGRATION_DB_VERSION: &str = "20261113000000";
 
-/// The sole layout change in these leaf records is a trailing optional execution
-/// ID. Explicitly append its None discriminant: serde(default) cannot supply
+/// The sole layout change in these leaf records is a trailing optional upstream
+/// TLC key. Explicitly append its None discriminant: serde(default) cannot supply
 /// missing positional fields in bincode records.
-pub(super) fn append_execution_scope<T: Serialize, U: DeserializeOwned>(
+pub(super) fn append_upstream_tlc_key<T: Serialize, U: DeserializeOwned>(
     old: T,
 ) -> Result<U, String> {
     let mut bytes = bincode::serialize(&old).map_err(|e| e.to_string())?;
@@ -31,7 +31,7 @@ fn convert_session(
     old: fiber_types_0100::payment::PaymentSession,
 ) -> Result<fiber_types_current::payment::PaymentSession, String> {
     Ok(fiber_types_current::payment::PaymentSession {
-        request: append_execution_scope(old.request)?,
+        request: append_upstream_tlc_key(old.request)?,
         last_error: old.last_error,
         last_error_code: decode_as_new(old.last_error_code)?,
         try_limit: old.try_limit,
@@ -73,7 +73,7 @@ impl Migration for MigrationObj {
                 continue;
             }
             let old = strict_decode::<fiber_types_0100::payment::Attempt>(&bytes)?;
-            let new: fiber_types_current::payment::Attempt = append_execution_scope(old)?;
+            let new: fiber_types_current::payment::Attempt = append_upstream_tlc_key(old)?;
             store.put(&key, &bincode::serialize(&new).map_err(|e| e.to_string())?);
         }
         // Channel TLCs and queued AddTlc operations are upgraded by the existing
@@ -161,7 +161,7 @@ mod tests {
         let session_bytes = StorageBackend::get(&store, &session_key).unwrap();
         let attempt_bytes = StorageBackend::get(&store, &attempt_key).unwrap();
         let new: fiber_types_current::PaymentSession = strict_decode(&session_bytes).unwrap();
-        assert!(new.request.execution_id.is_none());
+        assert!(new.request.upstream_tlc_key.is_none());
         assert_eq!(new.try_limit, session.try_limit);
         assert_eq!(new.last_error, session.last_error);
         assert_eq!(new.created_at, session.created_at);
@@ -174,7 +174,7 @@ mod tests {
         assert_eq!(request_bytes.pop(), Some(0));
         assert_eq!(request_bytes, bincode::serialize(&session.request).unwrap());
         let new_attempt: fiber_types_current::Attempt = strict_decode(&attempt_bytes).unwrap();
-        assert!(new_attempt.execution_id.is_none());
+        assert!(new_attempt.upstream_tlc_key.is_none());
         let mut expected_attempt = bincode::serialize(&attempt).unwrap();
         expected_attempt.push(0);
         assert_eq!(attempt_bytes, expected_attempt);

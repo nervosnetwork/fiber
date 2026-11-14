@@ -2995,7 +2995,7 @@ where
         match self.network.send_message(FiberActorMessage::Command(
             FiberActorCommand::SendPaymentOnionPacket(
                 SendOnionPacketCommand {
-                    execution_id: None,
+                    upstream_tlc_key: None,
                     peeled_onion_packet: peeled_onion_packet.clone(),
                     previous_tlc: Some(PrevTlcInfo::new_with_shared_secret(
                         state.get_id(),
@@ -9221,7 +9221,7 @@ impl ChannelActorState {
         TlcInfo {
             status: TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced),
             tlc_id,
-            execution_id: command.execution_id,
+            upstream_tlc_key: command.upstream_tlc_key,
             attempt_id: command.attempt_id,
             amount: command.amount,
             payment_hash: command.payment_hash,
@@ -9244,7 +9244,7 @@ impl ChannelActorState {
 
     fn create_inbounding_tlc(&self, message: AddTlc) -> Result<TlcInfo, ProcessingChannelError> {
         let tlc_info = TlcInfo {
-            execution_id: None,
+            upstream_tlc_key: None,
             tlc_id: TLCId::Received(message.tlc_id),
             status: TlcStatus::Inbound(InboundTlcStatus::RemoteAnnounced),
             amount: message.amount,
@@ -12391,7 +12391,7 @@ mod tests {
         };
 
         TlcInfo {
-            execution_id: None,
+            upstream_tlc_key: None,
             status,
             tlc_id,
             amount,
@@ -12426,7 +12426,7 @@ mod tests {
         };
 
         TlcInfo {
-            execution_id: None,
+            upstream_tlc_key: None,
             status,
             tlc_id,
             amount,
