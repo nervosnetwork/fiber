@@ -111,7 +111,7 @@ jobs:
 
           # Prebuild the program so that we can run the following script faster
           cargo build --locked
-          cd ./tests/deploy/udt-init && cargo build --locked && cd -
+          cd ./tests/deploy/udt-init && cargo build --locked && cargo test --locked && cd -
           export ON_GITHUB_ACTION=y
           # Pass it to tests/funding-tx-builder as args
           export EXTRA_BRU_ARGS="${{ matrix.extra_bru_args }}"
