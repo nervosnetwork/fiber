@@ -408,19 +408,34 @@ fn generate_nodes_config() {
     std::fs::write(port_file_path, content).expect("write ports list");
 }
 
+fn remap_bruno_ports(content: &str, ports_map: &[(u16, u16)]) -> String {
+    let mut result = String::with_capacity(content.len());
+    // Visit original port tokens once so generated ports cannot be remapped again.
+    for part in content.split_inclusive(|c: char| !c.is_ascii_digit()) {
+        if result.ends_with("/tcp/") || result.ends_with(':') {
+            let digits = part.bytes().take_while(u8::is_ascii_digit).count();
+            let port = part[..digits].parse::<u16>().ok();
+            if let Some((_, actual_port)) = ports_map
+                .iter()
+                .find(|(default_port, _)| Some(*default_port) == port)
+            {
+                result.push_str(&actual_port.to_string());
+                result.push_str(&part[digits..]);
+                continue;
+            }
+        }
+        result.push_str(part);
+    }
+    result
+}
+
 fn update_bruno_configs(nodes_dir: &Path, ports_map: &[(u16, u16)]) -> Result<(), Box<dyn StdErr>> {
     let bruno_dir = nodes_dir.join("../bruno/environments/");
 
     for config_entry in std::fs::read_dir(bruno_dir)? {
         let config_path = config_entry?.path();
-        let mut content = std::fs::read_to_string(&config_path)?;
-
-        // Apply all port replacements
-        for (default_port, actual_port) in ports_map {
-            content = content.replace(&default_port.to_string(), &actual_port.to_string());
-        }
-
-        std::fs::write(&config_path, content)?;
+        let content = std::fs::read_to_string(&config_path)?;
+        std::fs::write(&config_path, remap_bruno_ports(&content, ports_map))?;
     }
 
     Ok(())
@@ -473,4 +488,39 @@ fn main() -> Result<(), Box<dyn StdErr>> {
     generate_nodes_config();
     init_udt_accounts()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::remap_bruno_ports;
+
+    #[test]
+    fn test_bruno_port_replacements_do_not_cascade() {
+        let content = "NODE1_ADDR: /ip4/127.0.0.1/tcp/8344/p2p/node1\n\
+                       NODE2_ADDR: /ip4/127.0.0.1/tcp/8345/p2p/node2\n\
+                       NODE1_RPC_URL: http://127.0.0.1:21714\n\
+                       NODE2_RPC_URL: http://127.0.0.1:21715\n";
+        let ports = [(8344, 8345), (8345, 32154), (21714, 21715), (21715, 31000)];
+        assert_eq!(
+            remap_bruno_ports(content, &ports),
+            "NODE1_ADDR: /ip4/127.0.0.1/tcp/8345/p2p/node1\n\
+             NODE2_ADDR: /ip4/127.0.0.1/tcp/32154/p2p/node2\n\
+             NODE1_RPC_URL: http://127.0.0.1:21715\n\
+             NODE2_RPC_URL: http://127.0.0.1:31000\n"
+        );
+    }
+
+    #[test]
+    fn test_bruno_port_replacements_preserve_other_numbers() {
+        let content = "NODE1_ADDR: /ip4/127.0.0.1/tcp/8344/p2p/peer8344key21714\n\
+                       OTHER_URL: http://127.0.0.1:18344\n\
+                       UNKNOWN_ADDR: /ip4/127.0.0.1/tcp/9999\n";
+        assert_eq!(
+            remap_bruno_ports(content, &[(8344, 30001), (21714, 30002)]),
+            "NODE1_ADDR: /ip4/127.0.0.1/tcp/30001/p2p/peer8344key21714\n\
+             OTHER_URL: http://127.0.0.1:18344\n\
+             UNKNOWN_ADDR: /ip4/127.0.0.1/tcp/9999\n"
+        );
+        assert_eq!(remap_bruno_ports(content, &[]), content);
+    }
 }
