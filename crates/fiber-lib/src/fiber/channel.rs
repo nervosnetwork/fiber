@@ -19,9 +19,15 @@ use crate::fiber::onchain_tlc_reconcile::{
     collect_onchain_fulfilled_tlcs, collect_onchain_payer_failures,
     collect_onchain_received_timeout_settled_tlcs, collect_onchain_timeout_settled_tlcs,
     confirm_onchain_payer_fulfill, has_unresolved_onchain_tlcs, onchain_fulfilled_preimage,
-    OnChainConfirmedPayerTlc, OnChainTimeoutTlcRole, StoredOnChainTlcSettlement,
+    OnChainConfirmedPayerTlc, OnChainTimeoutTlcRole, OnChainTlcSettlement,
 };
-use crate::fiber::types::{BroadcastMessageWithTimestamp, TxSignatures};
+use crate::fiber::session::{
+    allocate_nonce, bind_context, guarded_sign, new_session, SESSION_MARKER,
+};
+use crate::fiber::types::{
+    BroadcastMessageWithTimestamp, ChannelReadyV2, ClosingSignedV2, CommitmentSignedV2,
+    ReestablishChannelV2, RevokeAndAckV2, ShutdownV2, TxCompleteV2, TxSignatures,
+};
 use crate::store::actor::StoreActorMessage;
 use crate::time::{SystemTime, UNIX_EPOCH};
 use crate::utils::actor::ActorHandleLogGuard;
@@ -36,17 +42,16 @@ use crate::{
     },
     fiber::{
         config::{DEFAULT_MIN_SHUTDOWN_FEE, MAX_PAYMENT_TLC_EXPIRY_LIMIT, MIN_TLC_EXPIRY_DELTA},
-        fee::{calculate_tlc_forward_fee, shutdown_tx_size},
+        fee::calculate_tlc_forward_fee,
         network::SendOnionPacketCommand,
         network::{
             get_chain_hash, sign_network_message, FiberMessageWithTarget, CHECK_CHANNELS_INTERVAL,
         },
         types::{
-            peeled_packet_mpp_custom_records, validate_payment_custom_records_size, AcceptChannel,
-            AddTlc, AnnouncementSignatures, ChannelReady, ClosingSigned, CommitmentSigned,
-            FiberChannelMessage, FiberMessage, HoldTlc, OpenChannel, ReestablishChannel, RemoveTlc,
-            Shutdown, TrampolineHopPayload, TrampolineOnionPacket, TxCollaborationMsg, TxComplete,
-            TxUpdate,
+            peeled_packet_mpp_custom_records, validate_payment_custom_records_size,
+            AcceptChannelV2, AddTlc, AnnouncementSignatures, FiberChannelMessage, FiberMessage,
+            HoldTlc, OpenChannelV2, RemoveTlc, TrampolineHopPayload, TrampolineOnionPacket,
+            TxCollaborationMsg, TxUpdate,
         },
         NetworkActorCommand, NetworkActorEvent, NetworkActorMessage, ASSUME_NETWORK_ACTOR_ALIVE,
     },
@@ -66,6 +71,7 @@ use ckb_types::{
     H256,
 };
 pub use fiber_types::channel_v2_validation::decode_channel_actor_data;
+pub use fiber_types::TlcReplayUpdate;
 use fiber_types::{
     blake2b_hash_with_salt, is_tlc_key_derivation_safe, try_derive_tlc_pubkey, AddTlcCommand,
     AppliedFlags, Attempt, AwaitingChannelReadyFlags, AwaitingTxSignaturesFlags,
@@ -74,26 +80,19 @@ use fiber_types::{
     ChannelState, ChannelTlcInfo, ChannelUpdate, ChannelUpdateChannelFlags,
     ChannelUpdateMessageFlags, CloseFlags, CollaboratingFundingTxFlags, CommitmentNumbers,
     EcdsaSignature, ExternalFundingPersistState, Hash256, InMemorySigner, InboundTlcStatus,
-    Musig2Context, NegotiatingFundingFlags, OutboundTlcStatus, PaymentCustomRecords,
-    PeeledPaymentOnionPacket, PendingNotifySettleTlc, PrevTlcInfo, Privkey, Pubkey,
-    PublicChannelInfo, RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation, RevocationData,
-    RevokeAndAck, SettlementData, SettlementTlc, ShutdownInfo, ShutdownSettlementRecord,
+    IncomingCommitmentV2, NegotiatingFundingFlags, NoncePurposeV2, OutboundTlcStatus,
+    OutgoingCommitmentV2, PaymentCustomRecords, PeeledPaymentOnionPacket, PendingNotifySettleTlc,
+    PrevTlcInfo, Privkey, Pubkey, PublicChannelInfo, RemoveTlcFulfill, RemoveTlcReason,
+    RetryableTlcOperation, RevocationData, SettlementData, SettlementTlc, ShutdownSettlementRecord,
     ShuttingDownFlags, SigningCommitmentFlags, TLCId, TlcErr, TlcErrPacket, TlcErrorCode, TlcInfo,
     TlcStatus, INITIAL_COMMITMENT_NUMBER, NO_SHARED_SECRET,
 };
-pub use fiber_types::{
-    CommitDiff, CommitmentSignedTemplate, ReplayOrderHint, TlcReplayUpdate,
-    CURRENT_COMMIT_DIFF_VERSION,
-};
 use molecule::prelude::{Builder, Entity};
-#[cfg(test)]
-use musig2::BinaryEncoding;
 use musig2::{
     aggregate_partial_signatures,
     errors::{RoundFinalizeError, SigningError, VerifyError},
     secp::Point,
-    sign_partial, verify_partial, AggNonce, CompactSignature, KeyAggContext, PartialSignature,
-    PubNonce, SecNonce,
+    sign_partial, AggNonce, CompactSignature, KeyAggContext, PartialSignature, PubNonce, SecNonce,
 };
 use ractor::call;
 use ractor::{
@@ -104,14 +103,10 @@ use secp256k1::{XOnlyPublicKey, SECP256K1};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::iter;
-#[path = "channel_v2.rs"]
-mod v2;
-
 #[cfg(test)]
-use std::{
-    backtrace::Backtrace,
-    sync::{LazyLock, Mutex},
-};
+#[path = "tests/channel_session.rs"]
+mod session_tests;
+
 use std::{
     fmt::{self, Debug, Display},
     sync::Arc,
@@ -371,7 +366,6 @@ pub struct OpenChannelParameter {
     pub funding_fee_rate: Option<u64>,
     pub max_tlc_value_in_flight: u128,
     pub max_tlc_number_in_flight: u64,
-    pub channel_features: ChannelFeatures,
 }
 
 pub struct AcceptChannelParameter {
@@ -380,12 +374,11 @@ pub struct AcceptChannelParameter {
     pub tlc_info: ChannelTlcInfo,
     pub public_channel_info: Option<PublicChannelInfo>,
     pub seed: [u8; 32],
-    pub open_channel: OpenChannel,
+    pub open_channel: OpenChannelV2,
     pub shutdown_script: Script,
     pub channel_id_sender: Option<oneshot::Sender<Hash256>>,
     pub max_tlc_value_in_flight: u128,
     pub max_tlc_number_in_flight: u64,
-    pub channel_features: ChannelFeatures,
 }
 
 /// Parameters for opening a channel with external funding.
@@ -407,7 +400,6 @@ pub struct OpenChannelWithExternalFundingParameter {
     pub funding_fee_rate: Option<u64>,
     pub max_tlc_value_in_flight: u128,
     pub max_tlc_number_in_flight: u64,
-    pub channel_features: ChannelFeatures,
 }
 
 /// Runtime state for external funding flow; this is intentionally not persisted.
@@ -458,7 +450,7 @@ pub enum ChannelInitializationOperation {
     OpenChannel(OpenChannelParameter),
     /// To accept a new channel from another peer, the funding amount,
     /// a unique channel seed to generate unique channel id,
-    /// original OpenChannel message and an oneshot
+    /// original OpenChannelV2 message and an oneshot
     /// channel to receive the new channel ID must be given.
     AcceptChannel(AcceptChannelParameter),
     /// Restore a persisted channel actor during node startup, keeping it offline until
@@ -534,7 +526,8 @@ where
                 .expect(ASSUME_NETWORK_ACTOR_ALIVE);
         }
         self.publish_force_closing_removes_v2(state);
-        if let Some(session) = &state.session_v2 {
+        {
+            let session = &state.session;
             self.publish_remove_effects_v2(
                 state.id,
                 &session.remove_effects[..count.min(session.remove_effects.len())],
@@ -548,170 +541,32 @@ where
         state: &mut ChannelActorState,
         message: FiberChannelMessage,
     ) -> ProcessingChannelResult {
-        let versioned = matches!(
-            message,
-            FiberChannelMessage::AcceptChannelV2(_)
-                | FiberChannelMessage::CommitmentSignedV2(_)
-                | FiberChannelMessage::RevokeAndAckV2(_)
-                | FiberChannelMessage::ChannelReadyV2(_)
-                | FiberChannelMessage::TxCompleteV2(_)
-                | FiberChannelMessage::ReestablishChannelV2(_)
-                | FiberChannelMessage::ShutdownV2(_)
-                | FiberChannelMessage::ClosingSignedV2(_)
-        );
-        let legacy = matches!(
-            message,
-            FiberChannelMessage::AcceptChannel(_)
-                | FiberChannelMessage::CommitmentSigned(_)
-                | FiberChannelMessage::RevokeAndAck(_)
-                | FiberChannelMessage::ChannelReady(_)
-                | FiberChannelMessage::TxComplete(_)
-                | FiberChannelMessage::ReestablishChannel(_)
-                | FiberChannelMessage::Shutdown(_)
-                | FiberChannelMessage::ClosingSigned(_)
-        );
-        let expects_v2 = state.channel_features.is_v2();
         state.ensure_v2_not_quarantined()?;
-        if (versioned && !expects_v2) || (legacy && expects_v2) {
-            return Err(ProcessingChannelError::InvalidState(
-                "Channel protocol version mismatch".to_owned(),
+        if message.get_channel_id() != state.id {
+            return Err(ProcessingChannelError::InvalidParameter(
+                "V2 channel ID mismatch".to_owned(),
             ));
         }
-        if versioned {
-            if message.get_channel_id() != state.id {
-                return Err(ProcessingChannelError::InvalidParameter(
-                    "V2 channel ID mismatch".to_owned(),
-                ));
-            }
-            // Full current-schema and cryptographic validation runs at DB preflight
-            // and actor restoration. Live traffic checks the protocol identity;
-            // every signing operation independently guards its immutable context.
-            if !state.session_v2.as_ref().is_some_and(|session| {
-                session.marker == super::session_v2::SESSION_MARKER
-                    && session.own.owner == state.signer.funding_key.pubkey()
-                    && session.own.purpose == fiber_types::NoncePurposeV2::Commitment
-            }) {
-                return Err(ProcessingChannelError::InvalidState(
-                    "Invalid V2 protocol session".to_owned(),
-                ));
-            }
+        // Full signing-context validation runs on restoration and before every signature.
+        if !{
+            let session = &state.session;
+            session.marker == SESSION_MARKER
+                && session.own.owner == state.signer.funding_key.pubkey()
+                && session.own.purpose == fiber_types::NoncePurposeV2::Commitment
+        } {
+            return Err(ProcessingChannelError::InvalidState(
+                "Invalid V2 protocol session".to_owned(),
+            ));
         }
         if state.reestablishing {
-            if expects_v2 {
-                if let FiberChannelMessage::ReestablishChannelV2(reestablish) = message {
-                    return self.reestablish_v2(myself, state, reestablish).await;
-                }
-                // No replay or update traffic is allowed until our handshake has been
-                // sent and the peer's handshake has been validated.
-                if state.recovery_peer_v2.is_none() {
-                    return Ok(());
-                }
-            } else {
-                match message {
-                    FiberChannelMessage::ReestablishChannel(ref reestablish_channel) => {
-                        // The peer's reestablish message can overtake our paced
-                        // PeerReconnected event. Claim and send our side of the handshake
-                        // before processing theirs so neither side is left waiting.
-                        state.on_peer_reconnected();
-                        let pending_commit_diff =
-                            self.store.get_pending_commit_diff(&state.get_id());
-                        state
-                            .handle_reestablish_channel_message(
-                                myself,
-                                reestablish_channel,
-                                pending_commit_diff,
-                            )
-                            .await?;
-                        if !state.reestablishing {
-                            state.schedule_next_retry_task(myself);
-                        }
-                    }
-                    _ => {
-                        debug!("Ignoring message while reestablishing: {:?}", message);
-                    }
-                }
+            if let FiberChannelMessage::ReestablishChannelV2(reestablish) = message {
+                return self.reestablish_v2(myself, state, reestablish).await;
+            }
+            // Do not accept replay or updates until both handshakes have been validated.
+            if state.recovery_peer_v2.is_none() {
                 return Ok(());
             }
         }
-
-        let message = match message {
-            FiberChannelMessage::CommitmentSignedV2(request) => {
-                return self.receive_commitment_v2(myself, state, request).await
-            }
-            FiberChannelMessage::RevokeAndAckV2(ack) => {
-                return self.receive_ack_v2(myself, state, ack).await
-            }
-            FiberChannelMessage::ReestablishChannelV2(reestablish) => {
-                return self.reestablish_v2(myself, state, reestablish).await
-            }
-            FiberChannelMessage::AcceptChannelV2(accept) => {
-                if accept.channel_features != 1 {
-                    return Err(ProcessingChannelError::InvalidParameter(
-                        "V2 Accept requires features=1".to_owned(),
-                    ));
-                }
-                FiberChannelMessage::AcceptChannel(crate::fiber::session_v2::accept_parameters(
-                    accept,
-                ))
-            }
-            FiberChannelMessage::TxCompleteV2(complete) => {
-                let session = state.session_v2.as_ref().expect("version checked");
-                if session.bootstrap_remote_nonce.as_ref()
-                    != Some(&complete.initial_commitment_nonce)
-                {
-                    return Err(ProcessingChannelError::InvalidState(
-                        "V2 TxComplete changed bootstrap nonce".to_owned(),
-                    ));
-                }
-                FiberChannelMessage::TxComplete(TxComplete {
-                    channel_id: complete.channel_id,
-                    next_commitment_nonce: complete.initial_commitment_nonce,
-                })
-            }
-            FiberChannelMessage::ChannelReadyV2(ready) => {
-                let packed: fiber_types::PackedChannelReadyV2 = ready.clone().into();
-                let ready_phase = match state.state {
-                    ChannelState::AwaitingChannelReady(_) => true,
-                    ChannelState::AwaitingTxSignatures(flags) => {
-                        flags.contains(AwaitingTxSignaturesFlags::TX_SIGNATURES_SENT)
-                    }
-                    _ => false,
-                };
-                let session = state.session_v2.as_mut().expect("version checked");
-                if let Some(previous) = &session.remote_ready {
-                    if previous.as_slice() != packed.as_slice() {
-                        return Err(ProcessingChannelError::InvalidState(
-                            "Conflicting duplicate V2 ChannelReady".to_owned(),
-                        ));
-                    }
-                    return Ok(());
-                }
-                if !ready_phase {
-                    return Err(ProcessingChannelError::InvalidState(
-                        "V2 ChannelReady in invalid phase".to_owned(),
-                    ));
-                }
-                if ready.next_commitment_number != INITIAL_COMMITMENT_NUMBER + 2 {
-                    return Err(ProcessingChannelError::InvalidState(
-                        "Unexpected V2 bootstrap Ready number".to_owned(),
-                    ));
-                }
-                if session.remote_number == INITIAL_COMMITMENT_NUMBER + 2
-                    && session.remote_nonce.as_ref() != Some(&ready.next_commitment_nonce)
-                {
-                    return Err(ProcessingChannelError::InvalidState(
-                        "Conflicting V2 ChannelReady nonce".to_owned(),
-                    ));
-                }
-                session.remote_number = ready.next_commitment_number;
-                session.remote_ready = Some(packed);
-                session.remote_nonce = Some(ready.next_commitment_nonce);
-                FiberChannelMessage::ChannelReady(ChannelReady {
-                    channel_id: ready.channel_id,
-                })
-            }
-            other => other,
-        };
         match message {
             FiberChannelMessage::ShutdownV2(shutdown) => {
                 self.receive_shutdown_v2(state, shutdown).await
@@ -719,14 +574,15 @@ where
             FiberChannelMessage::ClosingSignedV2(closing) => {
                 self.receive_closing_v2(state, closing).await
             }
-            FiberChannelMessage::AcceptChannelV2(_)
-            | FiberChannelMessage::CommitmentSignedV2(_)
-            | FiberChannelMessage::RevokeAndAckV2(_)
-            | FiberChannelMessage::ChannelReadyV2(_)
-            | FiberChannelMessage::ReestablishChannelV2(_)
-            | FiberChannelMessage::TxCompleteV2(_) => Err(ProcessingChannelError::InvalidState(
-                format!("Received undispatched V2 message {message}"),
-            )),
+            FiberChannelMessage::CommitmentSignedV2(request) => {
+                self.receive_commitment_v2(myself, state, request).await
+            }
+            FiberChannelMessage::RevokeAndAckV2(ack) => {
+                self.receive_ack_v2(myself, state, ack).await
+            }
+            FiberChannelMessage::ReestablishChannelV2(reestablish) => {
+                self.reestablish_v2(myself, state, reestablish).await
+            }
             FiberChannelMessage::AnnouncementSignatures(announcement_signatures) => {
                 if !state.is_public() {
                     return Err(ProcessingChannelError::InvalidState(
@@ -759,11 +615,16 @@ where
                 state.maybe_public_channel_is_ready(myself);
                 Ok(())
             }
-            FiberChannelMessage::AcceptChannel(accept_channel) => {
+            FiberChannelMessage::AcceptChannelV2(accept_channel) => {
+                if accept_channel.channel_features != 1 {
+                    return Err(ProcessingChannelError::InvalidParameter(
+                        "V2 Accept requires features=1".to_owned(),
+                    ));
+                }
                 state.handle_accept_channel_message(accept_channel)?;
                 let old_id = state.get_id();
                 state.fill_in_channel_id();
-                if state.session_v2.is_some() && !state.ephemeral_config.external_funding.enabled {
+                if !state.ephemeral_config.external_funding.enabled {
                     self.store.move_channel_actor_state(&old_id, state.clone());
                 }
 
@@ -867,7 +728,17 @@ where
                     .handle_tx_collaboration_msg(myself, TxCollaborationMsg::TxUpdate(tx))
                     .await
             }
-            FiberChannelMessage::TxComplete(tx) => {
+            FiberChannelMessage::TxCompleteV2(complete) => {
+                let session = &state.session;
+                if session.bootstrap_remote_nonce.as_ref()
+                    != Some(&complete.initial_commitment_nonce)
+                {
+                    return Err(ProcessingChannelError::InvalidState(
+                        "V2 TxComplete changed bootstrap nonce".to_owned(),
+                    ));
+                }
+                let tx = complete;
+
                 if state.ephemeral_config.external_funding.enabled
                     && state.ephemeral_config.external_funding.signed_submitted
                     && matches!(
@@ -903,19 +774,14 @@ where
                 }
                 Ok(())
             }
-            FiberChannelMessage::CommitmentSigned(commitment_signed) => {
-                self.handle_commitment_signed_peer_message(myself, state, commitment_signed)
-                    .await
-            }
+
             FiberChannelMessage::TxSignatures(tx_signatures) => {
                 // We're the one who sent tx_signature first, and we received a tx_signature message.
                 // This means that the tx_signature procedure is now completed. Just change state,
                 // and exit.
 
-                if state
-                    .session_v2
-                    .as_ref()
-                    .is_some_and(|session| session.incoming.is_some() && session.outgoing.is_some())
+                if state.session.incoming.is_some()
+                    && state.session.outgoing.is_some()
                     && matches!(state.state, ChannelState::AwaitingChannelReady(_))
                     && state.latest_commitment_transaction.is_some()
                     && state.ephemeral_config.external_funding.enabled
@@ -944,7 +810,7 @@ where
                         }
                     }
                     // The acceptor may have missed our response; replay only already saved witnesses.
-                    state.send_v2_message(FiberMessage::tx_signatures(TxSignatures {
+                    state.send_message_to_peer(FiberMessage::tx_signatures(TxSignatures {
                         channel_id: state.id,
                         witnesses: funding_tx
                             .witnesses()
@@ -955,8 +821,8 @@ where
                     if matches!(state.state, ChannelState::AwaitingChannelReady(flags) if flags.contains(AwaitingChannelReadyFlags::OUR_CHANNEL_READY))
                     {
                         // Our earlier Ready could also have overtaken the lost witness response.
-                        let session = state.session_v2.as_ref().expect("V2 replay checked");
-                        state.send_v2_message(FiberMessage::channel_ready_v2(
+                        let session = &state.session;
+                        state.send_message_to_peer(FiberMessage::channel_ready_v2(
                             crate::fiber::types::ChannelReadyV2 {
                                 channel_id: state.id,
                                 next_commitment_number: session.own.number,
@@ -1153,23 +1019,46 @@ where
                 }
                 Ok(())
             }
-            FiberChannelMessage::RevokeAndAck(revoke_and_ack) => {
-                state.handle_revoke_and_ack_peer_message(myself, revoke_and_ack)?;
-                self.update_tlc_status_on_ack(myself, state).await;
-                if state.tlc_state.need_another_commitment_signed() {
-                    self.handle_commitment_signed_command(myself, state).await?;
+
+            FiberChannelMessage::ChannelReadyV2(ready) => {
+                let packed: fiber_types::PackedChannelReadyV2 = ready.clone().into();
+                let ready_phase = match state.state {
+                    ChannelState::AwaitingChannelReady(_) => true,
+                    ChannelState::AwaitingTxSignatures(flags) => {
+                        flags.contains(AwaitingTxSignaturesFlags::TX_SIGNATURES_SENT)
+                    }
+                    _ => false,
+                };
+                let session = &mut state.session;
+                if let Some(previous) = &session.remote_ready {
+                    if previous.as_slice() != packed.as_slice() {
+                        return Err(ProcessingChannelError::InvalidState(
+                            "Conflicting duplicate V2 ChannelReady".to_owned(),
+                        ));
+                    }
+                    return Ok(());
                 }
-                if !state.is_waiting_tlc_ack() {
-                    self.apply_retryable_tlc_operations(myself, state, false)
-                        .await;
+                if !ready_phase {
+                    return Err(ProcessingChannelError::InvalidState(
+                        "V2 ChannelReady in invalid phase".to_owned(),
+                    ));
                 }
-                if state.finish_pending_reestablish_channel_ready(myself) {
-                    state.schedule_next_retry_task(myself);
-                    debug_event!(self.network, "Reestablished channel in ChannelReady");
+                if ready.next_commitment_number != INITIAL_COMMITMENT_NUMBER + 2 {
+                    return Err(ProcessingChannelError::InvalidState(
+                        "Unexpected V2 bootstrap Ready number".to_owned(),
+                    ));
                 }
-                Ok(())
-            }
-            FiberChannelMessage::ChannelReady(_channel_ready) => {
+                if session.remote_number == INITIAL_COMMITMENT_NUMBER + 2
+                    && session.remote_nonce.as_ref() != Some(&ready.next_commitment_nonce)
+                {
+                    return Err(ProcessingChannelError::InvalidState(
+                        "Conflicting V2 ChannelReady nonce".to_owned(),
+                    ));
+                }
+                session.remote_number = ready.next_commitment_number;
+                session.remote_ready = Some(packed);
+                session.remote_nonce = Some(ready.next_commitment_nonce);
+
                 let flags = match state.state {
                     ChannelState::ChannelReady => return Ok(()),
                     ChannelState::AwaitingTxSignatures(flags)
@@ -1212,45 +1101,7 @@ where
                 }
                 self.handle_remove_tlc_peer_message(state, remove_tlc)
             }
-            FiberChannelMessage::Shutdown(shutdown) => {
-                self.handle_shutdown_peer_message(state, shutdown).await
-            }
-            FiberChannelMessage::ClosingSigned(closing) => {
-                let ClosingSigned {
-                    partial_signature,
-                    channel_id,
-                } = closing;
 
-                if channel_id != state.get_id() {
-                    return Err(ProcessingChannelError::InvalidParameter(
-                        "Channel id mismatch".to_string(),
-                    ));
-                }
-
-                // Note that we don't check the validity of the signature here.
-                // we will check the validity when we're about to build the shutdown tx.
-                // This may be or may not be a problem.
-                // We do this to simplify the handling of the message.
-                // We may change this in the future.
-                // We also didn't check the state here.
-                if let Some(shutdown_info) = state.remote_shutdown_info.as_mut() {
-                    shutdown_info.signature = Some(partial_signature);
-                }
-
-                state.maybe_transfer_to_shutdown().await?;
-                Ok(())
-            }
-            FiberChannelMessage::ReestablishChannel(ref reestablish_channel) => {
-                let pending_commit_diff = self.store.get_pending_commit_diff(&state.get_id());
-                state
-                    .handle_reestablish_channel_message(
-                        myself,
-                        reestablish_channel,
-                        pending_commit_diff,
-                    )
-                    .await?;
-                Ok(())
-            }
             FiberChannelMessage::TxAbort(tx_abort) => {
                 if state.state.can_abort_funding() && !state.has_submitted_local_external_funding()
                 {
@@ -1377,132 +1228,6 @@ where
         )
     }
 
-    async fn handle_commitment_signed_peer_message(
-        &self,
-        myself: &ActorRef<ChannelActorMessage>,
-        state: &mut ChannelActorState,
-        commitment_signed: CommitmentSigned,
-    ) -> ProcessingChannelResult {
-        // If deferred peer TLC updates exist, they must be applied before verifying
-        // CommitmentSigned to preserve sender-side message order (Add/Remove before CommitSigned).
-        if state.defer_peer_tlc_updates && !state.deferred_peer_tlc_updates.is_empty() {
-            debug!(
-                "Applying deferred peer TLC updates before verifying CommitmentSigned for channel {} (queued={})",
-                state.get_id(),
-                state.deferred_peer_tlc_updates.len()
-            );
-            state.stop_defer_peer_tlc_updates();
-            self.flush_deferred_peer_tlc_updates(state)?;
-        }
-
-        let was_waiting_ack_before_verify = state.tlc_state.waiting_ack;
-        let previous_remote_nonce = state.last_committed_remote_nonce.clone();
-        let next_commitment_nonce = commitment_signed.next_commitment_nonce.clone();
-        // build commitment tx and verify signature from remote, if passed send ACK for partner
-        let commitment_signed_processed = match state
-            .verify_commitment_signed_and_send_ack(commitment_signed.clone())
-        {
-            Ok(processed) => processed,
-            Err(err) => {
-                error!(
-                        "Failed to verify commitment_signed message: {:?}, shutdown channel {} forcefully",
-                        err,
-                        state.get_id()
-                    );
-                self.notify_network_actor_shutdown_me(state);
-                return Err(err);
-            }
-        };
-        if !commitment_signed_processed {
-            return Ok(());
-        }
-        let should_return_unsigned_external_funding_tx = !state.is_acceptor
-            && state.ephemeral_config.external_funding.enabled
-            && !state.ephemeral_config.external_funding.signed_submitted
-            && matches!(
-                state.state,
-                ChannelState::SigningCommitment(
-                    SigningCommitmentFlags::THEIR_COMMITMENT_SIGNED_SENT
-                )
-            );
-        if state.ephemeral_config.external_funding.enabled {
-            if let ChannelState::SigningCommitment(flags) = state.state {
-                if flags.contains(SigningCommitmentFlags::COMMITMENT_SIGNED_SENT)
-                    && state.ephemeral_config.external_funding.signed_submitted
-                {
-                    self.store.insert_channel_actor_state(state.clone());
-                    state.maybe_transfer_to_tx_signatures(flags)?;
-                }
-            }
-        }
-        if was_waiting_ack_before_verify {
-            self.set_pending_commit_diff_replay_order_hint(
-                state,
-                ReplayOrderHint::CommitThenRevoke,
-            );
-        }
-        if !state.is_acceptor
-            && state.ephemeral_config.external_funding.signed_submitted
-            && matches!(
-                state.state,
-                ChannelState::SigningCommitment(
-                    SigningCommitmentFlags::THEIR_COMMITMENT_SIGNED_SENT
-                )
-            )
-        {
-            // Persist the completed commitment before TxUpdate can be broadcast.
-            self.store.insert_channel_actor_state(state.clone());
-            self.release_external_funding_signed_tx(state)?;
-        }
-        let need_commitment_signed = state.tlc_state.update_for_commitment_signed();
-
-        // flush remove tlc for received tlcs after replying ack for peer
-        self.apply_settled_remove_tlcs(myself, state, true).await;
-
-        // when we transfer to shutdown state, we need to build shutdown transaction
-        // here `maybe_transfer_to_shutdown` must be called after `apply_settled_remove_tlcs`
-        // so the closing transaction is symmetric with peer
-        state.maybe_transfer_to_shutdown().await?;
-
-        let should_reply_external_funding_handshake =
-            state.ephemeral_config.external_funding.enabled
-                && matches!(
-                    state.state,
-                    ChannelState::SigningCommitment(flags)
-                        if flags.contains(SigningCommitmentFlags::THEIR_COMMITMENT_SIGNED_SENT)
-                            && !flags.contains(SigningCommitmentFlags::OUR_COMMITMENT_SIGNED_SENT)
-                );
-        if should_reply_external_funding_handshake && !state.tlc_state.waiting_ack {
-            let previous_remote_nonce = previous_remote_nonce.ok_or_else(|| {
-                ProcessingChannelError::InvalidState(
-                    "Missing previous remote nonce during external funding handshake".to_string(),
-                )
-            })?;
-            // Sign the current commitment round with the same remote nonce that was
-            // just used to verify the peer's signature. The received next nonce
-            // should only become active after our response is sent.
-            state.commit_remote_nonce(previous_remote_nonce);
-            self.handle_commitment_signed_command(myself, state).await?;
-            state.commit_remote_nonce(next_commitment_nonce);
-        } else if need_commitment_signed
-            && !state.tlc_state.waiting_ack
-            && !state.is_waiting_for_external_funding_submission()
-        {
-            self.handle_commitment_signed_command(myself, state).await?;
-        }
-
-        if should_return_unsigned_external_funding_tx {
-            self.return_unsigned_external_funding_tx(state)?;
-        }
-
-        if state.defer_peer_tlc_updates {
-            state.stop_defer_peer_tlc_updates();
-            self.flush_deferred_peer_tlc_updates(state)?;
-        }
-
-        Ok(())
-    }
-
     fn flush_deferred_peer_tlc_updates(
         &self,
         state: &mut ChannelActorState,
@@ -1523,27 +1248,6 @@ where
         }
 
         Ok(())
-    }
-
-    fn set_pending_commit_diff_replay_order_hint(
-        &self,
-        state: &ChannelActorState,
-        replay_order_hint: ReplayOrderHint,
-    ) {
-        let channel_id = state.get_id();
-        let Some(mut commit_diff) = self.store.get_pending_commit_diff(&channel_id) else {
-            warn!(
-                "Unable to set replay_order_hint={:?} for channel {}: pending CommitDiff not found",
-                replay_order_hint, channel_id
-            );
-            return;
-        };
-        if commit_diff.replay_order_hint == Some(replay_order_hint) {
-            return;
-        }
-        commit_diff.replay_order_hint = Some(replay_order_hint);
-        self.store
-            .store_pending_commit_diff(&channel_id, &commit_diff);
     }
 
     pub(crate) async fn apply_settled_remove_tlcs(
@@ -2291,76 +1995,16 @@ where
         Ok(())
     }
 
-    async fn handle_shutdown_peer_message(
-        &self,
-        state: &mut ChannelActorState,
-        shutdown: Shutdown,
-    ) -> ProcessingChannelResult {
-        debug!("Received Shutdown message from peer: {:?}", shutdown);
-        #[cfg(debug_assertions)]
-        state.tlc_state.debug();
-        let flags = match state.state {
-            ChannelState::ChannelReady => {
-                if state.tlc_state.all_tlcs().any(|tlc| {
-                    matches!(
-                        tlc.status,
-                        TlcStatus::Inbound(InboundTlcStatus::RemoteAnnounced)
-                    )
-                }) {
-                    return Err(ProcessingChannelError::InvalidState(
-                        "Unable to process shutdown command peer message, as there are pending inbound tlcs"
-                            .to_string(),
-                    ));
-                }
-                ShuttingDownFlags::empty()
-            }
-            ChannelState::ShuttingDown(flags)
-                if flags.contains(ShuttingDownFlags::THEIR_SHUTDOWN_SENT) =>
-            {
-                return Err(ProcessingChannelError::InvalidParameter(
-                    "Received Shutdown message, but we're already in ShuttingDown state"
-                        .to_string(),
-                ));
-            }
-            ChannelState::ShuttingDown(flags) => flags,
-            _ => {
-                return Err(ProcessingChannelError::InvalidState(format!(
-                    "received Shutdown message, but we're not ready for Shutdown, state is currently {:?}",
-                    state.state
-                )));
-            }
-        };
-
-        if !state.check_shutdown_fee_valid(&shutdown.close_script, shutdown.fee_rate.as_u64()) {
-            return Err(ProcessingChannelError::InvalidParameter(
-                "Shutdown fee is invalid".to_string(),
-            ));
-        }
-
-        state.remote_shutdown_info = Some(ShutdownInfo {
-            close_script: shutdown.close_script,
-            fee_rate: shutdown.fee_rate.as_u64(),
-            signature: None,
-        });
-
-        state
-            .step_shutting_down(flags | ShuttingDownFlags::THEIR_SHUTDOWN_SENT)
-            .await?;
-        Ok(())
-    }
-
     async fn apply_remove_tlc_operation(
         &self,
         state: &mut ChannelActorState,
         tlc_id: TLCId,
     ) -> ProcessingChannelResult {
         let was_waiting_forward = state.is_waiting_forward_result_for_received_tlc(tlc_id);
-        if state.session_v2.is_some() && tlc_id.is_offered() {
+        if tlc_id.is_offered() {
             let tlc = state.tlc_state.get(&tlc_id).expect("settled TLC").clone();
             if !state
-                .session_v2
-                .as_ref()
-                .expect("V2 session")
+                .session
                 .remove_effects
                 .iter()
                 .any(|(old, _)| old.tlc_id == tlc_id)
@@ -2386,12 +2030,7 @@ where
                 } else {
                     None
                 };
-                state
-                    .session_v2
-                    .as_mut()
-                    .expect("V2 session")
-                    .remove_effects
-                    .push((tlc, execution));
+                state.session.remove_effects.push((tlc, execution));
             }
         }
         let tlc = state.tlc_state.get_mut(&tlc_id).expect("expect tlc");
@@ -2435,46 +2074,8 @@ where
         }
 
         if tlc_info.is_offered() {
-            if let Some(session) = &state.session_v2 {
-                // Do not include a later intent whose local application may fail.
-                state.pending_remove_effects_v2 = session.remove_effects.len();
-                return Ok(());
-            }
-            if let Some((previous_channel_id, previous_tlc_id)) = tlc_info.forwarding_tlc {
-                let remove_reason = match remove_reason.backward(&tlc_info.shared_secret) {
-                    Ok(remove_reason) => remove_reason,
-                    Err(err) => {
-                        warn!(
-                            "Not forwarding TLC failure: error={}, channel_id={:?}, tlc_id={:?}, previous_channel_id={:?}, previous_tlc_id={:?}",
-                            err,
-                            state.get_id(),
-                            tlc_id,
-                            previous_channel_id,
-                            previous_tlc_id
-                        );
-                        return Ok(());
-                    }
-                };
-
-                let _ = self.register_retryable_relay_tlc_remove(
-                    TLCId::Received(previous_tlc_id),
-                    previous_channel_id,
-                    remove_reason,
-                );
-            } else {
-                // only the original sender of the TLC should send `TlcRemoveReceived` event
-                // because only the original sender cares about the TLC event to settle the payment
-                self.network
-                    .send_message(NetworkActorMessage::new_event(
-                        NetworkActorEvent::TlcRemoveReceived(
-                            tlc_info.payment_hash,
-                            tlc_info.attempt_id,
-                            remove_reason,
-                            None,
-                        ),
-                    ))
-                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-            }
+            // Publish only the effects whose local application succeeded, after saving state.
+            state.pending_remove_effects_v2 = state.session.remove_effects.len();
         }
         Ok(())
     }
@@ -2486,149 +2087,6 @@ where
                 NetworkServiceEvent::PreimageRemoved(payment_hash),
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-    }
-
-    pub async fn handle_commitment_signed_command(
-        &self,
-        myself: &ActorRef<ChannelActorMessage>,
-        state: &mut ChannelActorState,
-    ) -> ProcessingChannelResult {
-        if state.session_v2.is_some() {
-            return self.send_commitment_v2(myself, state).await;
-        }
-        // Follow LND's unacked-commitment guard: never send a new CommitmentSigned
-        // while the previous one is still awaiting RevokeAndAck.
-        if state.tlc_state.waiting_ack {
-            debug!(
-                "[SEND_CS] waiting_ack=true for channel {}, skip duplicate CommitmentSigned",
-                state.get_id()
-            );
-            return Ok(());
-        }
-
-        let flags = match state.state {
-            ChannelState::CollaboratingFundingTx(flags)
-                if !flags.contains(CollaboratingFundingTxFlags::COLLABORATION_COMPLETED) =>
-            {
-                return Err(ProcessingChannelError::InvalidState(format!(
-                    "Unable to process commitment_signed command in state {:?}, as collaboration is not completed yet.",
-                    &state.state
-                )));
-            }
-            ChannelState::CollaboratingFundingTx(_) => {
-                CommitmentSignedFlags::SigningCommitment(SigningCommitmentFlags::empty())
-            }
-            ChannelState::SigningCommitment(flags)
-                if flags.contains(SigningCommitmentFlags::OUR_COMMITMENT_SIGNED_SENT) =>
-            {
-                return Err(ProcessingChannelError::InvalidState(format!(
-                    "Unable to process commitment_signed command in state {:?}, as we have already sent our commitment_signed message.",
-                    &state.state
-                )));
-            }
-            ChannelState::SigningCommitment(flags) => {
-                CommitmentSignedFlags::SigningCommitment(flags)
-            }
-            ChannelState::ChannelReady => CommitmentSignedFlags::ChannelReady(),
-            ChannelState::ShuttingDown(flags) => {
-                warn!(
-                    "Received commitment_signed command in ShuttingDown state: {:?}",
-                    flags
-                );
-                if flags.is_ok_for_commitment_operation() {
-                    CommitmentSignedFlags::PendingShutdown()
-                } else {
-                    return Err(ProcessingChannelError::InvalidState(format!(
-                        "Unable to process commitment_signed command in shutdowning state with flags {:?}",
-                        &flags
-                    )));
-                }
-            }
-            _ => {
-                return Err(ProcessingChannelError::InvalidState(format!(
-                    "Unable to send commitment signed message in state {:?}",
-                    &state.state
-                )));
-            }
-        };
-        state.clean_up_failed_tlcs();
-
-        let (funding_tx_partial_signature, commitment_tx, settlement_data) =
-            state.build_and_sign_commitment_tx()?;
-        let commitment_signed = CommitmentSigned {
-            channel_id: state.get_id(),
-            funding_tx_partial_signature,
-            next_commitment_nonce: state.get_next_commitment_nonce(),
-        };
-
-        // Store CommitDiff for potential reestablishment
-        let commit_diff = CommitDiff {
-            version: CURRENT_COMMIT_DIFF_VERSION,
-            channel_id: state.get_id(),
-            local_commitment_number_at_send: state.get_local_commitment_number(),
-            remote_commitment_number_at_send: state.get_remote_commitment_number(),
-            commit_tx: commitment_tx.data(),
-            replay_updates: state.collect_pending_tlc_updates(),
-            commitment_signed_template: Some(CommitmentSignedTemplate {
-                next_commitment_nonce: commitment_signed.next_commitment_nonce.clone(),
-                funding_tx_partial_signature: Some(funding_tx_partial_signature),
-            }),
-            replay_order_hint: Some(ReplayOrderHint::RevokeThenCommit),
-            created_at_ms: now_timestamp_as_millis_u64(),
-        };
-        state.last_was_revoke = false;
-        let signing_flags = match flags {
-            CommitmentSignedFlags::SigningCommitment(flags) => {
-                let flags = flags | SigningCommitmentFlags::OUR_COMMITMENT_SIGNED_SENT;
-                state.update_state(ChannelState::SigningCommitment(flags));
-                Some(flags)
-            }
-            CommitmentSignedFlags::ChannelReady() | CommitmentSignedFlags::PendingShutdown() => {
-                state.set_waiting_ack(myself, true);
-                None
-            }
-        };
-        self.store
-            .insert_channel_actor_state_with_pending_commit_diff(state.clone(), &commit_diff);
-
-        // Notify outside observers.
-        self.network
-            .send_message(NetworkActorMessage::new_notification(
-                NetworkServiceEvent::LocalCommitmentSigned(state.get_id(), settlement_data),
-            ))
-            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-
-        #[cfg(debug_assertions)]
-        debug!(
-            "send commitment signed: {:?} at commitment_numbers: {:?}",
-            commitment_signed,
-            state.get_current_commitment_numbers()
-        );
-
-        self.network
-            .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
-                    state.get_remote_pubkey(),
-                    FiberMessage::commitment_signed(commitment_signed),
-                )),
-            ))
-            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-
-        match flags {
-            CommitmentSignedFlags::SigningCommitment(_) => {
-                let flags = signing_flags.expect("signing flags should be set");
-                if !state.ephemeral_config.external_funding.enabled
-                    || state.ephemeral_config.external_funding.signed_submitted
-                {
-                    state.maybe_transfer_to_tx_signatures(flags)?;
-                }
-            }
-            CommitmentSignedFlags::ChannelReady() => {}
-            CommitmentSignedFlags::PendingShutdown() => {
-                state.maybe_transfer_to_shutdown().await?;
-            }
-        }
-        Ok(())
     }
 
     pub async fn handle_add_tlc_command(
@@ -2673,17 +2131,6 @@ where
             onion_packet: command.onion_packet.clone(),
         };
 
-        if state.session_v2.is_none() {
-            let msg = FiberMessageWithTarget::new(
-                state.get_remote_pubkey(),
-                FiberMessage::add_tlc(add_tlc.clone()),
-            );
-            self.network
-                .send_message(NetworkActorMessage::new_command(
-                    NetworkActorCommand::SendFiberMessage(msg),
-                ))
-                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-        }
         state.record_pending_replay_update(TlcReplayUpdate::Add(add_tlc));
         Ok(tlc_id.into())
     }
@@ -2695,13 +2142,11 @@ where
         command: RemoveTlcCommand,
     ) -> ProcessingChannelResult {
         self.remove_tlc_update(state, command)?;
-        if state.session_v2.is_some()
-            && matches!(state.state, ChannelState::ShuttingDown(flags) if flags.contains(ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION))
+        if matches!(state.state, ChannelState::ShuttingDown(flags) if flags.contains(ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION))
         {
             // The published close transaction precludes a new CS; notify after the next save.
             return Ok(());
         }
-        state.maybe_transfer_to_shutdown().await?;
         self.handle_commitment_signed_command(myself, state).await?;
         Ok(())
     }
@@ -2728,17 +2173,7 @@ where
             tlc_id: command.id,
             reason,
         };
-        if state.session_v2.is_none() {
-            let msg = FiberMessageWithTarget::new(
-                state.get_remote_pubkey(),
-                FiberMessage::remove_tlc(remove_tlc.clone()),
-            );
-            self.network
-                .send_message(NetworkActorMessage::new_command(
-                    NetworkActorCommand::SendFiberMessage(msg),
-                ))
-                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-        }
+
         state.record_pending_replay_update(TlcReplayUpdate::Remove(remove_tlc));
         Ok(())
     }
@@ -2749,143 +2184,70 @@ where
         command: ShutdownCommand,
     ) -> ProcessingChannelResult {
         state.ensure_v2_not_quarantined()?;
-        if state.session_v2.is_some() && !command.force {
+        if !command.force {
             return self.shutdown_v2(state, command).await;
         }
-        #[cfg(debug_assertions)]
-        state.tlc_state.debug();
-        if command.force {
-            match state.state {
-                ChannelState::ChannelReady => {
-                    debug!("Handling force shutdown command in ChannelReady state");
-                }
-                ChannelState::ShuttingDown(flags) => {
-                    debug!(
-                        "Handling force shutdown command in ShuttingDown state, flags: {:?}",
-                        &flags
-                    );
-                }
-                ChannelState::AwaitingChannelReady(flags)
-                    if flags.contains(AwaitingChannelReadyFlags::OUR_CHANNEL_READY)
-                        && state.latest_commitment_transaction.is_some() =>
-                {
-                    debug!(
-                        "Handling force shutdown command in AwaitingChannelReady state, flags: {:?}",
-                        &flags
-                    );
-                }
-                ChannelState::AwaitingTxSignatures(_)
-                    if state.ephemeral_config.external_funding.signed_submitted
-                        && state.funding_tx_confirmed_at.is_some()
-                        && state.latest_commitment_transaction.is_some() =>
-                {
-                    debug!("Handling force shutdown after early external funding confirmation");
-                }
-                _ => {
-                    return Err(ProcessingChannelError::InvalidState(format!(
-                        "Handling force shutdown command invalid state {:?}",
-                        &state.state
-                    )));
-                }
-            };
-
-            let transaction = state.get_latest_commitment_transaction().await?;
-            if state.session_v2.is_some() {
-                self.restore_received_tlc_claim_preimages(state);
+        match state.state {
+            ChannelState::ChannelReady => {
+                debug!("Handling force shutdown command in ChannelReady state");
             }
-
-            state.align_force_close_commitment_numbers();
-
-            if let Some(close) = state.session_v2.as_mut().and_then(|s| s.closing.as_mut()) {
-                close.superseded_by_force_close = true;
-                self.store.insert_channel_actor_state(state.clone());
+            ChannelState::ShuttingDown(flags) => {
+                debug!(
+                    "Handling force shutdown command in ShuttingDown state, flags: {:?}",
+                    &flags
+                );
             }
-
-            self.network
-                .send_message(NetworkActorMessage::new_event(
-                    NetworkActorEvent::ClosingTransactionPending(
-                        state.get_id(),
-                        self.get_remote_pubkey(),
-                        transaction,
-                        true,
-                    ),
-                ))
-                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-
-            state.update_state(ChannelState::ShuttingDown(
-                ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION,
-            ));
-            return Ok(());
-        } else {
-            if state.connectivity_state != ChannelConnectivityState::Online {
+            ChannelState::AwaitingChannelReady(flags)
+                if flags.contains(AwaitingChannelReadyFlags::OUR_CHANNEL_READY)
+                    && state.latest_commitment_transaction.is_some() =>
+            {
+                debug!(
+                    "Handling force shutdown command in AwaitingChannelReady state, flags: {:?}",
+                    &flags
+                );
+            }
+            ChannelState::AwaitingTxSignatures(_)
+                if state.ephemeral_config.external_funding.signed_submitted
+                    && state.funding_tx_confirmed_at.is_some()
+                    && state.latest_commitment_transaction.is_some() =>
+            {
+                debug!("Handling force shutdown after early external funding confirmation");
+            }
+            _ => {
                 return Err(ProcessingChannelError::InvalidState(format!(
-                    "Cannot cooperatively shutdown channel {} while peer is offline",
-                    state.get_id()
+                    "Handling force shutdown command invalid state {:?}",
+                    &state.state
                 )));
             }
+        };
 
-            let flags = match state.state {
-                ChannelState::ChannelReady => {
-                    debug!("Handling shutdown command in ChannelReady state");
-                    if state.tlc_state.all_tlcs().any(|tlc| {
-                        matches!(
-                            tlc.status,
-                            TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced)
-                        )
-                    }) {
-                        return Err(ProcessingChannelError::InvalidState(
-                            "Unable to process shutdown command, as there are pending outbound tlcs"
-                                .to_string(),
-                        ));
-                    }
-                    ShuttingDownFlags::empty()
-                }
-                _ => {
-                    debug!("Handling shutdown command in state {:?}", &state.state);
-                    return Err(ProcessingChannelError::InvalidState(format!(
-                        "Trying to send shutdown message while in invalid state {:?}",
-                        &state.state
-                    )));
-                }
-            };
-
-            let shutdown_fee_rate = command
-                .fee_rate
-                .unwrap_or(FeeRate::from_u64(state.commitment_fee_rate));
-            let close_script = command
-                .close_script
-                .clone()
-                .unwrap_or(state.get_local_shutdown_script());
-
-            state.check_shutdown_fee_rate(shutdown_fee_rate, &close_script)?;
-            self.network
-                .send_message(NetworkActorMessage::new_command(
-                    NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
-                        self.get_remote_pubkey(),
-                        FiberMessage::shutdown(Shutdown {
-                            channel_id: state.get_id(),
-                            close_script: close_script.clone(),
-                            fee_rate: shutdown_fee_rate,
-                        }),
-                    )),
-                ))
-                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-
-            state.local_shutdown_info = Some(ShutdownInfo {
-                close_script,
-                fee_rate: shutdown_fee_rate.as_u64(),
-                signature: None,
-            });
-            state.update_state(ChannelState::ShuttingDown(
-                flags | ShuttingDownFlags::OUR_SHUTDOWN_SENT,
-            ));
-
-            debug!(
-                "Channel state updated to {:?} after processing shutdown command",
-                &state.state
-            );
-            state.maybe_transfer_to_shutdown().await
+        let transaction = state.get_latest_commitment_transaction().await?;
+        {
+            self.restore_received_tlc_claim_preimages(state);
         }
+
+        state.align_force_close_commitment_numbers();
+
+        if let Some(close) = state.session.closing.as_mut() {
+            close.superseded_by_force_close = true;
+            self.store.insert_channel_actor_state(state.clone());
+        }
+
+        self.network
+            .send_message(NetworkActorMessage::new_event(
+                NetworkActorEvent::ClosingTransactionPending(
+                    state.get_id(),
+                    self.get_remote_pubkey(),
+                    transaction,
+                    true,
+                ),
+            ))
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+
+        state.update_state(ChannelState::ShuttingDown(
+            ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION,
+        ));
+        Ok(())
     }
 
     pub async fn handle_update_command(
@@ -3073,91 +2435,6 @@ where
             }
         }
         Ok(())
-    }
-
-    pub async fn apply_retryable_tlc_operations(
-        &self,
-        myself: &ActorRef<ChannelActorMessage>,
-        state: &mut ChannelActorState,
-        trigger_next: bool,
-    ) {
-        if state.is_closed() {
-            self.finalize_closed_retryable_tlc_operations(myself, state)
-                .await;
-            return;
-        }
-        if state.session_v2.is_some() {
-            self.apply_retryable_tlc_operations_v2(myself, state, trigger_next)
-                .await;
-            return;
-        }
-        debug!(
-            "apply_retryable_tlc_operations start: remained_ops={} waiting_tlc_ack={} reestablishing={}",
-            state.retryable_tlc_operations.len(),
-            state.is_waiting_tlc_ack(),
-            state.reestablishing
-        );
-        state.log_ack_state("[ack] retryable_ops_start");
-        loop {
-            if state.is_waiting_tlc_ack() || state.reestablishing {
-                state.log_ack_state("[ack] retryable_ops_blocked");
-                debug!(
-                    "apply_retryable_tlc_operations blocked remained_ops={} reestablishing={}",
-                    state.retryable_tlc_operations.len(),
-                    state.reestablishing
-                );
-                break;
-            }
-
-            let Some(operation) = state.retryable_tlc_operations.pop_front() else {
-                debug!("apply_retryable_tlc_operations empty queue, exiting",);
-                return;
-            };
-
-            #[cfg(debug_assertions)]
-            {
-                let hashset: HashSet<RetryableTlcOperation> =
-                    state.retryable_tlc_operations.iter().cloned().collect();
-                assert_eq!(
-                    hashset.len(),
-                    state.retryable_tlc_operations.len(),
-                    "retryable_tlc_operations contains duplicated operations"
-                );
-            }
-
-            let success = match operation {
-                RetryableTlcOperation::RemoveTlc(tlc_id, reason) => self
-                    .handle_remove_tlc_command(
-                        myself,
-                        state,
-                        RemoveTlcCommand {
-                            id: u64::from(tlc_id),
-                            reason,
-                        },
-                    )
-                    .await
-                    .is_ok(),
-                RetryableTlcOperation::AddTlc(command) => {
-                    let res = self.handle_add_tlc_command(myself, state, &command).await;
-                    self.post_add_tlc_command(myself, state, command, &res);
-                    res.is_ok()
-                }
-            };
-
-            if success {
-                break;
-            }
-        }
-
-        if trigger_next && !state.reestablishing {
-            state.schedule_next_retry_task(myself);
-        }
-        debug!(
-            "apply_retryable_tlc_operations finished: remained_ops={} trigger_next={} waiting_tlc_ack={}",
-            state.retryable_tlc_operations.len(),
-            trigger_next,
-            state.is_waiting_tlc_ack()
-        );
     }
 
     async fn finalize_closed_retryable_tlc_operations(
@@ -3373,12 +2650,13 @@ where
                 continue;
             };
             // Applied TLCs leave the active list before their result is durably received upstream.
-            for tlc in channel.tlc_state.offered_tlcs.tlcs.iter().chain(
-                channel
-                    .session_v2
-                    .iter()
-                    .flat_map(|session| session.remove_effects.iter().map(|(tlc, _)| tlc)),
-            ) {
+            for tlc in channel
+                .tlc_state
+                .offered_tlcs
+                .tlcs
+                .iter()
+                .chain(channel.session.remove_effects.iter().map(|(tlc, _)| tlc))
+            {
                 if let Some((prev_channel_id, prev_tlc_id)) = tlc.forwarding_tlc {
                     // A created TLC takes precedence over any duplicate queued command.
                     index.insert(
@@ -3961,12 +3239,12 @@ where
         let expect_expiry = now
             .saturating_add(tlc_expiry_delay(&delay_epoch))
             .saturating_add(CHECK_CHANNELS_INTERVAL.as_millis() as u64);
-        let claim = state.session_v2.as_ref().and_then(|_| {
+        let claim = {
             state.tlc_state.received_tlcs.tlcs.iter().find(|tlc| {
                 tlc.expiry < expect_expiry
                     && state.pending_received_tlc_claim_preimage(tlc).is_some()
             })
-        });
+        };
         if let Some(tlc) = claim {
             info!(
                 channel_id = %state.get_id(),
@@ -4781,7 +4059,7 @@ where
             }
             ChannelEvent::PeerReconnected => {
                 state.on_peer_reconnected();
-                if state.session_v2.is_some() && state.reestablishing {
+                if state.reestablishing {
                     myself.send_after(state.reestablish_timeout_delay(), || {
                         ChannelActorMessage::Event(ChannelEvent::CheckActiveChannel)
                     });
@@ -4891,12 +4169,10 @@ where
                         state.get_remote_pubkey(),
                     );
                     self.notify_network_actor_shutdown_me(state);
-                } else if state.session_v2.is_some()
-                    && !state.is_closed()
+                } else if !state.is_closed()
                     && state.reestablish_timed_out(now_timestamp_as_millis_u64())
                 {
                     // V2 keeps its recovery deadline through validated handshake replay,
-                    // including funding states that the V1 TLC watchdog does not cover.
                     error!(
                         "Channel {} from peer {:?} has been reestablishing too long, shutting down it forcefully",
                         state.get_id(),
@@ -4925,7 +4201,8 @@ where
                 // A settled removal whose payment effect could not be bound is retried here
                 // (and after a restart). Nothing else re-drives it: the retry queue only holds
                 // explicit TLC commands.
-                if let Some(session) = &state.session_v2 {
+                {
+                    let session = &state.session;
                     state.pending_remove_effects_v2 = session.remove_effects.len();
                     self.apply_settled_remove_tlcs(myself, state, true).await;
                     self.apply_settled_remove_tlcs(myself, state, false).await;
@@ -4941,17 +4218,7 @@ where
                     self.notify_network_actor_shutdown_me(state);
                     return Ok(());
                 }
-                if state.is_revocation_nonce_ledger_stalled(now) {
-                    error!(
-                        "Channel {} from peer {:?} cannot add or remove TLCs: its revocation nonce ledger has been unbalanced for over {} ms (send_present={}, verify_present={}) with no CommitmentSigned or RevokeAndAck from the peer, shutting down it forcefully",
-                        state.get_id(),
-                        state.get_remote_pubkey(),
-                        PEER_CHANNEL_RESPONSE_TIMEOUT,
-                        state.remote_revocation_nonce_for_send.is_some(),
-                        state.remote_revocation_nonce_for_verify.is_some(),
-                    );
-                    self.notify_network_actor_shutdown_me(state);
-                }
+
                 if state.is_ready() {
                     self.maintain_ready_channel_tlcs(myself, state).await;
                 } else if state.is_waiting_onchain_settlement() {
@@ -4986,7 +4253,8 @@ where
                 self.finalize_onchain_settlement(myself, state).await?;
             }
             ChannelEvent::OnChainTlcRelayConfirmed(tlc_id, reason) => {
-                if let Some(session) = &mut state.session_v2 {
+                {
+                    let session = &mut state.session;
                     // `retain` removes an entry exactly when this lookup finds one, so the
                     // payment hash also tells us whether the outbox changed.
                     let payment_hash = session
@@ -5291,7 +4559,6 @@ where
                 channel_id_sender,
                 max_tlc_number_in_flight,
                 max_tlc_value_in_flight,
-                channel_features,
             }) => {
                 let pubkey = self.get_remote_pubkey();
                 debug!(
@@ -5302,7 +4569,7 @@ where
                 let counterpart_pubkeys: ChannelBasePublicKeys = (&open_channel).into();
                 let public = open_channel.is_public();
                 let is_one_way = open_channel.is_one_way();
-                let OpenChannel {
+                let OpenChannelV2 {
                     channel_id,
                     chain_hash,
                     commitment_fee_rate,
@@ -5314,8 +4581,7 @@ where
                     reserved_ckb_amount,
                     first_per_commitment_point,
                     second_per_commitment_point,
-                    next_commitment_nonce,
-                    next_revocation_nonce,
+                    initial_commitment_nonce,
                     max_tlc_value_in_flight: remote_max_tlc_value_in_flight,
                     max_tlc_number_in_flight: remote_max_tlc_number_in_flight,
                     channel_announcement_nonce,
@@ -5362,7 +4628,6 @@ where
                     shutdown_script,
                     max_tlc_number_in_flight,
                     *remote_max_tlc_number_in_flight,
-                    channel_features,
                 )?;
 
                 if !is_tlc_key_derivation_safe(
@@ -5396,8 +4661,7 @@ where
                     *funding_amount,
                     *reserved_ckb_amount,
                     counterpart_pubkeys,
-                    next_commitment_nonce.clone(),
-                    next_revocation_nonce.clone(),
+                    initial_commitment_nonce.clone(),
                     channel_announcement_nonce.clone(),
                     *first_per_commitment_point,
                     *second_per_commitment_point,
@@ -5408,7 +4672,6 @@ where
                     tlc_info,
                     self.network.clone(),
                     args.private_key.clone(),
-                    channel_features,
                 );
                 state.check_accept_channel_parameters()?;
 
@@ -5430,7 +4693,7 @@ where
                 };
 
                 let commitment_number = 1; // The first commitment number is 1, as 0 is reserved for the initial state.
-                let accept_channel = AcceptChannel {
+                let accept_channel = AcceptChannelV2 {
                     channel_id: *channel_id,
                     funding_amount: local_funding_amount,
                     shutdown_script: local_shutdown_script,
@@ -5446,12 +4709,11 @@ where
                         .signer
                         .get_commitment_point(commitment_number + 1),
                     channel_announcement_nonce,
-                    next_commitment_nonce: state.get_commitment_nonce(),
-                    next_revocation_nonce: state.get_init_revocation_nonce(),
+                    initial_commitment_nonce: state.session.own.public_nonce.clone(),
+                    channel_features: 1,
                 };
 
-                let accept_message =
-                    state.opening_wire_message(FiberMessage::accept_channel(accept_channel));
+                let accept_message = FiberMessage::accept_channel_v2(accept_channel);
                 self.store.insert_channel_actor_state(state.clone());
                 self.network
                     .send_message(NetworkActorMessage::new_command(
@@ -5484,7 +4746,6 @@ where
                 funding_fee_rate,
                 max_tlc_number_in_flight,
                 max_tlc_value_in_flight,
-                channel_features,
             }) => {
                 let public = public_channel_info.is_some();
                 let pubkey = self.get_remote_pubkey();
@@ -5498,7 +4759,6 @@ where
                     funding_amount,
                     &shutdown_script,
                     &funding_udt_type_script,
-                    channel_features,
                 )?;
 
                 let mut channel = ChannelActorState::new_outbound_channel(
@@ -5525,7 +4785,6 @@ where
                     tlc_info,
                     self.network.clone(),
                     args.private_key.clone(),
-                    channel_features,
                 );
 
                 check_open_channel_parameters(
@@ -5534,7 +4793,6 @@ where
                     channel.local_reserved_ckb_amount,
                     channel.funding_fee_rate,
                     channel.commitment_fee_rate,
-                    channel.channel_features,
                     channel.commitment_delay_epoch,
                     channel.local_constraints.max_tlc_number_in_flight,
                 )?;
@@ -5553,7 +4811,7 @@ where
                     None
                 };
                 let commitment_number = 1; // The first commitment number is 1, as 0 is reserved for the initial state.
-                let message = FiberMessage::ChannelInitialization(OpenChannel {
+                let message = FiberMessage::ChannelInitializationV2(OpenChannelV2 {
                     chain_hash: get_chain_hash(),
                     channel_id: channel.get_id(),
                     funding_udt_type_script,
@@ -5574,16 +4832,15 @@ where
                         .get_commitment_point(commitment_number + 1),
                     funding_pubkey: channel.get_local_channel_public_keys().funding_pubkey,
                     tlc_basepoint: channel.get_local_channel_public_keys().tlc_base_key,
-                    next_commitment_nonce: channel.get_commitment_nonce(),
-                    next_revocation_nonce: channel.get_init_revocation_nonce(),
+                    initial_commitment_nonce: channel.session.own.public_nonce.clone(),
+                    channel_features: 1,
                     channel_announcement_nonce,
                 });
 
                 debug!(
-                    "Created OpenChannel message to {:?}: {:?}",
+                    "Created OpenChannelV2 message to {:?}: {:?}",
                     &pubkey, &message
                 );
-                let message = channel.opening_wire_message(message);
                 self.store.insert_channel_actor_state(channel.clone());
                 self.network
                     .send_message(NetworkActorMessage::new_command(
@@ -5593,7 +4850,7 @@ where
                         }),
                     ))
                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-                // TODO: note that we can't actually guarantee that this OpenChannel message is sent here.
+                // TODO: note that we can't actually guarantee that this OpenChannelV2 message is sent here.
                 // It is even possible that the remote pubkey is bogus, and we can't send a message to it.
                 // We need some book-keeping service to remove all the OUR_INIT_SENT channels.
                 channel.update_state(ChannelState::NegotiatingFunding(
@@ -5615,7 +4872,7 @@ where
                     .store
                     .get_channel_actor_state(&channel_id)
                     .expect("channel should exist");
-                channel.validate_session_v2()?;
+                channel.validate_session()?;
                 let Some(restore_mode) = channel.offline_restore_mode() else {
                     return Err(Box::new(ProcessingChannelError::InvalidState(format!(
                         "Channel {:x} cannot be restored offline from state {:?}",
@@ -5639,7 +4896,7 @@ where
                 channel.drop_stale_waiting_forward_tlc_tasks();
                 channel.private_key = Some(args.private_key.clone());
                 self.store.insert_channel_actor_state(channel.clone());
-                if channel.session_v2.is_some() {
+                {
                     // Watchtower/payment protection cannot depend on the peer
                     // being online after a process crash. These are durable local
                     // effects, not protocol traffic gated by the handshake.
@@ -5649,23 +4906,6 @@ where
                         self.replay_effects_v2(&channel);
                     }
                     self.replay_remove_effects_v2(&channel);
-                }
-
-                let reestablish_channel = ReestablishChannel {
-                    channel_id,
-                    local_commitment_number: channel.get_local_commitment_number(),
-                    remote_commitment_number: channel.get_remote_commitment_number(),
-                };
-
-                if channel.state != ChannelState::Stale && channel.session_v2.is_none() {
-                    self.network
-                        .send_message(NetworkActorMessage::new_command(
-                            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
-                                self.get_remote_pubkey(),
-                                FiberMessage::reestablish_channel(reestablish_channel),
-                            )),
-                        ))
-                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                 }
 
                 channel
@@ -5686,7 +4926,6 @@ where
                     funding_fee_rate,
                     max_tlc_number_in_flight,
                     max_tlc_value_in_flight,
-                    channel_features,
                 },
             ) => {
                 let public = public_channel_info.is_some();
@@ -5706,7 +4945,6 @@ where
                     funding_amount,
                     &shutdown_script,
                     &funding_udt_type_script,
-                    channel_features,
                 )?;
 
                 let mut channel = ChannelActorState::new_outbound_channel(
@@ -5733,7 +4971,6 @@ where
                     tlc_info,
                     self.network.clone(),
                     args.private_key.clone(),
-                    channel_features,
                 );
 
                 // Mark this channel as using external funding.
@@ -5753,7 +4990,6 @@ where
                     channel.local_reserved_ckb_amount,
                     channel.funding_fee_rate,
                     channel.commitment_fee_rate,
-                    channel.channel_features,
                     channel.commitment_delay_epoch,
                     channel.local_constraints.max_tlc_number_in_flight,
                 )?;
@@ -5773,7 +5009,7 @@ where
                     None
                 };
                 let commitment_number = 1; // The first commitment number is 1, as 0 is reserved for the initial state.
-                let message = FiberMessage::ChannelInitialization(OpenChannel {
+                let message = FiberMessage::ChannelInitializationV2(OpenChannelV2 {
                     chain_hash: get_chain_hash(),
                     channel_id: channel.get_id(),
                     funding_udt_type_script,
@@ -5794,16 +5030,15 @@ where
                         .get_commitment_point(commitment_number + 1),
                     funding_pubkey: channel.get_local_channel_public_keys().funding_pubkey,
                     tlc_basepoint: channel.get_local_channel_public_keys().tlc_base_key,
-                    next_commitment_nonce: channel.get_commitment_nonce(),
-                    next_revocation_nonce: channel.get_init_revocation_nonce(),
+                    initial_commitment_nonce: channel.session.own.public_nonce.clone(),
+                    channel_features: 1,
                     channel_announcement_nonce,
                 });
 
                 debug!(
-                    "Created OpenChannel message (external funding) to {:?}: {:?}",
+                    "Created OpenChannelV2 message (external funding) to {:?}: {:?}",
                     &peer_id, &message
                 );
-                let message = channel.opening_wire_message(message);
                 self.store.insert_channel_actor_state(channel.clone());
                 self.network
                     .send_message(NetworkActorMessage::new_command(
@@ -5814,7 +5049,7 @@ where
                     ))
                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
-                // Same initial state as regular OpenChannel - we're still negotiating
+                // Same initial state as regular OpenChannelV2 - we're still negotiating
                 channel.update_state(ChannelState::NegotiatingFunding(
                     NegotiatingFundingFlags::OUR_INIT_SENT,
                 ));
@@ -5902,7 +5137,7 @@ where
             self.resume_confirmed_external_funding(&myself, state);
         }
 
-        if state.session_v2.is_some() {
+        {
             if let Err(error) = self.progress_close_v2(state).await {
                 error!(?error, "Unable to progress V2 cooperative close");
             }
@@ -5910,8 +5145,6 @@ where
 
         // take the pending settlement tlc set
         let pending_notify_tlcs = std::mem::take(&mut state.pending_notify_settle_tlcs);
-
-        state.refresh_revocation_nonce_watchdog();
 
         if state.ephemeral_config.external_funding.enabled {
             state.persist_external_funding_state();
@@ -6086,14 +5319,12 @@ impl From<TlcInfo> for TlcNotifyInfo {
 pub fn settlement_data_to_witness(
     data: &SettlementData,
     for_remote: bool,
-    channel_features: ChannelFeatures,
     local_settlement_key: Privkey,
     remote_settlement_key: Pubkey,
 ) -> Vec<u8> {
     fiber_types::watchtower::settlement_data_witness(
         data,
         for_remote,
-        channel_features,
         local_settlement_key.pubkey(),
         remote_settlement_key,
     )
@@ -6109,12 +5340,8 @@ pub enum DeferredPeerTlcUpdate {
 /// Build the witness bytes for a single TLC in a settlement transaction.
 ///
 /// Free function replacement for `SettlementTlc::to_witness()`.
-pub fn settlement_tlc_to_witness(
-    tlc: &SettlementTlc,
-    for_remote: bool,
-    channel_features: ChannelFeatures,
-) -> Vec<u8> {
-    fiber_types::watchtower::settlement_tlc_witness(tlc, for_remote, channel_features)
+pub fn settlement_tlc_to_witness(tlc: &SettlementTlc, for_remote: bool) -> Vec<u8> {
+    fiber_types::watchtower::settlement_tlc_witness(tlc, for_remote)
 }
 
 /// Get the local pubkey hash for a settlement TLC.
@@ -6124,114 +5351,10 @@ pub fn settlement_tlc_local_pubkey_hash(tlc: &SettlementTlc) -> [u8; 20] {
     blake160(&tlc.local_key.pubkey().serialize()).0
 }
 
-pub(crate) fn validate_commit_diff_for_replay_inputs(
-    channel_id: Hash256,
-    waiting_ack: bool,
-    local_commitment_number: u64,
-    remote_commitment_number: u64,
-    reestablish_channel: &ReestablishChannel,
-    commit_diff: &CommitDiff,
-) -> ProcessingChannelResult {
-    if reestablish_channel.channel_id != channel_id {
-        return Err(ProcessingChannelError::InvalidParameter(format!(
-            "reestablish channel id mismatch: expected {}, got {}",
-            channel_id, reestablish_channel.channel_id
-        )));
-    }
-
-    if commit_diff.channel_id != channel_id {
-        return Err(ProcessingChannelError::InvalidState(format!(
-            "commit diff channel mismatch: expected {}, got {}",
-            channel_id, commit_diff.channel_id
-        )));
-    }
-
-    if !waiting_ack {
-        return Err(ProcessingChannelError::InvalidState(
-            "commit diff replay requested while channel is not waiting ack".to_string(),
-        ));
-    }
-
-    if reestablish_channel.remote_commitment_number != local_commitment_number {
-        return Err(ProcessingChannelError::InvalidState(format!(
-            "peer remote commitment number mismatch: expected {}, got {}",
-            local_commitment_number, reestablish_channel.remote_commitment_number
-        )));
-    }
-
-    if commit_diff.local_commitment_number_at_send != local_commitment_number {
-        return Err(ProcessingChannelError::InvalidState(format!(
-            "stale commit diff local commitment number: expected {}, got {}",
-            local_commitment_number, commit_diff.local_commitment_number_at_send
-        )));
-    }
-
-    let diff_remote = commit_diff.remote_commitment_number_at_send;
-    let diff_remote_upper = diff_remote.saturating_add(1);
-    if remote_commitment_number < diff_remote || remote_commitment_number > diff_remote_upper {
-        return Err(ProcessingChannelError::InvalidState(format!(
-            "stale commit diff remote commitment drift: state={}, diff_at_send={}, expected range=[{}, {}]",
-            remote_commitment_number, diff_remote, diff_remote, diff_remote_upper
-        )));
-    }
-
-    for update in &commit_diff.replay_updates {
-        let update_channel_id = match update {
-            TlcReplayUpdate::Add(add) => add.channel_id,
-            TlcReplayUpdate::Remove(remove) => remove.channel_id,
-        };
-        if update_channel_id != channel_id {
-            return Err(ProcessingChannelError::InvalidState(format!(
-                "commit diff replay update channel mismatch: expected {}, got {}",
-                channel_id, update_channel_id
-            )));
-        }
-    }
-
-    Ok(())
-}
-
-#[cfg(test)]
-pub(crate) fn require_pending_commit_diff_for_replay(
-    channel_id: Hash256,
-    pending_commit_diff: Option<&CommitDiff>,
-) -> Result<&CommitDiff, ProcessingChannelError> {
-    pending_commit_diff.ok_or_else(|| {
-        ProcessingChannelError::InvalidState(format!(
-            "Missing pending CommitDiff for owed CommitmentSigned replay on channel {}",
-            channel_id
-        ))
-    })
-}
-
-pub(crate) fn resolve_dual_owed_replay_order(
-    channel_id: Hash256,
-    replay_order_hint: Option<ReplayOrderHint>,
-    current_remote_commitment_number: u64,
-    remote_commitment_number_at_send: u64,
-    last_was_revoke: bool,
-) -> ReplayOrderHint {
-    if current_remote_commitment_number > remote_commitment_number_at_send
-        || replay_order_hint == Some(ReplayOrderHint::CommitThenRevoke)
-        || last_was_revoke
-    {
-        debug!(
-            "Dual-owed reestablish on channel {} chooses CommitThenRevoke (hint={:?}, last_was_revoke={}, remote_cn_now={}, remote_cn_at_send={})",
-            channel_id,
-            replay_order_hint,
-            last_was_revoke,
-            current_remote_commitment_number,
-            remote_commitment_number_at_send
-        );
-        return ReplayOrderHint::CommitThenRevoke;
-    }
-    ReplayOrderHint::RevokeThenCommit
-}
-
 type ScheduledChannelUpdateHandle =
     Option<Arc<JoinHandle<Result<(), MessagingErr<ChannelActorMessage>>>>>;
 
-/// Runtime recovery clock. V2 pauses it across disconnects; V1 starts a fresh clock.
+/// Runtime recovery clock, paused across disconnects.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReestablishTimer {
     /// Effective start timestamp, shifted on resume to exclude time spent offline.
@@ -6281,10 +5404,6 @@ pub struct ChannelActorState {
     pub core: ChannelActorData,
 
     // --- Runtime-only fields (not serialized) ---
-    /// Reestablish replay has resumed message flow, but we still owe the network actor a
-    /// `ChannelReady` notification once the missing peer acknowledgment arrives.
-    #[doc = "skip_store"]
-    pub pending_reestablish_channel_ready: bool,
     /// Temporarily defer peer TLC updates while replaying dual-owed state.
     #[doc = "skip_store"]
     pub defer_peer_tlc_updates: bool,
@@ -6297,14 +5416,7 @@ pub struct ChannelActorState {
     #[doc = "skip_store"]
     pub waiting_peer_response: Option<u64>,
 
-    // When the revocation nonce ledger became unbalanced with no ack of ours pending
-    // (see `is_revocation_nonce_ledger_unbalanced`). Bounds how long the channel can stay
-    // unable to add or remove TLCs when the peer message that would rebalance it never comes.
-    #[doc = "skip_store"]
-    pub revocation_nonce_unbalanced_since: Option<u64>,
-
     // V2 accumulates online recovery wait across connections, pausing while offline.
-    // V1 clears this clock on disconnect and on receipt of ReestablishChannel.
     // Runtime only: local actor/process restoration starts a fresh recovery budget.
     #[doc = "skip_store"]
     pub reestablish_timer: Option<ReestablishTimer>,
@@ -6412,13 +5524,11 @@ impl From<ChannelActorData> for ChannelActorState {
         let mut state = Self {
             core,
             waiting_peer_response: None,
-            revocation_nonce_unbalanced_since: None,
             reestablish_timer: None,
             recovery_peer_v2: None,
             network: None,
             scheduled_channel_update_handle: None,
             pending_notify_settle_tlcs: vec![],
-            pending_reestablish_channel_ready: false,
             defer_peer_tlc_updates: false,
             deferred_peer_tlc_updates: VecDeque::new(),
             ephemeral_config: Default::default(),
@@ -6602,12 +5712,6 @@ impl ProcessingChannelError {
 // Depending on the state of the channel, we may process the commitment_signed command differently.
 // Below are all the channel state flags variants that we may encounter
 // in normal commitment_signed processing flow.
-#[derive(Debug)]
-enum CommitmentSignedFlags {
-    SigningCommitment(SigningCommitmentFlags),
-    PendingShutdown(),
-    ChannelReady(),
-}
 
 fn new_channel_id_from_seed(seed: &[u8]) -> Hash256 {
     blake2b_256(seed).into()
@@ -6628,10 +5732,8 @@ pub(crate) fn get_funding_and_reserved_amount(
     total_amount: u128,
     shutdown_script: &Script,
     udt_type_script: &Option<Script>,
-    channel_features: ChannelFeatures,
 ) -> Result<(u128, u64), ProcessingChannelError> {
-    let reserved_capacity =
-        reserved_capacity(shutdown_script, udt_type_script, channel_features)?.as_u64();
+    let reserved_capacity = reserved_capacity(shutdown_script, udt_type_script)?.as_u64();
     if udt_type_script.is_none() {
         if total_amount < reserved_capacity as u128 {
             return Err(ProcessingChannelError::InvalidParameter(format!(
@@ -6665,19 +5767,17 @@ pub(crate) fn get_funding_and_reserved_amount(
 pub(crate) fn reserved_capacity(
     shutdown_script: &Script,
     udt_type_script: &Option<Script>,
-    channel_features: ChannelFeatures,
 ) -> Result<Capacity, CapacityError> {
-    occupied_capacity(shutdown_script, udt_type_script, channel_features)?
+    occupied_capacity(shutdown_script, udt_type_script)?
         .safe_add(Capacity::shannons(DEFAULT_MIN_SHUTDOWN_FEE))
 }
 
 pub(crate) fn occupied_capacity(
     shutdown_script: &Script,
     udt_type_script: &Option<Script>,
-    channel_features: ChannelFeatures,
 ) -> Result<Capacity, CapacityError> {
-    // Reserve enough capacity for the negotiated commitment-lock args when shutdown args are shorter.
-    let commitment_lock_args_len = channel_features.lock_args_len();
+    // Reserve enough capacity for the commitment-lock args when shutdown args are shorter.
+    let commitment_lock_args_len = ChannelFeatures::LOCK_ARGS_LEN;
     let min_lock_script = if shutdown_script.args().len() < commitment_lock_args_len {
         Script::new_builder()
             .args(vec![0u8; commitment_lock_args_len].pack())
@@ -6775,11 +5875,10 @@ impl ChannelActorState {
 
     /// Whether durable TLC commands or result deliveries still need this actor.
     pub(crate) fn has_pending_tlc_delivery(&self) -> bool {
-        !self.retryable_tlc_operations.is_empty()
-            || self
-                .session_v2
-                .as_ref()
-                .is_some_and(|session| !session.remove_effects.is_empty())
+        !self.retryable_tlc_operations.is_empty() || {
+            let session = &self.session;
+            !session.remove_effects.is_empty()
+        }
     }
 
     pub fn offline_restore_mode(&self) -> Option<OfflineChannelRestoreMode> {
@@ -6858,50 +5957,8 @@ impl ChannelActorState {
         }
     }
 
-    /// The revocation nonce ledger is unbalanced (we sent a RevokeAndAck the peer has not
-    /// matched yet, or received one we have not matched) while no ack to our own
-    /// CommitmentSigned is pending, so `is_waiting_tlc_ack` blocks local TLC updates until the
-    /// peer's next CommitmentSigned or RevokeAndAck rebalances the ledger. In a healthy round
-    /// that takes one round trip; `waiting_peer_response` already covers `waiting_ack`.
-    fn is_revocation_nonce_ledger_unbalanced(&self) -> bool {
-        // These fields are the V1 per-round revocation nonce ledger. A V2 channel keeps its nonces
-        // in `session_v2` and never advances this ledger, so it must not arm the V1 watchdog; V2
-        // staleness is bounded by `peer_response_wait_v2` and `ack_peer_wait_v2` instead.
-        self.session_v2.is_none()
-            && self.is_ready()
-            && !self.reestablishing
-            && !self.tlc_state.waiting_ack
-            && (self.remote_revocation_nonce_for_send.is_none()
-                || self.remote_revocation_nonce_for_verify.is_none())
-    }
-
-    /// Called after every handled message. Records when the ledger becomes unbalanced and
-    /// clears the record once it is balanced again. Going offline clears it too, so a reconnect
-    /// gets a fresh timeout.
-    pub fn refresh_revocation_nonce_watchdog(&mut self) {
-        if !self.is_revocation_nonce_ledger_unbalanced() {
-            self.revocation_nonce_unbalanced_since = None;
-        } else if self.revocation_nonce_unbalanced_since.is_none() {
-            self.revocation_nonce_unbalanced_since = Some(now_timestamp_as_millis_u64());
-            self.log_ack_state("[ack] revocation nonce ledger unbalanced, watchdog armed");
-        }
-    }
-
-    /// True if the ledger has stayed unbalanced for longer than the peer response timeout: the
-    /// peer message that would rebalance it is not coming, so the channel can never add or
-    /// remove TLCs again (#1561). Checked on each `MaintainChannelTlcs` tick, so the channel is
-    /// force-closed within one `CHECK_CHANNELS_INTERVAL` after the timeout.
-    pub fn is_revocation_nonce_ledger_stalled(&self, now: u64) -> bool {
-        self.is_revocation_nonce_ledger_unbalanced()
-            && self.revocation_nonce_unbalanced_since.is_some_and(|since| {
-                // saturating_sub, as in `peer_does_not_reply_ack_in_time`: the wall clock may step back
-                now.saturating_sub(since) > PEER_CHANNEL_RESPONSE_TIMEOUT
-            })
-    }
-
     /// True if recovery exhausted its online waiting budget in a force-closable TLC state.
-    /// V1 stops on receipt of its handshake; V2 retains the clock through validated replay
-    /// and pauses across disconnects. `Stale` must wait for an audit, and a published
+    /// Retains the clock through validated replay and pauses across disconnects. `Stale` must wait for an audit, and a published
     /// commitment is already being watched on-chain.
     pub fn is_reestablish_stalled(&self, now: u64) -> bool {
         let can_force_close = match self.state {
@@ -6956,14 +6013,9 @@ impl ChannelActorState {
         }
     }
 
+    #[cfg(any(test, feature = "bench"))]
     fn start_defer_peer_tlc_updates(&mut self) {
-        if !self.defer_peer_tlc_updates {
-            debug!(
-                "Start deferring peer TLC updates for channel {}",
-                self.get_id()
-            );
-            self.defer_peer_tlc_updates = true;
-        }
+        self.defer_peer_tlc_updates = true;
     }
 
     fn stop_defer_peer_tlc_updates(&mut self) {
@@ -7023,36 +6075,7 @@ impl ChannelActorState {
     }
 
     fn log_ack_state(&self, context: &str) {
-        debug!(
-            channel = ?self.get_id(),
-            "{} waiting_ack={} send_present={} verify_present={} next_present={}",
-            context,
-            self.tlc_state.waiting_ack,
-            self.remote_revocation_nonce_for_send.is_some(),
-            self.remote_revocation_nonce_for_verify.is_some(),
-            self.remote_revocation_nonce_for_next.is_some()
-        );
-    }
-
-    /// Restore the `remote_revocation_nonce_for_send` from `_verify` or `_next`
-    /// if it was lost during persistence (e.g. the nonce was consumed before the state was saved).
-    /// This prevents a deadlock during channel reestablishment when `send` nonce is None
-    /// but `verify`/`next` nonces are available.
-    fn restore_missing_revocation_send_nonce(&mut self) {
-        if self.session_v2.is_some() {
-            return;
-        }
-        if self.remote_revocation_nonce_for_send.is_some() || self.last_revoke_ack_msg.is_some() {
-            return;
-        }
-        let restored = self
-            .remote_revocation_nonce_for_verify
-            .clone()
-            .or_else(|| self.remote_revocation_nonce_for_next.clone());
-        if let Some(nonce) = restored {
-            self.remote_revocation_nonce_for_send = Some(nonce);
-            self.log_ack_state("[ack] restore_missing_revocation_send_nonce");
-        }
+        debug!(channel = ?self.get_id(), waiting_ack = self.tlc_state.waiting_ack, "{context}");
     }
 
     pub fn try_create_channel_messages(&mut self) -> Option<(ChannelAnnouncement, ChannelUpdate)> {
@@ -7304,14 +6327,10 @@ impl ChannelActorState {
         self.replayed_tlc_updates_v2 = 0;
         self.clear_waiting_peer_response();
         self.reestablishing = true;
-        // A V2 disconnect pauses the online recovery budget, rather than granting a
-        // fresh timeout on every reconnect. V1 retains its existing per-connection rule.
-        self.reestablish_timer = if self.session_v2.is_some() {
-            self.reestablish_timer
-                .map(|timer| timer.pause(now_timestamp_as_millis_u64()))
-        } else {
-            None
-        };
+        // Preserve the remaining online recovery budget across reconnects.
+        self.reestablish_timer = self
+            .reestablish_timer
+            .map(|timer| timer.pause(now_timestamp_as_millis_u64()));
         self.connectivity_state = ChannelConnectivityState::Offline;
         if let Some(handle) = self.scheduled_channel_update_handle.take() {
             handle.abort();
@@ -7357,7 +6376,7 @@ impl ChannelActorState {
                         timer.resume(now)
                     }),
             );
-            if self.session_v2.is_some() {
+            {
                 // Ordinary rounds advertise a fresh verification nonce at each handshake.
                 // Bootstrap CS/Ready replays keep their original allocation until safe to advance;
                 // `incoming` is kept because ACK processing needs its history.
@@ -7368,7 +6387,8 @@ impl ChannelActorState {
                 let ready_advertised = matches!(self.state, ChannelState::AwaitingChannelReady(flags)
                     if flags.contains(AwaitingChannelReadyFlags::OUR_CHANNEL_READY))
                     || self.may_need_ready_replay_v2();
-                if let Some(session) = self.session_v2.as_mut() {
+                {
+                    let session = &mut self.session;
                     // Initial CS recovery replays the original signature, so its nonce/context must survive.
                     let initial_unaccepted = session.own.number == INITIAL_COMMITMENT_NUMBER + 1
                         && session.incoming.is_none();
@@ -7376,7 +6396,7 @@ impl ChannelActorState {
                         // Only same-round retired allocations may sign a late CS; acceptance
                         // advances own and discards retired copies of the consumed allocation.
                         let previous = session.own.clone();
-                        session.own = crate::fiber::session_v2::allocate_nonce(
+                        session.own = crate::fiber::session::allocate_nonce(
                             channel_id,
                             local_funding_pubkey,
                             number,
@@ -7485,39 +6505,11 @@ impl ChannelActorState {
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
     }
 
-    fn send_reestablish_message(&self) {
-        if self.session_v2.is_some() {
-            self.send_reestablish_v2();
-            return;
-        }
-        let reestablish_channel = ReestablishChannel {
-            channel_id: self.get_id(),
-            local_commitment_number: self.get_local_commitment_number(),
-            remote_commitment_number: self.get_remote_commitment_number(),
-        };
-
-        self.network()
-            .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
-                    self.get_remote_pubkey(),
-                    FiberMessage::reestablish_channel(reestablish_channel),
-                )),
-            ))
-            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-    }
-
     fn send_update_tlc_info_message(&mut self) {
-        let update_tlc_info = self.create_update_tlc_info_message();
-        self.network()
-            .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget {
-                    target: self.get_remote_pubkey(),
-                    message: FiberMessage::ChannelNormalOperation(
-                        FiberChannelMessage::UpdateTlcInfo(update_tlc_info),
-                    ),
-                }),
-            ))
-            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        let update = self.create_update_tlc_info_message();
+        self.send_message_to_peer(FiberMessage::ChannelNormalOperation(
+            FiberChannelMessage::UpdateTlcInfo(update),
+        ));
     }
 
     fn try_create_channel_update_message(&mut self) -> Option<ChannelUpdate> {
@@ -7601,7 +6593,6 @@ impl ChannelActorState {
         remote_reserved_ckb_amount: u64,
         remote_pubkeys: ChannelBasePublicKeys,
         remote_nonce: PubNonce,
-        remote_revocation_nonce: PubNonce,
         remote_channel_announcement_nonce: Option<PubNonce>,
         first_commitment_point: Pubkey,
         second_commitment_point: Pubkey,
@@ -7612,7 +6603,6 @@ impl ChannelActorState {
         local_tlc_info: ChannelTlcInfo,
         network: ActorRef<NetworkActorMessage>,
         private_key: Privkey,
-        channel_features: ChannelFeatures,
     ) -> Self {
         let signer = InMemorySigner::generate_from_seed(seed);
         let local_base_pubkeys = signer.get_base_public_keys();
@@ -7651,14 +6641,11 @@ impl ChannelActorState {
                 waiting_forward_tlc_tasks: Default::default(),
                 local_shutdown_script,
                 local_channel_public_keys: local_base_pubkeys,
+                session: new_session(channel_id, &signer.funding_key, Some(remote_nonce)),
                 signer,
                 remote_channel_public_keys: Some(remote_pubkeys),
                 commitment_numbers: Default::default(),
                 remote_shutdown_script: Some(remote_shutdown_script),
-                last_committed_remote_nonce: Some(remote_nonce),
-                remote_revocation_nonce_for_send: Some(remote_revocation_nonce.clone()),
-                remote_revocation_nonce_for_verify: Some(remote_revocation_nonce.clone()),
-                remote_revocation_nonce_for_next: None,
                 remote_commitment_points: vec![
                     (1, first_commitment_point),
                     (2, second_commitment_point),
@@ -7679,22 +6666,18 @@ impl ChannelActorState {
                 latest_commitment_transaction: None,
                 reestablishing: false,
                 connectivity_state: ChannelConnectivityState::Online,
-                last_revoke_ack_msg: None,
                 pending_replay_updates: vec![],
                 last_was_revoke: false,
                 external_funding: None,
-                channel_features,
-                session_v2: None,
+                channel_features: ChannelFeatures::V2,
                 created_at: SystemTime::now(),
             },
             waiting_peer_response: None,
-            revocation_nonce_unbalanced_since: None,
             reestablish_timer: None,
             network: Some(network),
             recovery_peer_v2: None,
             scheduled_channel_update_handle: None,
             pending_notify_settle_tlcs: vec![],
-            pending_reestablish_channel_ready: false,
             defer_peer_tlc_updates: false,
             deferred_peer_tlc_updates: VecDeque::new(),
             ephemeral_config: Default::default(),
@@ -7708,8 +6691,6 @@ impl ChannelActorState {
         if let Some(nonce) = remote_channel_announcement_nonce {
             state.update_remote_channel_announcement_nonce(&nonce);
         }
-        let remote_nonce = state.last_committed_remote_nonce.clone();
-        state.initialize_session_v2(remote_nonce);
         state.log_ack_state("[ack] new_inbound_channel");
         state
     }
@@ -7733,12 +6714,11 @@ impl ChannelActorState {
         local_tlc_info: ChannelTlcInfo,
         network: ActorRef<NetworkActorMessage>,
         private_key: Privkey,
-        channel_features: ChannelFeatures,
     ) -> Self {
         let signer = InMemorySigner::generate_from_seed(seed);
         let local_pubkeys = signer.get_base_public_keys();
         let temp_channel_id = derive_temp_channel_id_from_tlc_key(&local_pubkeys.tlc_base_key);
-        let mut state = Self {
+        let state = Self {
             core: ChannelActorData {
                 state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::empty()),
                 public_channel_info,
@@ -7760,6 +6740,7 @@ impl ChannelActorState {
                 tlc_state: Default::default(),
                 retryable_tlc_operations: Default::default(),
                 waiting_forward_tlc_tasks: Default::default(),
+                session: new_session(temp_channel_id, &signer.funding_key, None),
                 signer,
                 local_channel_public_keys: local_pubkeys,
                 local_constraints: ChannelConstraints::new(
@@ -7769,10 +6750,6 @@ impl ChannelActorState {
                 // these values will update after accept channel peer message handled
                 remote_constraints: ChannelConstraints::default(),
                 remote_channel_public_keys: None,
-                last_committed_remote_nonce: None,
-                remote_revocation_nonce_for_send: None,
-                remote_revocation_nonce_for_verify: None,
-                remote_revocation_nonce_for_next: None,
                 commitment_numbers: Default::default(),
                 remote_commitment_points: vec![],
                 local_shutdown_script: shutdown_script,
@@ -7785,22 +6762,18 @@ impl ChannelActorState {
                 latest_commitment_transaction: None,
                 reestablishing: false,
                 connectivity_state: ChannelConnectivityState::Online,
-                last_revoke_ack_msg: None,
                 pending_replay_updates: vec![],
                 last_was_revoke: false,
                 external_funding: None,
-                channel_features,
-                session_v2: None,
+                channel_features: ChannelFeatures::V2,
                 created_at: SystemTime::now(),
             },
             waiting_peer_response: None,
-            revocation_nonce_unbalanced_since: None,
             reestablish_timer: None,
             network: Some(network),
             recovery_peer_v2: None,
             scheduled_channel_update_handle: None,
             pending_notify_settle_tlcs: vec![],
-            pending_reestablish_channel_ready: false,
             defer_peer_tlc_updates: false,
             deferred_peer_tlc_updates: VecDeque::new(),
             ephemeral_config: Default::default(),
@@ -7811,7 +6784,6 @@ impl ChannelActorState {
             pending_payment_notifications: Default::default(),
             replayed_tlc_updates_v2: 0,
         };
-        state.initialize_session_v2(None);
         state.log_ack_state("[ack] new_outbound_channel");
         state
     }
@@ -7841,7 +6813,6 @@ impl ChannelActorState {
         remote_shutdown_script: &Script,
         local_max_tlc_number_in_flight: u64,
         remote_max_tlc_number_in_flight: u64,
-        channel_features: ChannelFeatures,
     ) -> ProcessingChannelResult {
         if local_max_tlc_number_in_flight > MAX_TLC_NUMBER_IN_FLIGHT {
             return Err(ProcessingChannelError::InvalidParameter(format!(
@@ -7895,7 +6866,7 @@ impl ChannelActorState {
 
         // reserved_ckb_amount
         let occupied_capacity =
-            occupied_capacity(remote_shutdown_script, udt_type_script, channel_features)?.as_u64();
+            occupied_capacity(remote_shutdown_script, udt_type_script)?.as_u64();
         if remote_reserved_ckb_amount < occupied_capacity {
             return Err(ProcessingChannelError::InvalidParameter(format!(
                 "Reserved CKB amount {} is less than {}",
@@ -7912,12 +6883,7 @@ impl ChannelActorState {
                     remote_reserved_ckb_amount, occupied_capacity,
                 ))
             })?;
-        check_commitment_reserved_fee(
-            commitment_fee_rate,
-            udt_type_script,
-            channel_features,
-            reserved_fee,
-        )?;
+        check_commitment_reserved_fee(commitment_fee_rate, udt_type_script, reserved_fee)?;
 
         Ok(())
     }
@@ -7933,7 +6899,6 @@ impl ChannelActorState {
             &self.get_remote_shutdown_script(),
             self.local_constraints.max_tlc_number_in_flight,
             self.remote_constraints.max_tlc_number_in_flight,
-            self.channel_features,
         )
     }
 
@@ -7955,12 +6920,8 @@ impl ChannelActorState {
             (self.get_remote_shutdown_script(), close_script.clone()),
         )?;
 
-        let occupied_capacity = occupied_capacity(
-            close_script,
-            &self.funding_udt_type_script,
-            self.channel_features,
-        )?
-        .as_u64();
+        let occupied_capacity =
+            occupied_capacity(close_script, &self.funding_udt_type_script)?.as_u64();
         let available_max_fee = if self.funding_udt_type_script.is_none() {
             Self::checked_ckb_amount_with_reserved(
                 self.to_local_amount,
@@ -8162,7 +7123,6 @@ impl ChannelActorState {
         let agg_nonce = AggNonce::sum(self.order_things_for_musig2(local_nonce, remote_nonce));
         let key_agg_ctx = self.get_deterministic_musig2_agg_context();
         let channel_id = self.get_id();
-        let pubkey = self.get_remote_pubkey();
         let channel_outpoint = self.must_get_funding_transaction_outpoint();
 
         let partial_signature: PartialSignature = sign_partial(
@@ -8175,19 +7135,14 @@ impl ChannelActorState {
         .expect("Partial sign channel announcement");
 
         let node_signature = sign_network_message(self.private_key(), message);
-        self.network()
-            .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
-                    pubkey,
-                    FiberMessage::announcement_signatures(AnnouncementSignatures {
-                        channel_id,
-                        channel_outpoint,
-                        partial_signature,
-                        node_signature: node_signature.clone(),
-                    }),
-                )),
-            ))
-            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        self.send_message_to_peer(FiberMessage::announcement_signatures(
+            AnnouncementSignatures {
+                channel_id,
+                channel_outpoint,
+                partial_signature,
+                node_signature: node_signature.clone(),
+            },
+        ));
         let result = (node_signature, partial_signature);
         self.public_channel_state_mut()
             .local_channel_announcement_signature = Some(result.clone());
@@ -8314,136 +7269,6 @@ impl ChannelActorState {
     // Send RevokeAndAck message to the counterparty, and update the
     // channel state accordingly.
     // If `resend` is true, we MUST use the cached message (for reestablish scenarios).
-    fn send_revoke_and_ack_message(&mut self, resend: bool) -> ProcessingChannelResult {
-        // When resending during reestablish, we MUST use the cached message because:
-        // 1. The cached message was signed with the correct nonces at the time
-        // 2. The nonce state may have already advanced since then
-        // 3. The peer expects to verify with the original nonces
-        if resend || self.remote_revocation_nonce_for_send.is_none() {
-            match self.last_revoke_ack_msg {
-                Some(ref revoke_and_ack) => {
-                    self.network()
-                        .send_message(NetworkActorMessage::new_command(
-                            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
-                                self.get_remote_pubkey(),
-                                FiberMessage::revoke_and_ack(revoke_and_ack.clone()),
-                            )),
-                        ))
-                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-                    self.last_was_revoke = true;
-                    self.log_ack_state("[ack] send_revoke_and_ack_message(resend_cached)");
-                    return Ok(());
-                }
-                None => {
-                    let error = "Error reestablishing channel state, RevokeAndAck message not sent, but last_revoke_ack_msg is None";
-                    warn!(error);
-                    return Err(ProcessingChannelError::InvalidState(error.to_string()));
-                }
-            }
-        }
-
-        let sign_ctx = match self.get_revoke_sign_context(false) {
-            Some(ctx) => ctx,
-            None => {
-                let error =
-                    "get_revoke_sign_context returned None, cannot send RevokeAndAck message";
-                warn!(error);
-                return Err(ProcessingChannelError::InvalidState(error.to_string()));
-            }
-        };
-        let x_only_aggregated_pubkey = sign_ctx.common_ctx.x_only_aggregated_pubkey();
-
-        let revocation_partial_signature = {
-            let commitment_tx_fee = checked_calculate_commitment_tx_fee(
-                self.commitment_fee_rate,
-                &self.funding_udt_type_script,
-                self.channel_features,
-            )?;
-            let lock_script = self.get_remote_shutdown_script();
-            let (output, output_data) = if let Some(udt_type_script) = &self.funding_udt_type_script
-            {
-                let capacity = checked_sub_u64(
-                    self.get_total_reserved_ckb_amount()?,
-                    commitment_tx_fee,
-                    "Reserved CKB",
-                )?;
-                let output = CellOutput::new_builder()
-                    .lock(lock_script)
-                    .type_(Some(udt_type_script.clone()).pack())
-                    .capacity(capacity)
-                    .build();
-
-                let output_data = self.checked_liquid_capacity()?.to_le_bytes().pack();
-                (output, output_data)
-            } else {
-                let capacity =
-                    checked_sub_u64(self.get_total_ckb_amount()?, commitment_tx_fee, "Total CKB")?;
-                let output = CellOutput::new_builder()
-                    .lock(lock_script.clone())
-                    .capacity(capacity)
-                    .build();
-                let output_data = Bytes::default();
-                (output, output_data)
-            };
-
-            let commitment_number = self.get_remote_commitment_number().checked_sub(1).ok_or(
-                ProcessingChannelError::InvalidState(
-                    "Remote commitment number underflows while building revocation data"
-                        .to_string(),
-                ),
-            )?;
-            let commitment_lock_script_args = [
-                &blake2b_256(x_only_aggregated_pubkey)[0..20],
-                self.get_delay_epoch_as_lock_args_bytes().as_slice(),
-                commitment_number.to_be_bytes().as_slice(),
-            ]
-            .concat();
-            let message = blake2b_256(
-                [
-                    output.as_slice(),
-                    output_data.as_slice(),
-                    commitment_lock_script_args.as_slice(),
-                ]
-                .concat(),
-            );
-            let our_signature = sign_ctx.sign(message.as_slice()).expect("valid signature");
-            our_signature
-        };
-
-        let next_revocation_nonce = self.get_next_revocation_nonce();
-        // Note that we must update channel state here to update commitment number,
-        // so that next step will obtain the correct commitment point.
-        self.increment_remote_commitment_number();
-        let point = self.get_current_local_commitment_point();
-        self.last_revoke_ack_msg = Some(RevokeAndAck {
-            channel_id: self.get_id(),
-            revocation_partial_signature,
-            next_revocation_nonce,
-            next_per_commitment_point: point,
-        });
-
-        // update the remote_revocation_nonce_for_send and remote_revocation_nonce_for_verify for next round if needed
-        if self.remote_revocation_nonce_for_verify.is_none() {
-            self.remote_revocation_nonce_for_send = self.remote_revocation_nonce_for_next.clone();
-            self.remote_revocation_nonce_for_verify = self.remote_revocation_nonce_for_next.clone();
-        } else {
-            self.remote_revocation_nonce_for_send = None;
-        }
-        self.log_ack_state("[ack] send_revoke_and_ack_message");
-
-        self.network()
-            .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
-                    self.get_remote_pubkey(),
-                    FiberMessage::revoke_and_ack(
-                        self.last_revoke_ack_msg.as_ref().unwrap().clone(),
-                    ),
-                )),
-            ))
-            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-        self.last_was_revoke = true;
-        Ok(())
-    }
 
     pub fn get_id(&self) -> Hash256 {
         self.id
@@ -8489,31 +7314,6 @@ impl ChannelActorState {
         })
     }
 
-    pub fn get_next_commitment_nonce(&self) -> PubNonce {
-        let commitment_number = self.get_next_commitment_number(true);
-        self.signer
-            .derive_musig2_nonce(commitment_number, Musig2Context::Commitment)
-            .public_nonce()
-    }
-
-    pub fn get_next_revocation_nonce(&self) -> PubNonce {
-        let commitment_number = self.get_next_commitment_number(false);
-        self.signer
-            .derive_musig2_nonce(commitment_number, Musig2Context::Revoke)
-            .public_nonce()
-    }
-
-    fn get_last_committed_remote_nonce(&self) -> PubNonce {
-        self.last_committed_remote_nonce
-            .as_ref()
-            .expect("always have peer's last_committed_remote_nonce in normal channel operations")
-            .clone()
-    }
-
-    fn commit_remote_nonce(&mut self, nonce: PubNonce) {
-        self.last_committed_remote_nonce = Some(nonce);
-    }
-
     pub fn get_current_commitment_numbers(&self) -> CommitmentNumbers {
         self.commitment_numbers
     }
@@ -8539,12 +7339,11 @@ impl ChannelActorState {
     /// session before the terminal ShuttingDown state is validated.
     pub(crate) fn align_force_close_commitment_numbers(&mut self) {
         if matches!(self.state, ChannelState::AwaitingChannelReady(_)) {
-            if let Some(session) = self.session_v2.as_ref() {
-                self.commitment_numbers = CommitmentNumbers {
-                    local: session.remote_number,
-                    remote: session.own.number,
-                };
-            }
+            let session = &self.session;
+            self.commitment_numbers = CommitmentNumbers {
+                local: session.remote_number,
+                remote: session.own.number,
+            };
         }
     }
 
@@ -8852,44 +7651,6 @@ impl ChannelActorState {
             .public_nonce()
     }
 
-    fn get_init_revocation_nonce(&self) -> PubNonce {
-        self.signer
-            .derive_musig2_nonce(2, Musig2Context::Revoke)
-            .public_nonce()
-    }
-
-    fn get_commitment_nonce(&self) -> PubNonce {
-        if let Some(session) = &self.session_v2 {
-            return session.own.public_nonce.clone();
-        }
-        self.signer
-            .derive_musig2_nonce(
-                self.get_local_commitment_number(),
-                Musig2Context::Commitment,
-            )
-            .public_nonce()
-    }
-
-    fn get_revocation_nonce(&self, for_remote: bool) -> PubNonce {
-        let commitment_number = if for_remote {
-            self.get_local_commitment_number()
-        } else {
-            self.get_remote_commitment_number()
-        };
-        self.signer
-            .derive_musig2_nonce(commitment_number, Musig2Context::Revoke)
-            .public_nonce()
-    }
-
-    pub fn get_deterministic_musig2_agg_pubnonce(
-        &self,
-        local_nonce: PubNonce,
-        remote_nonce: PubNonce,
-    ) -> AggNonce {
-        let nonces = self.order_things_for_musig2(local_nonce, remote_nonce);
-        AggNonce::sum(nonces)
-    }
-
     fn get_active_tlcs_v2(&self, for_remote: bool) -> Vec<TlcInfo> {
         let (mut received_tlcs, mut offered_tlcs) = (
             self.tlc_state
@@ -8914,22 +7675,6 @@ impl ChannelActorState {
         a.sort_by(|x, y| u64::from(x.tlc_id).cmp(&u64::from(y.tlc_id)));
         b.sort_by(|x, y| u64::from(x.tlc_id).cmp(&u64::from(y.tlc_id)));
         [a, b].concat()
-    }
-
-    fn get_active_received_tlcs(&self, for_remote: bool) -> Vec<TlcInfo> {
-        self.tlc_state
-            .commitment_signed_tlcs(for_remote)
-            .filter(|tlc| tlc.is_received())
-            .cloned()
-            .collect()
-    }
-
-    fn get_active_offered_tlcs(&self, for_remote: bool) -> Vec<TlcInfo> {
-        self.tlc_state
-            .commitment_signed_tlcs(for_remote)
-            .filter(|tlc| tlc.is_offered())
-            .cloned()
-            .collect()
     }
 
     pub fn get_all_received_tlcs(&self) -> impl Iterator<Item = &TlcInfo> {
@@ -9003,28 +7748,7 @@ impl ChannelActorState {
     }
 
     fn get_active_tlcs(&self, for_remote: bool) -> Vec<TlcInfo> {
-        // V2 derives commitment content from the acknowledged history (Lightning's two-part rule);
-        // V1 keeps its historical status ladder so released channels do not change content.
-        if self.channel_features.is_v2() {
-            return self.get_active_tlcs_v2(for_remote);
-        }
-        // Build a sorted array of TLC so that both party can generate the same commitment transaction.
-        let (mut received_tlcs, mut offered_tlcs) = (
-            self.get_active_received_tlcs(for_remote),
-            self.get_active_offered_tlcs(for_remote),
-        );
-        let (mut a, mut b) = if for_remote {
-            (received_tlcs, offered_tlcs)
-        } else {
-            for tlc in received_tlcs.iter_mut().chain(offered_tlcs.iter_mut()) {
-                // Need to flip these fields for the counterparty.
-                tlc.flip_mut();
-            }
-            (offered_tlcs, received_tlcs)
-        };
-        a.sort_by(|x, y| u64::from(x.tlc_id).cmp(&u64::from(y.tlc_id)));
-        b.sort_by(|x, y| u64::from(x.tlc_id).cmp(&u64::from(y.tlc_id)));
-        [a, b].concat()
+        self.get_active_tlcs_v2(for_remote)
     }
 
     fn get_active_tlcs_for_settlement(
@@ -9074,14 +7798,11 @@ impl ChannelActorState {
             Ok(fee) => fee,
             Err(_) => return false,
         };
-        let occupied_capacity = match occupied_capacity(
-            remote_close_script,
-            &self.funding_udt_type_script,
-            self.channel_features,
-        ) {
-            Ok(capacity) => capacity.as_u64(),
-            Err(_) => return false,
-        };
+        let occupied_capacity =
+            match occupied_capacity(remote_close_script, &self.funding_udt_type_script) {
+                Ok(capacity) => capacity.as_u64(),
+                Err(_) => return false,
+            };
         let remote_available_max_fee = if self.funding_udt_type_script.is_none() {
             match Self::checked_ckb_amount_with_reserved(
                 self.to_remote_amount,
@@ -9104,12 +7825,6 @@ impl ChannelActorState {
             }
         };
         return remote_shutdown_fee <= remote_available_max_fee;
-    }
-
-    fn check_valid_to_auto_accept_shutdown(&self) -> bool {
-        self.remote_shutdown_info
-            .as_ref()
-            .is_some_and(|i| i.fee_rate >= self.commitment_fee_rate)
     }
 
     fn check_tlc_expiry(&self, expiry: u64) -> ProcessingChannelResult {
@@ -9197,8 +7912,7 @@ impl ChannelActorState {
                     "TLC is already removed".to_string(),
                 ));
             }
-            if self.session_v2.is_some()
-                && tlc.is_received()
+            if tlc.is_received()
                 && matches!(reason, RemoveTlcReason::RemoveTlcFail(_))
                 && self.pending_received_tlc_claim_preimage(tlc).is_some()
             {
@@ -9312,12 +8026,7 @@ impl ChannelActorState {
     }
 
     pub fn is_waiting_tlc_ack(&self) -> bool {
-        if self.session_v2.is_some() {
-            return self.tlc_state.waiting_ack;
-        }
         self.tlc_state.waiting_ack
-            || self.remote_revocation_nonce_for_send.is_none()
-            || self.remote_revocation_nonce_for_verify.is_none()
     }
 
     fn check_tlc_limits(&self, add_amount: u128, is_sent: bool) -> ProcessingChannelResult {
@@ -9450,130 +8159,9 @@ impl ChannelActorState {
         Ok(tlc_info)
     }
 
-    fn aggregate_partial_signatures_to_consume_funding_cell(
-        &self,
-        common_ctx: &Musig2CommonContext,
-        our_partial_signature: PartialSignature,
-        their_partial_signature: PartialSignature,
-        tx: &TransactionView,
-    ) -> Result<TransactionView, ProcessingChannelError> {
-        let signature = common_ctx.aggregate_partial_signatures_for_msg(
-            our_partial_signature,
-            their_partial_signature,
-            &compute_tx_message(tx),
-        )?;
-
-        let witness =
-            create_witness_for_funding_cell(self.get_funding_lock_script_xonly(), signature);
-        Ok(tx
-            .as_advanced_builder()
-            .set_witnesses(vec![witness.pack()])
-            .build())
-    }
-
-    async fn maybe_transfer_to_shutdown(&mut self) -> ProcessingChannelResult {
-        if self.session_v2.is_some() {
-            // The actor progresses V2 close with synchronous durable writes.
-            return Ok(());
-        }
-        // This function will also be called when we resolve all pending tlcs.
-        // If we are not in the ShuttingDown state, we should not do anything.
-        let flags = match self.state {
-            ChannelState::ShuttingDown(flags) => flags,
-            _ => {
-                return Ok(());
-            }
-        };
-
-        #[cfg(debug_assertions)]
-        self.tlc_state.debug();
-        if !flags.contains(ShuttingDownFlags::AWAITING_PENDING_TLCS) || self.any_tlc_pending() {
-            debug!("Will not shutdown the channel because we require all tlcs resolved");
-            return Ok(());
-        }
-
-        debug!("All pending tlcs are resolved, transitioning to Shutdown state");
-        self.update_state(ChannelState::ShuttingDown(
-            flags | ShuttingDownFlags::DROPPING_PENDING,
-        ));
-        self.clear_waiting_peer_response();
-
-        if self.local_shutdown_info.is_some() && self.remote_shutdown_info.is_some() {
-            let shutdown_tx = self.build_shutdown_tx().await?;
-            let sign_ctx = self.get_funding_sign_context();
-
-            let (Some(local_shutdown_info), Some(remote_shutdown_info)) = (
-                self.core.local_shutdown_info.as_mut(),
-                self.core.remote_shutdown_info.as_ref(),
-            ) else {
-                unreachable!("shutdown info checked above")
-            };
-
-            let shutdown_scripts = (
-                local_shutdown_info.close_script.clone(),
-                remote_shutdown_info.close_script.clone(),
-            );
-            let local_shutdown_signature = match local_shutdown_info.signature {
-                Some(signature) => signature,
-                None => {
-                    let signature = sign_ctx.sign(&compute_tx_message(&shutdown_tx))?;
-                    local_shutdown_info.signature = Some(signature);
-
-                    self.network()
-                        .send_message(NetworkActorMessage::new_command(
-                            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
-                                self.get_remote_pubkey(),
-                                FiberMessage::closing_signed(ClosingSigned {
-                                    partial_signature: signature,
-                                    channel_id: self.get_id(),
-                                }),
-                            )),
-                        ))
-                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-                    signature
-                }
-            };
-
-            if let Some(remote_shutdown_signature) = remote_shutdown_info.signature {
-                let tx: TransactionView = self
-                    .aggregate_partial_signatures_to_consume_funding_cell(
-                        &sign_ctx.common_ctx,
-                        local_shutdown_signature,
-                        remote_shutdown_signature,
-                        &shutdown_tx,
-                    )?;
-                assert_eq!(
-                    tx.data().serialized_size_in_block(),
-                    shutdown_tx_size(&self.funding_udt_type_script, shutdown_scripts)
-                );
-
-                self.update_state(ChannelState::ShuttingDown(
-                    ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION,
-                ));
-
-                self.network()
-                    .send_message(NetworkActorMessage::new_event(
-                        NetworkActorEvent::ClosingTransactionPending(
-                            self.get_id(),
-                            self.get_remote_pubkey(),
-                            tx,
-                            false,
-                        ),
-                    ))
-                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-            } else {
-                debug!("We have sent our shutdown signature, waiting for counterparty's signature");
-            }
-        } else {
-            debug!("Not ready to shutdown the channel, waiting for both parties to send the Shutdown message");
-        }
-
-        Ok(())
-    }
-
     fn handle_accept_channel_message(
         &mut self,
-        accept_channel: AcceptChannel,
+        accept_channel: AcceptChannelV2,
     ) -> ProcessingChannelResult {
         if self.state != ChannelState::NegotiatingFunding(NegotiatingFundingFlags::OUR_INIT_SENT) {
             return Err(ProcessingChannelError::InvalidState(format!(
@@ -9592,7 +8180,6 @@ impl ChannelActorState {
             &accept_channel.shutdown_script,
             self.local_constraints.max_tlc_number_in_flight,
             accept_channel.max_tlc_number_in_flight,
-            self.channel_features,
         )?;
 
         if !is_tlc_key_derivation_safe(
@@ -9614,18 +8201,9 @@ impl ChannelActorState {
         self.to_remote_amount = accept_channel.funding_amount;
         self.remote_reserved_ckb_amount = accept_channel.reserved_ckb_amount;
 
-        if let Some(session) = self.session_v2.as_mut() {
-            session.bootstrap_remote_nonce = Some(accept_channel.next_commitment_nonce.clone());
-            session.remote_nonce = Some(accept_channel.next_commitment_nonce.clone());
-        } else {
-            self.commit_remote_nonce(accept_channel.next_commitment_nonce.clone());
-            self.remote_revocation_nonce_for_send =
-                Some(accept_channel.next_revocation_nonce.clone());
-        }
-        if self.session_v2.is_none() {
-            self.remote_revocation_nonce_for_verify =
-                Some(accept_channel.next_revocation_nonce.clone());
-        }
+        let session = &mut self.session;
+        session.bootstrap_remote_nonce = Some(accept_channel.initial_commitment_nonce.clone());
+        session.remote_nonce = Some(accept_channel.initial_commitment_nonce.clone());
         self.log_ack_state("[ack] handle_accept_channel_message");
         let remote_pubkeys = (&accept_channel).into();
         self.remote_channel_public_keys = Some(remote_pubkeys);
@@ -9654,7 +8232,7 @@ impl ChannelActorState {
             }
         }
         debug!(
-            "Successfully processed AcceptChannel message {:?}",
+            "Successfully processed AcceptChannelV2 message {:?}",
             &accept_channel
         );
         Ok(())
@@ -9861,7 +8439,7 @@ impl ChannelActorState {
                     ));
                 }
             }
-            TxCollaborationMsg::TxComplete(tx_complete) => {
+            TxCollaborationMsg::TxComplete(_) => {
                 self.check_tx_complete_preconditions()?;
 
                 let (local_settlement_key, remote_settlement_key) = self.get_settlement_keys();
@@ -9884,9 +8462,6 @@ impl ChannelActorState {
                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
                 let flags = flags | CollaboratingFundingTxFlags::THEIR_TX_COMPLETE_SENT;
-                if self.session_v2.is_none() {
-                    self.commit_remote_nonce(tx_complete.next_commitment_nonce);
-                }
                 self.increment_remote_commitment_number();
                 self.update_state(ChannelState::CollaboratingFundingTx(flags));
             }
@@ -10014,120 +8589,11 @@ impl ChannelActorState {
         Ok(())
     }
 
-    fn verify_commitment_signed_and_send_ack(
-        &mut self,
-        commitment_signed: CommitmentSigned,
-    ) -> Result<bool, ProcessingChannelError> {
-        if self.is_duplicate_external_funding_commitment_signed(&commitment_signed) {
-            debug!(
-                "Ignoring duplicate external funding CommitmentSigned for channel {:?} in state {:?}",
-                self.get_id(),
-                self.state
-            );
-            return Ok(false);
-        }
-
-        let flags = match self.state {
-            ChannelState::CollaboratingFundingTx(flags)
-                if !flags.contains(CollaboratingFundingTxFlags::COLLABORATION_COMPLETED) =>
-            {
-                return Err(ProcessingChannelError::InvalidState(format!(
-                    "Unable to verify commitment_signed message in state {:?}, as collaboration is not completed yet.",
-                    &self.state
-                )));
-            }
-            ChannelState::CollaboratingFundingTx(_) => {
-                CommitmentSignedFlags::SigningCommitment(SigningCommitmentFlags::empty())
-            }
-            ChannelState::SigningCommitment(flags)
-                if flags.contains(SigningCommitmentFlags::THEIR_COMMITMENT_SIGNED_SENT) =>
-            {
-                return Err(ProcessingChannelError::InvalidState(format!(
-                    "Unable to verify commitment_signed message in state {:?}, as we have already received our commitment_signed message.",
-                    &self.state
-                )));
-            }
-            ChannelState::SigningCommitment(flags) => {
-                CommitmentSignedFlags::SigningCommitment(flags)
-            }
-            ChannelState::ChannelReady => CommitmentSignedFlags::ChannelReady(),
-            ChannelState::ShuttingDown(flags) => {
-                if flags.is_ok_for_commitment_operation() {
-                    debug!(
-                        "Verify commitment_signed message while shutdown is pending, current state {:?}",
-                        &self.state
-                    );
-                    CommitmentSignedFlags::PendingShutdown()
-                } else {
-                    return Err(ProcessingChannelError::InvalidState(format!(
-                        "Unable to verify commitment_signed message in shutdowning state with flags {:?}",
-                        &flags
-                    )));
-                }
-            }
-            ChannelState::NegotiatingFunding(flags)
-                if flags.contains(NegotiatingFundingFlags::AWAITING_EXTERNAL_FUNDING)
-                    && self.ephemeral_config.external_funding.enabled
-                    && !self.ephemeral_config.external_funding.signed_submitted =>
-            {
-                CommitmentSignedFlags::SigningCommitment(SigningCommitmentFlags::empty())
-            }
-            _ => {
-                return Err(ProcessingChannelError::InvalidState(format!(
-                    "Unable to verify commitment signed message in state {:?}",
-                    &self.state
-                )));
-            }
-        };
-
-        #[cfg(debug_assertions)]
-        {
-            debug!(
-                "verify commitment_signed: {:?} at commitment_numbers: {:?}",
-                commitment_signed,
-                self.get_current_commitment_numbers()
-            );
-        }
-
-        let (commitment_tx, settlement_data) =
-            self.verify_and_complete_tx(commitment_signed.funding_tx_partial_signature)?;
-
-        self.clean_up_failed_tlcs();
-
-        // Notify outside observers.
-        self.network()
-            .send_message(NetworkActorMessage::new_notification(
-                NetworkServiceEvent::RemoteCommitmentSigned(
-                    self.get_remote_pubkey(),
-                    self.get_id(),
-                    commitment_tx.clone(),
-                    settlement_data,
-                ),
-            ))
-            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-
-        match flags {
-            CommitmentSignedFlags::SigningCommitment(flags) => {
-                let flags = flags | SigningCommitmentFlags::THEIR_COMMITMENT_SIGNED_SENT;
-                self.update_state(ChannelState::SigningCommitment(flags));
-                if !self.ephemeral_config.external_funding.enabled {
-                    self.maybe_transfer_to_tx_signatures(flags)?;
-                }
-            }
-            CommitmentSignedFlags::ChannelReady() | CommitmentSignedFlags::PendingShutdown() => {
-                self.send_revoke_and_ack_message(false)?;
-            }
-        }
-        self.commit_remote_nonce(commitment_signed.next_commitment_nonce);
-        self.latest_commitment_transaction = Some(commitment_tx.data());
-        Ok(true)
-    }
-
     fn maybe_transfer_to_tx_signatures(
         &mut self,
         flags: SigningCommitmentFlags,
     ) -> ProcessingChannelResult {
-        // V1 and V2 exchange commitments before the wallet signs. Do not start
+        // Exchange commitments before the wallet signs. Do not start
         // funding signatures until the submitted transaction has been installed.
         if self.is_waiting_for_external_funding_submission() {
             return Ok(());
@@ -10216,17 +8682,10 @@ impl ChannelActorState {
                 .into_iter()
                 .map(|x| x.unpack())
                 .collect::<Vec<_>>();
-            self.network()
-                .send_message(NetworkActorMessage::new_command(
-                    NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
-                        self.get_remote_pubkey(),
-                        FiberMessage::tx_signatures(TxSignatures {
-                            channel_id: self.get_id(),
-                            witnesses,
-                        }),
-                    )),
-                ))
-                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+            self.send_message_to_peer(FiberMessage::tx_signatures(TxSignatures {
+                channel_id: self.get_id(),
+                witnesses,
+            }));
             self.update_state(ChannelState::AwaitingTxSignatures(
                 flags | AwaitingTxSignaturesFlags::OUR_TX_SIGNATURES_SENT,
             ));
@@ -10261,7 +8720,7 @@ impl ChannelActorState {
                 self.must_get_funding_transaction_timestamp(),
                 channel_announcement,
             )];
-            if self.session_v2.is_none() || !self.reestablishing {
+            if !self.reestablishing {
                 // Availability is advertised by on_reestablished_channel_ready after recovery.
                 messages.push(BroadcastMessageWithTimestamp::ChannelUpdate(channel_update));
             }
@@ -10309,14 +8768,14 @@ impl ChannelActorState {
         self.update_state(ChannelState::ChannelReady);
         self.increment_local_commitment_number();
         self.increment_remote_commitment_number();
-        if self.session_v2.is_some() && self.reestablishing && self.recovery_peer_v2.is_none() {
+        if self.reestablishing && self.recovery_peer_v2.is_none() {
             // Opening can complete while offline or before the peer's recovery handshake.
             // Preserve connectivity and its recovery clock; the validated recovery path
             // will publish Online, route availability, and ChannelReady notifications.
             return;
         }
         self.connectivity_state = ChannelConnectivityState::Online;
-        if self.session_v2.is_some() && self.recovery_peer_v2.is_some() {
+        if self.recovery_peer_v2.is_some() {
             self.reestablishing = false;
             self.reestablish_timer = None;
             self.clear_waiting_peer_response();
@@ -10341,7 +8800,6 @@ impl ChannelActorState {
             return;
         };
 
-        self.pending_reestablish_channel_ready = false;
         self.reestablishing = false;
         self.reestablish_timer = None;
         self.connectivity_state = ChannelConnectivityState::Online;
@@ -10359,18 +8817,6 @@ impl ChannelActorState {
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
         self.on_owned_channel_updated(myself, false);
-    }
-
-    fn finish_pending_reestablish_channel_ready(
-        &mut self,
-        myself: &ActorRef<ChannelActorMessage>,
-    ) -> bool {
-        if !self.pending_reestablish_channel_ready {
-            return false;
-        }
-
-        self.on_reestablished_channel_ready(myself);
-        true
     }
 
     fn resume_funding(&mut self, myself: &ActorRef<ChannelActorMessage>) {
@@ -10408,21 +8854,10 @@ impl ChannelActorState {
                             ),
                         ))
                         .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-                    let pubkey = self.get_remote_pubkey();
-                    let peer_message = FiberMessageWithTarget {
-                        target: pubkey,
-                        message: FiberMessage::ChannelNormalOperation(
-                            FiberChannelMessage::TxSignatures(TxSignatures {
-                                channel_id,
-                                witnesses,
-                            }),
-                        ),
-                    };
-                    self.network()
-                        .send_message(NetworkActorMessage::new_command(
-                            NetworkActorCommand::SendFiberMessage(peer_message),
-                        ))
-                        .expect("network actor alive");
+                    self.send_message_to_peer(FiberMessage::tx_signatures(TxSignatures {
+                        channel_id,
+                        witnesses,
+                    }));
                 } else if flags.contains(AwaitingTxSignaturesFlags::THEIR_TX_SIGNATURES_SENT)
                     || self.should_local_send_tx_signatures_first()
                 {
@@ -10446,29 +8881,15 @@ impl ChannelActorState {
             }
             ChannelState::AwaitingChannelReady(flags) => {
                 // V2 must replay Ready even if both flags were saved before opening completed.
-                if flags.contains(AwaitingChannelReadyFlags::OUR_CHANNEL_READY)
-                    && (self.session_v2.is_some()
-                        || !flags.contains(AwaitingChannelReadyFlags::CHANNEL_READY))
-                {
-                    let message = if let Some(session) = &self.session_v2 {
+                if flags.contains(AwaitingChannelReadyFlags::OUR_CHANNEL_READY) {
+                    let session = &self.session;
+                    let message =
                         FiberMessage::channel_ready_v2(crate::fiber::types::ChannelReadyV2 {
                             channel_id: self.id,
                             next_commitment_number: session.own.number,
                             next_commitment_nonce: session.own.public_nonce.clone(),
-                        })
-                    } else {
-                        FiberMessage::channel_ready(ChannelReady {
-                            channel_id: self.get_id(),
-                        })
-                    };
-                    self.network()
-                        .send_message(NetworkActorMessage::new_command(
-                            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
-                                self.get_remote_pubkey(),
-                                message,
-                            )),
-                        ))
-                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                        });
+                    self.send_message_to_peer(message);
                 }
                 if flags.contains(AwaitingChannelReadyFlags::CHANNEL_READY) {
                     self.maybe_channel_is_ready(myself);
@@ -10523,760 +8944,6 @@ impl ChannelActorState {
             .retain(|(number, _)| points.contains(number));
     }
 
-    fn handle_revoke_and_ack_peer_message(
-        &mut self,
-        myself: &ActorRef<ChannelActorMessage>,
-        revoke_and_ack: RevokeAndAck,
-    ) -> ProcessingChannelResult {
-        if !self.tlc_state.waiting_ack {
-            return Err(ProcessingChannelError::InvalidState(
-                "unexpected RevokeAndAck message".to_string(),
-            ));
-        }
-        let RevokeAndAck {
-            channel_id: _,
-            revocation_partial_signature,
-            next_per_commitment_point,
-            next_revocation_nonce,
-        } = revoke_and_ack;
-
-        let remote_tlc_base_key = &self.get_remote_channel_public_keys().tlc_base_key;
-        if !is_tlc_key_derivation_safe(remote_tlc_base_key, &next_per_commitment_point) {
-            return Err(ProcessingChannelError::InvalidParameter(
-                "peer tlc_basepoint and next_per_commitment_point in RevokeAndAck derive to invalid key"
-                    .to_string(),
-            ));
-        }
-
-        let sign_ctx = match self.get_revoke_sign_context(true) {
-            Some(ctx) => ctx,
-            None => {
-                let error =
-                    "RevokeAndAck message received, but get_revoke_sign_context returned None";
-                warn!(error);
-                return Err(ProcessingChannelError::InvalidState(error.to_string()));
-            }
-        };
-        let x_only_aggregated_pubkey = sign_ctx.common_ctx.x_only_aggregated_pubkey();
-
-        let revocation_data = {
-            let commitment_tx_fee = checked_calculate_commitment_tx_fee(
-                self.commitment_fee_rate,
-                &self.funding_udt_type_script,
-                self.channel_features,
-            )?;
-            let lock_script = self.get_local_shutdown_script();
-            let (output, output_data) = if let Some(udt_type_script) = &self.funding_udt_type_script
-            {
-                let capacity = checked_sub_u64(
-                    self.get_total_reserved_ckb_amount()?,
-                    commitment_tx_fee,
-                    "Reserved CKB",
-                )?;
-                let output = CellOutput::new_builder()
-                    .lock(lock_script.clone())
-                    .type_(Some(udt_type_script.clone()).pack())
-                    .capacity(capacity)
-                    .build();
-
-                let output_data = self.checked_liquid_capacity()?.to_le_bytes().pack();
-                (output, output_data)
-            } else {
-                let capacity =
-                    checked_sub_u64(self.get_total_ckb_amount()?, commitment_tx_fee, "Total CKB")?;
-                let output = CellOutput::new_builder()
-                    .lock(lock_script.clone())
-                    .capacity(capacity)
-                    .build();
-                let output_data = Bytes::default();
-                (output, output_data)
-            };
-
-            let commitment_number = self.get_local_commitment_number().checked_sub(1).ok_or(
-                ProcessingChannelError::InvalidState(
-                    "Local commitment number underflows while building revocation data".to_string(),
-                ),
-            )?;
-            let commitment_lock_script_args = [
-                &blake2b_256(x_only_aggregated_pubkey)[0..20],
-                self.get_delay_epoch_as_lock_args_bytes().as_slice(),
-                commitment_number.to_be_bytes().as_slice(),
-            ]
-            .concat();
-            let message = blake2b_256(
-                [
-                    output.as_slice(),
-                    output_data.as_slice(),
-                    commitment_lock_script_args.as_slice(),
-                ]
-                .concat(),
-            );
-            let aggregated_signature =
-                sign_ctx.sign_and_aggregate(message.as_slice(), revocation_partial_signature)?;
-            RevocationData {
-                commitment_number,
-                aggregated_signature,
-                output,
-                output_data,
-            }
-        };
-
-        let settlement_data = self.build_settlement_data(true)?;
-
-        self.increment_local_commitment_number();
-        self.append_remote_commitment_point(next_per_commitment_point);
-        let commitment_numbers = self.core.commitment_numbers;
-        self.core
-            .tlc_state
-            .update_for_revoke_and_ack(commitment_numbers);
-        self.set_waiting_ack(myself, false);
-
-        info!(
-            "After RevokeAndAckReceived settlement data for commitment_number: {}, tlcs count: {}, tlc_state: {:?}",
-            self.get_local_commitment_number(),
-            settlement_data.tlcs.len(),
-            self.tlc_state
-                .all_tlcs()
-                .map(|tlc| tlc.status.clone())
-                .collect::<Vec<_>>()
-        );
-
-        // update the remote_revocation_nonce_for_send and remote_revocation_nonce_for_verify for next round if needed
-        self.remote_revocation_nonce_for_next = Some(next_revocation_nonce);
-        if self.remote_revocation_nonce_for_send.is_none() {
-            self.remote_revocation_nonce_for_send = self.remote_revocation_nonce_for_next.clone();
-            self.remote_revocation_nonce_for_verify = self.remote_revocation_nonce_for_next.clone();
-        } else {
-            self.remote_revocation_nonce_for_verify = None;
-        }
-        self.log_ack_state("[ack] handle_revoke_and_ack_peer_message");
-
-        self.network()
-            .send_message(NetworkActorMessage::new_notification(
-                NetworkServiceEvent::RevokeAndAckReceived(
-                    self.get_remote_pubkey(),
-                    self.get_id(),
-                    revocation_data,
-                    settlement_data,
-                ),
-            ))
-            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-        Ok(())
-    }
-
-    fn should_replay_external_funding_commitment_on_reestablish(&self) -> bool {
-        self.ephemeral_config.external_funding.enabled
-            && self.ephemeral_config.external_funding.signed_submitted
-            && matches!(self.state, ChannelState::AwaitingTxSignatures(_))
-    }
-
-    fn is_duplicate_external_funding_commitment_signed(
-        &self,
-        commitment_signed: &CommitmentSigned,
-    ) -> bool {
-        let duplicate_external_funding_nonce = self.ephemeral_config.external_funding.enabled
-            && self.ephemeral_config.external_funding.signed_submitted
-            && self.last_committed_remote_nonce.as_ref()
-                == Some(&commitment_signed.next_commitment_nonce);
-        if !duplicate_external_funding_nonce {
-            return false;
-        }
-
-        matches!(
-            self.state,
-            ChannelState::SigningCommitment(flags)
-                if flags.contains(SigningCommitmentFlags::THEIR_COMMITMENT_SIGNED_SENT)
-        ) || matches!(
-            self.state,
-            ChannelState::AwaitingTxSignatures(_) | ChannelState::AwaitingChannelReady(_)
-        )
-    }
-
-    #[cfg(test)]
-    pub(crate) fn is_duplicate_external_funding_commitment_signed_for_test(
-        &self,
-        commitment_signed: &CommitmentSigned,
-    ) -> bool {
-        self.is_duplicate_external_funding_commitment_signed(commitment_signed)
-    }
-
-    fn validate_external_funding_commit_diff_for_replay(
-        &self,
-        commit_diff: &CommitDiff,
-    ) -> ProcessingChannelResult {
-        if commit_diff.channel_id != self.get_id() {
-            return Err(ProcessingChannelError::InvalidState(format!(
-                "external funding commit diff channel mismatch: expected {}, got {}",
-                self.get_id(),
-                commit_diff.channel_id
-            )));
-        }
-
-        if commit_diff.local_commitment_number_at_send != self.get_local_commitment_number() {
-            return Err(ProcessingChannelError::InvalidState(format!(
-                "stale external funding commit diff local commitment number: expected {}, got {}",
-                self.get_local_commitment_number(),
-                commit_diff.local_commitment_number_at_send
-            )));
-        }
-
-        let diff_remote = commit_diff.remote_commitment_number_at_send;
-        let diff_remote_upper = diff_remote.saturating_add(1);
-        let remote_commitment_number = self.get_remote_commitment_number();
-        if remote_commitment_number < diff_remote || remote_commitment_number > diff_remote_upper {
-            return Err(ProcessingChannelError::InvalidState(format!(
-                "stale external funding commit diff remote commitment drift: state={}, diff_at_send={}, expected range=[{}, {}]",
-                remote_commitment_number, diff_remote, diff_remote, diff_remote_upper
-            )));
-        }
-
-        Ok(())
-    }
-
-    /// Returns whether reconnect is in the initial `ChannelReady` replay window.
-    ///
-    /// The funding commitment exchange leaves both counters at the first post-initial value,
-    /// while entering `ChannelReady` advances them once more. Requiring the persisted funding
-    /// confirmation and no pending commitment/TLC work keeps this one-step gap from being
-    /// confused with a later channel update. The confirmation is historical local evidence;
-    /// this check does not query the chain again during reestablishment.
-    fn should_replay_channel_ready_on_reestablish(
-        &mut self,
-        myself: &ActorRef<ChannelActorMessage>,
-        reestablish_channel: &ReestablishChannel,
-    ) -> bool {
-        let funding_commitment_number = INITIAL_COMMITMENT_NUMBER + 1;
-        let channel_ready_commitment_number = funding_commitment_number + 1;
-
-        let should_relay_channel_ready = matches!(self.state, ChannelState::ChannelReady)
-            && self.funding_tx_confirmed_at.is_some()
-            && self.get_local_commitment_number() == channel_ready_commitment_number
-            && self.get_remote_commitment_number() == channel_ready_commitment_number
-            && reestablish_channel.local_commitment_number == funding_commitment_number
-            && reestablish_channel.remote_commitment_number == funding_commitment_number
-            && !self.tlc_state.waiting_ack
-            && self.tlc_state.all_tlcs().next().is_none();
-
-        if should_relay_channel_ready {
-            self.on_reestablished_channel_ready(myself);
-            let network = self.network();
-            network
-                .send_message(NetworkActorMessage::new_command(
-                    NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
-                        self.get_remote_pubkey(),
-                        FiberMessage::channel_ready(ChannelReady {
-                            channel_id: self.get_id(),
-                        }),
-                    )),
-                ))
-                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-            debug_event!(network, "Replayed ChannelReady after reestablishment");
-            return true;
-        }
-        false
-    }
-
-    async fn handle_reestablish_channel_message(
-        &mut self,
-        myself: &ActorRef<ChannelActorMessage>,
-        reestablish_channel: &ReestablishChannel,
-        pending_commit_diff: Option<CommitDiff>,
-    ) -> ProcessingChannelResult {
-        debug!(
-            "peer: {:?} Handling reestablish channel message: {:?}, our commitment_numbers {:?} in channel state {:?}, has_commit_diff: {}",
-            self.get_local_pubkey(),
-            reestablish_channel,
-            self.commitment_numbers,
-            self.state,
-            pending_commit_diff.is_some()
-        );
-        // The peer has answered, so stop the reestablish timeout whatever the outcome. Not all
-        // branches below clear `reestablishing` (`ShuttingDown` keeps it), and after a failed
-        // handshake a force close could broadcast a revoked commitment if our state is the stale
-        // one.
-        self.reestablish_timer = None;
-        let network = self.network();
-        self.notify_funding_tx(&network);
-        if self.ephemeral_config.external_funding.signed_submitted
-            && !self.is_acceptor
-            && self.latest_commitment_transaction.is_some()
-            && matches!(
-                self.state,
-                ChannelState::SigningCommitment(_) | ChannelState::AwaitingTxSignatures(_)
-            )
-        {
-            network
-                .send_message(NetworkActorMessage::new_command(
-                    NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
-                        self.get_remote_pubkey(),
-                        FiberMessage::tx_update(TxUpdate {
-                            channel_id: self.get_id(),
-                            tx: self.must_get_funding_transaction().clone(),
-                        }),
-                    )),
-                ))
-                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-        }
-        let external_funding_waiting_submit = self.ephemeral_config.external_funding.enabled
-            && !self.ephemeral_config.external_funding.signed_submitted
-            && (self.state.is_awaiting_external_funding()
-                || matches!(
-                    self.state,
-                    ChannelState::SigningCommitment(flags)
-                        if flags.intersects(SigningCommitmentFlags::COMMITMENT_SIGNED_SENT)
-                ));
-        let external_funding_submitted_in_flight = self.ephemeral_config.external_funding.enabled
-            && self.ephemeral_config.external_funding.signed_submitted
-            && matches!(
-                self.state,
-                ChannelState::CollaboratingFundingTx(_) | ChannelState::SigningCommitment(_)
-            );
-        if external_funding_waiting_submit {
-            self.clear_waiting_peer_response();
-            self.pending_reestablish_channel_ready = false;
-            self.reestablishing = false;
-            if matches!(
-                self.state,
-                ChannelState::SigningCommitment(flags)
-                    if flags.contains(SigningCommitmentFlags::OUR_COMMITMENT_SIGNED_SENT)
-            ) {
-                if let Some(ref commit_diff) = pending_commit_diff {
-                    self.validate_external_funding_commit_diff_for_replay(commit_diff)?;
-                    self.resend_commitment_from_diff(commit_diff)?;
-                }
-            }
-            return Ok(());
-        }
-        if external_funding_submitted_in_flight {
-            self.clear_waiting_peer_response();
-            self.pending_reestablish_channel_ready = false;
-            self.reestablishing = false;
-            match self.state {
-                ChannelState::CollaboratingFundingTx(_) => {}
-                ChannelState::SigningCommitment(flags)
-                    if flags.contains(SigningCommitmentFlags::THEIR_COMMITMENT_SIGNED_SENT)
-                        && !flags.contains(SigningCommitmentFlags::OUR_COMMITMENT_SIGNED_SENT) =>
-                {
-                    myself
-                        .send_message(ChannelActorMessage::Command(
-                            ChannelCommand::CommitmentSigned(None),
-                        ))
-                        .expect("myself alive")
-                }
-                ChannelState::SigningCommitment(flags)
-                    if flags.contains(SigningCommitmentFlags::OUR_COMMITMENT_SIGNED_SENT)
-                        && !flags
-                            .contains(SigningCommitmentFlags::THEIR_COMMITMENT_SIGNED_SENT) =>
-                {
-                    if let Some(ref commit_diff) = pending_commit_diff {
-                        self.validate_external_funding_commit_diff_for_replay(commit_diff)?;
-                        self.resend_commitment_from_diff(commit_diff)?;
-                    } else {
-                        warn!(
-                            "No CommitDiff for external funding channel {}, unable to replay CommitmentSigned during reestablish",
-                            self.get_id()
-                        );
-                    }
-                }
-                ChannelState::SigningCommitment(flags)
-                    if flags.contains(SigningCommitmentFlags::COMMITMENT_SIGNED_SENT) =>
-                {
-                    self.handle_tx_signatures(None)?
-                }
-                ChannelState::SigningCommitment(_) => {}
-                _ => unreachable!("checked external funding in-flight states above"),
-            }
-            return Ok(());
-        }
-        match self.state {
-            ChannelState::NegotiatingFunding(_)
-            | ChannelState::CollaboratingFundingTx(_)
-            | ChannelState::SigningCommitment(_) => {
-                // Abort funding. It's better to resume the funding workflow, but it will make the code more complex.
-                // Consider refactoring the code to better support restarting in the future.
-                myself
-                    .send_message(ChannelActorMessage::Event(ChannelEvent::Stop(
-                        StopReason::AbortFunding,
-                    )))
-                    .expect("myself alive");
-            }
-            ChannelState::AwaitingTxSignatures(_) | ChannelState::AwaitingChannelReady(_) => {
-                if self.should_replay_external_funding_commitment_on_reestablish() {
-                    if let Some(ref commit_diff) = pending_commit_diff {
-                        self.validate_external_funding_commit_diff_for_replay(commit_diff)?;
-                        self.resend_commitment_from_diff(commit_diff)?;
-                    } else {
-                        warn!(
-                            "No CommitDiff for external funding channel {}, unable to replay CommitmentSigned during reestablish",
-                            self.get_id()
-                        );
-                    }
-                }
-                self.on_reestablished_channel_ready(myself);
-                self.resume_funding(myself);
-            }
-            ChannelState::ChannelReady => {
-                self.clear_waiting_peer_response();
-                self.pending_reestablish_channel_ready = false;
-                self.restore_missing_revocation_send_nonce();
-
-                let my_local_commitment_number = self.get_local_commitment_number();
-                let my_remote_commitment_number = self.get_remote_commitment_number();
-                let my_waiting_ack = self.tlc_state.waiting_ack;
-                let peer_local_commitment_number = reestablish_channel.local_commitment_number;
-                let peer_remote_commitment_number = reestablish_channel.remote_commitment_number;
-                let mut reestablish_complete = true;
-
-                warn!(
-                    "peer: {:?} \
-                    local_commitment_number ({:?}, {:?}) \
-                    peer_commitment_number ({:?} {:?}) \
-                    waiting_ack: {:?}",
-                    self.get_local_pubkey(),
-                    my_local_commitment_number,
-                    my_remote_commitment_number,
-                    peer_local_commitment_number,
-                    peer_remote_commitment_number,
-                    my_waiting_ack,
-                );
-
-                if peer_local_commitment_number.abs_diff(my_remote_commitment_number) > 1
-                    || peer_remote_commitment_number.abs_diff(my_local_commitment_number) > 1
-                {
-                    return Err(ProcessingChannelError::InvalidParameter(
-                        "reestablish channel message with invalid commitment numbers".to_string(),
-                    ));
-                }
-
-                if self.should_replay_channel_ready_on_reestablish(myself, reestablish_channel) {
-                    return Ok(());
-                }
-
-                if my_local_commitment_number == peer_remote_commitment_number
-                    && my_remote_commitment_number == peer_local_commitment_number
-                {
-                    // We persist waiting_ack and CommitDiff before sending CommitmentSigned. If
-                    // the node crashes after that persist but before the frame reaches the peer,
-                    // reestablish sees equal commitment numbers and must replay the stored commit.
-                    if let (true, Some(commit_diff)) =
-                        (my_waiting_ack, pending_commit_diff.as_ref())
-                    {
-                        self.validate_commit_diff_for_replay(reestablish_channel, commit_diff)?;
-                        self.resend_commitment_from_diff(commit_diff)?;
-                        self.last_was_revoke = false;
-                        self.reestablishing = false;
-                        self.pending_reestablish_channel_ready = true;
-                        reestablish_complete = false;
-                    } else {
-                        // commitments are the same, sync up the tlcs
-                        self.set_waiting_ack(myself, false);
-                        self.resend_tlcs_on_reestablish(true)?;
-                    }
-                } else if peer_local_commitment_number
-                    .checked_add(1)
-                    .is_some_and(|next| my_remote_commitment_number == next)
-                {
-                    // peer need ACK, I need to resend my revoke_and_ack message
-                    // don't clear my waiting_ack flag here, since if i'm waiting for peer ack,
-                    // peer will resend commitment_signed message
-                    if my_waiting_ack && my_local_commitment_number == peer_remote_commitment_number
-                    {
-                        if let Some(ref commit_diff) = pending_commit_diff {
-                            // === New path: deterministic replay from stored CommitDiff ===
-                            self.validate_commit_diff_for_replay(reestablish_channel, commit_diff)?;
-                            let replay_order = resolve_dual_owed_replay_order(
-                                self.get_id(),
-                                commit_diff.replay_order_hint,
-                                self.get_remote_commitment_number(),
-                                commit_diff.remote_commitment_number_at_send,
-                                self.last_was_revoke,
-                            );
-                            debug!(
-                                "Dual-owed replay decision for channel {}: hint={:?}, last_was_revoke={}, remote_cn_now={}, remote_cn_at_send={}, chosen={:?}",
-                                self.get_id(),
-                                commit_diff.replay_order_hint,
-                                self.last_was_revoke,
-                                self.get_remote_commitment_number(),
-                                commit_diff.remote_commitment_number_at_send,
-                                replay_order
-                            );
-                            // During dual-owed replay, defer newly arrived peer TLC updates until
-                            // we finish verifying the replayed CommitmentSigned.
-                            self.start_defer_peer_tlc_updates();
-                            match replay_order {
-                                ReplayOrderHint::RevokeThenCommit => {
-                                    self.send_revoke_and_ack_message(true)?;
-                                    // Don't clear waiting_ack - we're still waiting for response to our CommitmentSigned.
-                                    self.resend_commitment_from_diff(commit_diff)?;
-                                    self.last_was_revoke = false;
-                                }
-                                ReplayOrderHint::CommitThenRevoke => {
-                                    self.resend_commitment_from_diff(commit_diff)?;
-                                    self.send_revoke_and_ack_message(true)?;
-                                }
-                            }
-                        } else {
-                            // === Legacy fallback: no CommitDiff, use old develop-branch behavior ===
-                            warn!(
-                                "No CommitDiff for channel {}, falling back to legacy reestablish path",
-                                self.get_id()
-                            );
-                            self.send_revoke_and_ack_message(true)?;
-                            self.set_waiting_ack(myself, false);
-                            self.resend_tlcs_on_reestablish(true)?;
-                        }
-                    } else {
-                        self.send_revoke_and_ack_message(true)?;
-                    }
-                } else if my_waiting_ack
-                    && my_local_commitment_number == peer_remote_commitment_number
-                {
-                    // I need to resend my commitment_signed message, don't clear my WaitingTlcAck flag.
-                    if let Some(ref commit_diff) = pending_commit_diff {
-                        // === New path: deterministic replay from stored CommitDiff ===
-                        self.validate_commit_diff_for_replay(reestablish_channel, commit_diff)?;
-                        self.resend_commitment_from_diff(commit_diff)?;
-                        self.last_was_revoke = false;
-                    } else {
-                        // === Legacy fallback: no CommitDiff ===
-                        warn!(
-                            "No CommitDiff for channel {}, falling back to legacy reestablish path",
-                            self.get_id()
-                        );
-                        self.resend_tlcs_on_reestablish(true)?;
-                    }
-                } else {
-                    // Wait for the peer to resend the missing revoke_and_ack before declaring the
-                    // channel ready again. We must resume normal message handling so that ack can
-                    // be processed, but we delay the ready notification until then.
-                    self.reestablishing = false;
-                    self.pending_reestablish_channel_ready = true;
-                    reestablish_complete = false;
-                }
-
-                if reestablish_complete {
-                    self.on_reestablished_channel_ready(myself);
-                    debug_event!(network, "Reestablished channel in ChannelReady");
-                }
-            }
-            ChannelState::Stale => {
-                let my_local = self.get_local_commitment_number();
-                let my_remote = self.get_remote_commitment_number();
-                let peer_local = reestablish_channel.local_commitment_number;
-                let peer_remote = reestablish_channel.remote_commitment_number;
-
-                if peer_local.abs_diff(my_remote) > 1 || peer_remote.abs_diff(my_local) > 1 {
-                    error!(
-                        "Audit Failed for Stale channel: Local(L:{}, R:{}), Peer(L:{}, R:{})",
-                        my_local, my_remote, peer_local, peer_remote
-                    );
-                    return Err(ProcessingChannelError::InvalidParameter(
-                        "reestablish channel message with invalid commitment numbers during audit"
-                            .to_string(),
-                    ));
-                }
-
-                info!(
-                    "Passive audit passed for channel {}. Resuming to Ready.",
-                    self.get_id()
-                );
-                self.update_state(ChannelState::ChannelReady);
-
-                return Box::pin(self.handle_reestablish_channel_message(
-                    myself,
-                    reestablish_channel,
-                    pending_commit_diff,
-                ))
-                .await;
-            }
-            ChannelState::ShuttingDown(flags) => {
-                // Resend the shutdown message to the peer if we have not received the peer's shutdown message.
-                if !flags.contains(ShuttingDownFlags::THEIR_SHUTDOWN_SENT) {
-                    self.network()
-                        .send_message(NetworkActorMessage::new_command(
-                            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
-                                self.get_remote_pubkey(),
-                                FiberMessage::shutdown(Shutdown {
-                                    channel_id: self.get_id(),
-                                    close_script: self.get_local_shutdown_script().clone(),
-                                    fee_rate: FeeRate::from_u64(self.commitment_fee_rate),
-                                }),
-                            )),
-                        ))
-                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-                }
-                self.step_shutting_down(flags).await?;
-            }
-            ChannelState::Closed(_) => {
-                if !self.has_pending_tlc_delivery() {
-                    myself.stop(Some("ChannelClosed".to_string()));
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn resend_tlcs_on_reestablish(&self, send_commitment_signed: bool) -> ProcessingChannelResult {
-        let network = self.network();
-        let mut need_commitment_signed = false;
-        for info in self.tlc_state.all_tlcs() {
-            if info.is_offered()
-                && matches!(info.outbound_status(), OutboundTlcStatus::LocalAnnounced)
-            {
-                // resend AddTlc message
-                network
-                    .send_message(NetworkActorMessage::new_command(
-                        NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
-                            self.get_remote_pubkey(),
-                            FiberMessage::add_tlc(AddTlc {
-                                channel_id: self.get_id(),
-                                tlc_id: info.tlc_id.into(),
-                                amount: info.amount,
-                                payment_hash: info.payment_hash,
-                                expiry: info.expiry,
-                                hash_algorithm: info.hash_algorithm,
-                                onion_packet: info.onion_packet.clone(),
-                            }),
-                        )),
-                    ))
-                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-                debug_event!(network, "resend add tlc");
-                need_commitment_signed = true;
-            } else if let Some(remove_reason) = &info.removed_reason {
-                if info.is_received()
-                    && matches!(info.inbound_status(), InboundTlcStatus::LocalRemoved)
-                {
-                    // resend RemoveTlc message
-                    network
-                        .send_message(NetworkActorMessage::new_command(
-                            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
-                                self.get_remote_pubkey(),
-                                FiberMessage::remove_tlc(RemoveTlc {
-                                    channel_id: self.get_id(),
-                                    tlc_id: info.tlc_id.into(),
-                                    reason: remove_reason.clone(),
-                                }),
-                            )),
-                        ))
-                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-                    debug_event!(network, "resend remove tlc");
-                    need_commitment_signed = true;
-                }
-            }
-        }
-
-        if send_commitment_signed
-            && (need_commitment_signed || self.tlc_state.need_another_commitment_signed())
-        {
-            network
-                .send_message(NetworkActorMessage::new_command(
-                    NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
-                        channel_id: self.get_id(),
-                        command: ChannelCommand::CommitmentSigned(None),
-                    }),
-                ))
-                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-        }
-        Ok(())
-    }
-
-    fn validate_commit_diff_for_replay(
-        &self,
-        reestablish_channel: &ReestablishChannel,
-        commit_diff: &CommitDiff,
-    ) -> ProcessingChannelResult {
-        validate_commit_diff_for_replay_inputs(
-            self.get_id(),
-            self.is_waiting_tlc_ack(),
-            self.get_local_commitment_number(),
-            self.get_remote_commitment_number(),
-            reestablish_channel,
-            commit_diff,
-        )
-    }
-
-    /// Resend commitment using stored CommitDiff. This re-signs the stored transaction
-    /// instead of rebuilding it, ensuring consistent signatures during reestablishment.
-    fn resend_commitment_from_diff(&self, commit_diff: &CommitDiff) -> ProcessingChannelResult {
-        let network = self.network();
-
-        // 1. Resend TLC update messages from the stored diff
-        for update in &commit_diff.replay_updates {
-            match update {
-                TlcReplayUpdate::Add(add) => {
-                    network
-                        .send_message(NetworkActorMessage::new_command(
-                            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
-                                self.get_remote_pubkey(),
-                                FiberMessage::add_tlc(add.clone()),
-                            )),
-                        ))
-                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-                    debug_event!(network, "resend add tlc");
-                }
-                TlcReplayUpdate::Remove(remove) => {
-                    network
-                        .send_message(NetworkActorMessage::new_command(
-                            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
-                                self.get_remote_pubkey(),
-                                FiberMessage::remove_tlc(remove.clone()),
-                            )),
-                        ))
-                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-                    debug_event!(network, "resend remove tlc");
-                }
-            }
-        }
-
-        // 2. Reuse the original partial signature when available.
-        //    Fallback to re-sign only for backward compatibility with old CommitDiff entries.
-        let (funding_tx_partial_signature, reused_stored_signature) = if let Some(signature) =
-            commit_diff
-                .commitment_signed_template
-                .as_ref()
-                .and_then(|template| template.funding_tx_partial_signature)
-        {
-            (signature, true)
-        } else {
-            let commit_tx_view = commit_diff.commit_tx.clone().into_view();
-            let signature = self
-                .get_funding_sign_context()
-                .sign(&compute_tx_message(&commit_tx_view))?;
-            (signature, false)
-        };
-
-        let next_commitment_nonce = commit_diff
-            .commitment_signed_template
-            .as_ref()
-            .map(|template| template.next_commitment_nonce.clone())
-            .unwrap_or_else(|| self.get_next_commitment_nonce());
-
-        // 3. Send CommitmentSigned with reused or fallback re-signed signature.
-        let commitment_signed = CommitmentSigned {
-            channel_id: self.get_id(),
-            funding_tx_partial_signature,
-            next_commitment_nonce,
-        };
-
-        debug!(
-            "Resending commitment_signed from diff: local_cn_at_send={}, remote_cn_at_send={}, replay_updates={}, reused_stored_signature={}",
-            commit_diff.local_commitment_number_at_send,
-            commit_diff.remote_commitment_number_at_send,
-            commit_diff.replay_updates.len(),
-            reused_stored_signature,
-        );
-
-        network
-            .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
-                    self.get_remote_pubkey(),
-                    FiberMessage::commitment_signed(commitment_signed),
-                )),
-            ))
-            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-
-        Ok(())
-    }
     pub fn is_tx_final(&self, tx: &Transaction) -> Result<bool, ProcessingChannelError> {
         let tx = tx.clone().into_view();
 
@@ -11366,14 +9033,7 @@ impl ChannelActorState {
             // Otherwise, it is possible that when the network actor is processing ControlFiberChannel,
             // it receives another SendFiberMessage command, and that message (e.g. CommitmentSigned)
             // is processed first, thus breaking the order of messages.
-            self.network()
-                .send_message(NetworkActorMessage::new_command(
-                    NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
-                        self.get_remote_pubkey(),
-                        self.tx_complete_wire_message(),
-                    )),
-                ))
-                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+            self.send_message_to_peer(self.tx_complete_wire_message());
             let old_flags = match self.state {
                 ChannelState::CollaboratingFundingTx(flags) => flags,
                 _ => {
@@ -11440,43 +9100,6 @@ impl ChannelActorState {
         }
     }
 
-    fn get_funding_common_context(&self) -> Musig2CommonContext {
-        let local_first = self.should_local_go_first_in_musig2();
-        let key_agg_ctx = self.get_deterministic_musig2_agg_context();
-        let remote_nonce = self.get_last_committed_remote_nonce();
-        let local_nonce = self.get_commitment_nonce();
-        let agg_nonce = AggNonce::sum(if local_first {
-            [local_nonce, remote_nonce]
-        } else {
-            [remote_nonce, local_nonce]
-        });
-        Musig2CommonContext {
-            local_first,
-            key_agg_ctx,
-            agg_nonce,
-        }
-    }
-
-    fn get_revoke_common_context(&self, for_remote: bool) -> Option<Musig2CommonContext> {
-        let key_agg_ctx = self.get_musig2_agg_context(for_remote);
-        let remote_nonce = if for_remote {
-            self.remote_revocation_nonce_for_verify.as_ref()
-        } else {
-            self.remote_revocation_nonce_for_send.as_ref()
-        }?;
-        let local_nonce = self.get_revocation_nonce(for_remote);
-        let agg_nonce = AggNonce::sum(if for_remote {
-            [local_nonce, remote_nonce.clone()]
-        } else {
-            [remote_nonce.clone(), local_nonce]
-        });
-        Some(Musig2CommonContext {
-            local_first: for_remote,
-            key_agg_ctx,
-            agg_nonce,
-        })
-    }
-
     fn get_musig2_agg_context(&self, for_remote: bool) -> KeyAggContext {
         let local_pubkey = self.get_local_channel_public_keys().funding_pubkey;
         let remote_pubkey = self.get_remote_channel_public_keys().funding_pubkey;
@@ -11489,50 +9112,10 @@ impl ChannelActorState {
     }
 
     // This is used to verify transactions which consume the funding cell.
-    fn get_funding_verify_context(&self) -> Musig2VerifyContext {
-        let common_ctx = self.get_funding_common_context();
-        Musig2VerifyContext {
-            common_ctx,
-            pubkey: *self.get_remote_funding_pubkey(),
-            pubnonce: self.get_last_committed_remote_nonce(),
-        }
-    }
 
     // This is used to sign transactions which consume the funding cell.
-    fn get_funding_sign_context(&self) -> Musig2SignContext {
-        let common_ctx = self.get_funding_common_context();
-        let seckey = self.signer.funding_key.clone();
-        let secnonce = self.signer.derive_musig2_nonce(
-            self.get_local_commitment_number(),
-            Musig2Context::Commitment,
-        );
-
-        Musig2SignContext {
-            common_ctx,
-            seckey,
-            secnonce,
-        }
-    }
 
     // This is used to sign revocation transactions which consume the commitment cell.
-    fn get_revoke_sign_context(&self, for_remote: bool) -> Option<Musig2SignContext> {
-        let common_ctx = self.get_revoke_common_context(for_remote)?;
-        let seckey = self.signer.funding_key.clone();
-        let commitment_number = if for_remote {
-            self.get_local_commitment_number()
-        } else {
-            self.get_remote_commitment_number()
-        };
-        let secnonce = self
-            .signer
-            .derive_musig2_nonce(commitment_number, Musig2Context::Revoke);
-
-        Some(Musig2SignContext {
-            common_ctx,
-            seckey,
-            secnonce,
-        })
-    }
 
     // Should the local send tx_signatures first?
     // In order to avoid deadlock, we need to define an order for sending tx_signatures.
@@ -11736,16 +9319,14 @@ impl ChannelActorState {
             blake160(&settlement_data_to_witness(
                 &settlement_data,
                 for_remote,
-                self.channel_features,
                 local_settlement_key,
                 remote_settlement_key,
             ))
             .as_ref(),
         );
         commitment_lock_script_args.push(0x00);
-        if self.channel_features.has_full_payment_hash() {
-            commitment_lock_script_args.push(self.channel_features.bits());
-        }
+
+        commitment_lock_script_args.push(self.channel_features.bits());
 
         let commitment_lock_script =
             get_script_by_contract(Contract::CommitmentLock, &commitment_lock_script_args);
@@ -11753,7 +9334,6 @@ impl ChannelActorState {
         let commitment_tx_fee = checked_calculate_commitment_tx_fee(
             self.commitment_fee_rate,
             &self.funding_udt_type_script,
-            self.channel_features,
         )?;
 
         if let Some(udt_type_script) = &self.funding_udt_type_script {
@@ -11786,7 +9366,6 @@ impl ChannelActorState {
         &self,
         for_remote: bool,
     ) -> Result<SettlementData, ProcessingChannelError> {
-        let v2 = self.channel_features.is_v2();
         let pending_tlcs = self
             .tlc_state
             .offered_tlcs
@@ -11809,7 +9388,7 @@ impl ChannelActorState {
                     // Folded while we still owed an ACK. V2 keeps the commitment directions
                     // independent, so the owner's commitment can already contain it; the peer's
                     // view must include it too or the two sides sign different transactions.
-                    InboundTlcStatus::AnnounceWaitPrevAck => v2 || !for_remote,
+                    InboundTlcStatus::AnnounceWaitPrevAck => true,
                     InboundTlcStatus::AnnounceWaitAck => true,
                     InboundTlcStatus::Committed => true,
                     InboundTlcStatus::LocalRemoved => true,
@@ -11827,10 +9406,8 @@ impl ChannelActorState {
                 let confirmed_remove_reason = (info.outbound_status()
                     == OutboundTlcStatus::RemoveWaitAck
                     || info.outbound_status() == OutboundTlcStatus::RemoveAckConfirmed
-                    // V1 local commitments omit this TLC; V2 omits it in both directions.
                     // Apply the removal to balances whenever the TLC output is absent.
-                    || ((v2 || !for_remote)
-                        && info.outbound_status() == OutboundTlcStatus::RemoveWaitPrevAck)
+                    || info.outbound_status() == OutboundTlcStatus::RemoveWaitPrevAck
                     || (info.outbound_status() == OutboundTlcStatus::RemoteRemoved && !for_remote))
                     .then(|| info.removed_reason.as_ref().unwrap());
                 match confirmed_remove_reason {
@@ -11930,18 +9507,6 @@ impl ChannelActorState {
         key_agg_ctx.aggregated_pubkey::<Point>().serialize_xonly()
     }
 
-    fn build_and_sign_commitment_tx(
-        &self,
-    ) -> Result<(PartialSignature, TransactionView, SettlementData), ProcessingChannelError> {
-        let (commitment_tx, settlement_data) =
-            self.build_commitment_tx_and_settlement_data(true)?;
-        let funding_tx_partial_signature = self
-            .get_funding_sign_context()
-            .sign(&compute_tx_message(&commitment_tx))?;
-
-        Ok((funding_tx_partial_signature, commitment_tx, settlement_data))
-    }
-
     /// Get the latest commitment transaction with updated cell deps
     pub async fn get_latest_commitment_transaction(
         &self,
@@ -11957,33 +9522,6 @@ impl ChannelActorState {
         let raw_tx = tx.raw().as_builder().cell_deps(cell_deps).build();
         let tx = tx.as_builder().raw(raw_tx).build();
         Ok(tx.into_view())
-    }
-
-    /// Verify the partial signature from the peer and create a complete transaction
-    /// with valid witnesses.
-    fn verify_and_complete_tx(
-        &self,
-        funding_tx_partial_signature: PartialSignature,
-    ) -> Result<(TransactionView, SettlementData), ProcessingChannelError> {
-        let (commitment_tx, settlement_data) =
-            self.build_commitment_tx_and_settlement_data(false)?;
-
-        let message = compute_tx_message(&commitment_tx);
-        self.get_funding_verify_context()
-            .verify(funding_tx_partial_signature, &message)?;
-
-        let completed_commitment_tx = {
-            let sign_ctx = self.get_funding_sign_context();
-            let signature = sign_ctx.sign_and_aggregate(&message, funding_tx_partial_signature)?;
-            let witness =
-                create_witness_for_funding_cell(self.get_funding_lock_script_xonly(), signature);
-            commitment_tx
-                .as_advanced_builder()
-                .set_witnesses(vec![witness.pack()])
-                .build()
-        };
-
-        Ok((completed_commitment_tx, settlement_data))
     }
 
     fn get_delay_epoch_as_lock_args_bytes(&self) -> [u8; 8] {
@@ -12190,47 +9728,6 @@ impl ChannelActorState {
             )
         })
     }
-
-    /// Perform the next step in shutting down the channel.
-    async fn step_shutting_down(&mut self, flags: ShuttingDownFlags) -> ProcessingChannelResult {
-        let mut flags = flags;
-
-        // Only automatically reply shutdown if only their shutdown message is sent.
-        // If we are in a state other than only their shutdown is sent,
-        // e.g. our shutdown message is also sent, or we are trying to force shutdown,
-        // we should not reply.
-        let should_we_reply_shutdown = matches!(flags, ShuttingDownFlags::THEIR_SHUTDOWN_SENT);
-        if self.check_valid_to_auto_accept_shutdown() && should_we_reply_shutdown {
-            let close_script = self.get_local_shutdown_script();
-            self.network()
-                .send_message(NetworkActorMessage::new_command(
-                    NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
-                        self.get_remote_pubkey(),
-                        FiberMessage::shutdown(Shutdown {
-                            channel_id: self.get_id(),
-                            close_script: close_script.clone(),
-                            fee_rate: FeeRate::from_u64(0),
-                        }),
-                    )),
-                ))
-                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-            self.local_shutdown_info = Some(ShutdownInfo {
-                close_script,
-                fee_rate: 0,
-                signature: None,
-            });
-            flags |= ShuttingDownFlags::OUR_SHUTDOWN_SENT;
-            debug!("Auto accept shutdown ...");
-        }
-
-        // TODO: there maybe some tlcs still not settled when shutdown,
-        // we need to check if we need to trigger remove tlc for previous channel
-        // maybe could be done in cron task from network actor.
-        self.update_state(ChannelState::ShuttingDown(flags));
-        self.maybe_transfer_to_shutdown().await?;
-
-        Ok(())
-    }
 }
 
 pub(crate) fn has_pending_tlc_for_payment_hash<S>(
@@ -12246,12 +9743,13 @@ where
             .tlc_state
             .all_tlcs()
             .any(|tlc| tlc.payment_hash == payment_hash)
-            || state.session_v2.as_ref().is_some_and(|session| {
+            || {
+                let session = &state.session;
                 session
                     .remove_effects
                     .iter()
                     .any(|(tlc, _)| tlc.payment_hash == payment_hash)
-            })
+            }
     };
 
     if has_matching_tlc(current_state) {
@@ -12277,15 +9775,7 @@ pub trait ChannelActorStateStore {
     ) -> bool;
     fn get_channel_actor_state(&self, id: &Hash256) -> Option<ChannelActorState>;
     fn insert_channel_actor_state(&self, state: ChannelActorState);
-    fn insert_channel_actor_state_with_pending_commit_diff(
-        &self,
-        state: ChannelActorState,
-        diff: &CommitDiff,
-    ) {
-        let channel_id = state.get_id();
-        self.insert_channel_actor_state(state);
-        self.store_pending_commit_diff(&channel_id, diff);
-    }
+
     fn move_channel_actor_state(&self, old_id: &Hash256, state: ChannelActorState);
     fn delete_channel_actor_state(&self, id: &Hash256);
     fn get_channel_ids_by_pubkey(&self, pubkey: &Pubkey) -> Vec<Hash256>;
@@ -12319,22 +9809,13 @@ pub trait ChannelActorStateStore {
     fn remove_payment_hold_tlc(&self, payment_hash: &Hash256, channel_id: &Hash256, tlc_id: u64);
     fn get_payment_hold_tlcs(&self, payment_hash: Hash256) -> Vec<HoldTlc>;
     fn get_node_hold_tlcs(&self) -> HashMap<Hash256, Vec<HoldTlc>>;
-    /// Returns an exact settlement proof for this TLC, or a legacy prefix-keyed record.
+    /// Returns an exact settlement proof keyed by channel and TLC ID.
     fn get_onchain_tlc_settlement(
         &self,
         channel_id: &Hash256,
         tlc_id: TLCId,
         payment_hash: &Hash256,
-    ) -> Option<StoredOnChainTlcSettlement>;
-
-    /// Store a pending CommitDiff for channel reestablishment
-    fn store_pending_commit_diff(&self, channel_id: &Hash256, diff: &CommitDiff);
-
-    /// Get the pending CommitDiff for a channel
-    fn get_pending_commit_diff(&self, channel_id: &Hash256) -> Option<CommitDiff>;
-
-    /// Delete the pending CommitDiff for a channel
-    fn delete_pending_commit_diff(&self, channel_id: &Hash256);
+    ) -> Option<OnChainTlcSettlement>;
 
     /// Store shutdown settlement record snapshot for a closed channel
     fn store_shutdown_settlement_record(
@@ -12403,148 +9884,2037 @@ pub fn create_witness_for_funding_cell(
     fiber_types::channel_v2_validation::canonical_funding_witness(lock_key_xonly, signature)
 }
 
-pub fn create_witness_for_commitment_cell_with_pending_tlcs(
-    index: u8,
-    pending_tlcs: &[u8],
-) -> Vec<u8> {
-    let mut witness = Vec::new();
-    witness.extend_from_slice(&XUDT_COMPATIBLE_WITNESS);
-    witness.extend_from_slice(&[index]);
-    witness.extend_from_slice(&[(pending_tlcs.len() / 85) as u8]);
-    witness.extend_from_slice(pending_tlcs);
-    witness.extend_from_slice(&[0u8; 65]);
-    witness
-}
-
-// The common musig2 configuration that is used both by signing and verifying.
-#[derive(Debug)]
-struct Musig2CommonContext {
-    // This parameter is also saved to the context because it is useful for
-    // aggregating partial signatures.
-    local_first: bool,
-    key_agg_ctx: KeyAggContext,
-    agg_nonce: AggNonce,
-}
-
-impl Musig2CommonContext {
-    fn aggregate_partial_signatures_for_msg(
-        &self,
-        local_signature: PartialSignature,
-        remote_signature: PartialSignature,
-        message: &[u8],
-    ) -> Result<CompactSignature, VerifyError> {
-        let partial_signatures = if self.local_first {
-            [local_signature, remote_signature]
-        } else {
-            [remote_signature, local_signature]
-        };
-        aggregate_partial_signatures(
-            &self.key_agg_ctx,
-            &self.agg_nonce,
-            partial_signatures,
-            message,
-        )
-    }
-
-    pub fn x_only_aggregated_pubkey(&self) -> [u8; 32] {
-        self.key_agg_ctx
-            .aggregated_pubkey::<Point>()
-            .serialize_xonly()
+impl From<&OpenChannelV2> for ChannelBasePublicKeys {
+    fn from(value: &OpenChannelV2) -> Self {
+        ChannelBasePublicKeys {
+            funding_pubkey: value.funding_pubkey,
+            tlc_base_key: value.tlc_basepoint,
+        }
     }
 }
 
-struct Musig2VerifyContext {
-    common_ctx: Musig2CommonContext,
-    pubkey: Pubkey,
-    pubnonce: PubNonce,
-}
-
-impl Musig2VerifyContext {
-    fn verify(&self, signature: PartialSignature, message: &[u8]) -> Result<(), VerifyError> {
-        verify_partial(
-            &self.common_ctx.key_agg_ctx,
-            signature,
-            &self.common_ctx.agg_nonce,
-            self.pubkey,
-            &self.pubnonce,
-            message,
-        )
+impl From<&AcceptChannelV2> for ChannelBasePublicKeys {
+    fn from(value: &AcceptChannelV2) -> Self {
+        ChannelBasePublicKeys {
+            funding_pubkey: value.funding_pubkey,
+            tlc_base_key: value.tlc_basepoint,
+        }
     }
 }
 
-struct Musig2SignContext {
-    common_ctx: Musig2CommonContext,
-    seckey: Privkey,
-    secnonce: SecNonce,
+fn invalid(message: impl Into<String>) -> ProcessingChannelError {
+    ProcessingChannelError::InvalidState(message.into())
 }
 
-#[cfg(test)]
-static SECNONCES: LazyLock<Mutex<HashMap<[u8; 64], Vec<u8>>>> =
-    LazyLock::new(|| Mutex::new(HashMap::default()));
+impl ChannelActorState {
+    /// A peer cannot answer while this channel is offline or its reestablishment is still in
+    /// flight, so a reconnect starts a fresh peer-response window instead of charging the
+    /// partition against the peer. A reconnect that never completes is bounded separately by
+    /// `REESTABLISH_TIMEOUT`.
+    fn refresh_peer_response_wait_v2_after_reestablish(&mut self) {
+        self.clear_waiting_peer_response();
+        self.reset_peer_response_wait_v2();
+    }
 
-impl Musig2SignContext {
-    fn sign(&self, message: &[u8]) -> Result<PartialSignature, SigningError> {
-        #[cfg(test)]
+    fn reset_peer_response_wait_v2(&mut self) {
+        let ack_pending = self.ack_peer_wait_v2().is_some();
+        let close_pending = self.close_peer_wait_v2().is_some();
+        let now = crate::now_timestamp_as_millis_u64();
         {
-            // Check if the secnonce is reused for different messages.
-            let mut secnonces = SECNONCES.lock().unwrap();
-            if let Some(old) = secnonces.insert(self.secnonce.to_bytes(), message.to_vec()) {
-                if old.as_slice() != message {
-                    panic!(
-                        "Musig2 secnonce {:?} is reused for different messages: {:?} and {:?} backtrace: {}",
-                        self.secnonce.public_nonce(),
-                        old,
-                        message,
-                        Backtrace::capture()
-                    );
+            let session = &mut self.session;
+            if ack_pending {
+                if let Some(outgoing) = session.outgoing.as_mut() {
+                    outgoing.peer_wait_started_at = now;
+                }
+            }
+            if close_pending {
+                if let Some(closing) = session.closing.as_mut() {
+                    closing.peer_wait_started_at = now;
                 }
             }
         }
+    }
 
-        sign_partial(
-            &self.common_ctx.key_agg_ctx,
-            self.seckey.clone(),
-            self.secnonce.clone(),
-            &self.common_ctx.agg_nonce,
+    fn ack_peer_wait_v2(&self) -> Option<u64> {
+        // Draining TLCs can still owe a real peer RAA. Only terminal local
+        // publication/on-chain waits end this obligation, not shutdown ads.
+        let can_wait = match self.state {
+            ChannelState::ChannelReady => true,
+            ChannelState::ShuttingDown(flags) => {
+                !flags.contains(fiber_types::ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION)
+            }
+            _ => false,
+        };
+        if !self.tlc_state.waiting_ack || !can_wait {
+            return None;
+        }
+        Some(self.session.outgoing.as_ref()?.peer_wait_started_at)
+    }
+
+    fn peer_response_wait_v2(&self) -> Option<u64> {
+        self.close_peer_wait_v2()
+            .into_iter()
+            .chain(self.ack_peer_wait_v2())
+            .min()
+    }
+
+    // The retained records explicitly distinguish awaiting Shutdown, awaiting
+    // ClosingSigned, local TLC draining, and awaiting on-chain confirmation.
+    fn close_peer_wait_v2(&self) -> Option<u64> {
+        if !matches!(self.state, ChannelState::ShuttingDown(_)) {
+            return None;
+        }
+        let close = self.session.closing.as_ref()?;
+        if !close.superseded_by_force_close
+            && (close.remote_shutdown.is_none()
+                || (close.response.is_some() && close.remote_response.is_none()))
+        {
+            Some(close.peer_wait_started_at)
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn ensure_v2_not_quarantined(&self) -> ProcessingChannelResult {
+        if self.state == ChannelState::Stale {
+            return Err(invalid(
+                "Backup-restored V2 channel is quarantined: freshness is unknown",
+            ));
+        }
+        Ok(())
+    }
+
+    fn send_reestablish_message(&self) {
+        self.send_message_to_peer(FiberMessage::reestablish_channel_v2(
+            self.reestablish_message_v2(),
+        ));
+    }
+
+    fn reestablish_message_v2(&self) -> ReestablishChannelV2 {
+        let session = &self.session;
+        ReestablishChannelV2 {
+            channel_id: self.id,
+            next_commitment_number: session.own.number,
+            next_ack_number: self.get_local_commitment_number(),
+            next_local_commitment_nonce: session.own.public_nonce.clone(),
+        }
+    }
+
+    fn validate_recovery_history_v2(&self) -> ProcessingChannelResult {
+        if !matches!(self.state, ChannelState::ChannelReady | ChannelState::Stale) {
+            return Ok(());
+        }
+        let session = &self.session;
+        let local = self.get_local_commitment_number();
+        let remote = self.get_remote_commitment_number();
+        if session.own.number != remote || session.remote_number != local {
+            return Err(invalid("V2 nonce/counter history mismatch"));
+        }
+        let outgoing = session
+            .outgoing
+            .as_ref()
+            .ok_or_else(|| invalid("Missing retained V2 outgoing history"))?;
+        let sent = CommitmentSignedV2::try_from(outgoing.request.clone())
+            .map_err(|e| invalid(e.to_string()))?;
+        if sent.channel_id != self.id
+            || if self.tlc_state.waiting_ack {
+                sent.commitment_number != local
+            } else {
+                sent.commitment_number.checked_add(1) != Some(local)
+            }
+        {
+            return Err(invalid("V2 outgoing/counter history mismatch"));
+        }
+        if local > INITIAL_COMMITMENT_NUMBER + 2 {
+            let ack = session
+                .last_ack
+                .clone()
+                .ok_or_else(|| invalid("Missing retained V2 accepted ACK"))?;
+            let ack = RevokeAndAckV2::try_from(ack).map_err(|e| invalid(e.to_string()))?;
+            if ack.channel_id != self.id || ack.commitment_number.checked_add(1) != Some(local) {
+                return Err(invalid("V2 accepted ACK/counter history mismatch"));
+            }
+        }
+        let incoming = session
+            .incoming
+            .as_ref()
+            .ok_or_else(|| invalid("Missing usable V2 incoming history"))?;
+        let accepted = CommitmentSignedV2::try_from(incoming.request.clone())
+            .map_err(|e| invalid(e.to_string()))?;
+        if accepted.channel_id != self.id
+            || accepted.commitment_number.checked_add(1) != Some(remote)
+        {
+            return Err(invalid("V2 incoming/counter history mismatch"));
+        }
+        if remote > INITIAL_COMMITMENT_NUMBER + 2 {
+            let ack = incoming
+                .response
+                .clone()
+                .ok_or_else(|| invalid("Missing retained V2 response"))?;
+            let ack = RevokeAndAckV2::try_from(ack).map_err(|e| invalid(e.to_string()))?;
+            // The cached ACK keeps the verification nonce that was advertised when it was sent.
+            // After a reconnect we rotate `session.own`, so its `next_commitment_nonce` is
+            // historical and must not be compared with the current one; only the counter must
+            // still describe the accepted commitment.
+            if ack.commitment_number != accepted.commitment_number {
+                return Err(invalid("V2 cached ACK/nonce history mismatch"));
+            }
+        }
+        Ok(())
+    }
+
+    fn finish_recovery_v2(&mut self, myself: &ActorRef<ChannelActorMessage>) {
+        if self.reestablishing
+            && self.recovery_peer_v2.is_some()
+            && !self.tlc_state.waiting_ack
+            && matches!(self.state, ChannelState::ShuttingDown(_))
+        {
+            self.reestablishing = false;
+            self.connectivity_state = fiber_types::ChannelConnectivityState::Online;
+            self.reestablish_timer = None;
+            self.refresh_peer_response_wait_v2_after_reestablish();
+            self.schedule_next_retry_task(myself);
+            return;
+        }
+        if self.reestablishing
+            && self.recovery_peer_v2.is_some()
+            && !self.tlc_state.waiting_ack
+            && self.state == ChannelState::ChannelReady
+        {
+            self.clear_waiting_peer_response();
+            self.on_reestablished_channel_ready(myself);
+            debug_event!(self.network(), "Reestablished channel in ChannelReady");
+            self.schedule_next_retry_task(myself);
+        }
+    }
+
+    fn validate_session(&self) -> ProcessingChannelResult {
+        fiber_types::channel_v2_validation::validate_channel_v2(&self.core).map_err(invalid)
+    }
+
+    /// Give synthetic on-chain fixtures genuine signed V2 bootstrap history.
+    #[cfg(test)]
+    pub(crate) fn sign_test_bootstrap_v2(&mut self) -> ProcessingChannelResult {
+        let state = self.state;
+        let tlcs = std::mem::take(&mut self.tlc_state);
+        self.state = ChannelState::NegotiatingFunding(NegotiatingFundingFlags::empty());
+        self.funding_tx.get_or_insert_with(Default::default);
+        self.local_channel_public_keys = self.signer.get_base_public_keys();
+        let remote_signer = fiber_types::InMemorySigner::generate_from_seed(&[1; 32]);
+        self.remote_channel_public_keys = Some(remote_signer.get_base_public_keys());
+        self.commitment_numbers = fiber_types::CommitmentNumbers {
+            local: 1,
+            remote: 1,
+        };
+        let mut peer = self.clone();
+        peer.signer = remote_signer;
+        peer.local_channel_public_keys = peer.signer.get_base_public_keys();
+        peer.remote_channel_public_keys = Some(self.local_channel_public_keys.clone());
+        peer.to_local_amount = self.to_remote_amount;
+        peer.to_remote_amount = self.to_local_amount;
+        peer.local_reserved_ckb_amount = self.remote_reserved_ckb_amount;
+        peer.remote_reserved_ckb_amount = self.local_reserved_ckb_amount;
+        self.session = new_session(self.id, &self.signer.funding_key, None);
+        let local_nonce = self.session.own.public_nonce.clone();
+        peer.session = new_session(peer.id, &peer.signer.funding_key, Some(local_nonce));
+        let remote_nonce = peer.session.own.public_nonce.clone();
+        let session = &mut self.session;
+        session.remote_nonce = Some(remote_nonce.clone());
+        session.bootstrap_remote_nonce = Some(remote_nonce);
+        let (ours, _) = self.prepare_outgoing_v2(true)?;
+        let (theirs, _) = peer.prepare_outgoing_v2(true)?;
+        let verified = self.stage_incoming_v2(&theirs, true)?;
+        self.accept_commitment_v2(&theirs, true, verified)?;
+        let verified = peer.stage_incoming_v2(&ours, true)?;
+        peer.accept_commitment_v2(&ours, true, verified)?;
+        self.commitment_numbers = fiber_types::CommitmentNumbers {
+            local: 2,
+            remote: 2,
+        };
+        peer.commitment_numbers = self.commitment_numbers;
+        self.ready_wire_message()?;
+        let FiberMessage::ChannelNormalOperation(FiberChannelMessage::ChannelReadyV2(ready)) =
+            peer.ready_wire_message()?
+        else {
+            return Err(invalid("Expected V2 bootstrap Ready"));
+        };
+        let session = &mut self.session;
+        session.remote_number = ready.next_commitment_number;
+        session.remote_nonce = Some(ready.next_commitment_nonce.clone());
+        session.remote_ready = Some(ready.into());
+        if tlcs.waiting_ack {
+            self.prepare_outgoing_v2(false)?;
+        }
+        self.tlc_state = tlcs;
+        self.state = state;
+        self.validate_session()
+    }
+
+    fn tx_complete_wire_message(&self) -> FiberMessage {
+        let session = &self.session;
+        FiberMessage::tx_complete_v2(TxCompleteV2 {
+            channel_id: self.id,
+            initial_commitment_nonce: session.own.public_nonce.clone(),
+        })
+    }
+
+    /// Normal-round history cannot yet prove that the peer received our opening Ready.
+    fn may_need_ready_replay_v2(&self) -> bool {
+        self.get_local_commitment_number() == INITIAL_COMMITMENT_NUMBER + 2
+            && self.get_remote_commitment_number() == INITIAL_COMMITMENT_NUMBER + 2
+            && (self.state == ChannelState::ChannelReady
+                || matches!(self.state, ChannelState::ShuttingDown(flags) if flags.is_ok_for_commitment_operation()))
+    }
+
+    fn ready_wire_message(&mut self) -> ProcessingChannelResult<FiberMessage> {
+        let mut session = self.session.clone();
+        if session.own.number == INITIAL_COMMITMENT_NUMBER + 1 {
+            if session.incoming.is_none() {
+                return Err(invalid("V2 Ready requires usable initial commitment"));
+            }
+            session.own = allocate_nonce(
+                self.id,
+                self.signer.funding_key.pubkey(),
+                INITIAL_COMMITMENT_NUMBER + 2,
+                NoncePurposeV2::Commitment,
+                &self.signer.funding_key,
+            );
+            session.own_retired.clear();
+        }
+        let message = FiberMessage::channel_ready_v2(ChannelReadyV2 {
+            channel_id: self.id,
+            next_commitment_number: session.own.number,
+            next_commitment_nonce: session.own.public_nonce.clone(),
+        });
+        self.session = session;
+        Ok(message)
+    }
+
+    fn revocation_message_v2(
+        &self,
+        for_remote: bool,
+        new_number: u64,
+    ) -> ProcessingChannelResult<([u8; 32], CellOutput, Bytes)> {
+        let agg = self.get_musig2_agg_context(for_remote);
+        let xonly = agg.aggregated_pubkey::<Point>().serialize_xonly();
+        let fee = checked_calculate_commitment_tx_fee(
+            self.commitment_fee_rate,
+            &self.funding_udt_type_script,
+        )?;
+        let lock = if for_remote {
+            self.get_local_shutdown_script()
+        } else {
+            self.get_remote_shutdown_script()
+        };
+        let (output, data) = if let Some(udt) = &self.funding_udt_type_script {
+            (
+                CellOutput::new_builder()
+                    .lock(lock)
+                    .type_(Some(udt.clone()).pack())
+                    .capacity(checked_sub_u64(
+                        self.get_total_reserved_ckb_amount()?,
+                        fee,
+                        "Reserved CKB",
+                    )?)
+                    .build(),
+                self.checked_liquid_capacity()?.to_le_bytes().pack(),
+            )
+        } else {
+            (
+                CellOutput::new_builder()
+                    .lock(lock)
+                    .capacity(checked_sub_u64(
+                        self.get_total_ckb_amount()?,
+                        fee,
+                        "Total CKB",
+                    )?)
+                    .build(),
+                Bytes::default(),
+            )
+        };
+        let old = new_number
+            .checked_sub(1)
+            .ok_or_else(|| invalid("V2 revocation number underflow"))?;
+        let args = [
+            &blake2b_256(xonly)[..20],
+            &self.get_delay_epoch_as_lock_args_bytes(),
+            &old.to_be_bytes(),
+        ]
+        .concat();
+        Ok((
+            blake2b_256([output.as_slice(), data.as_slice(), &args].concat()),
+            output,
+            data,
+        ))
+    }
+
+    fn revocation_context_v2(
+        &self,
+        for_remote: bool,
+        number: u64,
+    ) -> ProcessingChannelResult<fiber_types::RevocationContextV2> {
+        let (message, output, output_data) = self.revocation_message_v2(for_remote, number)?;
+        Ok(fiber_types::RevocationContextV2 {
+            message,
+            output,
+            output_data,
+        })
+    }
+
+    fn prepare_outgoing_v2(
+        &mut self,
+        initial: bool,
+    ) -> ProcessingChannelResult<(CommitmentSignedV2, SettlementData)> {
+        self.ensure_v2_not_quarantined()?;
+        let mut session = self.session.clone();
+        let number = self.get_local_commitment_number();
+        number
+            .checked_add(1)
+            .ok_or_else(|| invalid("V2 commitment number exhausted"))?;
+        if session.remote_number != number {
+            return Err(invalid("Remote V2 nonce number mismatch"));
+        }
+        if let Some(previous) = &session.outgoing {
+            let old = CommitmentSignedV2::try_from(previous.request.clone())
+                .map_err(|e| invalid(e.to_string()))?;
+            if old.commitment_number == number {
+                return Err(invalid("V2 CS already signed; replay exact cached request"));
+            }
+        }
+        let remote = session
+            .remote_nonce
+            .clone()
+            .ok_or_else(|| invalid("Missing remote V2 commitment nonce"))?;
+        let (transaction, settlement) = self.build_commitment_tx_and_settlement_data(true)?;
+        let mut funding = allocate_nonce(
+            self.id,
+            *self.get_remote_funding_pubkey(),
+            number,
+            NoncePurposeV2::Commitment,
+            &self.signer.funding_key,
+        );
+        let keys = self.order_things_for_musig2(
+            *self.get_local_funding_pubkey(),
+            *self.get_remote_funding_pubkey(),
+        );
+        let agg = self.get_deterministic_musig2_agg_context();
+        let nonce = AggNonce::sum([funding.public_nonce.clone(), remote]);
+        let signature = guarded_sign(
+            &mut funding,
+            &self.signer.funding_key,
+            keys,
+            &agg,
+            &nonce,
+            &compute_tx_message(&transaction),
+        )
+        .map_err(invalid)?;
+        let revocation = (!initial).then(|| {
+            allocate_nonce(
+                self.id,
+                *self.get_remote_funding_pubkey(),
+                number,
+                NoncePurposeV2::Revocation,
+                &self.signer.funding_key,
+            )
+        });
+        let request = CommitmentSignedV2 {
+            channel_id: self.id,
+            commitment_number: number,
+            funding_tx_partial_signature: signature,
+            funding_nonce: funding.public_nonce.clone(),
+            revocation_nonce: revocation.as_ref().map(|n| n.public_nonce.clone()),
+        };
+        let revocation_context = if initial {
+            None
+        } else {
+            Some(self.revocation_context_v2(true, number)?)
+        };
+        session.outgoing = Some(OutgoingCommitmentV2 {
+            peer_wait_started_at: crate::now_timestamp_as_millis_u64(),
+            request: request.clone().into(),
+            transaction: transaction.data(),
+            settlement: settlement.clone(),
+            updates: self.collect_pending_tlc_updates(),
+            funding,
+            revocation,
+            revocation_context,
+        });
+        self.session = session;
+        Ok((request, settlement))
+    }
+
+    fn stage_incoming_v2(
+        &mut self,
+        request: &CommitmentSignedV2,
+        initial: bool,
+    ) -> ProcessingChannelResult<bool> {
+        self.ensure_v2_not_quarantined()?;
+        let mut session = self.session.clone();
+        let packed: fiber_types::gen::fiber::CommitmentSignedV2 = request.clone().into();
+        if let Some(pending) = &session.pending_incoming {
+            if pending.request.as_slice() != packed.as_slice() {
+                return Err(invalid("Conflicting pending incoming V2 CS"));
+            }
+            // Retained staging data is not a verification result for this call.
+            return Ok(false);
+        }
+        request
+            .commitment_number
+            .checked_add(1)
+            .ok_or_else(|| invalid("V2 commitment number exhausted"))?;
+        if request.channel_id != self.id
+            || request.commitment_number != self.get_remote_commitment_number()
+            || request.commitment_number != session.own.number
+            || request.revocation_nonce.is_none() != initial
+        {
+            return Err(invalid("Unexpected V2 incoming CS session/phase"));
+        }
+        let (transaction, settlement) = self.build_commitment_tx_and_settlement_data(false)?;
+        let message = compute_tx_message(&transaction);
+        let keys = self.order_things_for_musig2(
+            *self.get_local_funding_pubkey(),
+            *self.get_remote_funding_pubkey(),
+        );
+        let agg = self.get_deterministic_musig2_agg_context();
+        // The peer may have signed before it learned about a nonce rotation, so accept the active
+        // verification nonce or a retired allocation for this same round. Signature validity alone
+        // cannot prove the allocation belongs to this commitment or has not signed an older one.
+        let mut candidates = Vec::with_capacity(1 + session.own_retired.len());
+        candidates.push(session.own.clone());
+        candidates.extend(
+            session
+                .own_retired
+                .iter()
+                .filter(|nonce| nonce.number == request.commitment_number)
+                .cloned(),
+        );
+        let mut verified = None;
+        for candidate in candidates {
+            let nonce = AggNonce::sum([
+                candidate.public_nonce.clone(),
+                request.funding_nonce.clone(),
+            ]);
+            if musig2::verify_partial(
+                &agg,
+                request.funding_tx_partial_signature,
+                &nonce,
+                *self.get_remote_funding_pubkey(),
+                &request.funding_nonce,
+                message,
+            )
+            .is_ok()
+            {
+                verified = Some((candidate, nonce));
+                break;
+            }
+        }
+        let (mut funding, _) =
+            verified.ok_or_else(|| invalid("failed to verify signature: signature is invalid"))?;
+        let nonce = AggNonce::sum([funding.public_nonce.clone(), request.funding_nonce.clone()]);
+        bind_context(&mut funding, keys, &nonce, &message).map_err(invalid)?;
+        if initial && session.bootstrap_settlement.is_none() {
+            session.bootstrap_settlement = Some(settlement.clone());
+        }
+        session.pending_incoming = Some(IncomingCommitmentV2 {
+            request: packed,
+            funding,
+            revocation: None,
+            revocation_context: if initial {
+                None
+            } else {
+                Some(self.revocation_context_v2(false, request.commitment_number)?)
+            },
+            transaction: transaction.data(),
+            settlement,
+            response: None,
+        });
+        self.session = session;
+        Ok(true)
+    }
+
+    fn accept_commitment_v2(
+        &mut self,
+        request: &CommitmentSignedV2,
+        initial: bool,
+        verified: bool,
+    ) -> ProcessingChannelResult<(TransactionView, SettlementData, Option<RevokeAndAckV2>)> {
+        self.ensure_v2_not_quarantined()?;
+        let mut session = self.session.clone();
+        let next_number = request
+            .commitment_number
+            .checked_add(1)
+            .ok_or_else(|| invalid("V2 commitment number exhausted"))?;
+        if request.channel_id != self.id
+            || request.commitment_number != self.get_remote_commitment_number()
+            || request.commitment_number != session.own.number
+        {
+            return Err(invalid("Unexpected incoming V2 commitment number/channel"));
+        }
+        if request.revocation_nonce.is_none() != initial {
+            return Err(invalid(
+                "V2 CS revocation nonce does not match opening/normal phase",
+            ));
+        }
+        let pending = session
+            .pending_incoming
+            .as_ref()
+            .ok_or_else(|| invalid("V2 incoming CS was not staged"))?;
+        let packed: fiber_types::gen::fiber::CommitmentSignedV2 = request.clone().into();
+        if pending.request.as_slice() != packed.as_slice() {
+            return Err(invalid("Conflicting staged V2 CS"));
+        }
+        let tx = pending.transaction.clone().into_view();
+        let settlement = pending.settlement.clone();
+        let revocation_context = pending.revocation_context.clone();
+        session.own = pending.funding.clone();
+        let message = compute_tx_message(&tx);
+        let keys = self.order_things_for_musig2(
+            *self.get_local_funding_pubkey(),
+            *self.get_remote_funding_pubkey(),
+        );
+        let agg = self.get_deterministic_musig2_agg_context();
+        let nonce = AggNonce::sum([
+            session.own.public_nonce.clone(),
+            request.funding_nonce.clone(),
+        ]);
+        if !verified {
+            musig2::verify_partial(
+                &agg,
+                request.funding_tx_partial_signature,
+                &nonce,
+                *self.get_remote_funding_pubkey(),
+                &request.funding_nonce,
+                message,
+            )
+            .map_err(|e| invalid(e.to_string()))?;
+        }
+        let signature = guarded_sign(
+            &mut session.own,
+            &self.signer.funding_key,
+            keys,
+            &agg,
+            &nonce,
+            &message,
+        )
+        .map_err(invalid)?;
+        let signature: CompactSignature = musig2::aggregate_partial_signatures(
+            &agg,
+            &nonce,
+            [signature, request.funding_tx_partial_signature],
             message,
         )
+        .map_err(|e| invalid(e.to_string()))?;
+        let witness =
+            create_witness_for_funding_cell(self.get_funding_lock_script_xonly(), signature);
+        let tx = tx
+            .as_advanced_builder()
+            .set_witnesses(vec![witness.pack()])
+            .build();
+        // Install usable commitment before creating any predecessor revocation.
+        self.latest_commitment_transaction = Some(tx.data());
+        let funding = session.own.clone();
+        let mut revocation = None;
+        let response = if let Some(remote_nonce) = &request.revocation_nonce {
+            let mut local = allocate_nonce(
+                self.id,
+                *self.get_local_funding_pubkey(),
+                request.commitment_number,
+                NoncePurposeV2::Revocation,
+                &self.signer.funding_key,
+            );
+            let keys = [
+                *self.get_remote_funding_pubkey(),
+                *self.get_local_funding_pubkey(),
+            ];
+            let agg = self.get_musig2_agg_context(false);
+            let nonce = AggNonce::sum([local.public_nonce.clone(), remote_nonce.clone()]);
+            let message = revocation_context
+                .as_ref()
+                .ok_or_else(|| invalid("Missing staged V2 revocation context"))?
+                .message;
+            let signature = guarded_sign(
+                &mut local,
+                &self.signer.funding_key,
+                keys,
+                &agg,
+                &nonce,
+                &message,
+            )
+            .map_err(invalid)?;
+            self.increment_remote_commitment_number();
+            session.own = allocate_nonce(
+                self.id,
+                *self.get_local_funding_pubkey(),
+                next_number,
+                NoncePurposeV2::Commitment,
+                &self.signer.funding_key,
+            );
+            session.own_retired.clear();
+            let response = RevokeAndAckV2 {
+                channel_id: self.id,
+                commitment_number: request.commitment_number,
+                revocation_partial_signature: signature,
+                revocation_nonce: local.public_nonce.clone(),
+                next_per_commitment_point: self.get_current_local_commitment_point(),
+                next_commitment_nonce: session.own.public_nonce.clone(),
+            };
+            revocation = Some(local);
+            Some(response)
+        } else {
+            None
+        };
+        session.incoming = Some(IncomingCommitmentV2 {
+            request: request.clone().into(),
+            funding,
+            revocation,
+            revocation_context,
+            transaction: tx.data(),
+            settlement: settlement.clone(),
+            response: response.clone().map(Into::into),
+        });
+        session.pending_incoming = None;
+        self.session = session;
+        Ok((tx, settlement, response))
     }
 
-    fn sign_and_aggregate(
+    fn stage_ack_v2(&mut self, ack: &RevokeAndAckV2) -> ProcessingChannelResult<bool> {
+        self.ensure_v2_not_quarantined()?;
+        let mut session = self.session.clone();
+        let packed: fiber_types::gen::fiber::RevokeAndAckV2 = ack.clone().into();
+        if let Some(last) = &session.last_ack {
+            let old = RevokeAndAckV2::try_from(last.clone()).map_err(|e| invalid(e.to_string()))?;
+            if old.commitment_number == ack.commitment_number {
+                if last.as_slice() != packed.as_slice() {
+                    return Err(invalid("Conflicting duplicate V2 ACK"));
+                }
+                return Ok(false);
+            }
+        }
+        if let Some(pending) = &session.pending_ack {
+            if pending.as_slice() != packed.as_slice() {
+                return Err(invalid("Conflicting pending V2 ACK"));
+            }
+            // Recovery must verify the retained ACK again before accepting it.
+            return Ok(false);
+        }
+        if !self.tlc_state.waiting_ack
+            || ack.channel_id != self.id
+            || ack.commitment_number != self.get_local_commitment_number()
+        {
+            return Err(invalid("Unexpected V2 ACK number/channel"));
+        }
+        ack.commitment_number
+            .checked_add(1)
+            .ok_or_else(|| invalid("V2 commitment number exhausted"))?;
+        if !is_tlc_key_derivation_safe(
+            &self.get_remote_channel_public_keys().tlc_base_key,
+            &ack.next_per_commitment_point,
+        ) {
+            return Err(invalid("Invalid V2 ACK commitment point"));
+        }
+        let outgoing = session
+            .outgoing
+            .as_mut()
+            .ok_or_else(|| invalid("Missing persisted outgoing V2 CS"))?;
+        let local = outgoing
+            .revocation
+            .as_mut()
+            .ok_or_else(|| invalid("Initial V2 CS cannot receive ACK"))?;
+        if local.number != ack.commitment_number {
+            return Err(invalid("V2 revocation session mismatch"));
+        }
+        let keys = [
+            *self.get_local_funding_pubkey(),
+            *self.get_remote_funding_pubkey(),
+        ];
+        let agg = self.get_musig2_agg_context(true);
+        let nonce = AggNonce::sum([local.public_nonce.clone(), ack.revocation_nonce.clone()]);
+        let message = outgoing
+            .revocation_context
+            .as_ref()
+            .ok_or_else(|| invalid("Missing original V2 ACK context"))?
+            .message;
+        musig2::verify_partial(
+            &agg,
+            ack.revocation_partial_signature,
+            &nonce,
+            *self.get_remote_funding_pubkey(),
+            &ack.revocation_nonce,
+            message,
+        )
+        .map_err(|e| invalid(e.to_string()))?;
+        bind_context(local, keys, &nonce, &message).map_err(invalid)?;
+        session.pending_ack = Some(packed);
+        self.session = session;
+        Ok(true)
+    }
+
+    fn accept_ack_v2(
+        &mut self,
+        myself: &ActorRef<ChannelActorMessage>,
+        ack: &RevokeAndAckV2,
+        verified: bool,
+    ) -> ProcessingChannelResult<Option<(RevocationData, SettlementData)>> {
+        self.ensure_v2_not_quarantined()?;
+        let mut session = self.session.clone();
+        let packed: fiber_types::gen::fiber::RevokeAndAckV2 = ack.clone().into();
+        if let Some(previous) = &session.last_ack {
+            let old =
+                RevokeAndAckV2::try_from(previous.clone()).map_err(|e| invalid(e.to_string()))?;
+            if old.commitment_number == ack.commitment_number {
+                if previous.as_slice() != packed.as_slice() {
+                    return Err(invalid("Conflicting duplicate V2 ACK"));
+                }
+                return Ok(None);
+            }
+        }
+        if !self.tlc_state.waiting_ack
+            || ack.channel_id != self.id
+            || ack.commitment_number != self.get_local_commitment_number()
+        {
+            return Err(invalid("Unexpected V2 ACK number/channel"));
+        }
+        if session.pending_ack.as_ref().map(Entity::as_slice) != Some(packed.as_slice()) {
+            return Err(invalid("V2 ACK was not staged"));
+        }
+        if !is_tlc_key_derivation_safe(
+            &self.get_remote_channel_public_keys().tlc_base_key,
+            &ack.next_per_commitment_point,
+        ) {
+            return Err(invalid("Invalid V2 ACK commitment point"));
+        }
+        let outgoing = session
+            .outgoing
+            .as_mut()
+            .ok_or_else(|| invalid("V2 ACK has no persisted outgoing CS"))?;
+        let mut local = outgoing
+            .revocation
+            .clone()
+            .ok_or_else(|| invalid("Initial V2 CS cannot receive RAA"))?;
+        if local.number != ack.commitment_number {
+            return Err(invalid("V2 revocation session mismatch"));
+        }
+        let keys = [
+            *self.get_local_funding_pubkey(),
+            *self.get_remote_funding_pubkey(),
+        ];
+        let agg = self.get_musig2_agg_context(true);
+        let nonce = AggNonce::sum([local.public_nonce.clone(), ack.revocation_nonce.clone()]);
+        let context = outgoing
+            .revocation_context
+            .clone()
+            .ok_or_else(|| invalid("Missing original V2 ACK context"))?;
+        let fiber_types::RevocationContextV2 {
+            message,
+            output,
+            output_data,
+        } = context;
+        if !verified {
+            musig2::verify_partial(
+                &agg,
+                ack.revocation_partial_signature,
+                &nonce,
+                *self.get_remote_funding_pubkey(),
+                &ack.revocation_nonce,
+                message,
+            )
+            .map_err(|e| invalid(e.to_string()))?;
+        }
+        let signature = guarded_sign(
+            &mut local,
+            &self.signer.funding_key,
+            keys,
+            &agg,
+            &nonce,
+            &message,
+        )
+        .map_err(invalid)?;
+        let aggregated_signature = musig2::aggregate_partial_signatures(
+            &agg,
+            &nonce,
+            [signature, ack.revocation_partial_signature],
+            message,
+        )
+        .map_err(|e| invalid(e.to_string()))?;
+        outgoing.revocation = Some(local);
+        let settlement = outgoing.settlement.clone();
+        self.increment_local_commitment_number();
+        self.append_remote_commitment_point(ack.next_per_commitment_point);
+        let numbers = self.commitment_numbers;
+        self.tlc_state.update_for_revoke_and_ack(numbers);
+        self.set_waiting_ack(myself, false);
+        session.remote_number = ack.commitment_number + 1;
+        // A cached RAA predates this connection's same-round nonce advertisement.
+        session.remote_nonce = Some(
+            self.recovery_peer_v2
+                .as_ref()
+                .filter(|peer| peer.next_commitment_number == session.remote_number)
+                .map(|peer| peer.next_local_commitment_nonce.clone())
+                .unwrap_or_else(|| ack.next_commitment_nonce.clone()),
+        );
+        session.last_ack = Some(packed);
+        session.pending_ack = None;
+        let revocation = RevocationData {
+            commitment_number: ack.commitment_number - 1,
+            aggregated_signature,
+            output,
+            output_data,
+        };
+        session.revocation_effect = Some((revocation.clone(), settlement.clone()));
+        self.session = session;
+        Ok(Some((revocation, settlement)))
+    }
+}
+
+impl<S> ChannelActor<S>
+where
+    S: ChannelActorStateStore + InvoiceStore + PreimageStore,
+{
+    fn advertise_close_v2(
         &self,
-        message: &[u8],
-        remote_signature: PartialSignature,
-    ) -> Result<CompactSignature, RoundFinalizeError> {
-        let local_signature = sign_partial(
-            &self.common_ctx.key_agg_ctx,
-            self.seckey.clone(),
-            self.secnonce.clone(),
-            &self.common_ctx.agg_nonce,
-            message,
-        )?;
-        Ok(self.common_ctx.aggregate_partial_signatures_for_msg(
-            local_signature,
-            remote_signature,
-            message,
-        )?)
+        state: &mut ChannelActorState,
+        script: ckb_types::packed::Script,
+        fee_rate: u64,
+        remote_shutdown: Option<fiber_types::gen::fiber::ShutdownV2>,
+    ) -> ProcessingChannelResult {
+        let own = allocate_nonce(
+            state.id,
+            state.signer.funding_key.pubkey(),
+            0,
+            NoncePurposeV2::Closing,
+            &state.signer.funding_key,
+        );
+        let shutdown = ShutdownV2 {
+            channel_id: state.id,
+            close_script: script.clone(),
+            fee_rate,
+            closing_nonce: own.public_nonce.clone(),
+        };
+        state.local_shutdown_info = Some(fiber_types::ShutdownInfo {
+            close_script: script,
+            fee_rate,
+            signature: None,
+        });
+        state.session.closing = Some(fiber_types::ClosingSessionV2 {
+            peer_wait_started_at: crate::now_timestamp_as_millis_u64(),
+            superseded_by_force_close: false,
+            own,
+            shutdown: shutdown.clone().into(),
+            remote_shutdown: remote_shutdown.clone(),
+            transaction: None,
+            response: None,
+            remote_response: None,
+        });
+        let flags = match state.state {
+            ChannelState::ShuttingDown(flags) => flags,
+            _ => fiber_types::ShuttingDownFlags::empty(),
+        };
+        state.update_state(ChannelState::ShuttingDown(
+            flags
+                | fiber_types::ShuttingDownFlags::OUR_SHUTDOWN_SENT
+                | if remote_shutdown.is_some() {
+                    fiber_types::ShuttingDownFlags::THEIR_SHUTDOWN_SENT
+                } else {
+                    fiber_types::ShuttingDownFlags::empty()
+                },
+        ));
+        self.arm_peer_response_v2(state);
+        self.store.insert_channel_actor_state(state.clone());
+        state.send_message_to_peer(FiberMessage::shutdown_v2(shutdown));
+        Ok(())
     }
-}
 
-impl From<&OpenChannel> for ChannelBasePublicKeys {
-    fn from(value: &OpenChannel) -> Self {
-        ChannelBasePublicKeys {
-            funding_pubkey: value.funding_pubkey,
-            tlc_base_key: value.tlc_basepoint,
+    fn arm_peer_response_v2(&self, state: &mut ChannelActorState) {
+        if state.ensure_v2_not_quarantined().is_err() {
+            return;
+        }
+        let Some(started) = state.peer_response_wait_v2() else {
+            return;
+        };
+        state.waiting_peer_response = Some(
+            state
+                .waiting_peer_response
+                .map_or(started, |old| old.min(started)),
+        );
+        let remaining = PEER_CHANNEL_RESPONSE_TIMEOUT
+            .saturating_sub(crate::now_timestamp_as_millis_u64().saturating_sub(started));
+        let channel_id = state.id;
+        self.network
+            .send_after(std::time::Duration::from_millis(remaining + 1), move || {
+                NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+                    ChannelCommandWithId {
+                        channel_id,
+                        command: ChannelCommand::NotifyEvent(ChannelEvent::CheckActiveChannel),
+                    },
+                ))
+            });
+    }
+
+    async fn shutdown_v2(
+        &self,
+        state: &mut ChannelActorState,
+        command: ShutdownCommand,
+    ) -> ProcessingChannelResult {
+        if state.connectivity_state != fiber_types::ChannelConnectivityState::Online {
+            return Err(invalid(format!(
+                "Cannot cooperatively shutdown channel {} while peer is offline",
+                state.get_id()
+            )));
+        }
+        if state.state != ChannelState::ChannelReady {
+            return Err(invalid("V2 cooperative shutdown requires a ready channel"));
+        }
+        if state.tlc_state.all_tlcs().any(|tlc| {
+            matches!(
+                tlc.status,
+                fiber_types::TlcStatus::Outbound(fiber_types::OutboundTlcStatus::LocalAnnounced)
+            )
+        }) {
+            return Err(invalid("Pending outbound TLCs prevent shutdown"));
+        }
+        let script = command
+            .close_script
+            .unwrap_or_else(|| state.get_local_shutdown_script());
+        let fee = command
+            .fee_rate
+            .unwrap_or(ckb_types::core::FeeRate::from_u64(
+                state.commitment_fee_rate,
+            ));
+        state.check_shutdown_fee_rate(fee, &script)?;
+        self.advertise_close_v2(state, script, fee.as_u64(), None)
+    }
+
+    async fn receive_shutdown_v2(
+        &self,
+        state: &mut ChannelActorState,
+        message: ShutdownV2,
+    ) -> ProcessingChannelResult {
+        state.ensure_v2_not_quarantined()?;
+        if message.channel_id != state.id {
+            return Err(invalid("V2 shutdown channel mismatch"));
+        }
+        let packed: fiber_types::gen::fiber::ShutdownV2 = message.clone().into();
+        if let Some(close) = state.session.closing.as_ref() {
+            if let Some(old) = &close.remote_shutdown {
+                if old.as_slice() != packed.as_slice() {
+                    return Err(invalid("Conflicting V2 shutdown"));
+                }
+                if let Some(response) = &close.response {
+                    state.send_message_to_peer(FiberMessage::closing_signed_v2(
+                        ClosingSignedV2::try_from(response.clone())
+                            .map_err(|e| invalid(e.to_string()))?,
+                    ));
+                }
+                return Ok(());
+            }
+        }
+        // A published close must retain its confirmation flag, not start a second close.
+        let awaiting_confirmation = matches!(state.state, ChannelState::ShuttingDown(flags)
+            if flags.contains(ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION));
+        if !matches!(
+            state.state,
+            ChannelState::ChannelReady | ChannelState::ShuttingDown(_)
+        ) || awaiting_confirmation
+            || !state.check_shutdown_fee_valid(&message.close_script, message.fee_rate)
+        {
+            return Err(invalid("Invalid V2 shutdown state or fee"));
+        }
+        if state.tlc_state.all_tlcs().any(|tlc| {
+            matches!(
+                tlc.status,
+                fiber_types::TlcStatus::Inbound(fiber_types::InboundTlcStatus::RemoteAnnounced)
+            )
+        }) {
+            return Err(invalid("Pending inbound TLCs prevent shutdown"));
+        }
+        // Validate the auto-accept minimum before changing shutdown state: the
+        // actor persists state even when this handler fails, so rejecting here
+        // after recording remote_shutdown_info would leave a stale remote info
+        // next to a later local closing session without a remote advertisement,
+        // and V2 validation would reject the channel after a restart.
+        let auto_accept = state.session.closing.is_none();
+        if auto_accept && message.fee_rate < state.commitment_fee_rate {
+            return Err(invalid(
+                "V2 shutdown fee does not allow automatic acceptance",
+            ));
+        }
+        state.remote_shutdown_info = Some(fiber_types::ShutdownInfo {
+            close_script: message.close_script,
+            fee_rate: message.fee_rate,
+            signature: None,
+        });
+        if auto_accept {
+            self.advertise_close_v2(
+                state,
+                state.get_local_shutdown_script(),
+                0,
+                Some(packed.clone()),
+            )?;
+        }
+        state
+            .session
+            .closing
+            .as_mut()
+            .expect("closing")
+            .remote_shutdown = Some(packed);
+        let flags = match state.state {
+            ChannelState::ShuttingDown(flags) => flags,
+            _ => ShuttingDownFlags::empty(),
+        };
+        state.update_state(ChannelState::ShuttingDown(
+            flags | ShuttingDownFlags::AWAITING_PENDING_TLCS,
+        ));
+        self.progress_close_v2(state).await
+    }
+
+    async fn progress_close_v2(&self, state: &mut ChannelActorState) -> ProcessingChannelResult {
+        state.ensure_v2_not_quarantined()?;
+        if !matches!(state.state, ChannelState::ShuttingDown(flags) if flags.contains(fiber_types::ShuttingDownFlags::AWAITING_PENDING_TLCS) || (flags == fiber_types::ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION && state.session.closing.as_ref().is_some_and(|c| c.remote_response.is_some())))
+            || state.any_tlc_pending()
+            || state.reestablishing
+        {
+            return Ok(());
+        }
+        let was_waiting_confirmation = matches!(state.state, ChannelState::ShuttingDown(flags)
+            if flags == fiber_types::ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION);
+        let Some(close) = state.session.closing.as_ref() else {
+            return Ok(());
+        };
+        if close.superseded_by_force_close
+            || state.tlc_state.waiting_ack
+            || state.tlc_state.all_tlcs().any(|tlc| {
+                !tlc.applied_flags
+                    .contains(fiber_types::AppliedFlags::REMOVE)
+            })
+        {
+            return Ok(());
+        }
+        let Some(remote) = close.remote_shutdown.clone() else {
+            return Ok(());
+        };
+        let remote = ShutdownV2::try_from(remote).map_err(|e| invalid(e.to_string()))?;
+        let tx = match &close.transaction {
+            Some(tx) => tx.clone().into_view(),
+            None => state.build_shutdown_tx().await?,
+        };
+        let keys = state.order_things_for_musig2(
+            state.signer.funding_key.pubkey(),
+            *state.get_remote_funding_pubkey(),
+        );
+        let aggregate = musig2::KeyAggContext::new(keys).map_err(|e| invalid(e.to_string()))?;
+        let nonce = AggNonce::sum([close.own.public_nonce.clone(), remote.closing_nonce]);
+        let message = compute_tx_message(&tx);
+        let key = state.signer.funding_key.clone();
+        let channel_id = state.id;
+        state.update_state(ChannelState::ShuttingDown(
+            fiber_types::ShuttingDownFlags::AWAITING_PENDING_TLCS
+                | fiber_types::ShuttingDownFlags::DROPPING_PENDING,
+        ));
+        let close = state.session.closing.as_mut().expect("closing");
+        close.transaction = Some(tx.data());
+        bind_context(&mut close.own, keys, &nonce, &message).map_err(invalid)?;
+        let signature = guarded_sign(&mut close.own, &key, keys, &aggregate, &nonce, &message)
+            .map_err(invalid)?;
+        let first = close.response.is_none();
+        let response = ClosingSignedV2 {
+            channel_id,
+            partial_signature: signature,
+        };
+        close.response = Some(response.clone().into());
+        let remote_response = close.remote_response.clone();
+        state
+            .local_shutdown_info
+            .as_mut()
+            .expect("shutdown")
+            .signature = Some(signature);
+        if first {
+            self.store.insert_channel_actor_state(state.clone());
+            self.arm_peer_response_v2(state);
+            state.send_message_to_peer(FiberMessage::closing_signed_v2(response));
+        }
+        if let Some(remote_response) = remote_response {
+            let remote =
+                ClosingSignedV2::try_from(remote_response).map_err(|e| invalid(e.to_string()))?;
+            let sig: CompactSignature = musig2::aggregate_partial_signatures(
+                &aggregate,
+                &nonce,
+                [signature, remote.partial_signature],
+                message,
+            )
+            .map_err(|e| invalid(e.to_string()))?;
+            let witness =
+                create_witness_for_funding_cell(state.get_funding_lock_script_xonly(), sig);
+            let tx = tx
+                .as_advanced_builder()
+                .set_witnesses(vec![witness.pack()])
+                .build();
+            state.update_state(ChannelState::ShuttingDown(
+                fiber_types::ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION,
+            ));
+            state.clear_waiting_peer_response();
+            if first || !was_waiting_confirmation {
+                self.store.insert_channel_actor_state(state.clone());
+            }
+            state
+                .network()
+                .send_message(NetworkActorMessage::new_event(
+                    crate::fiber::network::NetworkActorEvent::ClosingTransactionPending(
+                        state.id,
+                        state.remote_pubkey,
+                        tx,
+                        false,
+                    ),
+                ))
+                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        }
+        Ok(())
+    }
+
+    async fn receive_closing_v2(
+        &self,
+        state: &mut ChannelActorState,
+        message: ClosingSignedV2,
+    ) -> ProcessingChannelResult {
+        state.ensure_v2_not_quarantined()?;
+        if message.channel_id != state.id {
+            return Err(invalid("V2 closing channel mismatch"));
+        }
+        let close = state
+            .session
+            .closing
+            .as_ref()
+            .ok_or_else(|| invalid("V2 closing without shutdown"))?;
+        let packed: fiber_types::gen::fiber::ClosingSignedV2 = message.clone().into();
+        if let Some(old) = &close.remote_response {
+            if old.as_slice() != packed.as_slice() {
+                return Err(invalid("Conflicting V2 closing signature"));
+            }
+            return Ok(());
+        }
+        let tx = close
+            .transaction
+            .as_ref()
+            .ok_or_else(|| invalid("V2 closing before fixed transaction"))?
+            .clone()
+            .into_view();
+        let remote = ShutdownV2::try_from(
+            close
+                .remote_shutdown
+                .clone()
+                .ok_or_else(|| invalid("Missing remote closing nonce"))?,
+        )
+        .map_err(|e| invalid(e.to_string()))?;
+        let keys = state.order_things_for_musig2(
+            state.signer.funding_key.pubkey(),
+            *state.get_remote_funding_pubkey(),
+        );
+        let aggregate = musig2::KeyAggContext::new(keys).map_err(|e| invalid(e.to_string()))?;
+        let nonce = AggNonce::sum([close.own.public_nonce.clone(), remote.closing_nonce.clone()]);
+        musig2::verify_partial(
+            &aggregate,
+            message.partial_signature,
+            &nonce,
+            *state.get_remote_funding_pubkey(),
+            &remote.closing_nonce,
+            compute_tx_message(&tx),
+        )
+        .map_err(|e| invalid(e.to_string()))?;
+        state
+            .session
+            .closing
+            .as_mut()
+            .expect("closing")
+            .remote_response = Some(packed);
+        state
+            .remote_shutdown_info
+            .as_mut()
+            .expect("shutdown")
+            .signature = Some(message.partial_signature);
+        self.progress_close_v2(state).await
+    }
+
+    async fn reestablish_v2(
+        &self,
+        myself: &ActorRef<ChannelActorMessage>,
+        state: &mut ChannelActorState,
+        peer: ReestablishChannelV2,
+    ) -> ProcessingChannelResult {
+        // A valid old image cannot reveal post-backup nonce use or revocations.
+        // Matching peer counters/nonces are untrusted assertions, not freshness proof.
+        state.ensure_v2_not_quarantined()?;
+        if !state.reestablishing {
+            // A delayed identical handshake must not rewind a live session.
+            return Ok(());
+        }
+        if let Some(previous) = &state.recovery_peer_v2 {
+            if previous != &peer {
+                return Err(invalid(
+                    "Conflicting V2 handshake for the active connection",
+                ));
+            }
+            return Ok(());
+        }
+        // Syncing can only precede this handler after a committed reconnect message.
+        let nonce_already_persisted =
+            state.connectivity_state == fiber_types::ChannelConnectivityState::Syncing;
+        state.on_peer_reconnected();
+        myself.send_after(state.reestablish_timeout_delay(), || {
+            ChannelActorMessage::Event(ChannelEvent::CheckActiveChannel)
+        });
+        state.validate_recovery_history_v2()?;
+        state.notify_funding_tx(&self.network);
+        let session = &state.session;
+
+        if matches!(
+            state.state,
+            ChannelState::NegotiatingFunding(_)
+                | ChannelState::CollaboratingFundingTx(_)
+                | ChannelState::SigningCommitment(_)
+        ) {
+            let external = state.ephemeral_config.external_funding.enabled;
+            let has_signing_session = session.outgoing.is_some()
+                || session.incoming.is_some()
+                || session.pending_incoming.is_some();
+            if !external && !has_signing_session {
+                myself
+                    .send_message(ChannelActorMessage::Event(ChannelEvent::Stop(
+                        StopReason::AbortFunding,
+                    )))
+                    .expect("myself alive");
+                return Ok(());
+            }
+            if !(INITIAL_COMMITMENT_NUMBER + 1..=INITIAL_COMMITMENT_NUMBER + 2)
+                .contains(&peer.next_commitment_number)
+                || !(INITIAL_COMMITMENT_NUMBER + 1..=INITIAL_COMMITMENT_NUMBER + 2)
+                    .contains(&peer.next_ack_number)
+            {
+                return Err(invalid(
+                    "Incompatible V2 external funding bootstrap history",
+                ));
+            }
+            state.recovery_peer_v2 = Some(peer);
+            // Bootstrap funding flow is unlocked only for this validated handshake.
+            self.replay_effects_v2(state);
+            if external && !state.ephemeral_config.external_funding.signed_submitted {
+                // Resume bootstrap under its funding-phase checks and funding timeout.
+                // Local submission waiting must not consume a future recovery budget.
+                state.reestablishing = false;
+                state.reestablish_timer = None;
+                if let Some(outgoing) = state.session.outgoing.clone() {
+                    // A lost bootstrap CS must still be replayed while the wallet waits.
+                    state.send_message_to_peer(FiberMessage::commitment_signed_v2(
+                        CommitmentSignedV2::try_from(outgoing.request)
+                            .map_err(|e| invalid(e.to_string()))?,
+                    ));
+                } else if state.session.incoming.is_some() {
+                    self.handle_commitment_signed_command(myself, state).await?;
+                    if !state.is_acceptor {
+                        self.return_unsigned_external_funding_tx(state)?;
+                    }
+                }
+                return Ok(());
+            }
+            // Keep the recovery watchdog active until actual ChannelReady.
+            if external && !state.is_acceptor {
+                self.release_external_funding_signed_tx(state)?;
+            }
+            if let Some(pending) = state.session.pending_incoming.clone() {
+                self.receive_commitment_v2(
+                    myself,
+                    state,
+                    CommitmentSignedV2::try_from(pending.request)
+                        .map_err(|e| invalid(e.to_string()))?,
+                )
+                .await?;
+            }
+            if let Some(outgoing) = state.session.outgoing.clone() {
+                state.send_message_to_peer(FiberMessage::commitment_signed_v2(
+                    CommitmentSignedV2::try_from(outgoing.request)
+                        .map_err(|e| invalid(e.to_string()))?,
+                ));
+                if let ChannelState::SigningCommitment(flags) = state.state {
+                    state.maybe_transfer_to_tx_signatures(flags)?;
+                }
+            } else {
+                // No partial signature exists: allocating the first session is
+                // permitted. Existing signed sessions above are replayed verbatim.
+                myself
+                    .send_message(ChannelActorMessage::Command(
+                        ChannelCommand::CommitmentSigned(None),
+                    ))
+                    .expect("myself alive");
+            }
+            return Ok(());
+        }
+        if matches!(
+            state.state,
+            ChannelState::AwaitingTxSignatures(_) | ChannelState::AwaitingChannelReady(_)
+        ) {
+            if !(INITIAL_COMMITMENT_NUMBER + 1..=INITIAL_COMMITMENT_NUMBER + 2)
+                .contains(&peer.next_commitment_number)
+                || !(INITIAL_COMMITMENT_NUMBER + 1..=INITIAL_COMMITMENT_NUMBER + 2)
+                    .contains(&peer.next_ack_number)
+            {
+                return Err(invalid("Incompatible V2 funding Ready history"));
+            }
+            let replay_initial = peer.next_commitment_number == INITIAL_COMMITMENT_NUMBER + 1;
+            state.recovery_peer_v2 = Some(peer);
+            self.replay_effects_v2(state);
+            if state.ephemeral_config.external_funding.signed_submitted && !state.is_acceptor {
+                // The peer may still be waiting for the signed TxUpdate, even
+                // though this side has already advanced to funding signatures.
+                self.release_external_funding_signed_tx(state)?;
+            }
+            if replay_initial {
+                let outgoing = state
+                    .session
+                    .outgoing
+                    .clone()
+                    .ok_or_else(|| invalid("Missing V2 initial CS replay"))?;
+                state.send_message_to_peer(FiberMessage::commitment_signed_v2(
+                    CommitmentSignedV2::try_from(outgoing.request)
+                        .map_err(|e| invalid(e.to_string()))?,
+                ));
+            }
+            state.resume_funding(myself);
+            return Ok(());
+        }
+        let local = state.get_local_commitment_number();
+        let remote = state.get_remote_commitment_number();
+        // Ready advances opening commitment 1 to normal commitment 2 without RAA.
+        // Repair that gap before updates, then continue any outstanding first normal round.
+        if state.may_need_ready_replay_v2()
+            && peer.next_commitment_number == local
+            && peer.next_ack_number == INITIAL_COMMITMENT_NUMBER + 1
+            && state.funding_tx_confirmed_at.is_some()
+        {
+            if state.session.remote_nonce.as_ref() != Some(&peer.next_local_commitment_nonce) {
+                return Err(invalid("Peer changed V2 bootstrap Ready nonce"));
+            }
+            let ready = state.ready_wire_message()?;
+            if !nonce_already_persisted {
+                self.store.insert_channel_actor_state(state.clone());
+            }
+            state.send_message_to_peer(ready);
+            debug_event!(self.network, "Replayed ChannelReady after reestablishment");
+        }
+        // The peer has not accepted our outstanding CS (`next_commitment_number == local`).
+        // Abandon that signing session and sign a fresh CS after recovery; V2 allocates every
+        // session nonce from a fresh random seed, so the burned nonce is never reused. The
+        // previous signature is retained as a watchtower snapshot, so either same-number
+        // transaction the peer may publish remains recoverable.
+        let resign_outstanding_cs = if state.tlc_state.waiting_ack {
+            if peer.next_commitment_number == local {
+                // A closing phase that already published a transaction must not sign again.
+                match state.state {
+                    ChannelState::ChannelReady => true,
+                    ChannelState::ShuttingDown(flags) => flags.is_ok_for_commitment_operation(),
+                    _ => false,
+                }
+            } else if local.checked_add(1) == Some(peer.next_commitment_number) {
+                // The peer already accepted the round; its ACK is replayed below.
+                false
+            } else {
+                return Err(invalid("Incompatible V2 incoming CS history"));
+            }
+        } else {
+            // One step behind is the "missed our latest commitment" case, for example a peer that
+            // never saw our `ChannelReadyV2`. Nothing is owed and nothing is replayed except that
+            // Ready, so accept it instead of failing the handshake.
+            if peer.next_commitment_number != local
+                && peer.next_commitment_number.checked_add(1) != Some(local)
+            {
+                return Err(invalid("Incompatible V2 completed outgoing history"));
+            }
+            false
+        };
+
+        let has_cached_ack = state
+            .session
+            .incoming
+            .as_ref()
+            .and_then(|incoming| incoming.response.as_ref())
+            .is_some();
+        let replay_ack = if peer.next_ack_number == remote {
+            false
+        } else if peer.next_ack_number.checked_add(1) == Some(remote) {
+            // Only a real owed ACK is replayed. Without a cached ACK the peer is simply one
+            // commitment behind (it missed our `ChannelReadyV2`), which the Ready replay repairs.
+            has_cached_ack
+        } else {
+            return Err(invalid("Incompatible V2 incoming ACK history"));
+        };
+        let session = &state.session;
+        let outgoing = session.outgoing.clone();
+        let incoming = session.incoming.clone();
+        if state.tlc_state.waiting_ack {
+            let outgoing = outgoing
+                .as_ref()
+                .ok_or_else(|| invalid("Missing outstanding V2 CS"))?;
+            let request = CommitmentSignedV2::try_from(outgoing.request.clone())
+                .map_err(|e| invalid(e.to_string()))?;
+            if request.commitment_number != local {
+                return Err(invalid("Outstanding V2 CS counter mismatch"));
+            }
+        }
+        let ack = if replay_ack {
+            let incoming = incoming
+                .as_ref()
+                .ok_or_else(|| invalid("Missing accepted V2 CS"))?;
+            let response = incoming
+                .response
+                .clone()
+                .ok_or_else(|| invalid("Missing cached V2 ACK"))?;
+            let ack = RevokeAndAckV2::try_from(response).map_err(|e| invalid(e.to_string()))?;
+            if ack.commitment_number != peer.next_ack_number {
+                return Err(invalid("Cached V2 ACK counter mismatch"));
+            }
+            Some(ack)
+        } else {
+            None
+        };
+        let peer_nonce = peer.next_local_commitment_nonce.clone();
+        let peer_number = peer.next_commitment_number;
+        state.recovery_peer_v2 = Some(peer);
+        // An ahead-of-us advertisement remains per-connection until RAA advances both counters.
+        if peer_number == local {
+            {
+                let session = &mut state.session;
+                session.remote_nonce = Some(peer_nonce);
+                session.remote_number = peer_number;
+            }
+        }
+        if resign_outstanding_cs {
+            // Carry the original updates into the regenerated round so another crash can replay
+            // them. `pending_replay_updates` and `outgoing.updates` are disjoint by construction
+            // (`prepare_outgoing_v2` drains the former into the latter), and the merged list is
+            // drained again by the next commitment, so repeated crashes cannot accumulate it.
+            let mut updates = outgoing
+                .as_ref()
+                .expect("outstanding CS validated")
+                .updates
+                .clone();
+            state.replayed_tlc_updates_v2 = updates.len();
+            updates.append(&mut state.pending_replay_updates);
+            state.pending_replay_updates = updates;
+            {
+                let session = &mut state.session;
+                session.outgoing = None;
+            }
+            state.set_waiting_ack(myself, false);
+            tracing::debug!(
+                "Channel {} abandoned a stale V2 CommitmentSigned and will sign a fresh one",
+                state.get_id()
+            );
+        }
+        self.replay_effects_v2(state);
+        state.pending_remove_effects_v2 = state.session.remove_effects.len();
+        self.update_tlc_status_on_ack(myself, state).await;
+        self.apply_settled_remove_tlcs(myself, state, true).await;
+        if !matches!(state.state, ChannelState::ShuttingDown(_)) {
+            state.set_waiting_peer_response();
+        }
+        self.arm_peer_response_v2(state);
+        // Replay the owed updates in their original relative order; the signature itself is
+        // regenerated after recovery (see `resign_outstanding_cs`).
+        let send_updates = || -> ProcessingChannelResult {
+            if resign_outstanding_cs {
+                let outgoing = outgoing
+                    .as_ref()
+                    .ok_or_else(|| invalid("Missing outgoing replay"))?;
+                for update in &outgoing.updates {
+                    state.send_message_to_peer(match update {
+                        fiber_types::TlcReplayUpdate::Add(add) => {
+                            FiberMessage::add_tlc(add.clone())
+                        }
+                        fiber_types::TlcReplayUpdate::Remove(remove) => {
+                            FiberMessage::remove_tlc(remove.clone())
+                        }
+                    });
+                    match update {
+                        fiber_types::TlcReplayUpdate::Add(_) => {
+                            debug_event!(self.network, "resend add tlc");
+                        }
+                        fiber_types::TlcReplayUpdate::Remove(_) => {
+                            debug_event!(self.network, "resend remove tlc");
+                        }
+                    }
+                }
+            }
+            Ok(())
+        };
+        if state.last_was_revoke {
+            send_updates()?;
+        }
+        if let Some(ack) = ack {
+            state.send_message_to_peer(FiberMessage::revoke_and_ack_v2(ack));
+        }
+        if !state.last_was_revoke {
+            send_updates()?;
+        }
+        let pending_incoming = state.session.pending_incoming.clone();
+        let pending_ack = state.session.pending_ack.clone();
+        if let Some(pending) = pending_incoming {
+            self.receive_commitment_v2(
+                myself,
+                state,
+                CommitmentSignedV2::try_from(pending.request)
+                    .map_err(|e| invalid(e.to_string()))?,
+            )
+            .await?;
+        }
+        if let Some(pending) = pending_ack {
+            self.receive_ack_v2(
+                myself,
+                state,
+                RevokeAndAckV2::try_from(pending).map_err(|e| invalid(e.to_string()))?,
+            )
+            .await?;
+        }
+        state.finish_recovery_v2(myself);
+        if resign_outstanding_cs && !state.reestablishing {
+            // Recovery no longer owes an ACK, so this is an ordinary CS exchange again.
+            self.handle_commitment_signed_command(myself, state).await?;
+        }
+        if let Some(close) = state.session.closing.as_ref() {
+            if !close.superseded_by_force_close {
+                state.send_message_to_peer(FiberMessage::shutdown_v2(
+                    ShutdownV2::try_from(close.shutdown.clone())
+                        .map_err(|e| invalid(e.to_string()))?,
+                ));
+                if let Some(response) = &close.response {
+                    state.send_message_to_peer(FiberMessage::closing_signed_v2(
+                        ClosingSignedV2::try_from(response.clone())
+                            .map_err(|e| invalid(e.to_string()))?,
+                    ));
+                }
+            }
+        }
+        if !state.reestablishing
+            && !state.tlc_state.waiting_ack
+            && (!state.pending_replay_updates.is_empty()
+                || state.tlc_state.need_another_commitment_signed())
+        {
+            // V2 replays its ordered log above; never publish raw TLC state before the next save.
+            self.network
+                .send_message(NetworkActorMessage::new_command(
+                    NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+                        channel_id: state.id,
+                        command: ChannelCommand::CommitmentSigned(None),
+                    }),
+                ))
+                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        }
+        self.progress_close_v2(state).await
+    }
+
+    fn replay_effects_v2(&self, state: &ChannelActorState) {
+        let session = &state.session;
+        if let Some(settlement) = &session.bootstrap_settlement {
+            let (local_key, remote_key) = state.get_settlement_keys();
+            self.network
+                .send_message(NetworkActorMessage::new_notification(
+                    NetworkServiceEvent::RemoteTxComplete(
+                        state.remote_pubkey,
+                        state.id,
+                        state.funding_udt_type_script.clone(),
+                        local_key,
+                        remote_key,
+                        *state.get_local_funding_pubkey(),
+                        *state.get_remote_funding_pubkey(),
+                        settlement.clone(),
+                        state.channel_features,
+                    ),
+                ))
+                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        }
+        // Each slot is a latest-value snapshot, not an edge-triggered effect. Do
+        // not erase a slot after enqueue: NetworkActor's observer queue is volatile.
+        // Replay accepted revocation before the newer pending remote settlement.
+        if let Some((revocation, settlement)) = &session.revocation_effect {
+            self.network
+                .send_message(NetworkActorMessage::new_notification(
+                    NetworkServiceEvent::RevokeAndAckReceived(
+                        state.remote_pubkey,
+                        state.id,
+                        revocation.clone(),
+                        settlement.clone(),
+                    ),
+                ))
+                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        }
+        if let Some(outgoing) = &session.outgoing {
+            self.network
+                .send_message(NetworkActorMessage::new_notification(
+                    NetworkServiceEvent::LocalCommitmentSigned(
+                        state.id,
+                        outgoing.settlement.clone(),
+                    ),
+                ))
+                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        }
+        if let Some(incoming) = &session.incoming {
+            self.network
+                .send_message(NetworkActorMessage::new_notification(
+                    NetworkServiceEvent::RemoteCommitmentSigned(
+                        state.remote_pubkey,
+                        state.id,
+                        incoming.transaction.clone().into_view(),
+                        incoming.settlement.clone(),
+                    ),
+                ))
+                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        }
+    }
+
+    /// Publish saved removal hints without signing after the closing transaction is published.
+    fn publish_force_closing_removes_v2(&self, state: &mut ChannelActorState) {
+        if !matches!(state.state, ChannelState::ShuttingDown(flags)
+                if flags.contains(fiber_types::ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION))
+        {
+            return;
+        }
+        for update in state
+            .pending_replay_updates
+            .iter()
+            .skip(state.replayed_tlc_updates_v2)
+        {
+            if let fiber_types::TlcReplayUpdate::Remove(remove) = update {
+                state.send_message_to_peer(FiberMessage::remove_tlc(remove.clone()));
+            }
+        }
+        state.replayed_tlc_updates_v2 = state.pending_replay_updates.len();
+    }
+
+    fn replay_remove_effects_v2(&self, state: &ChannelActorState) {
+        {
+            let session = &state.session;
+            self.publish_remove_effects_v2(state.id, &session.remove_effects);
+        }
+    }
+
+    fn publish_remove_effects_v2(
+        &self,
+        channel_id: fiber_types::Hash256,
+        effects: &[(fiber_types::TlcInfo, Option<u32>)],
+    ) {
+        for (tlc, execution) in effects {
+            self.network
+                .send_message(NetworkActorMessage::new_command(
+                    NetworkActorCommand::RelayV2RemoveEffect {
+                        channel_id,
+                        tlc: Box::new(tlc.clone()),
+                        execution: *execution,
+                    },
+                ))
+                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        }
+    }
+
+    pub async fn handle_commitment_signed_command(
+        &self,
+        myself: &ActorRef<ChannelActorMessage>,
+        state: &mut ChannelActorState,
+    ) -> ProcessingChannelResult {
+        state.ensure_v2_not_quarantined()?;
+        let recovering_bootstrap = state.recovery_peer_v2.is_some()
+            && matches!(
+                state.state,
+                ChannelState::CollaboratingFundingTx(_) | ChannelState::SigningCommitment(_)
+            );
+        if state.reestablishing && !recovering_bootstrap {
+            return Err(invalid("V2 signing waits for reestablishment obligations"));
+        }
+        if state.tlc_state.waiting_ack {
+            return Ok(());
+        }
+        let flags = match state.state {
+            ChannelState::CollaboratingFundingTx(flags)
+                if flags.contains(CollaboratingFundingTxFlags::COLLABORATION_COMPLETED) =>
+            {
+                Some(SigningCommitmentFlags::empty())
+            }
+            ChannelState::SigningCommitment(flags)
+                if !flags.contains(SigningCommitmentFlags::OUR_COMMITMENT_SIGNED_SENT) =>
+            {
+                Some(flags)
+            }
+            ChannelState::ChannelReady => None,
+            ChannelState::ShuttingDown(flags) if flags.is_ok_for_commitment_operation() => None,
+            _ => return Err(invalid("V2 CS command in invalid phase")),
+        };
+        state.clean_up_failed_tlcs();
+        let (request, settlement) = state.prepare_outgoing_v2(flags.is_some())?;
+        if let Some(flags) = flags {
+            state.update_state(ChannelState::SigningCommitment(
+                flags | SigningCommitmentFlags::OUR_COMMITMENT_SIGNED_SENT,
+            ));
+        } else {
+            state.set_waiting_ack(myself, true);
+        }
+        state.last_was_revoke = false;
+        let replayed = std::mem::take(&mut state.replayed_tlc_updates_v2);
+        self.store.insert_channel_actor_state(state.clone());
+        // Publish only after IDs, contents and the exact signing intent are durable.
+        for update in &state.session.outgoing.as_ref().expect("signed CS").updates[replayed..] {
+            state.send_message_to_peer(match update {
+                fiber_types::TlcReplayUpdate::Add(add) => FiberMessage::add_tlc(add.clone()),
+                fiber_types::TlcReplayUpdate::Remove(remove) => {
+                    FiberMessage::remove_tlc(remove.clone())
+                }
+            });
+        }
+        self.network
+            .send_message(NetworkActorMessage::new_notification(
+                NetworkServiceEvent::LocalCommitmentSigned(state.id, settlement),
+            ))
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        state.send_message_to_peer(FiberMessage::commitment_signed_v2(request));
+        if let ChannelState::SigningCommitment(flags) = state.state {
+            state.maybe_transfer_to_tx_signatures(flags)?;
+        }
+        Ok(())
+    }
+
+    async fn receive_commitment_v2(
+        &self,
+        myself: &ActorRef<ChannelActorMessage>,
+        state: &mut ChannelActorState,
+        request: CommitmentSignedV2,
+    ) -> ProcessingChannelResult {
+        state.ensure_v2_not_quarantined()?;
+        let session = &state.session;
+        if let Some(previous) = &session.incoming {
+            let old = CommitmentSignedV2::try_from(previous.request.clone())
+                .map_err(|e| invalid(e.to_string()))?;
+            if old.commitment_number == request.commitment_number {
+                let packed: fiber_types::gen::fiber::CommitmentSignedV2 = request.clone().into();
+                if previous.request.as_slice() != packed.as_slice() {
+                    return Err(invalid("Conflicting duplicate V2 CS"));
+                }
+                if let Some(response) = &previous.response {
+                    state.send_message_to_peer(FiberMessage::revoke_and_ack_v2(
+                        RevokeAndAckV2::try_from(response.clone())
+                            .map_err(|e| invalid(e.to_string()))?,
+                    ));
+                }
+                return Ok(());
+            }
+        }
+        let flags = match state.state {
+            ChannelState::CollaboratingFundingTx(flags)
+                if flags.contains(CollaboratingFundingTxFlags::COLLABORATION_COMPLETED) =>
+            {
+                Some(SigningCommitmentFlags::empty())
+            }
+            ChannelState::SigningCommitment(flags)
+                if !flags.contains(SigningCommitmentFlags::THEIR_COMMITMENT_SIGNED_SENT) =>
+            {
+                Some(flags)
+            }
+            ChannelState::NegotiatingFunding(flags)
+                if flags.contains(NegotiatingFundingFlags::AWAITING_EXTERNAL_FUNDING) =>
+            {
+                Some(SigningCommitmentFlags::empty())
+            }
+            ChannelState::ChannelReady => None,
+            ChannelState::ShuttingDown(flags) if flags.is_ok_for_commitment_operation() => None,
+            _ => return Err(invalid("V2 CS received in invalid phase")),
+        };
+        if state.defer_peer_tlc_updates {
+            state.stop_defer_peer_tlc_updates();
+            self.flush_deferred_peer_tlc_updates(state)?;
+        }
+        let verified = state.stage_incoming_v2(&request, flags.is_some())?;
+        let (transaction, settlement, response) =
+            state.accept_commitment_v2(&request, flags.is_some(), verified)?;
+        if let Some(flags) = flags {
+            state.update_state(ChannelState::SigningCommitment(
+                flags | SigningCommitmentFlags::THEIR_COMMITMENT_SIGNED_SENT,
+            ));
+        }
+        let needs_cs = state.tlc_state.update_for_commitment_signed();
+        state.last_was_revoke = response.is_some();
+        // Staging/signing is local; commit the accepted session before publishing its results.
+        self.store.insert_channel_actor_state(state.clone());
+        self.network
+            .send_message(NetworkActorMessage::new_notification(
+                NetworkServiceEvent::RemoteCommitmentSigned(
+                    state.remote_pubkey,
+                    state.id,
+                    transaction,
+                    settlement,
+                ),
+            ))
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        if let Some(response) = response {
+            state.send_message_to_peer(FiberMessage::revoke_and_ack_v2(response));
+        }
+        if let ChannelState::SigningCommitment(flags) = state.state {
+            state.maybe_transfer_to_tx_signatures(flags)?;
+        }
+        self.apply_settled_remove_tlcs(myself, state, true).await;
+        let external_reply = state.ephemeral_config.external_funding.enabled
+            && matches!(state.state, ChannelState::SigningCommitment(flags) if !flags.contains(SigningCommitmentFlags::OUR_COMMITMENT_SIGNED_SENT));
+        let return_unsigned = external_reply
+            && !state.is_acceptor
+            && !state.ephemeral_config.external_funding.signed_submitted;
+        state.finish_recovery_v2(myself);
+        if (needs_cs || external_reply)
+            && !state.tlc_state.waiting_ack
+            && (!state.reestablishing || (flags.is_some() && state.recovery_peer_v2.is_some()))
+        {
+            self.handle_commitment_signed_command(myself, state).await?;
+        }
+        if return_unsigned {
+            self.return_unsigned_external_funding_tx(state)?;
+        }
+        Ok(())
+    }
+
+    async fn receive_ack_v2(
+        &self,
+        myself: &ActorRef<ChannelActorMessage>,
+        state: &mut ChannelActorState,
+        ack: RevokeAndAckV2,
+    ) -> ProcessingChannelResult {
+        state.ensure_v2_not_quarantined()?;
+        // A reconnect can replay an ACK we already processed. Its bytes match `last_ack`, so it
+        // is an idempotent duplicate: ignore it instead of trying to verify it again.
+        let packed_ack: fiber_types::gen::fiber::RevokeAndAckV2 = ack.clone().into();
+        if state
+            .session
+            .last_ack
+            .as_ref()
+            .is_some_and(|last| last.as_slice() == packed_ack.as_slice())
+        {
+            tracing::debug!(
+                "Channel {} ignores an already processed V2 ACK for commitment {}",
+                state.id,
+                ack.commitment_number
+            );
+            return Ok(());
+        }
+        let verified = state.stage_ack_v2(&ack)?;
+        // While the handshake is still in flight the peer may answer a superseded round with an
+        // ACK that can no longer be verified. The replayed commitment gets its own ACK, so
+        // dropping this one costs nothing. Outside recovery an unverifiable ACK is a hard error.
+        let accepted = match state.accept_ack_v2(myself, &ack, verified) {
+            Ok(accepted) => accepted,
+            Err(err) if state.reestablishing => {
+                tracing::warn!(
+                    "Channel {} ignores an ACK for a superseded V2 commitment round: {}",
+                    state.id,
+                    err
+                );
+                return Ok(());
+            }
+            Err(err) => return Err(err),
+        };
+        let Some((revocation, settlement)) = accepted else {
+            return Ok(());
+        };
+        self.store.insert_channel_actor_state(state.clone());
+        self.network
+            .send_message(NetworkActorMessage::new_notification(
+                NetworkServiceEvent::RevokeAndAckReceived(
+                    state.remote_pubkey,
+                    state.id,
+                    revocation,
+                    settlement,
+                ),
+            ))
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        self.update_tlc_status_on_ack(myself, state).await;
+        state.finish_recovery_v2(myself);
+        // An RAA cannot stand in for an unreceived CS: only updates already folded by a real
+        // peer CS need another round. Otherwise we sign too early or storm rounds (#1561).
+        let needs_cs = state.tlc_state.all_tlcs().any(|tlc| {
+            matches!(
+                tlc.status,
+                fiber_types::TlcStatus::Outbound(fiber_types::OutboundTlcStatus::RemoveWaitAck)
+                    | fiber_types::TlcStatus::Inbound(
+                        fiber_types::InboundTlcStatus::AnnounceWaitAck
+                    )
+            )
+        });
+        if !state.is_waiting_tlc_ack() {
+            self.apply_retryable_tlc_operations(myself, state, false)
+                .await;
+        }
+        if needs_cs && !state.tlc_state.waiting_ack {
+            self.handle_commitment_signed_command(myself, state).await?;
+        }
+        Ok(())
+    }
+
+    pub async fn apply_retryable_tlc_operations(
+        &self,
+        myself: &ActorRef<ChannelActorMessage>,
+        state: &mut ChannelActorState,
+        trigger_next: bool,
+    ) {
+        if state.is_closed() {
+            self.finalize_closed_retryable_tlc_operations(myself, state)
+                .await;
+            return;
+        }
+        let mut changed = false;
+        let mut add_results = Vec::new();
+        while !state.is_waiting_tlc_ack() && !state.reestablishing {
+            let Some(operation) = state.retryable_tlc_operations.pop_front() else {
+                break;
+            };
+            match operation {
+                RetryableTlcOperation::AddTlc(command) => {
+                    let result = self.add_tlc_update(state, &command);
+                    changed |= result.is_ok();
+                    add_results.push((command, result));
+                }
+                RetryableTlcOperation::RemoveTlc(tlc_id, reason) => {
+                    changed |= self
+                        .remove_tlc_update(
+                            state,
+                            RemoveTlcCommand {
+                                id: u64::from(tlc_id),
+                                reason,
+                            },
+                        )
+                        .is_ok();
+                }
+            }
+        }
+        if changed {
+            // Persist/sign the whole batch before reporting successful additions.
+            if let Err(error) = self.handle_commitment_signed_command(myself, state).await {
+                tracing::error!(?error, channel_id = ?state.id, "Unable to sign V2 TLC batch");
+                self.store.insert_channel_actor_state(state.clone());
+                for (_, result) in &mut add_results {
+                    if result.is_ok() {
+                        *result = Err(error.clone());
+                    }
+                }
+            }
+        }
+        for (command, result) in add_results {
+            self.post_add_tlc_command(myself, state, command, &result);
+        }
+        if trigger_next && !state.reestablishing && !state.retryable_tlc_operations.is_empty() {
+            state.schedule_next_retry_task(myself);
         }
     }
 }
 
-impl From<&AcceptChannel> for ChannelBasePublicKeys {
-    fn from(value: &AcceptChannel) -> Self {
-        ChannelBasePublicKeys {
-            funding_pubkey: value.funding_pubkey,
-            tlc_base_key: value.tlc_basepoint,
-        }
+impl ChannelActorState {
+    fn send_message_to_peer(&self, message: FiberMessage) {
+        self.network()
+            .send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                    self.remote_pubkey,
+                    message,
+                )),
+            ))
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
     }
 }
 
@@ -12790,6 +12160,7 @@ mod tests {
                 commitment_delay_epoch: DEFAULT_COMMITMENT_DELAY_EPOCHS,
                 funding_fee_rate: DEFAULT_FEE_RATE,
                 local_channel_public_keys: signer.get_base_public_keys(),
+                session: new_session(Hash256::from([42; 32]), &signer.funding_key, None),
                 signer,
                 commitment_numbers: CommitmentNumbers::default(),
                 local_constraints,
@@ -12799,10 +12170,6 @@ mod tests {
                 waiting_forward_tlc_tasks: HashMap::new(),
                 remote_shutdown_script: None,
                 local_shutdown_script: Script::default(),
-                last_committed_remote_nonce: None,
-                remote_revocation_nonce_for_verify: None,
-                remote_revocation_nonce_for_send: None,
-                remote_revocation_nonce_for_next: None,
                 latest_commitment_transaction: None,
                 remote_commitment_points: Vec::new(),
                 remote_channel_public_keys: Some(remote_signer.get_base_public_keys()),
@@ -12810,20 +12177,16 @@ mod tests {
                 remote_shutdown_info: None,
                 shutdown_transaction_hash: None,
                 reestablishing: false,
-                last_revoke_ack_msg: None,
                 created_at: SystemTime::now(),
                 pending_replay_updates: vec![],
                 last_was_revoke: false,
                 connectivity_state: ChannelConnectivityState::Online,
                 external_funding: None,
                 channel_features: Default::default(),
-                session_v2: None,
             },
-            pending_reestablish_channel_ready: false,
             defer_peer_tlc_updates: false,
             deferred_peer_tlc_updates: VecDeque::new(),
             waiting_peer_response: None,
-            revocation_nonce_unbalanced_since: None,
             reestablish_timer: None,
             network: None,
             recovery_peer_v2: None,
@@ -12929,8 +12292,7 @@ mod tests {
         let offered_keys = state.get_tlc_pubkeys(&offered).unwrap();
         let received_keys = state.get_tlc_pubkeys(&received).unwrap();
 
-        // The shared helper must also preserve references for legacy channels.
-        assert!(!state.channel_features.is_v2());
+        assert_eq!(state.channel_features, ChannelFeatures::V2);
         for number in 6..=40 {
             state.commitment_numbers = CommitmentNumbers {
                 local: number,
@@ -13102,7 +12464,7 @@ mod tests {
                 ChannelConstraints::new(1_000_000, 10),
                 ChannelConstraints::new(1_000_000, 10),
             );
-            state.session_v2 = ChannelActorState::samples(0).remove(2).session_v2.clone();
+            state.session = ChannelActorState::samples(0).remove(0).session.clone();
             let preimage = Hash256::from([7; 32]);
             let fulfill = RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
                 payment_preimage: preimage,

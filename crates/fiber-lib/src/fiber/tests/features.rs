@@ -222,19 +222,15 @@ fn test_channel_v2_feature_bit() {
 fn channel_features_are_validated_bytes() {
     use fiber_types::ChannelFeatures as Features;
 
-    assert_eq!(Features::LEGACY.bits(), 0);
+    assert_eq!(Features::default(), Features::V2);
     assert_eq!(Features::V2.bits(), 1);
-    assert_eq!(Features::LEGACY.lock_args_len(), 57);
-    assert_eq!(Features::V2.lock_args_len(), 58);
-    assert_eq!(Features::LEGACY.payment_hash_len(), 20);
-    assert_eq!(Features::V2.payment_hash_len(), 32);
+    assert_eq!(Features::LOCK_ARGS_LEN, 58);
+    assert_eq!(Features::PAYMENT_HASH_LEN, 32);
     assert_eq!(bincode::serialize(&Features::V2).unwrap(), vec![1]);
-    assert!(bincode::deserialize::<Features>(&[2]).is_err());
-    assert_eq!(
-        Features::for_negotiated(true, Some(false)),
-        Features::LEGACY
-    );
-    assert_eq!(Features::for_negotiated(true, Some(true)), Features::V2);
+    for bits in [0, 2, 255] {
+        assert!(Features::from_bits(bits).is_err());
+        assert!(bincode::deserialize::<Features>(&[bits]).is_err());
+    }
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

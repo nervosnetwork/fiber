@@ -177,8 +177,8 @@ where
                 local_funding_pubkey,
                 remote_funding_pubkey,
                 settlement_data,
-                channel_features,
-            ) => self.store.insert_watch_channel_with_features(
+                _,
+            ) => self.store.insert_watch_channel(
                 NodeId::local(),
                 channel_id,
                 funding_udt_type_script,
@@ -187,7 +187,6 @@ where
                 local_funding_pubkey,
                 remote_funding_pubkey,
                 settlement_data,
-                channel_features,
             ),
             WatchtowerMessage::RemoveChannel(channel_id) => {
                 self.store.remove_watch_channel(NodeId::local(), channel_id)
@@ -661,7 +660,6 @@ fn try_settle_commitment_tx<S: WatchtowerStore>(
         &channel_data.channel_id,
         store,
         &self_node_id,
-        channel_data.channel_features,
     );
 
     // the live cells number should be 1 or 0 for normal case.
@@ -737,7 +735,6 @@ fn try_settle_commitment_tx<S: WatchtowerStore>(
                                                     {
                                                         SettlementWitness::build_from_witness(
                                                             &witness[16..],
-                                                            channel_data.channel_features,
                                                         )
                                                     } else {
                                                         warn!("Found a commitment tx, but the witness is invalid: {:?}", commitment_tx_hash);
@@ -830,7 +827,6 @@ fn scan_watched_settlement_txs<S: WatchtowerStore>(
     channel_id: &Hash256,
     store: &S,
     self_node_id: &NodeId,
-    channel_features: ChannelFeatures,
 ) -> WatchedSettlementScan {
     let mut watched_outpoints = HashMap::from([(first_commitment_tx_out_point, initial_tlcs)]);
     let mut settlement_witness_input_indices = HashMap::new();
@@ -896,7 +892,7 @@ fn scan_watched_settlement_txs<S: WatchtowerStore>(
             if processed_tx_hashes.contains(&tx_hash) {
                 continue;
             }
-            if let Some(witness_index) = process_watched_settlement_tx_with_features(
+            if let Some(witness_index) = process_watched_settlement_tx(
                 tx,
                 &mut watched_outpoints,
                 &mut processed_tx_hashes,
@@ -904,7 +900,6 @@ fn scan_watched_settlement_txs<S: WatchtowerStore>(
                 channel_id,
                 store,
                 self_node_id,
-                channel_features,
             ) {
                 settlement_witness_input_indices.insert(tx_hash, witness_index);
                 progress = true;
@@ -927,7 +922,7 @@ fn lock_matches_commitment_prefix(lock: &Script, commitment_lock_prefix: &Script
         && lock_args.starts_with(commitment_lock_prefix.args().raw_data().as_ref())
 }
 
-#[allow(dead_code)]
+#[allow(clippy::too_many_arguments)]
 fn process_watched_settlement_tx<S: WatchtowerStore>(
     tx: &Transaction,
     watched_outpoints: &mut HashMap<OutPoint, Vec<TrackedSettlementTlc>>,
@@ -936,29 +931,6 @@ fn process_watched_settlement_tx<S: WatchtowerStore>(
     channel_id: &Hash256,
     store: &S,
     self_node_id: &NodeId,
-) -> Option<usize> {
-    process_watched_settlement_tx_with_features(
-        tx,
-        watched_outpoints,
-        processed_tx_hashes,
-        commitment_lock_prefix,
-        channel_id,
-        store,
-        self_node_id,
-        ChannelFeatures::LEGACY,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn process_watched_settlement_tx_with_features<S: WatchtowerStore>(
-    tx: &Transaction,
-    watched_outpoints: &mut HashMap<OutPoint, Vec<TrackedSettlementTlc>>,
-    processed_tx_hashes: &mut HashSet<ckb_types::packed::Byte32>,
-    commitment_lock_prefix: &Script,
-    channel_id: &Hash256,
-    store: &S,
-    self_node_id: &NodeId,
-    channel_features: ChannelFeatures,
 ) -> Option<usize> {
     let tx_hash = tx.calc_tx_hash();
     if processed_tx_hashes.contains(&tx_hash) {
@@ -992,7 +964,6 @@ fn process_watched_settlement_tx_with_features<S: WatchtowerStore>(
         self_node_id,
         &tracked_tlcs,
         terminal,
-        channel_features,
     )?;
     processed_tx_hashes.insert(tx_hash.clone());
     watched_outpoints.remove(&watched_outpoint);
@@ -1025,7 +996,6 @@ fn reconcile_settlement_witness<S: WatchtowerStore>(
     self_node_id: &NodeId,
     tracked_tlcs: &[TrackedSettlementTlc],
     terminal: bool,
-    channel_features: ChannelFeatures,
 ) -> Option<Vec<TrackedSettlementTlc>> {
     let Some(witness) = tx.witnesses().get(witness_index) else {
         warn!(
@@ -1042,9 +1012,7 @@ fn reconcile_settlement_witness<S: WatchtowerStore>(
         );
         return None;
     }
-    let Some(settlement_witness) =
-        SettlementWitness::build_from_witness(&witness[16..], channel_features)
-    else {
+    let Some(settlement_witness) = SettlementWitness::build_from_witness(&witness[16..]) else {
         warn!(
             "Cannot decode settlement witness for tx {:?}",
             tx.calc_tx_hash()
@@ -1177,22 +1145,6 @@ fn verified_watch_preimage<S: WatchtowerStore>(
         );
         None
     }
-}
-
-fn first_settlement_witness(
-    settlement_data: &SettlementData,
-    for_remote: bool,
-    channel_features: ChannelFeatures,
-    local_settlement_key: Privkey,
-    remote_settlement_key: Pubkey,
-) -> Vec<u8> {
-    settlement_data_to_witness(
-        settlement_data,
-        for_remote,
-        channel_features,
-        local_settlement_key,
-        remote_settlement_key,
-    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1476,11 +1428,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
             if settlement_data.tlcs.len() != tracked_tlcs.len()
                 || settlement_data.tlcs.iter().zip(tracked_tlcs).any(
                     |(settlement_tlc, tracked_tlc)| {
-                        settlement_tlc_to_witness(
-                            settlement_tlc,
-                            for_remote,
-                            channel_data.channel_features,
-                        ) != tracked_tlc.witness
+                        settlement_tlc_to_witness(settlement_tlc, for_remote) != tracked_tlc.witness
                     },
                 )
             {
@@ -1578,10 +1526,9 @@ fn build_settlement_tx<S: WatchtowerStore>(
                     unlock,
                     unlock_amount,
                     private_key,
-                    first_settlement_witness(
+                    settlement_data_to_witness(
                         settlement_data,
                         for_remote,
-                        channel_data.channel_features,
                         channel_data.local_settlement_key.clone(),
                         channel_data.remote_settlement_key,
                     ),
@@ -1596,7 +1543,6 @@ fn build_settlement_tx<S: WatchtowerStore>(
     let new_script_hash = {
         let mut sw = SettlementWitness::build_from_witness(
             &[&[0x01], new_settlement_witness.as_slice()].concat(),
-            channel_data.channel_features,
         )
         .expect("valid data");
         sw.unlocks.push(unlock.clone());
@@ -1605,11 +1551,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
     };
     new_commitment_lock_script_args.extend_from_slice(&new_script_hash);
     new_commitment_lock_script_args.extend_from_slice(&[0x01]);
-    // Propagate the commitment contract features bitmap so a V1 commitment
-    // cell stays V1 after settlement.
-    if lock_script_args.len() > 57 {
-        new_commitment_lock_script_args.extend_from_slice(&lock_script_args[57..]);
-    }
+    new_commitment_lock_script_args.push(ChannelFeatures::V2.bits());
 
     let placeholder_witness_for_change = WitnessArgs::new_builder()
         .lock(Some(ckb_types::bytes::Bytes::from(vec![0u8; 65])).pack())
@@ -2149,7 +2091,8 @@ struct Htlc {
 }
 
 impl Htlc {
-    pub fn build_from_witness(witness: &[u8], payment_hash_len: usize) -> Self {
+    pub fn build_from_witness(witness: &[u8]) -> Self {
+        let payment_hash_len = ChannelFeatures::PAYMENT_HASH_LEN;
         let htlc_type = witness[0];
         let payment_amount = u128::from_le_bytes(witness[1..17].try_into().unwrap());
         let payment_hash = witness[17..17 + payment_hash_len].to_vec();
@@ -2275,8 +2218,8 @@ impl Unlock {
 }
 
 impl SettlementWitness {
-    pub fn build_from_witness(witness: &[u8], channel_features: ChannelFeatures) -> Option<Self> {
-        let payment_hash_len = channel_features.payment_hash_len();
+    pub fn build_from_witness(witness: &[u8]) -> Option<Self> {
+        let payment_hash_len = ChannelFeatures::PAYMENT_HASH_LEN;
         let htlc_script_len = 65 + payment_hash_len;
         let mut reader = WitnessReader::new(witness);
         let _unlock_count = reader.take_u8()?;
@@ -2284,10 +2227,7 @@ impl SettlementWitness {
 
         let mut pending_htlcs = Vec::with_capacity(pending_htlc_count);
         for _ in 0..pending_htlc_count {
-            pending_htlcs.push(Htlc::build_from_witness(
-                reader.take(htlc_script_len)?,
-                payment_hash_len,
-            ));
+            pending_htlcs.push(Htlc::build_from_witness(reader.take(htlc_script_len)?));
         }
 
         let settlement_remote_pubkey_hash = reader.take_array::<20>()?;
@@ -2397,7 +2337,7 @@ mod tests {
     use ckb_types::{core::ScriptHashType, packed::Byte32, prelude::*};
     use fiber_types::TLCId;
 
-    use crate::fiber::onchain_tlc_reconcile::StoredOnChainTlcSettlement;
+    use crate::fiber::onchain_tlc_reconcile::OnChainTlcSettlement;
 
     use super::*;
 
@@ -2409,17 +2349,12 @@ mod tests {
     }
 
     impl TestWatchtowerStore {
-        fn settled_tlcs(&self) -> Vec<(Hash256, [u8; 20])> {
+        fn settled_tlcs(&self) -> Vec<(Hash256, [u8; 32])> {
             self.settlements
                 .lock()
                 .expect("lock poisoned")
                 .iter()
-                .map(|(channel_id, _, settlement)| {
-                    let prefix = settlement.payment_hash.as_ref()[..20]
-                        .try_into()
-                        .expect("payment hash prefix");
-                    (*channel_id, prefix)
-                })
+                .map(|(channel_id, _, settlement)| (*channel_id, settlement.payment_hash.into()))
                 .collect()
         }
 
@@ -2447,25 +2382,7 @@ mod tests {
             self.registered_features
                 .lock()
                 .expect("lock poisoned")
-                .push(ChannelFeatures::LEGACY);
-        }
-
-        fn insert_watch_channel_with_features(
-            &self,
-            _node_id: NodeId,
-            _channel_id: Hash256,
-            _funding_udt_type_script: Option<Script>,
-            _local_settlement_key: Privkey,
-            _remote_settlement_key: Pubkey,
-            _local_funding_pubkey: Pubkey,
-            _remote_funding_pubkey: Pubkey,
-            _settlement_data: SettlementData,
-            channel_features: ChannelFeatures,
-        ) {
-            self.registered_features
-                .lock()
-                .expect("lock poisoned")
-                .push(channel_features);
+                .push(ChannelFeatures::V2);
         }
 
         fn remove_watch_channel(&self, _node_id: NodeId, _channel_id: Hash256) {}
@@ -2534,14 +2451,13 @@ mod tests {
             channel_id: &Hash256,
             tlc_id: TLCId,
             _payment_hash: &Hash256,
-        ) -> Option<StoredOnChainTlcSettlement> {
+        ) -> Option<OnChainTlcSettlement> {
             self.settlements
                 .lock()
                 .expect("lock poisoned")
                 .iter()
                 .find_map(|(id, stored_tlc_id, settlement)| {
-                    (id == channel_id && *stored_tlc_id == tlc_id)
-                        .then(|| StoredOnChainTlcSettlement::Exact(settlement.clone()))
+                    (id == channel_id && *stored_tlc_id == tlc_id).then(|| settlement.clone())
                 })
         }
     }
@@ -2558,10 +2474,11 @@ mod tests {
         let mut args = prefix.args().raw_data().to_vec();
         args.extend_from_slice(&[3u8; 20]);
         args.push(1);
+        args.push(ChannelFeatures::V2.bits());
         prefix.clone().as_builder().args(args.pack()).build()
     }
 
-    fn settlement_witness(payment_hash: [u8; 20]) -> Vec<u8> {
+    fn settlement_witness(payment_hash: [u8; 32]) -> Vec<u8> {
         settlement_witness_with_unlock(
             payment_hash,
             Unlock {
@@ -2573,7 +2490,7 @@ mod tests {
         )
     }
 
-    fn test_htlc(payment_hash: [u8; 20]) -> Htlc {
+    fn test_htlc(payment_hash: [u8; 32]) -> Htlc {
         Htlc {
             htlc_type: 0,
             payment_amount: 1_000,
@@ -2584,22 +2501,19 @@ mod tests {
         }
     }
 
-    fn tracked_tlc(payment_hash_prefix: [u8; 20], tlc_id: u64) -> TrackedSettlementTlc {
-        let mut payment_hash = [0u8; 32];
-        payment_hash[..20].copy_from_slice(&payment_hash_prefix);
-        payment_hash[24..].copy_from_slice(&tlc_id.to_be_bytes());
+    fn tracked_tlc(payment_hash: [u8; 32], tlc_id: u64) -> TrackedSettlementTlc {
         TrackedSettlementTlc {
             tlc_id: TLCId::Offered(tlc_id),
             payment_hash: payment_hash.into(),
             hash_algorithm: HashAlgorithm::CkbHash,
-            witness: test_htlc(payment_hash_prefix).to_witness(),
-            channel_features: ChannelFeatures::LEGACY,
+            witness: test_htlc(payment_hash).to_witness(),
+            channel_features: ChannelFeatures::V2,
         }
     }
 
     fn watched_outpoints(
         outpoint: OutPoint,
-        payment_hashes: &[[u8; 20]],
+        payment_hashes: &[[u8; 32]],
     ) -> HashMap<OutPoint, Vec<TrackedSettlementTlc>> {
         HashMap::from([(
             outpoint,
@@ -2611,19 +2525,22 @@ mod tests {
         )])
     }
 
-    fn settlement_witness_with_unlock(payment_hash: [u8; 20], unlock: Unlock) -> Vec<u8> {
+    fn settlement_witness_with_unlock(payment_hash: [u8; 32], unlock: Unlock) -> Vec<u8> {
         settlement_witness_with_unlocks(&[payment_hash], vec![unlock])
     }
 
     fn settlement_witness_with_unlocks(
-        payment_hashes: &[[u8; 20]],
+        payment_hashes: &[[u8; 32]],
         unlocks: Vec<Unlock>,
     ) -> Vec<u8> {
         let settlement_witness = SettlementWitness {
             pending_htlc_count: payment_hashes.len(),
             pending_htlcs: payment_hashes
                 .iter()
-                .map(|payment_hash| test_htlc(*payment_hash))
+                .enumerate()
+                .map(|(index, prefix)| {
+                    test_htlc(tracked_tlc(*prefix, index as u64).payment_hash.into())
+                })
                 .collect(),
             settlement_remote_pubkey_hash: [6u8; 20],
             settlement_remote_amount: 2_000,
@@ -2645,12 +2562,18 @@ mod tests {
     }
 
     fn settlement_witness_final_party_unlock(
-        payment_hashes: [[u8; 20]; 2],
+        payment_hashes: [[u8; 32]; 2],
         unlock_type: u8,
     ) -> Vec<u8> {
         let settlement_witness = SettlementWitness {
             pending_htlc_count: 2,
-            pending_htlcs: payment_hashes.into_iter().map(test_htlc).collect(),
+            pending_htlcs: payment_hashes
+                .into_iter()
+                .enumerate()
+                .map(|(index, prefix)| {
+                    test_htlc(tracked_tlc(prefix, index as u64).payment_hash.into())
+                })
+                .collect(),
             settlement_remote_pubkey_hash: [6u8; 20],
             settlement_remote_amount: 2_000,
             settlement_local_pubkey_hash: [7u8; 20],
@@ -2735,8 +2658,8 @@ mod tests {
             tlc_id: settlement_tlc.tlc_id.flip(),
             payment_hash: settlement_tlc.payment_hash,
             hash_algorithm: settlement_tlc.hash_algorithm,
-            witness: settlement_tlc_to_witness(&settlement_tlc, false, ChannelFeatures::LEGACY),
-            channel_features: ChannelFeatures::LEGACY,
+            witness: settlement_tlc_to_witness(&settlement_tlc, false),
+            channel_features: ChannelFeatures::V2,
         }];
         let settlement_data = SettlementData {
             local_amount: 100_000_000_000,
@@ -2754,7 +2677,7 @@ mod tests {
             pending_remote_settlement_data: settlement_data.clone(),
             local_settlement_data: settlement_data.clone(),
             revocation_data: None,
-            channel_features: ChannelFeatures::LEGACY,
+            channel_features: ChannelFeatures::V2,
         };
         let settlement_witness = SettlementWitness::build_from_witness(
             &[
@@ -2762,14 +2685,12 @@ mod tests {
                 settlement_data_to_witness(
                     &settlement_data,
                     false,
-                    ChannelFeatures::LEGACY,
                     local_settlement_key,
                     remote_settlement_key,
                 )
                 .as_slice(),
             ]
             .concat(),
-            ChannelFeatures::LEGACY,
         )
         .expect("settlement witness");
 
@@ -2835,17 +2756,17 @@ mod tests {
     }
 
     #[test]
-    fn settlement_witness_parses_both_layouts() {
+    fn settlement_witness_rejects_short_payment_hash() {
         let payment_hash: Vec<u8> = (0..32).collect();
-        let mut v1_htlc = vec![0u8];
-        v1_htlc.extend_from_slice(&1_000u128.to_le_bytes());
-        v1_htlc.extend_from_slice(&payment_hash);
-        v1_htlc.extend_from_slice(&[4u8; 20]);
-        v1_htlc.extend_from_slice(&[5u8; 20]);
-        v1_htlc.extend_from_slice(&0u64.to_le_bytes());
-        let v1_witness = [
+        let mut v2_htlc = vec![0u8];
+        v2_htlc.extend_from_slice(&1_000u128.to_le_bytes());
+        v2_htlc.extend_from_slice(&payment_hash);
+        v2_htlc.extend_from_slice(&[4u8; 20]);
+        v2_htlc.extend_from_slice(&[5u8; 20]);
+        v2_htlc.extend_from_slice(&0u64.to_le_bytes());
+        let v2_witness = [
             &[0u8, 1u8],
-            v1_htlc.as_slice(),
+            v2_htlc.as_slice(),
             &[6u8; 20],
             &2_000u128.to_le_bytes(),
             &[7u8; 20],
@@ -2855,28 +2776,18 @@ mod tests {
             &payment_hash,
         ]
         .concat();
-        let parsed = SettlementWitness::build_from_witness(&v1_witness, ChannelFeatures::V2)
-            .expect("V1 settlement witness");
+        let parsed =
+            SettlementWitness::build_from_witness(&v2_witness).expect("V2 settlement witness");
         assert_eq!(parsed.pending_htlcs[0].payment_hash, payment_hash);
         assert_eq!(parsed.unlocks[0].witness_len(), 99);
 
-        let legacy = settlement_witness_with_unlock(
-            [1u8; 20],
-            Unlock {
-                unlock_type: 0,
-                with_preimage: false,
-                signature: [0u8; 65],
-                preimage: None,
-            },
-        );
-        let parsed = SettlementWitness::build_from_witness(&legacy[16..], ChannelFeatures::LEGACY)
-            .expect("legacy settlement witness");
-        assert_eq!(parsed.pending_htlcs[0].payment_hash, vec![1u8; 20]);
-        assert_eq!(parsed.unlocks[0].witness_len(), 67);
+        let mut old_witness = v2_witness;
+        old_witness.drain(2 + 17 + 20..2 + 17 + 32);
+        assert!(SettlementWitness::build_from_witness(&old_witness).is_none());
     }
 
     #[test]
-    fn first_settlement_witness_uses_v1_layout() {
+    fn first_settlement_witness_uses_v2_layout() {
         let payment_hash_bytes: [u8; 32] = (0..32)
             .map(|value| value as u8)
             .collect::<Vec<_>>()
@@ -2897,18 +2808,14 @@ mod tests {
             }],
         };
 
-        let witness = first_settlement_witness(
+        let witness = settlement_data_to_witness(
             &settlement_data,
             false,
-            ChannelFeatures::V2,
             Privkey::from(&[3u8; 32]),
             Privkey::from(&[4u8; 32]).pubkey(),
         );
-        let parsed = SettlementWitness::build_from_witness(
-            &[&[0u8], witness.as_slice()].concat(),
-            ChannelFeatures::V2,
-        )
-        .expect("V1 first settlement witness");
+        let parsed = SettlementWitness::build_from_witness(&[&[0u8], witness.as_slice()].concat())
+            .expect("V2 first settlement witness");
 
         assert_eq!(parsed.pending_htlcs[0].payment_hash, payment_hash.as_ref());
     }
@@ -2921,7 +2828,7 @@ mod tests {
             remote_amount: 2,
             tlcs: vec![],
         };
-        store.insert_watch_channel_with_features(
+        store.insert_watch_channel(
             NodeId::local(),
             [1u8; 32].into(),
             None,
@@ -2930,7 +2837,6 @@ mod tests {
             Privkey::from(&[3u8; 32]).pubkey(),
             Privkey::from(&[4u8; 32]).pubkey(),
             settlement_data,
-            ChannelFeatures::V2,
         );
 
         assert_eq!(
@@ -2943,14 +2849,14 @@ mod tests {
     fn unrelated_same_prefix_tx_does_not_pollute_store() {
         let lock_prefix = commitment_lock_prefix();
         let channel_id: Hash256 = [9u8; 32].into();
-        let payment_hash = [42u8; 20];
+        let payment_hash = [42u8; 32];
         let attacker_tx = tx_with_input_output_and_witness(
             OutPoint::new([8u8; 32].pack(), 0),
             settlement_lock(&lock_prefix),
             Some(settlement_witness(payment_hash)),
         );
         let mut watched_outpoints =
-            watched_outpoints(OutPoint::new([7u8; 32].pack(), 0), &[[43u8; 20]]);
+            watched_outpoints(OutPoint::new([7u8; 32].pack(), 0), &[[43u8; 32]]);
         let mut processed_tx_hashes = HashSet::new();
         let store = TestWatchtowerStore::default();
         let self_node_id = NodeId::local();
@@ -2974,7 +2880,7 @@ mod tests {
     fn watched_non_first_input_does_not_parse_unrelated_witness_zero() {
         let lock_prefix = commitment_lock_prefix();
         let channel_id: Hash256 = [9u8; 32].into();
-        let malicious_payment_hash = [42u8; 20];
+        let malicious_payment_hash = [42u8; 32];
         let watched_out_point = OutPoint::new([7u8; 32].pack(), 0);
         let fee_out_point = OutPoint::new([8u8; 32].pack(), 0);
         let tx = tx_with_inputs_outputs_and_witnesses(
@@ -3005,7 +2911,7 @@ mod tests {
     fn watched_settlement_tx_updates_store_and_tracks_next_outpoint() {
         let lock_prefix = commitment_lock_prefix();
         let channel_id: Hash256 = [9u8; 32].into();
-        let payment_hash = [42u8; 20];
+        let payment_hash = [42u8; 32];
         let first_commitment_out_point = OutPoint::new([7u8; 32].pack(), 0);
         let tx = tx_with_input_output_and_witness(
             first_commitment_out_point.clone(),
@@ -3052,8 +2958,11 @@ mod tests {
     fn shared_prefix_unlock_index_maps_to_exact_tlc() {
         let lock_prefix = commitment_lock_prefix();
         let channel_id: Hash256 = [9u8; 32].into();
-        let shared_prefix = [42u8; 20];
-        let tracked = [tracked_tlc(shared_prefix, 0), tracked_tlc(shared_prefix, 1)];
+        let first_hash = [42u8; 32];
+        let mut second_hash = first_hash;
+        second_hash[31] = 43;
+        assert_eq!(&first_hash[..20], &second_hash[..20]);
+        let tracked = [tracked_tlc(first_hash, 0), tracked_tlc(second_hash, 1)];
         assert_ne!(tracked[0].payment_hash, tracked[1].payment_hash);
 
         let first_commitment_out_point = OutPoint::new([7u8; 32].pack(), 0);
@@ -3061,7 +2970,7 @@ mod tests {
             first_commitment_out_point.clone(),
             settlement_lock(&lock_prefix),
             Some(settlement_witness_with_unlocks(
-                &[shared_prefix, shared_prefix],
+                &[first_hash, second_hash],
                 vec![Unlock {
                     unlock_type: 1,
                     with_preimage: false,
@@ -3101,7 +3010,7 @@ mod tests {
     fn final_party_unlock_keeps_pending_tlcs_tracked() {
         let lock_prefix = commitment_lock_prefix();
         let channel_id: Hash256 = [9u8; 32].into();
-        let payment_hashes = [[41u8; 20], [42u8; 20]];
+        let payment_hashes = [[41u8; 32], [42u8; 32]];
         let first_commitment_out_point = OutPoint::new([7u8; 32].pack(), 0);
         let tx = tx_with_input_output_and_witness(
             first_commitment_out_point.clone(),
@@ -3148,7 +3057,7 @@ mod tests {
         // reconciliation stays incomplete forever and `RemoveTlc` is never propagated upstream.
         let lock_prefix = commitment_lock_prefix();
         let channel_id: Hash256 = [9u8; 32].into();
-        let payment_hashes = [[41u8; 20], [42u8; 20]];
+        let payment_hashes = [[41u8; 32], [42u8; 32]];
         let first_commitment_out_point = OutPoint::new([7u8; 32].pack(), 0);
         let tracked = [
             tracked_tlc(payment_hashes[0], 0),
@@ -3219,7 +3128,7 @@ mod tests {
     fn final_party_unlock_only_removes_explicitly_unlocked_tlc() {
         let lock_prefix = commitment_lock_prefix();
         let channel_id: Hash256 = [9u8; 32].into();
-        let payment_hashes = [[41u8; 20], [42u8; 20]];
+        let payment_hashes = [[41u8; 32], [42u8; 32]];
         let first_commitment_out_point = OutPoint::new([7u8; 32].pack(), 0);
         let tx = tx_with_input_output_and_witness(
             first_commitment_out_point.clone(),
@@ -3276,7 +3185,7 @@ mod tests {
     fn watched_tx_does_not_track_extra_same_prefix_output() {
         let lock_prefix = commitment_lock_prefix();
         let channel_id: Hash256 = [9u8; 32].into();
-        let payment_hash = [42u8; 20];
+        let payment_hash = [42u8; 32];
         let first_commitment_out_point = OutPoint::new([7u8; 32].pack(), 0);
         let tx = tx_with_inputs_outputs_and_witnesses(
             vec![first_commitment_out_point.clone()],
@@ -3307,8 +3216,8 @@ mod tests {
     fn asc_processing_handles_parent_before_child_without_candidate_cache() {
         let lock_prefix = commitment_lock_prefix();
         let channel_id: Hash256 = [9u8; 32].into();
-        let parent_payment_hash = [42u8; 20];
-        let child_payment_hash = [43u8; 20];
+        let parent_payment_hash = [42u8; 32];
+        let child_payment_hash = [43u8; 32];
         let first_commitment_out_point = OutPoint::new([7u8; 32].pack(), 0);
         let parent_tx = tx_with_input_output_and_witness(
             first_commitment_out_point.clone(),
@@ -3378,8 +3287,8 @@ mod tests {
     fn one_pass_processing_misses_child_when_indexer_returns_child_before_parent() {
         let lock_prefix = commitment_lock_prefix();
         let channel_id: Hash256 = [9u8; 32].into();
-        let parent_payment_hash = [42u8; 20];
-        let child_payment_hash = [43u8; 20];
+        let parent_payment_hash = [42u8; 32];
+        let child_payment_hash = [43u8; 32];
         let first_commitment_out_point = OutPoint::new([7u8; 32].pack(), 0);
         let parent_tx = tx_with_input_output_and_witness(
             first_commitment_out_point.clone(),
@@ -3521,12 +3430,11 @@ mod tests {
             pending_remote_settlement_data: pending,
             local_settlement_data: preceding.clone(),
             revocation_data: None,
-            channel_features: ChannelFeatures::LEGACY,
+            channel_features: ChannelFeatures::V2,
         };
         let witness = settlement_data_to_witness(
             &preceding,
             true,
-            ChannelFeatures::LEGACY,
             channel_data.local_settlement_key.clone(),
             channel_data.remote_settlement_key,
         );

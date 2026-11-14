@@ -14,7 +14,6 @@ use crate::Pubkey;
 use crate::RevocationData;
 use crate::SettlementData;
 use bitflags::bitflags;
-use ckb_types::packed::Byte32 as MByte32;
 use ckb_types::packed::Script;
 use ckb_types::packed::Transaction;
 use ckb_types::prelude::{Pack, Unpack};
@@ -24,7 +23,6 @@ use musig2::secp::{Point, Scalar};
 use musig2::BinaryEncoding;
 use musig2::PartialSignature;
 use musig2::PubNonce;
-use musig2::{SecNonce, SecNonceBuilder};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::collections::{HashMap, VecDeque};
@@ -1083,63 +1081,6 @@ pub enum TlcReplayUpdate {
     Remove(RemoveTlc),
 }
 
-/// Version for `CommitDiff` serialization compatibility.
-pub const CURRENT_COMMIT_DIFF_VERSION: u8 = 2;
-
-fn default_commit_diff_version() -> u8 {
-    CURRENT_COMMIT_DIFF_VERSION
-}
-
-/// Optional template fields for `CommitmentSigned` replay.
-#[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct CommitmentSignedTemplate {
-    #[serde_as(as = "PubNonceAsBytes")]
-    pub next_commitment_nonce: PubNonce,
-    #[serde(default)]
-    #[serde_as(as = "Option<PartialSignatureAsBytes>")]
-    pub funding_tx_partial_signature: Option<PartialSignature>,
-}
-
-/// Replay ordering hint when both revoke+commit are owed.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
-pub enum ReplayOrderHint {
-    RevokeThenCommit,
-    CommitThenRevoke,
-}
-
-/// Everything needed to resend a pending `CommitmentSigned` after reconnect.
-#[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct CommitDiff {
-    /// Structure version for backward/forward compatibility.
-    #[serde(default = "default_commit_diff_version")]
-    pub version: u8,
-    /// Channel that owns this diff.
-    #[serde(default)]
-    pub channel_id: Hash256,
-    /// Local/remote commitment numbers when this commitment was sent.
-    #[serde(default)]
-    pub local_commitment_number_at_send: u64,
-    #[serde(default)]
-    pub remote_commitment_number_at_send: u64,
-    /// The commitment transaction (used for resign, not rebuilt).
-    #[serde_as(as = "EntityHex")]
-    pub commit_tx: Transaction,
-    /// TLC updates included in this commitment (for resending).
-    #[serde(default, alias = "tlc_updates")]
-    pub replay_updates: Vec<TlcReplayUpdate>,
-    /// Optional template fields for `CommitmentSigned` replay.
-    #[serde(default)]
-    pub commitment_signed_template: Option<CommitmentSignedTemplate>,
-    /// Optional replay ordering hint when both revoke+commit are owed.
-    #[serde(default)]
-    pub replay_order_hint: Option<ReplayOrderHint>,
-    /// Creation timestamp.
-    #[serde(default, alias = "created_at")]
-    pub created_at_ms: u64,
-}
-
 /// Information about a channel shutdown.
 #[serde_as]
 #[derive(Clone, Serialize, Deserialize, Eq, PartialEq, Debug)]
@@ -1151,17 +1092,6 @@ pub struct ShutdownInfo {
     pub signature: Option<PartialSignature>,
 }
 
-/// Message to revoke the previous commitment and acknowledge the new one.
-#[serde_as]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RevokeAndAck {
-    pub channel_id: Hash256,
-    #[serde_as(as = "PartialSignatureAsBytes")]
-    pub revocation_partial_signature: PartialSignature,
-    pub next_per_commitment_point: Pubkey,
-    #[serde_as(as = "PubNonceAsBytes")]
-    pub next_revocation_nonce: PubNonce,
-}
 // This struct holds the channel information that are only relevant when the channel
 // is public. The information includes signatures to the channel announcement message,
 // our config for the channel that will be published to the network (via ChannelUpdate).
@@ -1304,24 +1234,6 @@ pub fn get_commitment_point(commitment_seed: &[u8; 32], commitment_number: u64) 
     Privkey::from(&get_commitment_secret(commitment_seed, commitment_number)).pubkey()
 }
 
-/// Context for musig2 nonce derivation.
-pub enum Musig2Context {
-    /// Commitment transaction context.
-    Commitment,
-    /// Revocation context.
-    Revoke,
-}
-
-impl std::fmt::Display for Musig2Context {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let context_str = match self {
-            Musig2Context::Commitment => "COMMITMENT",
-            Musig2Context::Revoke => "REVOKE",
-        };
-        write!(f, "{}", context_str)
-    }
-}
-
 impl InMemorySigner {
     /// Generate an `InMemorySigner` from a seed.
     pub fn generate_from_seed(params: &[u8]) -> InMemorySigner {
@@ -1379,16 +1291,6 @@ impl InMemorySigner {
     pub fn derive_tlc_key(&self, new_commitment_number: u64) -> Privkey {
         let per_commitment_point = self.get_commitment_point(new_commitment_number);
         derive_private_key(&self.tlc_base_key, &per_commitment_point)
-    }
-
-    /// Derive a musig2 nonce for the given commitment number and context.
-    pub fn derive_musig2_nonce(&self, commitment_number: u64, context: Musig2Context) -> SecNonce {
-        let commitment_point = self.get_commitment_point(commitment_number);
-        let seckey = derive_private_key(&self.musig2_base_nonce, &commitment_point);
-
-        SecNonceBuilder::new(seckey.as_ref())
-            .with_extra_input(&context.to_string())
-            .build()
     }
 }
 
@@ -1645,40 +1547,12 @@ impl ChannelOpenRecord {
         }
     }
 
-    /// Create a new opening record with the negotiated channel features.
-    pub fn new_with_features(
-        channel_id: Hash256,
-        pubkey: Pubkey,
-        funding_amount: u128,
-        channel_features: ChannelFeatures,
-    ) -> Self {
-        let mut record = Self::new(channel_id, pubkey, funding_amount);
-        record.channel_features = channel_features;
-        record
-    }
-
     /// Create a new inbound record in the `WaitingForPeer` state.
     /// Used when a remote peer's `OpenChannel` request is queued for local acceptance.
     pub fn new_inbound(channel_id: Hash256, pubkey: Pubkey, remote_funding_amount: u128) -> Self {
         let mut record = Self::new(channel_id, pubkey, remote_funding_amount);
         record.is_acceptor = true;
         record
-    }
-
-    /// Create a new inbound record with the negotiated channel features.
-    pub fn new_inbound_with_features(
-        channel_id: Hash256,
-        pubkey: Pubkey,
-        remote_funding_amount: u128,
-        channel_features: ChannelFeatures,
-    ) -> Self {
-        Self::new_with_features(channel_id, pubkey, remote_funding_amount, channel_features)
-            .with_acceptor()
-    }
-
-    fn with_acceptor(mut self) -> Self {
-        self.is_acceptor = true;
-        self
     }
 
     /// Transition to a new status.
@@ -1735,24 +1609,21 @@ impl PendingNotifySettleTlc {
     }
 }
 
-/// Channel version features selecting the nonce protocol and commitment layout.
+/// Validated feature byte for the supported commitment-lock format.
 ///
-/// Zero represents the 57-byte Legacy args without a features byte. The only
-/// supported nonzero value is bit 0, appended to the 58-byte args.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize)]
+/// Only bit 0 is supported, appended to the 58-byte commitment-lock args.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
 pub struct ChannelFeatures(u8);
 
 impl ChannelFeatures {
-    /// Legacy commitment-lock layout, with no feature byte in the args.
-    pub const LEGACY: Self = Self(0);
     /// Channel V2 nonce sessions and full 32-byte TLC payment hashes on-chain.
     pub const V2: Self = Self(1);
 
     /// Accept only feature combinations supported by the current channel protocol.
     pub fn from_bits(bits: u8) -> Result<Self, String> {
         match bits {
-            0 | 1 => Ok(Self(bits)),
+            1 => Ok(Self(bits)),
             _ => Err(format!("unsupported channel features: 0x{bits:x}")),
         }
     }
@@ -1762,41 +1633,16 @@ impl ChannelFeatures {
         self.0
     }
 
-    /// Whether the settlement witness commits the full payment hash.
-    pub fn has_full_payment_hash(self) -> bool {
-        self.is_v2()
-    }
+    /// Length of the supported commitment-lock args.
+    pub const LOCK_ARGS_LEN: usize = 58;
 
-    /// Whether this persisted feature byte selects Channel V2 in the node.
-    pub fn is_v2(self) -> bool {
-        self.0 & Self::V2.0 != 0
-    }
+    /// Length of the complete TLC payment hash in settlement witnesses.
+    pub const PAYMENT_HASH_LEN: usize = 32;
+}
 
-    /// Length of the commitment-lock args in bytes.
-    pub fn lock_args_len(self) -> usize {
-        if self.has_full_payment_hash() {
-            58
-        } else {
-            57
-        }
-    }
-
-    /// Length of a TLC payment hash in the settlement witness.
-    pub fn payment_hash_len(self) -> usize {
-        if self.has_full_payment_hash() {
-            32
-        } else {
-            20
-        }
-    }
-
-    /// Select the bitmap for a new channel from both peers' advertised support.
-    pub fn for_negotiated(ours_supports: bool, peer_supports: Option<bool>) -> Self {
-        if ours_supports && peer_supports == Some(true) {
-            Self::V2
-        } else {
-            Self::LEGACY
-        }
+impl Default for ChannelFeatures {
+    fn default() -> Self {
+        Self::V2
     }
 }
 
@@ -1894,18 +1740,6 @@ pub struct ChannelActorData {
     #[serde_as(as = "EntityHex")]
     pub local_shutdown_script: Script,
 
-    /// Basically the latest remote nonce sent by the peer with the CommitmentSigned message,
-    /// but we will only update this field after we have sent a RevokeAndAck to the peer.
-    #[serde_as(as = "Option<PubNonceAsBytes>")]
-    pub last_committed_remote_nonce: Option<PubNonce>,
-
-    #[serde_as(as = "Option<PubNonceAsBytes>")]
-    pub remote_revocation_nonce_for_verify: Option<PubNonce>,
-    #[serde_as(as = "Option<PubNonceAsBytes>")]
-    pub remote_revocation_nonce_for_send: Option<PubNonce>,
-    #[serde_as(as = "Option<PubNonceAsBytes>")]
-    pub remote_revocation_nonce_for_next: Option<PubNonce>,
-
     /// The latest commitment transaction we're holding,
     /// it can be broadcasted to blockchain by us to force close the channel.
     #[serde_as(as = "Option<EntityHex>")]
@@ -1927,7 +1761,6 @@ pub struct ChannelActorData {
     /// A flag to indicate whether the channel is reestablishing,
     /// we won't process any messages until the channel is reestablished.
     pub reestablishing: bool,
-    pub last_revoke_ack_msg: Option<RevokeAndAck>,
 
     pub created_at: SystemTime,
 
@@ -1950,18 +1783,8 @@ pub struct ChannelActorData {
     /// Channel features decided once at channel-open and never changed.
     #[serde(default)]
     pub channel_features: ChannelFeatures,
-    /// Independent V2 owner sessions; legacy zero-feature channels have none.
-    #[serde(default)]
-    pub session_v2: Option<ChannelSessionV2>,
-}
-
-fn partial_signature_to_molecule(partial_signature: PartialSignature) -> MByte32 {
-    MByte32::from_slice(partial_signature.serialize().as_ref()).expect("[Byte; 32] from [u8; 32]")
-}
-
-fn pub_nonce_to_molecule(pub_nonce: PubNonce) -> molecule_fiber::PubNonce {
-    molecule_fiber::PubNonce::from_slice(pub_nonce.to_bytes().as_ref())
-        .expect("PubNonce from 66 bytes")
+    /// Independent owner signing sessions.
+    pub session: ChannelSessionV2,
 }
 
 impl From<PubNonce> for molecule_fiber::PubNonce {
@@ -1976,41 +1799,6 @@ impl TryFrom<molecule_fiber::PubNonce> for PubNonce {
 
     fn try_from(value: molecule_fiber::PubNonce) -> Result<Self, Self::Error> {
         PubNonce::from_bytes(value.as_slice())
-    }
-}
-
-impl From<RevokeAndAck> for molecule_fiber::RevokeAndAck {
-    fn from(revoke_and_ack: RevokeAndAck) -> Self {
-        molecule_fiber::RevokeAndAck::new_builder()
-            .channel_id(revoke_and_ack.channel_id.into())
-            .revocation_partial_signature(partial_signature_to_molecule(
-                revoke_and_ack.revocation_partial_signature,
-            ))
-            .next_per_commitment_point(revoke_and_ack.next_per_commitment_point.into())
-            .next_revocation_nonce(pub_nonce_to_molecule(revoke_and_ack.next_revocation_nonce))
-            .build()
-    }
-}
-
-impl TryFrom<molecule_fiber::RevokeAndAck> for RevokeAndAck {
-    type Error = anyhow::Error;
-
-    fn try_from(revoke_and_ack: molecule_fiber::RevokeAndAck) -> Result<Self, Self::Error> {
-        Ok(RevokeAndAck {
-            channel_id: revoke_and_ack.channel_id().into(),
-            revocation_partial_signature: PartialSignature::from_slice(
-                revoke_and_ack.revocation_partial_signature().as_slice(),
-            )
-            .map_err(|e| anyhow::anyhow!(e))?,
-            next_per_commitment_point: revoke_and_ack
-                .next_per_commitment_point()
-                .try_into()
-                .map_err(|e: secp256k1::Error| anyhow::anyhow!(e))?,
-            next_revocation_nonce: PubNonce::from_bytes(
-                revoke_and_ack.next_revocation_nonce().as_slice(),
-            )
-            .map_err(|e| anyhow::anyhow!("{}", e))?,
-        })
     }
 }
 

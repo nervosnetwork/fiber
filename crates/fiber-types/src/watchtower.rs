@@ -60,14 +60,10 @@ pub struct SettlementTlc {
 }
 
 /// Encode a TLC using the channel's exact on-chain witness layout.
-pub fn settlement_tlc_witness(
-    tlc: &SettlementTlc,
-    for_remote: bool,
-    features: ChannelFeatures,
-) -> Vec<u8> {
+pub fn settlement_tlc_witness(tlc: &SettlementTlc, for_remote: bool) -> Vec<u8> {
     let mut bytes = vec![((tlc.hash_algorithm as u8) << 1) + u8::from(tlc.tlc_id.is_received())];
     bytes.extend_from_slice(&tlc.payment_amount.to_le_bytes());
-    bytes.extend_from_slice(&tlc.payment_hash.as_ref()[..features.payment_hash_len()]);
+    bytes.extend_from_slice(&tlc.payment_hash.as_ref()[..ChannelFeatures::PAYMENT_HASH_LEN]);
     let local = tlc.local_key.pubkey();
     let keys = if for_remote {
         [tlc.remote_key, local]
@@ -86,7 +82,6 @@ pub fn settlement_tlc_witness(
 pub fn settlement_data_witness(
     data: &SettlementData,
     for_remote: bool,
-    features: ChannelFeatures,
     local: Pubkey,
     remote: Pubkey,
 ) -> Result<Vec<u8>, String> {
@@ -94,7 +89,7 @@ pub fn settlement_data_witness(
         .map_err(|_| "TLC count exceeds witness encoding limit (max 255)")?;
     let mut bytes = vec![len];
     for tlc in &data.tlcs {
-        bytes.extend_from_slice(&settlement_tlc_witness(tlc, for_remote, features));
+        bytes.extend_from_slice(&settlement_tlc_witness(tlc, for_remote));
     }
     let sides = if for_remote {
         [(remote, data.remote_amount), (local, data.local_amount)]

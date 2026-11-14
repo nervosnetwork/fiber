@@ -55,17 +55,15 @@ docker exec -it fiber-node fnn-cli --auth-token 'YOUR_TOKEN' info
 
 The full CLI reference is available in [../crates/fiber-cli/README.md](../crates/fiber-cli/README.md).
 
-## Migrate data with Docker
+## Upgrading to the V2-only image
 
-When upgrading between versions that require a storage migration, stop the node container first and back up the mounted data directory.
+Stop the container and back up its complete mounted data directory. The new image
+can migrate the recognized old database layout in the same mount without closing
+V2 channels. Migration refuses unfinished V1 channels, settlement or legacy
+watchtower work before changing records or the database version. Use the old
+image to finish that work, then retry with the new image.
 
-Current releases run the unified migration system when `fnn` opens the store. If the existing database predates the unified migration epoch, upgrade it with the v0.8.x `fnn-migrate` binary before starting a current image:
-
-```bash
-docker run --rm -it \
-  -v "$(pwd)/fiber-node:/fiber" \
-  nervos/fiber:<v0.8.x-release-tag> \
-  fnn-migrate -d /fiber
-```
-
-After the legacy migration finishes, start the new image version again with the same bind mount.
+Completed V1 history is archived without deletion, and V2 signing sessions are
+preserved. Do not run an old image against the migrated store or restore stale
+channel data after new commitments have been signed. See the
+[upgrade instructions](../README.md#upgrading-to-the-v2-only-release).

@@ -26,7 +26,7 @@ pub const DEFAULT_MIN_SHUTDOWN_FEE: u64 = CKB_SHANNONS; // 1 CKB prepared for sh
 /// By default, listen to any tcp port allocated by the kernel.
 pub const DEFAULT_LISTENING_ADDR: &str = "/ip4/0.0.0.0/tcp/0";
 
-const MIN_OCCUPIED_CAPACITY: u64 = 99 * CKB_SHANNONS; // 99 CKB for V1 commitment lock occupied capacity
+const MIN_OCCUPIED_CAPACITY: u64 = 99 * CKB_SHANNONS; // 99 CKB for V2 commitment lock occupied capacity
 
 /// Default ckb funding amount when auto accepting an open channel request.
 pub const DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT: u64 =
@@ -649,7 +649,7 @@ impl FiberConfig {
         // ...
         let mut fv = FeatureVector::default();
         // Channel V2 combines independent nonce sessions and full on-chain hashes.
-        fv.set_channel_v2_optional();
+        fv.set_channel_v2_required();
         fv
     }
 }

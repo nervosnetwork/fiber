@@ -4164,12 +4164,7 @@ async fn test_mpp_waiting_ack_settlement_hands_off_to_durable_retry_queue() {
     node_1.wait_for_held_fiber_messages(1).await;
     let payee_channel_state = node_2.get_channel_actor_state(payee_channel_id);
     assert!(payee_channel_state.tlc_state.waiting_ack);
-    assert!(payee_channel_state
-        .session_v2
-        .as_ref()
-        .unwrap()
-        .outgoing
-        .is_some());
+    assert!(payee_channel_state.session.outgoing.is_some());
     let payee_channel_actor = node_2
         .get_channel_actor(payee_channel_id)
         .await

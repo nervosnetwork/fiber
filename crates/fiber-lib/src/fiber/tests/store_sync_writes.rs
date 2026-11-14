@@ -44,7 +44,7 @@ struct SyncProbe {
 
 impl Migration for SyncProbe {
     fn version(&self) -> &str {
-        "20260302200001"
+        "20261114000001"
     }
 
     fn migrate(&self, store: &dyn MigrationStore) -> Result<(), String> {

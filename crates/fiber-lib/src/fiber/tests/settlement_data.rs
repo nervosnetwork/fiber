@@ -13,7 +13,7 @@ fn state_with_remove_wait_prev_ack(
 ) -> ChannelActorState {
     let mut state =
         create_test_channel_state_with_tlc(gen_rand_sha256_hash(), 0, 300, payment_hash, None);
-    state.channel_features = ChannelFeatures::LEGACY;
+    state.channel_features = ChannelFeatures::V2;
     state.to_local_amount = 800;
     state.to_remote_amount = 200;
 

@@ -3,11 +3,9 @@ use ckb_types::packed::Script;
 use musig2::{secp::Point, KeyAggContext};
 
 use crate::ckb::contracts::{get_script_by_contract, Contract};
-use crate::fiber::onchain_tlc_reconcile::{OnChainTlcSettlement, StoredOnChainTlcSettlement};
+use crate::fiber::onchain_tlc_reconcile::OnChainTlcSettlement;
 use fiber_types::TLCId;
-use fiber_types::{
-    ChannelData, ChannelFeatures, Hash256, NodeId, Privkey, Pubkey, RevocationData, SettlementData,
-};
+use fiber_types::{ChannelData, Hash256, NodeId, Privkey, Pubkey, RevocationData, SettlementData};
 
 pub trait WatchtowerStore {
     /// Get the channels currently being watched together with their owning node.
@@ -33,33 +31,6 @@ pub trait WatchtowerStore {
         local_funding_pubkey: Pubkey,
         remote_funding_pubkey: Pubkey,
         settlement_data: SettlementData,
-    ) {
-        self.insert_watch_channel_with_features(
-            node_id,
-            channel_id,
-            funding_udt_type_script,
-            local_settlement_key,
-            remote_settlement_key,
-            local_funding_pubkey,
-            remote_funding_pubkey,
-            settlement_data,
-            ChannelFeatures::LEGACY,
-        );
-    }
-
-    /// Insert a channel while retaining its negotiated witness layout.
-    #[allow(clippy::too_many_arguments)]
-    fn insert_watch_channel_with_features(
-        &self,
-        node_id: NodeId,
-        channel_id: Hash256,
-        funding_udt_type_script: Option<Script>,
-        local_settlement_key: Privkey,
-        remote_settlement_key: Pubkey,
-        local_funding_pubkey: Pubkey,
-        remote_funding_pubkey: Pubkey,
-        settlement_data: SettlementData,
-        channel_features: ChannelFeatures,
     );
     /// Remove a channel from the store, the watchtower will stop monitoring the channel
     fn remove_watch_channel(&self, node_id: NodeId, channel_id: Hash256);
@@ -121,14 +92,14 @@ pub trait WatchtowerStore {
         settlement: OnChainTlcSettlement,
     );
 
-    /// Returns an exact settlement proof for this TLC, or a legacy prefix-keyed record.
+    /// Returns an exact settlement proof keyed by channel and TLC ID.
     fn get_onchain_tlc_settlement(
         &self,
         node_id: &NodeId,
         channel_id: &Hash256,
         tlc_id: TLCId,
         payment_hash: &Hash256,
-    ) -> Option<StoredOnChainTlcSettlement>;
+    ) -> Option<OnChainTlcSettlement>;
 }
 
 /// Compute the x-only aggregated public key for a channel.

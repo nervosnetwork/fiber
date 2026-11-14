@@ -1,102 +1,45 @@
 //! Independent, durable signing sessions for commitment-owner V2 exchanges.
 
-use fiber_types::{Hash256, NoncePurposeV2, Privkey, Pubkey, SigningNonceV2};
+use fiber_types::{
+    ChannelSessionV2, Hash256, NoncePurposeV2, Privkey, Pubkey, SigningNonceV2,
+    INITIAL_COMMITMENT_NUMBER,
+};
 use musig2::{
-    AggNonce, BinaryEncoding, KeyAggContext, PartialSignature, SecNonce, SecNonceBuilder,
+    AggNonce, BinaryEncoding, KeyAggContext, PartialSignature, PubNonce, SecNonce, SecNonceBuilder,
 };
 
 pub(super) const SESSION_MARKER: u32 = 0x56320001;
 
-// Opening parameter adapters reuse the existing parameter validation, never V1
-// signing state. The placeholder revocation field is discarded at construction.
-pub(super) fn open_parameters(m: super::types::OpenChannelV2) -> super::types::OpenChannel {
-    super::types::OpenChannel {
-        chain_hash: m.chain_hash,
-        channel_id: m.channel_id,
-        funding_udt_type_script: m.funding_udt_type_script,
-        funding_amount: m.funding_amount,
-        shutdown_script: m.shutdown_script,
-        reserved_ckb_amount: m.reserved_ckb_amount,
-        funding_fee_rate: m.funding_fee_rate,
-        commitment_fee_rate: m.commitment_fee_rate,
-        commitment_delay_epoch: m.commitment_delay_epoch,
-        max_tlc_value_in_flight: m.max_tlc_value_in_flight,
-        max_tlc_number_in_flight: m.max_tlc_number_in_flight,
-        channel_flags: m.channel_flags,
-        first_per_commitment_point: m.first_per_commitment_point,
-        second_per_commitment_point: m.second_per_commitment_point,
-        funding_pubkey: m.funding_pubkey,
-        tlc_basepoint: m.tlc_basepoint,
-        next_revocation_nonce: m.initial_commitment_nonce.clone(),
-        next_commitment_nonce: m.initial_commitment_nonce,
-        channel_announcement_nonce: m.channel_announcement_nonce,
+/// Allocate the initial owner-bound signing session before constructing a channel.
+pub(crate) fn new_session(
+    channel_id: Hash256,
+    key: &Privkey,
+    remote_nonce: Option<PubNonce>,
+) -> ChannelSessionV2 {
+    ChannelSessionV2 {
+        marker: SESSION_MARKER,
+        own: allocate_nonce(
+            channel_id,
+            key.pubkey(),
+            INITIAL_COMMITMENT_NUMBER + 1,
+            NoncePurposeV2::Commitment,
+            key,
+        ),
+        own_retired: Vec::new(),
+        bootstrap_remote_nonce: remote_nonce.clone(),
+        remote_ready: None,
+        remote_nonce,
+        remote_number: INITIAL_COMMITMENT_NUMBER + 1,
+        outgoing: None,
+        incoming: None,
+        pending_incoming: None,
+        pending_ack: None,
+        last_ack: None,
+        revocation_effect: None,
+        bootstrap_settlement: None,
+        remove_effects: Vec::new(),
+        closing: None,
     }
-}
-
-pub(super) fn opening_message(
-    m: super::types::OpenChannel,
-    nonce: musig2::PubNonce,
-) -> super::types::FiberMessage {
-    super::types::FiberMessage::open_channel_v2(super::types::OpenChannelV2 {
-        chain_hash: m.chain_hash,
-        channel_id: m.channel_id,
-        funding_udt_type_script: m.funding_udt_type_script,
-        funding_amount: m.funding_amount,
-        shutdown_script: m.shutdown_script,
-        reserved_ckb_amount: m.reserved_ckb_amount,
-        funding_fee_rate: m.funding_fee_rate,
-        commitment_fee_rate: m.commitment_fee_rate,
-        commitment_delay_epoch: m.commitment_delay_epoch,
-        max_tlc_value_in_flight: m.max_tlc_value_in_flight,
-        max_tlc_number_in_flight: m.max_tlc_number_in_flight,
-        channel_flags: m.channel_flags,
-        first_per_commitment_point: m.first_per_commitment_point,
-        second_per_commitment_point: m.second_per_commitment_point,
-        funding_pubkey: m.funding_pubkey,
-        tlc_basepoint: m.tlc_basepoint,
-        initial_commitment_nonce: nonce,
-        channel_features: 1,
-        channel_announcement_nonce: m.channel_announcement_nonce,
-    })
-}
-
-pub(super) fn accept_parameters(m: super::types::AcceptChannelV2) -> super::types::AcceptChannel {
-    super::types::AcceptChannel {
-        channel_id: m.channel_id,
-        funding_amount: m.funding_amount,
-        shutdown_script: m.shutdown_script,
-        reserved_ckb_amount: m.reserved_ckb_amount,
-        max_tlc_value_in_flight: m.max_tlc_value_in_flight,
-        max_tlc_number_in_flight: m.max_tlc_number_in_flight,
-        first_per_commitment_point: m.first_per_commitment_point,
-        second_per_commitment_point: m.second_per_commitment_point,
-        funding_pubkey: m.funding_pubkey,
-        tlc_basepoint: m.tlc_basepoint,
-        next_revocation_nonce: m.initial_commitment_nonce.clone(),
-        next_commitment_nonce: m.initial_commitment_nonce,
-        channel_announcement_nonce: m.channel_announcement_nonce,
-    }
-}
-
-pub(super) fn accepting_message(
-    m: super::types::AcceptChannel,
-    nonce: musig2::PubNonce,
-) -> super::types::FiberMessage {
-    super::types::FiberMessage::accept_channel_v2(super::types::AcceptChannelV2 {
-        channel_id: m.channel_id,
-        funding_amount: m.funding_amount,
-        shutdown_script: m.shutdown_script,
-        reserved_ckb_amount: m.reserved_ckb_amount,
-        max_tlc_value_in_flight: m.max_tlc_value_in_flight,
-        max_tlc_number_in_flight: m.max_tlc_number_in_flight,
-        first_per_commitment_point: m.first_per_commitment_point,
-        second_per_commitment_point: m.second_per_commitment_point,
-        funding_pubkey: m.funding_pubkey,
-        tlc_basepoint: m.tlc_basepoint,
-        initial_commitment_nonce: nonce,
-        channel_features: 1,
-        channel_announcement_nonce: m.channel_announcement_nonce,
-    })
 }
 
 fn secret_nonce(record: &SigningNonceV2, key: &Privkey) -> SecNonce {
