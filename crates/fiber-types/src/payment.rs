@@ -11,7 +11,35 @@ use serde_with::serde_as;
 use std::collections::HashMap;
 use strum::{AsRefStr, EnumString};
 
-/// The upstream TLC identifying one hosted forwarding execution. Never sent on the wire.
+/// Identifies the received TLC that a public LSP node is forwarding to a hosted tenant.
+/// Both fields are interpreted from the public node's perspective, not the tenant's.
+///
+/// A payment hash identifies a hashlock, not a unique local payment execution. The
+/// public node may already have an unrelated outgoing payment with the same hash.
+/// Combining this key with the hash in [`PaymentSessionKey`] keeps the hosted
+/// session, its attempts and their outcomes separate from that outgoing payment.
+///
+/// ```text
+/// Payer P                  Public T / LSP                  Hosted tenant U
+///    |                            |                              |
+///    |-- channel C_PT, TLC #7 --->|-- channel C_TU, TLC #21 ---->|
+///    |                            |                              |
+///    |                  upstream_tlc_key = (C_PT, 7)             |
+///    |                  carried by the hosted session,          |
+///    |                  its attempts and outgoing TLC #21       |
+/// ```
+///
+/// The key records the source of the forwarding work, not the downstream TLC's
+/// own location: in the example it is `(C_PT, 7)`, never `(C_TU, 21)`. Downstream
+/// retries or MPP parts may create different outgoing TLCs, but all retain the
+/// same upstream key. Replaying the same incoming request after a lost reply or
+/// restart therefore selects the same session; its outcome can be matched to the
+/// exact upstream delivery rather than to any payment sharing its hash.
+///
+/// This is local execution and persistence metadata, never a peer wire field or
+/// a replacement hashlock. Ordinary payments and ordinary trampoline forwarding
+/// leave [`PaymentSessionKey::upstream_tlc_key`] absent. Distinguishing incoming
+/// TLCs does not by itself implement aggregation of multiple upstream MPP parts.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct UpstreamTlcKey {
     /// Public node's incoming channel for the held upstream TLC.
