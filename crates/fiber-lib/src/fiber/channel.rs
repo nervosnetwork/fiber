@@ -11779,9 +11779,8 @@ where
         ack: RevokeAndAckV2,
     ) -> ProcessingChannelResult {
         state.ensure_v2_not_quarantined()?;
-        // A reconnect can replay an ACK we already processed before we re-signed the commitment
-        // it refers to. Its bytes match `last_ack`, so it is an idempotent duplicate: ignore it
-        // instead of trying to verify it against the regenerated session.
+        // A reconnect can replay an ACK we already processed. Its bytes match `last_ack`, so it
+        // is an idempotent duplicate: ignore it instead of trying to verify it again.
         let packed_ack: fiber_types::gen::fiber::RevokeAndAckV2 = ack.clone().into();
         if state
             .session
@@ -11797,11 +11796,9 @@ where
             return Ok(());
         }
         let verified = state.stage_ack_v2(&ack)?;
-        // A reconnect abandons the outstanding commitment and re-signs it with a fresh nonce, so
-        // the peer may still answer the *previous* round with an ACK that can no longer be
-        // verified. Such an ACK is stale by construction: the peer answers the regenerated
-        // commitment with a new ACK, so dropping it costs nothing. Outside recovery an
-        // unverifiable ACK remains a hard error.
+        // While the handshake is still in flight the peer may answer a superseded round with an
+        // ACK that can no longer be verified. The replayed commitment gets its own ACK, so
+        // dropping this one costs nothing. Outside recovery an unverifiable ACK is a hard error.
         let accepted = match state.accept_ack_v2(myself, &ack, verified) {
             Ok(accepted) => accepted,
             Err(err) if state.reestablishing => {

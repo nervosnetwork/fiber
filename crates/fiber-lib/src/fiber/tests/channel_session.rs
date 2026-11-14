@@ -6591,8 +6591,7 @@ async fn test_v2_pending_aggregation_context_survives_restart() {
 
 #[tokio::test]
 async fn test_v2_shutdown_after_force_close_preserves_confirmation_flag() {
-    let (a, b, id) =
-        create_nodes_with_established_channel(100000000000, 11800000000, false).await;
+    let (a, b, id) = create_nodes_with_established_channel(100000000000, 11800000000, false).await;
     let mut sa = a.get_channel_actor_state(id);
     let mut sb = b.get_channel_actor_state(id);
     let captured = Arc::new(Mutex::new(Vec::new()));
@@ -6607,7 +6606,7 @@ async fn test_v2_shutdown_after_force_close_preserves_confirmation_flag() {
     actor_b
         .shutdown_v2(
             &mut sb,
-            super::super::ShutdownCommand {
+            super::ShutdownCommand {
                 force: false,
                 close_script: None,
                 fee_rate: None,
@@ -6615,20 +6614,12 @@ async fn test_v2_shutdown_after_force_close_preserves_confirmation_flag() {
         )
         .await
         .unwrap();
-    let peer_shutdown = ShutdownV2::try_from(
-        sb.session
-            .closing
-            .as_ref()
-            .unwrap()
-            .shutdown
-            .clone(),
-    )
-    .unwrap();
+    let peer_shutdown =
+        ShutdownV2::try_from(sb.session.closing.as_ref().unwrap().shutdown.clone()).unwrap();
 
     // Local force close published the commitment transaction and waits for it.
-    sa.state = ChannelState::ShuttingDown(
-        fiber_types::ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION,
-    );
+    sa.state =
+        ChannelState::ShuttingDown(fiber_types::ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION);
     sa.session.closing = None;
     assert!(actor_a
         .receive_shutdown_v2(&mut sa, peer_shutdown)
@@ -6636,9 +6627,7 @@ async fn test_v2_shutdown_after_force_close_preserves_confirmation_flag() {
         .is_err());
     assert_eq!(
         sa.state,
-        ChannelState::ShuttingDown(
-            fiber_types::ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION
-        )
+        ChannelState::ShuttingDown(fiber_types::ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION)
     );
     assert!(sa.remote_shutdown_info.is_none());
     assert!(sa.session.closing.is_none());
@@ -6675,23 +6664,16 @@ async fn test_v2_shutdown_after_force_close_preserves_confirmation_flag() {
 
 #[tokio::test]
 async fn test_v2_force_close_reconnect_keeps_outgoing_session_and_restart_state() {
-    let (a, b, id) =
-        create_nodes_with_established_channel(100000000000, 11800000000, false).await;
+    let (a, b, id) = create_nodes_with_established_channel(100000000000, 11800000000, false).await;
     let mut state = a.get_channel_actor_state(id);
     let receiver = b.get_channel_actor_state(id);
     let myself = a.get_channel_actor(id).await.unwrap();
     state.prepare_outgoing_v2(false).unwrap();
     state.tlc_state.waiting_ack = true;
-    let stored = state
-        .session
-        .outgoing
-        .as_ref()
-        .unwrap()
-        .clone();
+    let stored = state.session.outgoing.as_ref().unwrap().clone();
     state.mark_reestablishing_offline();
-    state.state = ChannelState::ShuttingDown(
-        fiber_types::ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION,
-    );
+    state.state =
+        ChannelState::ShuttingDown(fiber_types::ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION);
 
     let captured = Arc::new(Mutex::new(Vec::new()));
     let (network, task) = Actor::spawn(None, CaptureNetwork, captured.clone())
@@ -6713,9 +6695,7 @@ async fn test_v2_force_close_reconnect_keeps_outgoing_session_and_restart_state(
     assert_eq!(after.request.as_slice(), stored.request.as_slice());
     assert_eq!(
         state.state,
-        ChannelState::ShuttingDown(
-            fiber_types::ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION
-        )
+        ChannelState::ShuttingDown(fiber_types::ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION)
     );
     // No signature is attempted in a phase that already published a close.
     assert!(!captured.lock().unwrap().iter().any(|message| matches!(
@@ -6742,8 +6722,7 @@ async fn test_v2_force_close_reconnect_keeps_outgoing_session_and_restart_state(
 
 #[tokio::test]
 async fn test_v2_force_close_during_ready_keeps_restart_state_valid() {
-    let (a, b, id) =
-        create_nodes_with_established_channel(100000000000, 11800000000, false).await;
+    let (a, b, id) = create_nodes_with_established_channel(100000000000, 11800000000, false).await;
     let mut state = a.get_channel_actor_state(id);
     // Recreate the pre-peer-Ready window: our Ready rotated the session nonce to 2,
     // but the commitment counters have not advanced yet.
@@ -6755,7 +6734,7 @@ async fn test_v2_force_close_during_ready_keeps_restart_state_valid() {
         remote: 1,
     };
     {
-        let session = state.session;
+        let session = &mut state.session;
         session.own.number = 2;
         session.remote_number = 1;
     }
@@ -6769,7 +6748,7 @@ async fn test_v2_force_close_during_ready_keeps_restart_state_valid() {
     actor
         .handle_shutdown_command(
             &mut state,
-            super::super::ShutdownCommand {
+            super::ShutdownCommand {
                 force: true,
                 close_script: None,
                 fee_rate: None,
