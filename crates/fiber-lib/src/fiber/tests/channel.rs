@@ -12465,16 +12465,7 @@ impl MockChainActorMiddleware for InjectExternalFundingInputMiddleware {
 }
 
 #[tokio::test]
-async fn test_external_funding_spent_input_automatically_aborts_stuck_channel_v1() {
-    do_test_external_funding_spent_input_automatically_aborts_stuck_channel(false).await;
-}
-
-#[tokio::test]
 async fn test_external_funding_spent_input_automatically_aborts_stuck_channel_v2() {
-    do_test_external_funding_spent_input_automatically_aborts_stuck_channel(true).await;
-}
-
-async fn do_test_external_funding_spent_input_automatically_aborts_stuck_channel(v2: bool) {
     use crate::ckb::contracts::{get_cell_deps_by_contracts, get_script_by_contract};
     use ckb_types::packed::CellOutput;
 
@@ -12534,20 +12525,6 @@ async fn do_test_external_funding_spent_input_automatically_aborts_stuck_channel
         TxStatus::Committed(..)
     ));
 
-    for node in [&mut node_a, &mut node_b] {
-        if !v2 {
-            let mut features = FeatureVector::default();
-            features.unset_channel_v2_optional();
-            features.unset_channel_v2_required();
-            node.update_node_features_and_wait(features).await;
-            call!(node.network_actor, |reply| {
-                NetworkActorMessage::new_command(NetworkActorCommand::TestEnableLegacyFixture(
-                    reply,
-                ))
-            })
-            .expect("node alive");
-        }
-    }
     node_a.connect_to(&mut node_b).await;
 
     let (channel_id, unsigned_tx) =
@@ -12676,16 +12653,7 @@ async fn do_test_external_funding_spent_input_automatically_aborts_stuck_channel
 }
 
 #[tokio::test]
-async fn test_external_funding_acceptor_not_locked_by_peer_tx_update_v1() {
-    do_test_external_funding_acceptor_not_locked_by_peer_tx_update(false).await;
-}
-
-#[tokio::test]
 async fn test_external_funding_acceptor_not_locked_by_peer_tx_update_v2() {
-    do_test_external_funding_acceptor_not_locked_by_peer_tx_update(true).await;
-}
-
-async fn do_test_external_funding_acceptor_not_locked_by_peer_tx_update(v2: bool) {
     use crate::fiber::types::TxUpdate;
 
     init_tracing();
@@ -12783,7 +12751,7 @@ async fn do_test_external_funding_acceptor_not_locked_by_peer_tx_update(v2: bool
         channel_id
     }
 
-    let [mut node_a, mut node_b] = new_2_nodes_with_auto_accept_version(v2).await;
+    let [mut node_a, mut node_b] = new_2_nodes_with_auto_accept().await;
 
     // Scenario 1: Peer flips acceptor's `signed_submitted = true` via `TxUpdate` without sending
     // `CommitmentSigned`. Acceptor must still allow `abandon_channel`.
@@ -12861,18 +12829,6 @@ async fn do_test_external_funding_acceptor_not_locked_by_peer_tx_update(v2: bool
             });
         }
         let node = NetworkNode::new_with_config(builder.build()).await;
-        if !v2 {
-            let mut features = FeatureVector::default();
-            features.unset_channel_v2_optional();
-            features.unset_channel_v2_required();
-            node.update_node_features_and_wait(features).await;
-            call!(node.network_actor, |reply| {
-                NetworkActorMessage::new_command(NetworkActorCommand::TestEnableLegacyFixture(
-                    reply,
-                ))
-            })
-            .expect("node alive");
-        }
         nodes.push(node);
     }
     let [mut opener, mut acceptor]: [NetworkNode; 2] = nodes.try_into().expect("2 nodes");

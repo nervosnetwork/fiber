@@ -42,8 +42,7 @@ use crate::fiber::onchain_tlc_reconcile::{
     has_unresolved_onchain_tlcs, has_unresolved_onchain_tlcs_for_snapshot, parse_commitment_lock,
     recover_shutdown_settlement_data_with_superseded, resolve_onchain_tlc,
     settlement_data_for_commitment, tracked_settlement_tlcs, verify_and_select_settlement_data,
-    verify_and_select_settlement_data_with_superseded,
-    OnChainTimeoutTlcRole, OnChainTlcResolution,
+    verify_and_select_settlement_data_with_superseded, OnChainTimeoutTlcRole, OnChainTlcResolution,
 };
 use crate::fiber::tests::settle_tlc_set_command_tests::{
     create_test_channel_state_with_tlc, MockStore,
