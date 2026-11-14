@@ -1,7 +1,6 @@
 use fiber_types::{ChannelActorData, ChannelSessionV2};
-use fiber_types_0100::ChannelActorData as OldChannelActorData;
 
-use super::decode_as_new;
+use super::{decode_as_new, OldChannelActorData};
 
 pub(super) fn released_v2(
     channel: ChannelActorData,
