@@ -1,6 +1,7 @@
 use fiber_store::backend::StorageBackend;
 use fiber_store::db_migrate::DbMigrate;
 use fiber_store::migrations::decode_as_new;
+use fiber_types_0100::ChannelActorData as OldChannelActorData;
 
 #[path = "../../../../fiber-store/src/migrations/v2_only/test_utils.rs"]
 mod migration_fixtures;
