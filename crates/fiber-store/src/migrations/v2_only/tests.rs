@@ -1,6 +1,11 @@
+use ckb_types::prelude::Entity;
 use fiber_types::channel_v2_validation::decode_and_validate_channel_actor_data;
 use fiber_types::sample::StoreSample;
-use fiber_types::schema::{CHANNEL_OPEN_RECORD_PREFIX, PUBKEY_CHANNEL_ID_PREFIX};
+use fiber_types::schema::{
+    CHANNEL_OPEN_RECORD_PREFIX, CHANNEL_OUTPOINT_CHANNEL_ID_PREFIX,
+    CHANNEL_SHUTDOWN_SETTLEMENT_PREFIX, PUBKEY_CHANNEL_ID_PREFIX, WATCHTOWER_CHANNEL_PREFIX,
+    WATCHTOWER_SUPERSEDED_SETTLEMENT_PREFIX,
+};
 use fiber_types::{ChannelActorData, ChannelSessionV2};
 use fiber_types_0100::sample::StoreSample as OldStoreSample;
 
@@ -37,6 +42,22 @@ fn legacy(seed: u64, state: OldChannelState) -> OldChannelActorData {
     let mut record = OldChannelActorData::samples(seed).remove(0);
     record.state = state;
     record
+}
+
+fn local_watchtower_pair(seed: u64) -> (OldChannelActorData, super::OldChannelData) {
+    let mut channel = legacy(
+        seed,
+        OldChannelState::Closed(OldCloseFlags::UNCOOPERATIVE_LOCAL),
+    );
+    let mut watch = super::OldChannelData::samples(seed).remove(0);
+    watch.channel_id = channel.id;
+    watch.local_funding_pubkey = channel.signer.funding_key.pubkey();
+    watch.commitment_contract_features = fiber_types_0100::CommitmentContractFeatures::LEGACY;
+    let mut remote_keys = channel.local_channel_public_keys.clone();
+    remote_keys.funding_pubkey = watch.remote_funding_pubkey;
+    channel.remote_channel_public_keys = Some(remote_keys);
+    assert_ne!(watch.local_funding_pubkey, watch.remote_funding_pubkey);
+    (channel, watch)
 }
 
 fn snapshot(store: &crate::Store) -> Vec<(Vec<u8>, Vec<u8>)> {
@@ -271,17 +292,42 @@ fn test_full_hash_v1_is_not_mistaken_for_v2() {
 }
 
 #[test]
-fn test_unfinished_opening_without_a_v2_session_is_rejected() {
-    for features in [
-        fiber_types_0100::CommitmentContractFeatures::LEGACY,
-        fiber_types_0100::CommitmentContractFeatures::ONCHAIN_FULL_PAYMENT_HASH,
+fn test_unfunded_orphan_openings_are_archived_verbatim() {
+    for is_acceptor in [false, true] {
+        for features in [
+            fiber_types_0100::CommitmentContractFeatures::LEGACY,
+            fiber_types_0100::CommitmentContractFeatures::ONCHAIN_FULL_PAYMENT_HASH,
+        ] {
+            let (_dir, store) = database();
+            let mut record = OldChannelOpenRecord::samples(66).remove(0);
+            record.commitment_contract_features = features;
+            record.status = OldChannelOpeningStatus::WaitingForPeer;
+            record.is_acceptor = is_acceptor;
+            record.funding_amount = 100_000_000_000; // Requested amount, not locked funds.
+            let key = [&[CHANNEL_OPEN_RECORD_PREFIX], record.channel_id.as_ref()].concat();
+            let encoded = bincode::serialize(&record).unwrap();
+            store.put(&key, &encoded);
+            migrate(&store).unwrap();
+            assert!(store.get(&key).is_none());
+            assert_eq!(store.get(archive_key(&key)).unwrap(), encoded);
+        }
+    }
+}
+
+#[test]
+fn test_orphan_openings_past_waiting_for_peer_still_block() {
+    for status in [
+        OldChannelOpeningStatus::FundingTxBuilding,
+        OldChannelOpeningStatus::FundingTxBroadcasted,
+        OldChannelOpeningStatus::ChannelReady,
     ] {
         let (_dir, store) = database();
         let mut record = OldChannelOpenRecord::samples(66).remove(0);
-        record.commitment_contract_features = features;
-        record.status = OldChannelOpeningStatus::WaitingForPeer;
-        let key = [&[CHANNEL_OPEN_RECORD_PREFIX], record.channel_id.as_ref()].concat();
-        store.put(key, bincode::serialize(&record).unwrap());
+        record.status = status;
+        store.put(
+            [&[CHANNEL_OPEN_RECORD_PREFIX], record.channel_id.as_ref()].concat(),
+            bincode::serialize(&record).unwrap(),
+        );
         let before = snapshot(&store);
         assert!(migrate(&store).is_err());
         assert_eq!(snapshot(&store), before);
@@ -343,4 +389,292 @@ fn test_archive_conflict_is_rejected_without_writes() {
     let before = snapshot(&store);
     assert!(migrate(&store).is_err());
     assert_eq!(snapshot(&store), before);
+}
+
+#[test]
+fn test_closed_local_v1_watchtower_history_is_archived_and_resumes() {
+    for archived_actor in [false, true] {
+        let (_dir, store) = database();
+        let (channel, watch) = local_watchtower_pair(80);
+        let channel_key = actor_key(&channel.id);
+        let watch_key = [&[WATCHTOWER_CHANNEL_PREFIX], channel.id.as_ref()].concat();
+        let superseded_key = [
+            &[WATCHTOWER_SUPERSEDED_SETTLEMENT_PREFIX],
+            channel.id.as_ref(),
+        ]
+        .concat();
+        let channel_bytes = bincode::serialize(&channel).unwrap();
+        let watch_bytes = bincode::serialize(&watch).unwrap();
+        let superseded =
+            bincode::serialize(&vec![watch.pending_remote_settlement_data.clone()]).unwrap();
+        store.put(
+            if archived_actor {
+                archive_key(&channel_key)
+            } else {
+                channel_key.clone()
+            },
+            &channel_bytes,
+        );
+        store.put(&watch_key, &watch_bytes);
+        store.put(&superseded_key, &superseded);
+        migrate(&store).unwrap();
+        for (key, bytes) in [
+            (&channel_key, &channel_bytes),
+            (&watch_key, &watch_bytes),
+            (&superseded_key, &superseded),
+        ] {
+            assert!(store.get(key).is_none());
+            assert_eq!(store.get(archive_key(key)).unwrap(), *bytes);
+        }
+        let completed = snapshot(&store);
+        migrate(&store).unwrap();
+        assert_eq!(snapshot(&store), completed);
+    }
+}
+
+#[test]
+fn test_local_watchtower_archive_conflict_preserves_all_records() {
+    for prefix in [
+        WATCHTOWER_CHANNEL_PREFIX,
+        WATCHTOWER_SUPERSEDED_SETTLEMENT_PREFIX,
+    ] {
+        let (_dir, store) = database();
+        let (channel, watch) = local_watchtower_pair(87);
+        store.put(
+            actor_key(&channel.id),
+            bincode::serialize(&channel).unwrap(),
+        );
+        store.put(
+            [&[WATCHTOWER_CHANNEL_PREFIX], channel.id.as_ref()].concat(),
+            bincode::serialize(&watch).unwrap(),
+        );
+        store.put(
+            [
+                &[WATCHTOWER_SUPERSEDED_SETTLEMENT_PREFIX],
+                channel.id.as_ref(),
+            ]
+            .concat(),
+            b"retained snapshot",
+        );
+        let conflicting_key = [&[prefix], channel.id.as_ref()].concat();
+        store.put(archive_key(&conflicting_key), b"conflicting archived bytes");
+        let before = snapshot(&store);
+        assert!(migrate(&store)
+            .unwrap_err()
+            .to_string()
+            .contains("Conflicting V1 archive"));
+        assert_eq!(snapshot(&store), before);
+    }
+}
+
+#[test]
+fn test_local_v1_watchtower_requires_final_state_and_matching_funding_keys() {
+    for scenario in [
+        "waiting",
+        "confirmed",
+        "delivery",
+        "retry",
+        "missing actor",
+        "local key",
+        "remote key",
+    ] {
+        let (_dir, store) = database();
+        let v2 = sample(81);
+        store.put(
+            actor_key(&v2.id),
+            bincode::serialize(&released_v2(v2)).unwrap(),
+        );
+        let (mut channel, mut watch) = local_watchtower_pair(82);
+        match scenario {
+            "waiting" => {
+                channel.state = OldChannelState::Closed(
+                    OldCloseFlags::UNCOOPERATIVE_LOCAL | OldCloseFlags::WAITING_ONCHAIN_SETTLEMENT,
+                )
+            }
+            "confirmed" => {
+                channel.state = OldChannelState::Closed(
+                    OldCloseFlags::UNCOOPERATIVE_LOCAL
+                        | OldCloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED,
+                )
+            }
+            "delivery" => {
+                channel
+                    .waiting_forward_tlc_tasks
+                    .insert(fiber_types_0100::TLCId::Received(0), [1; 32]);
+            }
+            "retry" => channel.retryable_tlc_operations.push_back(
+                fiber_types_0100::RetryableTlcOperation::RemoveTlc(
+                    fiber_types_0100::TLCId::Received(0),
+                    fiber_types_0100::RemoveTlcReason::RemoveTlcFulfill(
+                        fiber_types_0100::RemoveTlcFulfill {
+                            payment_preimage: [1; 32].into(),
+                        },
+                    ),
+                ),
+            ),
+            "local key" => watch.local_funding_pubkey = watch.remote_funding_pubkey,
+            "remote key" => watch.remote_funding_pubkey = watch.local_funding_pubkey,
+            "missing actor" => {}
+            _ => unreachable!(),
+        }
+        if scenario != "missing actor" {
+            store.put(
+                actor_key(&channel.id),
+                bincode::serialize(&channel).unwrap(),
+            );
+        }
+        store.put(
+            [&[WATCHTOWER_CHANNEL_PREFIX], channel.id.as_ref()].concat(),
+            bincode::serialize(&watch).unwrap(),
+        );
+        let before = snapshot(&store);
+        assert!(migrate(&store).is_err(), "{scenario}");
+        assert_eq!(snapshot(&store), before, "{scenario}");
+    }
+}
+
+#[test]
+fn test_third_party_legacy_watchtower_cannot_borrow_a_closed_local_state() {
+    let (_dir, store) = database();
+    let (channel, watch) = local_watchtower_pair(83);
+    store.put(
+        actor_key(&channel.id),
+        bincode::serialize(&channel).unwrap(),
+    );
+    let client = [7; 33];
+    let key = [
+        &[WATCHTOWER_CHANNEL_PREFIX],
+        client.as_slice(),
+        channel.id.as_ref(),
+    ]
+    .concat();
+    store.put(key, bincode::serialize(&watch).unwrap());
+    let before = snapshot(&store);
+    let error = migrate(&store).unwrap_err().to_string();
+    assert!(
+        error.contains("Unsupported legacy third-party watchtower"),
+        "{error}"
+    );
+    assert!(error.contains(&channel.id.to_string()), "{error}");
+    assert_eq!(snapshot(&store), before);
+}
+
+#[test]
+fn test_waiting_orphan_with_funding_evidence_is_not_archived() {
+    for evidence in [
+        "outpoint",
+        "snapshot",
+        "commit diff",
+        "pubkey index",
+        "different pubkey index",
+        "watchtower",
+        "superseded",
+    ] {
+        let (_dir, store) = database();
+        let mut record = OldChannelOpenRecord::samples(84).remove(0);
+        record.status = OldChannelOpeningStatus::WaitingForPeer;
+        store.put(
+            [&[CHANNEL_OPEN_RECORD_PREFIX], record.channel_id.as_ref()].concat(),
+            bincode::serialize(&record).unwrap(),
+        );
+        let (key, value) = match evidence {
+            "outpoint" => (
+                [
+                    &[CHANNEL_OUTPOINT_CHANNEL_ID_PREFIX],
+                    ckb_types::packed::OutPoint::default().as_slice(),
+                ]
+                .concat(),
+                bincode::serialize(&record.channel_id).unwrap(),
+            ),
+            "snapshot" => (
+                [
+                    &[CHANNEL_SHUTDOWN_SETTLEMENT_PREFIX],
+                    record.channel_id.as_ref(),
+                ]
+                .concat(),
+                b"retained settlement snapshot".to_vec(),
+            ),
+            "superseded" => (
+                [
+                    &[WATCHTOWER_SUPERSEDED_SETTLEMENT_PREFIX],
+                    record.channel_id.as_ref(),
+                ]
+                .concat(),
+                b"retained superseded snapshot".to_vec(),
+            ),
+            "commit diff" => (
+                [
+                    &[super::PENDING_COMMIT_DIFF_PREFIX],
+                    record.channel_id.as_ref(),
+                ]
+                .concat(),
+                b"retained signed replay intent".to_vec(),
+            ),
+            "pubkey index" | "different pubkey index" => {
+                let pubkey = if evidence == "different pubkey index" {
+                    let pubkey = super::OldChannelData::samples(85)
+                        .remove(0)
+                        .local_funding_pubkey;
+                    assert_ne!(pubkey, record.pubkey);
+                    pubkey
+                } else {
+                    record.pubkey
+                };
+                (
+                    [
+                        &[PUBKEY_CHANNEL_ID_PREFIX],
+                        pubkey.serialize().as_slice(),
+                        record.channel_id.as_ref(),
+                    ]
+                    .concat(),
+                    bincode::serialize(&OldChannelState::ChannelReady).unwrap(),
+                )
+            }
+            "watchtower" => {
+                let mut watch = super::OldChannelData::samples(84).remove(0);
+                watch.channel_id = record.channel_id;
+                watch.commitment_contract_features =
+                    fiber_types_0100::CommitmentContractFeatures::ONCHAIN_FULL_PAYMENT_HASH;
+                (
+                    [&[WATCHTOWER_CHANNEL_PREFIX], record.channel_id.as_ref()].concat(),
+                    bincode::serialize(&watch).unwrap(),
+                )
+            }
+            _ => unreachable!(),
+        };
+        store.put(key, value);
+        let before = snapshot(&store);
+        assert!(migrate(&store).is_err(), "{evidence}");
+        assert_eq!(snapshot(&store), before, "{evidence}");
+    }
+}
+
+#[test]
+fn test_funding_evidence_for_another_channel_does_not_block_orphan_retirement() {
+    let (_dir, store) = database();
+    let mut record = OldChannelOpenRecord::samples(85).remove(0);
+    record.status = OldChannelOpeningStatus::WaitingForPeer;
+    let key = [&[CHANNEL_OPEN_RECORD_PREFIX], record.channel_id.as_ref()].concat();
+    let encoded = bincode::serialize(&record).unwrap();
+    store.put(&key, &encoded);
+    let other = sample(86);
+    store.put(
+        actor_key(&other.id),
+        bincode::serialize(&released_v2(other.clone())).unwrap(),
+    );
+    store.put(
+        [
+            &[CHANNEL_OUTPOINT_CHANNEL_ID_PREFIX],
+            ckb_types::packed::OutPoint::default().as_slice(),
+        ]
+        .concat(),
+        bincode::serialize(&other.id).unwrap(),
+    );
+    migrate(&store).unwrap();
+    assert!(store.get(&key).is_none());
+    assert_eq!(store.get(archive_key(&key)).unwrap(), encoded);
+    assert_eq!(
+        store.get(actor_key(&other.id)).unwrap(),
+        bincode::serialize(&other).unwrap()
+    );
 }

@@ -59,9 +59,10 @@ The full CLI reference is available in [../crates/fiber-cli/README.md](../crates
 
 Stop the container and back up its complete mounted data directory. The new image
 can migrate the recognized old database layout in the same mount without closing
-V2 channels. Migration refuses unfinished V1 channels, settlement or legacy
-watchtower work before changing records or the database version. Use the old
-image to finish that work, then retry with the new image.
+V2 channels. Migration refuses unfinished local V1 channels or settlement before
+changing records or the database version. Use the old image to finish that work,
+then retry with the new image. Legacy third-party watchtower entries are not
+supported by this migration; keep their original protection running.
 
 Completed V1 history is archived without deletion, and V2 signing sessions are
 preserved. Do not run an old image against the migrated store or restore stale

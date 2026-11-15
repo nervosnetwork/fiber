@@ -122,8 +122,7 @@ pub struct CreateWatchChannelParams {
     pub remote_funding_pubkey: Pubkey,
     /// Settlement data
     pub settlement_data: SettlementData,
-    /// Channel feature bitmap as hex. Only "0x1" (V2 with full payment hashes) is supported.
-    #[serde(default)]
+    /// Required channel feature bitmap as hex. Only "0x1" (V2 with full payment hashes) is supported.
     pub channel_features: ChannelFeatures,
 }
 

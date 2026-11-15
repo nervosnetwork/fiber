@@ -1,11 +1,13 @@
 //! Admit existing V2 channels without retaining a V1 runtime.
+use std::collections::HashSet;
+
 use bincode::Options;
 use ckb_types::{packed::OutPoint, prelude::*};
 use fiber_types::channel_v2_validation::validate_channel_v2;
 use fiber_types::schema::{
     ARCHIVED_V1_PREFIX, CHANNEL_ACTOR_STATE_PREFIX, CHANNEL_OPEN_RECORD_PREFIX,
     CHANNEL_OUTPOINT_CHANNEL_ID_PREFIX, CHANNEL_SHUTDOWN_SETTLEMENT_PREFIX,
-    PUBKEY_CHANNEL_ID_PREFIX, WATCHTOWER_CHANNEL_PREFIX,
+    PUBKEY_CHANNEL_ID_PREFIX, WATCHTOWER_CHANNEL_PREFIX, WATCHTOWER_SUPERSEDED_SETTLEMENT_PREFIX,
 };
 use fiber_types::{
     ChannelActorData, ChannelData, ChannelFeatures, ChannelOpenRecord, ChannelSessionV2,
@@ -293,6 +295,27 @@ fn scan(store: &dyn MigrationStore, apply: bool) -> Result<(), String> {
             }
         }
     }
+    // A missing actor is not enough: retain orphan openings backed by funding/watch data.
+    let mut funded_channels = HashSet::new();
+    if upgrading {
+        for (_, value) in store.iter_prefix(&[CHANNEL_OUTPOINT_CHANNEL_ID_PREFIX]) {
+            funded_channels.insert(decode_exact::<OldHash256>(&value)?);
+        }
+        for prefix in [
+            PUBKEY_CHANNEL_ID_PREFIX,
+            WATCHTOWER_CHANNEL_PREFIX,
+            WATCHTOWER_SUPERSEDED_SETTLEMENT_PREFIX,
+        ] {
+            for (key, _) in store.iter_prefix(&[prefix]) {
+                if key.len() < 33 {
+                    return Err("Invalid channel/watchtower index key".to_owned());
+                }
+                let mut id = [0; 32];
+                id.copy_from_slice(&key[key.len() - 32..]);
+                funded_channels.insert(OldHash256::from(id));
+            }
+        }
+    }
     for (key, value) in store.iter_prefix(&[CHANNEL_OPEN_RECORD_PREFIX]) {
         if !upgrading {
             let record: ChannelOpenRecord = decode_exact(&value)?;
@@ -309,9 +332,22 @@ fn scan(store: &dyn MigrationStore, apply: bool) -> Result<(), String> {
             .get(&actor_key(&record.channel_id))
             .map(|bytes| channel_record(&bytes, version))
             .transpose()?;
+        let unfunded_orphan = actor.is_none()
+            && record.status == OldChannelOpeningStatus::WaitingForPeer
+            && !funded_channels.contains(&record.channel_id)
+            && [
+                [
+                    &[CHANNEL_SHUTDOWN_SETTLEMENT_PREFIX],
+                    record.channel_id.as_ref(),
+                ]
+                .concat(),
+                [&[PENDING_COMMIT_DIFF_PREFIX], record.channel_id.as_ref()].concat(),
+            ]
+            .iter()
+            .all(|key| store.get(key).is_none());
         if matches!(actor, Some(ChannelRecord::Current(_))) {
             let _: ChannelOpenRecord = decode_exact(&value)?;
-        } else if matches!(record.status, OldChannelOpeningStatus::Failed) {
+        } else if matches!(record.status, OldChannelOpeningStatus::Failed) || unfunded_orphan {
             archive(store, &[key], apply)?;
         } else {
             block(
@@ -341,22 +377,40 @@ fn scan(store: &dyn MigrationStore, apply: bool) -> Result<(), String> {
                 let _: ChannelData = decode_exact(&value)?;
             }
             0 => {
+                if key.len() != 33 {
+                    return Err(format!(
+                        "Unsupported legacy third-party watchtower record for channel {}. This migration supports only local legacy watchtower entries with a safely closed matching local channel. Keep client-owned legacy protection on the original service; it cannot be automatically retired.",
+                        record.channel_id
+                    ));
+                }
                 let closed = archived_or_closed_channel(store, &record.channel_id, version)?;
-                let local_closed =
-                    key.len() == 33
-                        && closed.is_some_and(|channel| {
-                            channel.signer.funding_key.pubkey() == record.local_funding_pubkey
-                                && channel.remote_channel_public_keys.as_ref().is_some_and(
-                                    |remote| remote.funding_pubkey == record.remote_funding_pubkey,
-                                )
-                        });
+                let local_closed = closed.is_some_and(|channel| {
+                    channel.signer.funding_key.pubkey() == record.local_funding_pubkey
+                        && channel
+                            .remote_channel_public_keys
+                            .as_ref()
+                            .is_some_and(|remote| {
+                                remote.funding_pubkey == record.remote_funding_pubkey
+                            })
+                });
                 if !local_closed {
                     block(
                         record.channel_id.to_string(),
-                        "V1 watchtower protection still needs the old binary".to_owned(),
+                        "Local V1 watchtower entry has no safely closed matching local channel and funding keys".to_owned(),
                     );
                 } else {
-                    archive(store, &[key], apply)?;
+                    archive(
+                        store,
+                        &[
+                            key,
+                            [
+                                &[WATCHTOWER_SUPERSEDED_SETTLEMENT_PREFIX],
+                                record.channel_id.as_ref(),
+                            ]
+                            .concat(),
+                        ],
+                        apply,
+                    )?;
                 }
             }
             _ => return Err("Unsupported watchtower channel features".to_owned()),

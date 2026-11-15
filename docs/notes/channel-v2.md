@@ -142,10 +142,21 @@ current V2 session type to decode develop's appended session field. The full-has
 contract flag alone does not establish that a channel speaks V2. Migration never
 creates a missing signing session or re-signs a transaction.
 
-Preflight checks all records before writing. Unfinished V1 channels, settlement,
-delivery and legacy watchtower obligations require the old binary to finish;
-rejection preserves records and the version. Valid V2 channels are converted
-without changing their signing intents or replay history. Fully completed V1
+Preflight checks all records before writing. Unfinished local V1 channels,
+settlement and delivery require the old binary to finish; rejection preserves
+records and the version. Local legacy watchtower records and superseded snapshots
+are archived only with a safely closed local channel and matching funding keys.
+Missing local state is not treated as completion. Legacy third-party watchtower
+entries are explicitly unsupported and must retain their original protection;
+migration does not query the chain or add a new completion marker.
+
+An orphan `WaitingForPeer` opening can be archived without restoring an actor,
+but only if it has no funding outpoint index, channel index, signed replay intent,
+settlement snapshot or watchtower evidence. Other unfinished opening stages remain
+blocked. Watchtower registration RPCs require explicit V2 features; absence is not
+interpreted as V2.
+
+Valid V2 channels are converted without changing their signing intents or replay history. Fully completed V1
 records and indexes are archived byte-for-byte and never restored as actors.
 Each archive move is atomic; interrupted upgrades recognize already-converted V2
 records and archived V1 records on retry. Back up the complete data directory

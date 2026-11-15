@@ -102,10 +102,23 @@ need to be closed. The new storage epoch is `20261113000001`.
    history unchanged. Fully completed V1 records and their indexes are retained
    byte-for-byte in a read-only archive, outside the V2 runtime's channel tables.
 
-Unfinished legacy watchtower duties and opening records that cannot be proven V2
-also require the old binary. Unsupported, corrupt and nonempty unversioned stores
-are not cleared or silently initialized. Older database layouts must first be
+Legacy watchtower history is archived only for this node's safely closed channels,
+with matching funding keys. Local entries without a trustworthy final channel
+state are refused. Legacy third-party watchtower entries are outside this
+migration's supported scope: keep their original service and database protecting
+them; they are never silently discarded. No chain queries or replacement sessions
+are used to guess whether a legacy channel has finished.
+
+Orphan inbound/outbound `WaitingForPeer` opening records are archived only when
+no actor or persisted funding/watch evidence exists. The requested funding amount
+is not evidence that funds were locked. Later opening stages still require the
+old binary to finish recovery. Unsupported, corrupt and nonempty unversioned
+stores are not cleared or silently initialized. Older layouts must first be
 upgraded with their matching old release's migration tools.
+
+Watchtower RPC clients must explicitly send `channel_features: "0x1"` when creating
+a watched channel. Missing features, the old field name alone, and explicit
+legacy features are rejected rather than silently registered as V2.
 
 Do not run the old binary on the migrated database, or restore a stale backup as a
 live channel after the upgraded node has signed new commitments.
