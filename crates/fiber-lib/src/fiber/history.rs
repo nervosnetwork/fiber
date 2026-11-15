@@ -316,9 +316,10 @@ impl InternalResult {
                         need_retry = false;
                         self.fail_node(nodes, len - 1);
                     } else {
-                        // maybe the previous hop is malicious
-                        self.fail_pair(nodes, index - 1);
-                        self.succeed_range_pairs(nodes, 0, index - 2);
+                        // The recipient reported a bad final amount or expiry. The previous
+                        // hop forwarded that TLC, so penalize its outgoing channel.
+                        self.fail_pair(nodes, index);
+                        self.succeed_range_pairs(nodes, 0, index - 1);
                     }
                 }
                 TlcErrorCode::IncorrectOrUnknownPaymentDetails
