@@ -10,7 +10,8 @@ PR #1512 using the project's real three-node CKB dev-chain environment.
 - Node2 force-closes one of those channels before Node3 settles the invoice.
 - Before the closing transaction is mined, the test observes the fulfilled
   split as `Outbound.RemoteRemoved` on Node1 and `Inbound.LocalRemoved` on
-  Node2, while the payer payment is still `Inflight`.
+  Node2. The payer payment is already `Success` with the valid preimage, while
+  the existing TLC still awaits on-chain reconciliation.
 - After mining the force-close transaction, Node1 explicitly runs the same
   shutdown check used by the existing `shutdown-force` E2E instead of waiting
   for the five-minute background scan.

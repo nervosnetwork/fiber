@@ -3,10 +3,10 @@ use ckb_types::packed::Script;
 use musig2::{secp::Point, KeyAggContext};
 
 use crate::ckb::contracts::{get_script_by_contract, Contract};
-use crate::fiber::onchain_tlc_reconcile::{OnChainTlcSettlement, StoredOnChainTlcSettlement};
+use crate::fiber::onchain_tlc_reconcile::OnChainTlcSettlement;
 use fiber_types::TLCId;
 use fiber_types::{
-    ChannelData, CommitmentContractFeatures, Hash256, NodeId, RevocationData, SettlementData,
+    ChannelData, ChannelFeatures, Hash256, NodeId, RevocationData, SettlementData,
     WatchChannelKeys, WatchtowerSignerState,
 };
 
@@ -45,7 +45,7 @@ pub trait WatchtowerStore {
             funding_udt_type_script,
             keys,
             settlement_data,
-            CommitmentContractFeatures::LEGACY,
+            ChannelFeatures::V2,
         );
     }
 
@@ -57,7 +57,7 @@ pub trait WatchtowerStore {
         funding_udt_type_script: Option<Script>,
         keys: WatchChannelKeys,
         settlement_data: SettlementData,
-        commitment_contract_features: CommitmentContractFeatures,
+        channel_features: ChannelFeatures,
     );
     /// Stop monitoring a channel. Returns false if removal is refused for a live channel.
     fn remove_watch_channel(&self, node_id: NodeId, channel_id: Hash256) -> bool;
@@ -85,6 +85,16 @@ pub trait WatchtowerStore {
         channel_id: Hash256,
         pending_remote_settlement_data: SettlementData,
     );
+
+    /// Return superseded same-number remote settlement snapshots that remain valid
+    /// candidates until their commitment number is revoked.
+    fn get_superseded_remote_settlements(
+        &self,
+        _node_id: &NodeId,
+        _channel_id: &Hash256,
+    ) -> Vec<SettlementData> {
+        Vec::new()
+    }
 
     /// Update the settlement data of a channel, the watchtower will use this data to settle the local commitment transaction of a force closed channel
     fn update_local_settlement(
@@ -142,14 +152,14 @@ pub trait WatchtowerStore {
         settlement: OnChainTlcSettlement,
     );
 
-    /// Returns an exact settlement proof for this TLC, or a legacy prefix-keyed record.
+    /// Returns an exact settlement proof keyed by channel and TLC ID.
     fn get_onchain_tlc_settlement(
         &self,
         node_id: &NodeId,
         channel_id: &Hash256,
         tlc_id: TLCId,
         payment_hash: &Hash256,
-    ) -> Option<StoredOnChainTlcSettlement>;
+    ) -> Option<OnChainTlcSettlement>;
 }
 
 /// Compute the x-only aggregated public key for a channel.

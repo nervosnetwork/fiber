@@ -39,8 +39,8 @@ Fiber wire protocol.
 - Multi-node tenants or tenant migration between LSP processes.
 - A complete phone-side balance and TLC policy engine.
 - Final invoice authorization and preimage custody semantics.
-- A claim that the current permissive nonce-reuse compatibility mode is safe
-  for production.
+- Compatibility with unreleased V1 hosted-LSP signer data or number-only nonce
+  derivation. Only the current V2 channel protocol is supported.
 - Offline pre-signing for every watchtower or justice path.
 
 ## Current hosted LSP baseline
@@ -105,6 +105,28 @@ and the SDK agent E2E. It does not yet provide a durable push mailbox,
 long-lived signer sessions with fencing, or an explicit signer-readiness gate
 for buffered delivery. The current agent uses the general WebSocket signing subscriptions with
 pending-state recovery. See [RPC subscriptions](../../crates/fiber-lib/src/rpc/README.md#subscription).
+
+### V2 public material and nonce binding
+
+External signing uses only V2 channel sessions. Opening material contains a
+fresh SDK-owned `v2_nonces` pool; follow-up material replenishes that pool and
+provides indexed `commitment_points`. The SDK persists nonce secrets before
+publishing their public counterparts. The hosted process stores only public
+allocations, never a substitute local signer for an external channel.
+
+Each `Musig2SigningContent.v2` binds the channel ID, commitment owner and exact
+public nonce. Together with the slot's number and purpose, ordered keys,
+plaintext and aggregate nonce, this identifies an immutable signing context.
+The owner is the commitment owner, not automatically the local signer or the
+counter selected by a legacy commitment number. Cooperative closes use the
+separate `Closing` purpose. Participant evidence is read from the persisted V2
+session; received-message phases also provide the peer partial signature.
+
+Replaying an identical request is idempotent. Rebinding an allocated nonce to
+a changed channel, owner, number, purpose or signing context must fail closed,
+including after an SDK or node restart. No warning-only compatibility mode or
+V1 wire/runtime path is permitted. Unreleased old hosted-LSP stores need not
+migrate to this format; use fresh stores and fresh channels for prototype data.
 
 ### Waiting for hosted channel signatures
 
@@ -612,11 +634,11 @@ checks, or crash recovery.
 | --- | --- | --- |
 | 1. Shared types and SDK signer core | Implemented | `fiber-lsp-sdk`, canonical registration payloads, RootSigner restore, channel-key isolation, signer persistence, native tests, and WASM compilation are present. |
 | 2. Tenant registration | Implemented prototype | Client request IDs with signed timestamps, durable replay rejection, RootSigner proof, server-derived TenantId, and tenant Biscuit issuance are implemented. Production credential recovery and rotation remain open. |
-| 3. Channel signer state | Implemented prototype | Persistent internal/external channel signer states, migrations, signature verification, and idempotent receipts are present. Missing/partial next material and fail-closed nonce-reuse tests remain release gates. |
+| 3. Channel signer state | Implemented prototype | V2 public-only external allocations, SDK-owned fresh nonce pools, signature verification, and idempotent receipts. Missing/partial next material and fail-closed replay/crash tests remain release gates; unreleased LSP data compatibility is not required. |
 | 4. Tenant-scoped signer RPC | Partially implemented | Namespace authorization and hydrated submission are implemented. Status queries and subscription pending replays read the namespaced store without hydration; stronger cross-tenant concurrency coverage remains. |
 | 5. Hosted U-T external signer E2E | Implemented prototype | Registration, external funding, subscription/signing, SDK restart, cooperative close, hosted incoming payments, and watchtower scenarios are covered. Production `Auto` policy and a complete external-signer outbound payment E2E remain. |
 | 6. Gateway and readiness | Not implemented | There is no durable push mailbox, session fencing, or `TenantSignReady` delivery gate; the SDK agent subscribes to persisted signing state. |
-| 7. Remaining signer policy | Partially implemented | External watchtower signing, tenant eviction recovery, preimage claim, and revocation E2Es are present. Strict nonce behavior, invoice authorization policy, and crash/race coverage remain. |
+| 7. Remaining signer policy | Partially implemented | External watchtower signing, tenant eviction recovery, preimage claim, and revocation E2Es are present. V2 nonce binding must remain fail-closed; invoice authorization policy and crash/race coverage remain release gates. |
 
 Each phase also runs formatting and targeted clippy checks. A change to shared
 types or persistence additionally runs the applicable native/WASM checks,
@@ -644,9 +666,9 @@ This integration can remove channel and selected on-chain private keys from the
 LSP process. It does not automatically remove trust in the LSP for node
 identity, invoice construction, routing availability, or denial of service.
 
-Furthermore, the current signer prototype records nonce-reuse conflicts as
-warnings for compatibility with the existing Fiber signing lifecycle. That
-mode is useful for validating the abstraction boundary but must not be treated
-as a deployable remote signer policy. Strict nonce behavior, state-root
-verification, invoice authorization, and preimage policy remain release
-blockers for a non-custodial product.
+Nonce-reuse conflicts must be rejected, never downgraded to compatibility
+warnings. The V2 external signing boundary requires fresh SDK-owned nonces and
+exact durable allocation bindings; the node cannot recover missing material
+with local secrets. State-root verification, invoice authorization, preimage
+policy, and crash/race validation remain release gates for a non-custodial
+product.

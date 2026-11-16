@@ -87,6 +87,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Type `CchOrderStatus`](#type-cchorderstatus)
     * [Type `Channel`](#type-channel)
     * [Type `ChannelBasePublicKeys`](#type-channelbasepublickeys)
+    * [Type `ChannelFeatures`](#type-channelfeatures)
     * [Type `ChannelInfo`](#type-channelinfo)
     * [Type `ChannelOpenSignerMaterial`](#type-channelopensignermaterial)
     * [Type `ChannelSigningStatus`](#type-channelsigningstatus)
@@ -94,7 +95,6 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Type `ChannelUpdateInfo`](#type-channelupdateinfo)
     * [Type `CkbInvoice`](#type-ckbinvoice)
     * [Type `CkbInvoiceStatus`](#type-ckbinvoicestatus)
-    * [Type `CommitmentContractFeatures`](#type-commitmentcontractfeatures)
     * [Type `Currency`](#type-currency)
     * [Type `GetPaymentCommandResult`](#type-getpaymentcommandresult)
     * [Type `Hash256`](#type-hash256)
@@ -427,6 +427,10 @@ Opens a channel with external funding. The node will negotiate the channel with 
  the LSP public node as `pubkey`, explicit `public: false`, and
  `external_channel_signer`, and the response includes `opening_context`.
  Repeating identical parameters resumes the pending opening or returns its frozen result.
+ With an external channel signer, the result is a proposal for independent signer review.
+ Complete both initial channel-signing lanes and verify a usable local commitment before
+ signing or broadcasting wallet inputs. `submit_signed_funding_tx` enforces that ordering
+ on the node, but cannot prevent a wallet from broadcasting directly to CKB.
 
 ##### Params
 
@@ -1577,7 +1581,7 @@ Create a new watched channel.
 * `local_funding_pubkey` - <em>[Pubkey](#type-pubkey)</em>, The local party's funding public key (hex without 0x prefix)
 * `remote_funding_pubkey` - <em>[Pubkey](#type-pubkey)</em>, The remote party's funding public key (hex without 0x prefix)
 * `settlement_data` - <em>[SettlementData](#type-settlementdata)</em>, Settlement data
-* `commitment_contract_features` - <em>[CommitmentContractFeatures](#type-commitmentcontractfeatures)</em>, Commitment-lock feature bitmap as hex: "0x0" (Legacy) or "0x1" (full payment hash).
+* `channel_features` - <em>[ChannelFeatures](#type-channelfeatures)</em>, Required channel feature bitmap as hex. Only "0x1" (V2 with full payment hashes) is supported.
 
 ##### Returns
 
@@ -1843,6 +1847,15 @@ One counterparty's public keys which do not change over the life of a channel.
 * `tlc_base_key` - <em>[Pubkey](#type-pubkey)</em>, The base point used to derive per-commitment TLC public keys.
 ---
 
+<a id="#type-channelfeatures"></a>
+### Type `ChannelFeatures`
+
+Channel features. Only "0x1" (V2 with full payment hashes) is supported.
+
+
+
+---
+
 <a id="#type-channelinfo"></a>
 ### Type `ChannelInfo`
 
@@ -1871,12 +1884,13 @@ Public channel-signer material required to send Fiber's `OpenChannel` message.
 
 #### Fields
 
+* `v2_nonces` - <em>`Vec<Vec<u8>>`</em>, Fresh SDK-owned public nonce pool; secret nonce seeds never leave the signer.
 * `base_public_keys` - <em>[ChannelBasePublicKeys](#type-channelbasepublickeys)</em>, Static funding and TLC public keys for this channel.
 * `first_commitment_point` - <em>[Pubkey](#type-pubkey)</em>, Per-commitment point for commitment number 1.
 * `second_commitment_point` - <em>[Pubkey](#type-pubkey)</em>, Per-commitment point for commitment number 2.
 * `commitment_nonce` - <em>`Vec<u8>`</em>, Commitment public nonce at the initial local commitment number, encoded as `0x`-prefixed hex.
-* `next_commitment_nonce` - <em>`Vec<u8>`</em>, Commitment public nonce published in `TxComplete`, encoded as `0x`-prefixed hex.
-* `revocation_nonce` - <em>`Vec<u8>`</em>, Revocation public nonce published with `OpenChannel`, encoded as `0x`-prefixed hex.
+* `next_commitment_nonce` - <em>`Vec<u8>`</em>, Additional fresh public nonce for the V2 pool, encoded as `0x`-prefixed hex.
+* `revocation_nonce` - <em>`Vec<u8>`</em>, Additional fresh public nonce for the V2 pool, encoded as `0x`-prefixed hex.
 * `channel_announcement_nonce` - <em>`Option<Vec<u8>>`</em>, Channel-announcement public nonce; required for public channels and forbidden for private ones.
 ---
 
@@ -1969,15 +1983,6 @@ The status of an invoice.
 * `Expired` - The invoice is expired.
 * `Received` - The invoice is received, but not settled yet.
 * `Paid` - The invoice is paid.
----
-
-<a id="#type-commitmentcontractfeatures"></a>
-### Type `CommitmentContractFeatures`
-
-Commitment-lock feature bits (0x0: Legacy; 0x1: full payment hash).
-
-
-
 ---
 
 <a id="#type-currency"></a>
@@ -2183,6 +2188,8 @@ Follow-up public signer material submitted together with a channel signature.
 
 #### Fields
 
+* `v2_nonces` - <em>`Vec<Vec<u8>>`</em>, Fresh SDK-owned public nonces replenishing the V2 pool.
+* `commitment_points` - <em>`Vec<>`</em>, Explicit per-commitment point indices and public keys.
 * `next_commitment_point` - <em>Option<[Pubkey](#type-pubkey)></em>, Next local per-commitment point the node will need.
 * `next_commitment_nonce` - <em>`Option<Vec<u8>>`</em>, Next commitment public nonce, encoded as `0x`-prefixed hex.
 * `next_revocation_nonce` - <em>`Option<Vec<u8>>`</em>, Next revocation public nonce, encoded as `0x`-prefixed hex.
@@ -2258,7 +2265,7 @@ The status of a payment, will update as the payment progresses.
 
 * `Created` - Initial status. A payment session is created, but no HTLC has been dispatched.
 * `Inflight` - The first hop AddTlc is sent successfully and waiting for the response.
-* `Success` - The payment is finished. All related HTLCs are successfully settled.
+* `Success` - A payment TLC was successfully claimed. Other attempts may still be pending.
 * `Failed` - The payment session has terminated.
 ---
 

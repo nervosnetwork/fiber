@@ -142,6 +142,7 @@ impl From<CchTrackingEvent> for CchOrderEvent {
         match event {
             CchTrackingEvent::InvoiceChanged {
                 payment_hash: _,
+                source: _,
                 status,
                 failure_reason,
             } => CchOrderEvent::IncomingInvoiceChanged {

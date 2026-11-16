@@ -2,7 +2,7 @@
 build = "src/build.rs"
 edition = "2021"
 name = "fnn"
-version = "0.10.0-rc1"
+version = "0.10.1"
 license.workspace = true
 
 [lib]
@@ -50,7 +50,8 @@ serde_yaml = "0.9.32"
 strum = { version = "0.28", features = ["derive"] }
 tempfile = { version = "3.10.1", optional = true }
 thiserror = "1.0.58"
-tokio-util = { version = "0.7.10", features = ["rt"] }
+# shortcut: tokio-util 0.7.20 breaks tentacle-secio's Sink inference; lift after its upstream fix.
+tokio-util = { version = ">=0.7.10, <0.7.20", features = ["rt"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
@@ -140,6 +141,7 @@ futures = "0.3.31"
 tempfile = "3.10.1"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+fiber-types-0100 = { package = "fiber-types", version = "=0.10.0-rc1", features = ["watchtower"] }
 criterion = { version = "0.5", features = ["html_reports"] }
 fiber-store = { path = "../fiber-store", features = ["rocksdb"] }
 hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "http2", "tokio"] }

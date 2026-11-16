@@ -61,6 +61,8 @@ pub enum Error {
     SendPaymentError(String),
     #[error("Send payment first hop error: {0}")]
     FirstHopError(String, bool),
+    #[error("Payment admission acknowledgement interrupted: {0}")]
+    PaymentAdmissionInterrupted(String),
     #[error("InvalidParameter: {0}")]
     InvalidParameter(String),
     #[error("Channel announcement verification deferred for {0:?}: {1}")]

@@ -14,18 +14,16 @@ use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::cch::{CchOrderStore, CchStoreError};
 use crate::fiber::gossip::GossipMessageStore;
-use crate::fiber::onchain_tlc_reconcile::StoredOnChainTlcSettlement;
-#[cfg(feature = "watchtower")]
-use crate::fiber::onchain_tlc_reconcile::{LegacyOnChainTlcSettlement, OnChainTlcSettlement};
+use crate::fiber::onchain_tlc_reconcile::OnChainTlcSettlement;
 use crate::fiber::types::HoldTlc;
 #[cfg(feature = "watchtower")]
 use crate::watchtower::WatchtowerStore;
 use crate::{
     fiber::{
-        channel::{ChannelActorState, ChannelActorStateStore, ChannelOpenRecordStore, CommitDiff},
+        channel::{ChannelActorState, ChannelActorStateStore, ChannelOpenRecordStore},
         graph::NetworkGraphStateStore,
         network::NetworkActorStateStore,
-        payment::PaymentSessionExt,
+        payment::{attempt_has_channel_work, PaymentSessionExt},
     },
     invoice::{CkbInvoice, CkbInvoiceStatus, InvoiceError, InvoiceStore, PreimageStore},
 };
@@ -37,7 +35,7 @@ use fiber_store::migration::{
 };
 use fiber_types::schema::*;
 #[cfg(feature = "watchtower")]
-use fiber_types::CommitmentContractFeatures;
+use fiber_types::ChannelFeatures;
 use fiber_types::{
     Attempt, AttemptStatus, BroadcastMessage, BroadcastMessageID, ChannelData, ChannelOpenRecord,
     ChannelState, Cursor, Direction, Hash256, PaymentCustomRecords, PaymentSession, PaymentStatus,
@@ -138,6 +136,61 @@ impl Store {
         physical_key
     }
 
+    fn restore_payment_session(&self, session: PaymentSession) -> PaymentSession {
+        session.init_attempts(self)
+    }
+
+    /// Resolve a list view without probing channels for unindexed historical failures.
+    /// This compatibility shortcut is deliberately not used for settlement or notifications.
+    fn filter_payment_session(
+        &self,
+        session: PaymentSession,
+        status: Option<PaymentStatus>,
+    ) -> Option<PaymentSession> {
+        if session.status.is_final()
+            && status.is_some_and(|wanted| {
+                session.status != wanted
+                    && !(session.status == PaymentStatus::Failed
+                        && matches!(wanted, PaymentStatus::Success | PaymentStatus::Inflight))
+            })
+        {
+            return None;
+        }
+        let mut session = self.restore_payment_session(session);
+        // Channel work can only promote Failed to Inflight, never to Success.
+        if status.is_some_and(|wanted| {
+            session.status != wanted
+                && !(session.status == PaymentStatus::Failed && wanted == PaymentStatus::Inflight)
+        }) {
+            return None;
+        }
+        if session.status == PaymentStatus::Failed {
+            let pending = session.attempts().any(Attempt::is_inflight)
+                || session.attempts().any(|attempt| {
+                    attempt
+                        .first_hop_channel_outpoint()
+                        .is_some_and(|outpoint| {
+                            let key = KeyValue::AttemptChannelIndex((
+                                outpoint.clone(),
+                                attempt.session_key(),
+                                attempt.id,
+                            ))
+                            .key();
+                            self.get(key).is_some() && attempt_has_channel_work(attempt, self)
+                        })
+                });
+            if pending {
+                // List views only: neither the session record nor its attempts are rewritten.
+                session.status = PaymentStatus::Inflight;
+            }
+        }
+        if status.is_some_and(|wanted| session.status != wanted) {
+            None
+        } else {
+            Some(session)
+        }
+    }
+
     /// Shut down the browser database after all actors and background writes stop.
     #[cfg(target_arch = "wasm32")]
     pub fn shutdown(self) {
@@ -162,9 +215,7 @@ impl Store {
 
     fn channel_owns_attempt(&self, channel_outpoint: &OutPoint, attempt: &Attempt) -> bool {
         self.get_channel_state_by_outpoint(channel_outpoint)
-            .is_some_and(|channel_state| {
-                channel_state.owns_payment_attempt(attempt.session_key(), attempt.id)
-            })
+            .is_some_and(|channel_state| channel_state.owns_payment_attempt(attempt))
     }
 
     #[cfg(feature = "watchtower")]
@@ -313,6 +364,12 @@ where
         .unwrap_or_else(|e| panic!("deserialization of {} failed: {}", field_name, e))
 }
 
+fn deserialize_channel_state(bytes: &[u8]) -> ChannelActorState {
+    fiber_types::channel_v2_validation::decode_channel_actor_data(bytes)
+        .unwrap_or_else(|e| panic!("deserialization of ChannelActorState failed: {e}"))
+        .into()
+}
+
 /// Open a store at `path`, running auto-migration with auto-confirm.
 /// Use this when no user interaction is needed (e.g. tests, simple setups).
 pub fn open_store<P: AsRef<Path>>(path: P) -> Result<Store, String> {
@@ -377,6 +434,21 @@ fn run_auto_migrate<S: StorageBackend>(
 
 pub fn check_validate<P: AsRef<Path>>(path: P) -> Result<(), String> {
     let db = fiber_store::Store::open_db(path.as_ref())?;
+    let mut migrate = DbMigrate::new();
+    fiber_store::migrations::register_all_migrations(&mut migrate);
+    migrate.preflight(&db).map_err(|error| error.to_string())?;
+    let version = db
+        .get(MIGRATION_VERSION_KEY)
+        .ok_or("Database has no version; use its matching old binary first")?;
+    let version = std::str::from_utf8(&version).map_err(|_| "Invalid database version")?;
+    if !(INIT_DB_VERSION..=fiber_store::migration::LATEST_DB_VERSION).contains(&version) {
+        return Err(format!(
+            "Unsupported database version {version}; supported upgrade base is {INIT_DB_VERSION}"
+        ));
+    }
+    if migrate.check(&db) == std::cmp::Ordering::Less {
+        info!("Database is eligible for migration at startup");
+    }
     let store = Store {
         inner: db,
         namespace: None,
@@ -405,12 +477,7 @@ pub fn check_validate<P: AsRef<Path>>(path: P) -> Result<(), String> {
         }
 
         match key[0] {
-            CHANNEL_ACTOR_STATE_PREFIX => {
-                check_deserialization::<ChannelActorState>(
-                    &value,
-                    "CHANNEL_ACTOR_STATE_PREFIX",
-                    &mut errors,
-                );
+            CHANNEL_ACTOR_STATE_PREFIX | CHANNEL_OPEN_RECORD_PREFIX | WATCHTOWER_CHANNEL_PREFIX => {
             }
             PUBLIC_KEY_NETWORK_ACTOR_STATE_PREFIX => {
                 check_deserialization::<PersistentNetworkActorState>(
@@ -493,10 +560,10 @@ pub fn check_validate<P: AsRef<Path>>(path: P) -> Result<(), String> {
                 );
             }
             #[cfg(feature = "watchtower")]
-            WATCHTOWER_CHANNEL_PREFIX => {
-                check_deserialization::<ChannelData>(
+            WATCHTOWER_SUPERSEDED_SETTLEMENT_PREFIX => {
+                check_deserialization::<Vec<SettlementData>>(
                     &value,
-                    "WATCHTOWER_CHANNEL_PREFIX",
+                    "WATCHTOWER_SUPERSEDED_SETTLEMENT_PREFIX",
                     &mut errors,
                 );
             }
@@ -513,47 +580,7 @@ pub fn check_validate<P: AsRef<Path>>(path: P) -> Result<(), String> {
     }
 
     let mut errors: Vec<String> = errors.into_iter().collect();
-    {
-        let mut migrate = DbMigrate::new();
-        fiber_store::migrations::register_all_migrations(&mut migrate);
-        let ordering = migrate.check(&store.inner);
-        match ordering {
-            std::cmp::Ordering::Greater => {
-                let db_version = store
-                    .inner
-                    .get(MIGRATION_VERSION_KEY)
-                    .map(|v| String::from_utf8(v).unwrap_or_default())
-                    .unwrap_or_default();
-                errors.push(format!(
-                    "Database version ({}) is newer than the binary. \
-                     Please upgrade fiber to a newer version.",
-                    db_version
-                ));
-            }
-            std::cmp::Ordering::Less => {
-                let db_version = store
-                    .inner
-                    .get(MIGRATION_VERSION_KEY)
-                    .map(|v| String::from_utf8(v).unwrap_or_default())
-                    .unwrap_or_default();
-                let mut msg = format!(
-                    "Database version ({}) is older than the binary. Migration needed.",
-                    db_version
-                );
-                // If the DB is older than the initial migration epoch, the user
-                // must run the legacy fnn-migrate tool first.
-                if db_version.as_str() < INIT_DB_VERSION {
-                    msg.push_str(&format!(
-                        " DB version {} predates the unified migration epoch ({}). \
-                         Run fnn-migrate v0.8.x to upgrade before starting this binary.",
-                        db_version, INIT_DB_VERSION
-                    ));
-                }
-                errors.push(msg);
-            }
-            std::cmp::Ordering::Equal => {}
-        }
-    }
+    errors.sort();
     if errors.is_empty() {
         info!("All keys and values in the store are valid.");
         Ok(())
@@ -643,6 +670,43 @@ pub enum StoreChange {
         payment_hash: Hash256,
         attempt_status: AttemptStatus,
     },
+}
+
+/// Delivers each store change to every subscriber, in the order the store made them.
+///
+/// ractor's `OutputPort` holds at most 16 messages between a sender and each subscriber's
+/// forwarding task, and drops a subscriber for good once its task falls further behind. The
+/// store can send more changes than that in a row (#1717), so this port hands each change
+/// straight to the subscriber's mailbox instead, keeping no queue of its own. A subscriber
+/// that has stopped is removed.
+#[derive(Default)]
+pub struct StoreChangePort {
+    subscribers: parking_lot::Mutex<Vec<StoreChangeDelivery>>,
+}
+
+/// Hands a change to one subscriber; false once the subscriber has stopped.
+type StoreChangeDelivery = Box<dyn Fn(StoreChange) -> bool + Send>;
+
+impl StoreChangePort {
+    pub fn subscribe<M>(&self, receiver: ractor::ActorRef<M>)
+    where
+        M: ractor::Message + From<StoreChange>,
+    {
+        self.subscribers.lock().push(Box::new(move |change| {
+            receiver.cast(M::from(change)).is_ok()
+        }));
+    }
+
+    pub fn send(&self, change: StoreChange) {
+        self.subscribers
+            .lock()
+            .retain(|deliver| deliver(change.clone()));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn subscriber_count(&self) -> usize {
+        self.subscribers.lock().len()
+    }
 }
 
 pub trait StoreKeyValue {
@@ -814,15 +878,6 @@ impl StoreKeyValue for KeyValue {
 
 #[cfg(feature = "watchtower")]
 impl Store {
-    fn legacy_tlc_on_chain_settled_key(channel_id: &Hash256, payment_hash: &[u8; 20]) -> Vec<u8> {
-        [
-            &[WATCHTOWER_TLC_SETTLED_PREFIX],
-            channel_id.as_ref(),
-            payment_hash.as_ref(),
-        ]
-        .concat()
-    }
-
     fn tlc_on_chain_settled_key(node_id: &NodeId, channel_id: &Hash256, tlc_id: TLCId) -> Vec<u8> {
         let (direction, id) = match tlc_id {
             TLCId::Offered(id) => (0u8, id),
@@ -898,54 +953,63 @@ impl Store {
         channel_data: &ChannelData,
         payment_hash: &Hash256,
     ) -> bool {
-        let snapshot_statuses = [
-            (&channel_data.remote_settlement_data, true),
-            (&channel_data.pending_remote_settlement_data, true),
-            (&channel_data.local_settlement_data, false),
-        ]
-        .into_iter()
-        .filter_map(|(settlement_data, for_remote)| {
-            let mut has_matching_tlc = false;
-            let mut has_exact_settlement = false;
-            let mut has_unsettled_tlc = false;
-            for tlc in settlement_data
-                .tlcs
-                .iter()
-                .filter(|tlc| &tlc.payment_hash == payment_hash)
-            {
-                has_matching_tlc = true;
-                let tlc_id = if for_remote {
-                    tlc.tlc_id
-                } else {
-                    tlc.tlc_id.flip()
-                };
-                let is_exactly_settled = self
-                    .get(Self::tlc_on_chain_settled_key(
-                        node_id,
-                        &channel_data.channel_id,
-                        tlc_id,
-                    ))
-                    .map(|value| {
-                        deserialize_from::<OnChainTlcSettlement>(
-                            value.as_ref(),
-                            "OnChainTlcSettlement",
-                        )
-                    })
-                    .is_some_and(|settlement| {
-                        settlement.payment_hash == tlc.payment_hash
-                            && settlement.hash_algorithm == tlc.hash_algorithm
-                    });
-                has_exact_settlement |= is_exactly_settled;
-                has_unsettled_tlc |= !is_exactly_settled;
-            }
-            has_matching_tlc.then_some((has_exact_settlement, has_unsettled_tlc))
-        })
-        .collect::<Vec<_>>();
+        let superseded = self.get_superseded_remote_settlements(node_id, &channel_data.channel_id);
+        let snapshot_statuses = std::iter::once((&channel_data.remote_settlement_data, true))
+            .chain(std::iter::once((
+                &channel_data.pending_remote_settlement_data,
+                true,
+            )))
+            .chain(
+                superseded
+                    .iter()
+                    .map(|settlement_data| (settlement_data, true)),
+            )
+            .chain(std::iter::once((
+                &channel_data.local_settlement_data,
+                false,
+            )))
+            .filter_map(|(settlement_data, for_remote)| {
+                let mut has_matching_tlc = false;
+                let mut has_exact_settlement = false;
+                let mut has_unsettled_tlc = false;
+                for tlc in settlement_data
+                    .tlcs
+                    .iter()
+                    .filter(|tlc| &tlc.payment_hash == payment_hash)
+                {
+                    has_matching_tlc = true;
+                    let tlc_id = if for_remote {
+                        tlc.tlc_id
+                    } else {
+                        tlc.tlc_id.flip()
+                    };
+                    let is_exactly_settled = self
+                        .get(Self::tlc_on_chain_settled_key(
+                            node_id,
+                            &channel_data.channel_id,
+                            tlc_id,
+                        ))
+                        .map(|value| {
+                            deserialize_from::<OnChainTlcSettlement>(
+                                value.as_ref(),
+                                "OnChainTlcSettlement",
+                            )
+                        })
+                        .is_some_and(|settlement| {
+                            settlement.payment_hash == tlc.payment_hash
+                                && settlement.hash_algorithm == tlc.hash_algorithm
+                        });
+                    has_exact_settlement |= is_exactly_settled;
+                    has_unsettled_tlc |= !is_exactly_settled;
+                }
+                has_matching_tlc.then_some((has_exact_settlement, has_unsettled_tlc))
+            })
+            .collect::<Vec<_>>();
 
         // ChannelData retains several candidate commitment snapshots. Once an exact settlement
         // exists, only snapshots containing exact evidence can represent the active on-chain
         // chain. Within those candidates every same-hash TLC must be settled before its shared
-        // preimage can be removed. Prefix-keyed legacy records intentionally provide no evidence
+        // preimage can be removed. Unrecognized prefix-keyed records provide no evidence
         // here because they cannot identify a specific TLC.
         if snapshot_statuses
             .iter()
@@ -961,15 +1025,18 @@ impl Store {
         }
     }
 
-    fn watch_channel_payment_hashes(channel_data: &ChannelData) -> HashSet<Hash256> {
-        [
-            &channel_data.remote_settlement_data,
-            &channel_data.pending_remote_settlement_data,
-            &channel_data.local_settlement_data,
-        ]
-        .into_iter()
-        .flat_map(|settlement_data| settlement_data.tlcs.iter().map(|tlc| tlc.payment_hash))
-        .collect()
+    fn watch_channel_payment_hashes(
+        channel_data: &ChannelData,
+        superseded: &[SettlementData],
+    ) -> HashSet<Hash256> {
+        std::iter::once(&channel_data.remote_settlement_data)
+            .chain(std::iter::once(
+                &channel_data.pending_remote_settlement_data,
+            ))
+            .chain(superseded.iter())
+            .chain(std::iter::once(&channel_data.local_settlement_data))
+            .flat_map(|settlement_data| settlement_data.tlcs.iter().map(|tlc| tlc.payment_hash))
+            .collect()
     }
 
     fn watch_preimage_in_use(&self, node_id: &NodeId, payment_hash: &Hash256) -> bool {
@@ -1119,10 +1186,33 @@ impl ChannelActorStateStore for Store {
         }
     }
 
+    fn has_trampoline_payment_for_tlc(
+        &self,
+        payment_hash: Hash256,
+        channel_id: Hash256,
+        tlc_id: u64,
+    ) -> bool {
+        let scoped = PaymentSessionKey {
+            payment_hash,
+            upstream_tlc_key: Some(UpstreamTlcKey {
+                incoming_channel_id: channel_id,
+                incoming_tlc_id: tlc_id,
+            }),
+        };
+        [payment_hash.into(), scoped].into_iter().any(|key| {
+            self.get_payment_session(key)
+                .and_then(|session| session.request.trampoline_context)
+                .is_some_and(|context| {
+                    context.previous_tlcs.iter().any(|previous| {
+                        previous.prev_channel_id == channel_id && previous.prev_tlc_id == tlc_id
+                    })
+                })
+        })
+    }
+
     fn get_channel_actor_state(&self, id: &Hash256) -> Option<ChannelActorState> {
         let key = [&[CHANNEL_ACTOR_STATE_PREFIX], id.as_ref()].concat();
-        self.get(key)
-            .map(|v| deserialize_from(v.as_ref(), "ChannelActorState"))
+        self.get(key).map(|v| deserialize_channel_state(v.as_ref()))
     }
 
     fn insert_channel_actor_state(&self, mut state: ChannelActorState) {
@@ -1137,29 +1227,6 @@ impl ChannelActorStateStore for Store {
         }
         let kv = KeyValue::ChannelActorState(state.id, state);
         batch.put(kv.key(), kv.value());
-        batch.commit();
-    }
-
-    fn insert_channel_actor_state_with_pending_commit_diff(
-        &self,
-        mut state: ChannelActorState,
-        diff: &CommitDiff,
-    ) {
-        state.clear_local_signer_material();
-        let channel_id = state.get_id();
-        let mut batch = self.batch();
-
-        let kv = KeyValue::PubkeyChannelId((state.get_remote_pubkey(), state.id), state.state);
-        batch.put(kv.key(), kv.value());
-        if let Some(outpoint) = state.get_funding_transaction_outpoint() {
-            let kv = KeyValue::OutPointChannelId(outpoint, state.id);
-            batch.put(kv.key(), kv.value());
-        }
-        let kv = KeyValue::ChannelActorState(state.id, state);
-        batch.put(kv.key(), kv.value());
-
-        let key = [&[PENDING_COMMIT_DIFF_PREFIX], channel_id.as_ref()].concat();
-        batch.put(key, serialize_to_vec(diff, "CommitDiff"));
         batch.commit();
     }
 
@@ -1217,7 +1284,6 @@ impl ChannelActorStateStore for Store {
                 batch.delete([&[CHANNEL_OUTPOINT_CHANNEL_ID_PREFIX], outpoint.as_slice()].concat());
             }
             batch.delete([&[CHANNEL_SHUTDOWN_SETTLEMENT_PREFIX], id.as_ref()].concat());
-            batch.delete([&[PENDING_COMMIT_DIFF_PREFIX], id.as_ref()].concat());
             batch.commit();
         }
     }
@@ -1270,7 +1336,7 @@ impl ChannelActorStateStore for Store {
         let prefix = &[CHANNEL_ACTOR_STATE_PREFIX];
         self.collect_by_prefix(prefix)
             .into_iter()
-            .map(|kv| deserialize_from(kv.value.as_ref(), "ChannelActorState"))
+            .map(|kv| deserialize_channel_state(kv.value.as_ref()))
             .collect()
     }
 
@@ -1344,7 +1410,7 @@ impl ChannelActorStateStore for Store {
         channel_id: &Hash256,
         tlc_id: TLCId,
         payment_hash: &Hash256,
-    ) -> Option<StoredOnChainTlcSettlement> {
+    ) -> Option<OnChainTlcSettlement> {
         #[cfg(feature = "watchtower")]
         {
             if self.namespace.is_some() {
@@ -1353,12 +1419,10 @@ impl ChannelActorStateStore for Store {
                 // tenant ownership. Hosted tenants only consume exact proofs
                 // from the host watchtower, never another namespace's fallback.
                 let key = Self::tlc_on_chain_settled_key(&node_id, channel_id, tlc_id);
-                return self.inner.get(key).map(|value| {
-                    StoredOnChainTlcSettlement::Exact(deserialize_from(
-                        value.as_ref(),
-                        "OnChainTlcSettlement",
-                    ))
-                });
+                return self
+                    .inner
+                    .get(key)
+                    .map(|value| deserialize_from(value.as_ref(), "OnChainTlcSettlement"));
             }
             WatchtowerStore::get_onchain_tlc_settlement(
                 self,
@@ -1373,22 +1437,6 @@ impl ChannelActorStateStore for Store {
             let _ = (channel_id, tlc_id, payment_hash);
             None
         }
-    }
-
-    fn store_pending_commit_diff(&self, channel_id: &Hash256, diff: &CommitDiff) {
-        let key = [&[PENDING_COMMIT_DIFF_PREFIX], channel_id.as_ref()].concat();
-        let value = serialize_to_vec(diff, "CommitDiff");
-        self.put(key, value);
-    }
-
-    fn get_pending_commit_diff(&self, channel_id: &Hash256) -> Option<CommitDiff> {
-        let key = [&[PENDING_COMMIT_DIFF_PREFIX], channel_id.as_ref()].concat();
-        self.get(&key).map(|v| deserialize_from(&v, "CommitDiff"))
-    }
-
-    fn delete_pending_commit_diff(&self, channel_id: &Hash256) {
-        let key = [&[PENDING_COMMIT_DIFF_PREFIX], channel_id.as_ref()].concat();
-        self.delete(&key);
     }
 
     fn store_shutdown_settlement_record(
@@ -1432,6 +1480,23 @@ impl ChannelActorStateStore for Store {
     #[cfg(not(feature = "watchtower"))]
     fn get_local_watch_channel(&self, _channel_id: &Hash256) -> Option<ChannelData> {
         None
+    }
+
+    #[cfg(feature = "watchtower")]
+    fn get_local_superseded_remote_settlements(&self, channel_id: &Hash256) -> Vec<SettlementData> {
+        let Some(node_id) = self.local_watchtower_node_id(channel_id) else {
+            return Vec::new();
+        };
+        let key = [
+            &[WATCHTOWER_SUPERSEDED_SETTLEMENT_PREFIX],
+            node_id.as_ref(),
+            channel_id.as_ref(),
+        ]
+        .concat();
+        self.inner
+            .get(&key)
+            .map(|value| deserialize_from(&value, "WATCHTOWER_SUPERSEDED_SETTLEMENT_PREFIX"))
+            .unwrap_or_default()
     }
 }
 
@@ -1641,7 +1706,7 @@ impl NetworkGraphStateStore for Store {
         .concat();
         self.get(prefix)
             .map(|v| deserialize_from(v.as_ref(), "PaymentSession"))
-            .map(|session: PaymentSession| session.init_attempts(self))
+            .map(|session: PaymentSession| self.restore_payment_session(session))
     }
 
     fn get_persisted_payment_status(
@@ -1664,9 +1729,89 @@ impl NetworkGraphStateStore for Store {
             .into_iter()
             .map(|kv| {
                 let session: PaymentSession = deserialize_from(kv.value.as_ref(), "PaymentSession");
-                session.init_attempts(self)
+                self.restore_payment_session(session)
             })
             .collect()
+    }
+
+    fn get_payment_hashes_with_channel_index(&self) -> HashSet<Hash256> {
+        // Key: prefix(1) | outpoint(36) | payment hash(32) | attempt id(8).
+        // Stream the index and deduplicate without loading sessions or attempts.
+        self.prefix_iterator([ATTEMPT_CHANNEL_INDEX_PREFIX])
+            .filter_map(|(key, _)| key.get(37..69)?.try_into().ok())
+            .collect()
+    }
+
+    fn reconcile_attempts_channel_index(&self) -> HashSet<PaymentSessionKey> {
+        // Enumerate only recovery keys, never the payment/attempt tables. Group by
+        // payment so completion checks load its attempts and channel work once.
+        let mut indexed = HashMap::<PaymentSessionKey, Vec<(Vec<u8>, u64)>>::new();
+        for (key, _) in self.prefix_iterator([ATTEMPT_CHANNEL_INDEX_PREFIX]) {
+            if !matches!(key.len(), 77 | 117) {
+                continue;
+            }
+            let session_end = key.len() - 8;
+            let hash = PaymentSessionKey {
+                payment_hash: Hash256::from(
+                    <[u8; 32]>::try_from(&key[37..69]).expect("index hash"),
+                ),
+                upstream_tlc_key: (session_end == 109).then(|| UpstreamTlcKey {
+                    incoming_channel_id: Hash256::from(
+                        <[u8; 32]>::try_from(&key[69..101]).expect("index upstream channel"),
+                    ),
+                    incoming_tlc_id: u64::from_le_bytes(
+                        key[101..109].try_into().expect("index upstream TLC"),
+                    ),
+                }),
+            };
+            let id = u64::from_le_bytes(key[session_end..].try_into().expect("index attempt id"));
+            indexed.entry(hash).or_default().push((key.to_vec(), id));
+        }
+        let mut hashes = HashSet::new();
+        for (hash, entries) in indexed {
+            let session = self.get_payment_session(hash);
+            if session.is_some() {
+                hashes.insert(hash);
+            }
+            let finished = session.as_ref().is_none_or(|session| {
+                session.status.is_final() && !session.has_pending_payment_work(self)
+            });
+            // Bound write batches even when an old node accumulated many aliases.
+            for chunk in entries.chunks(256) {
+                let mut batch = self.batch();
+                let mut changed = false;
+                for (key, id) in chunk {
+                    let current_key = if finished {
+                        None
+                    } else {
+                        session.as_ref().and_then(|session| {
+                            session
+                                .attempts()
+                                .find(|attempt| attempt.id == *id)
+                                .and_then(|attempt| attempt.first_hop_channel_outpoint())
+                                .map(|outpoint| {
+                                    KeyValue::AttemptChannelIndex((outpoint.clone(), hash, *id))
+                                        .key()
+                                })
+                        })
+                    };
+                    if current_key.as_ref() == Some(key) {
+                        continue;
+                    }
+                    batch.delete(key.clone());
+                    if let Some(current_key) = current_key {
+                        if self.get(&current_key).is_none() {
+                            batch.put(current_key, vec![]);
+                        }
+                    }
+                    changed = true;
+                }
+                if changed {
+                    batch.commit();
+                }
+            }
+        }
+        hashes
     }
 
     fn get_payment_sessions_with_status(&self, status: PaymentStatus) -> Vec<PaymentSession> {
@@ -1675,11 +1820,7 @@ impl NetworkGraphStateStore for Store {
             .into_iter()
             .filter_map(|kv| {
                 let session: PaymentSession = deserialize_from(kv.value.as_ref(), "PaymentSession");
-                if session.status == status {
-                    Some(session.init_attempts(self))
-                } else {
-                    None
-                }
+                self.filter_payment_session(session, Some(status))
             })
             .collect()
     }
@@ -1702,10 +1843,7 @@ impl NetworkGraphStateStore for Store {
             if session.request.upstream_tlc_key.is_some() {
                 return None;
             }
-            match status {
-                Some(ref s) if session.status != *s => None,
-                _ => Some(session.init_attempts(self)),
-            }
+            self.filter_payment_session(session, status)
         })
         .take(limit)
         .collect()
@@ -1713,23 +1851,33 @@ impl NetworkGraphStateStore for Store {
 
     fn insert_payment_session(&self, session: PaymentSession) {
         let payment_hash = session.payment_hash();
-        let session_clone = session.clone();
-        let payment_preimage = (session.status == PaymentStatus::Success)
-            .then(|| session.attempts().find_map(|attempt| attempt.preimage))
-            .flatten();
+        let is_public = session.request.upstream_tlc_key.is_none();
         let mut batch = self.batch();
         let kv = KeyValue::PaymentSession(session.session_key(), session);
         batch.put(kv.key(), kv.value());
         batch.commit();
-        // Public payment subscriptions are hash-addressed. Hosted internal
-        // sessions must not publish outcomes as an unrelated ordinary payment.
-        if session_clone.request.upstream_tlc_key.is_none() {
-            self.notify(StoreChange::PutPaymentSession {
-                payment_hash,
-                payment_session: session_clone,
-                payment_preimage,
-            });
+        if is_public {
+            self.publish_payment_result(payment_hash);
         }
+    }
+
+    fn publish_payment_result(&self, session_key: impl Into<PaymentSessionKey>) {
+        let session_key = session_key.into();
+        // Public subscriptions are hash addressed, never disclose hosted execution outcomes.
+        if session_key.upstream_tlc_key.is_some() {
+            return;
+        }
+        let payment_hash = session_key.payment_hash;
+        let Some(mut session) = self.get_payment_session(session_key) else {
+            return;
+        };
+        session.status = session.effective_status(self);
+        let payment_preimage = session.payment_preimage();
+        self.notify(StoreChange::PutPaymentSession {
+            payment_hash,
+            payment_session: session,
+            payment_preimage,
+        });
     }
 
     fn get_attempt(
@@ -1752,9 +1900,10 @@ impl NetworkGraphStateStore for Store {
         assert_ne!(attempt.id, 0, "Attempt ID should not be zero");
 
         let first_hop_outpoint = attempt.first_hop_channel_outpoint().cloned();
-        let is_new = self
-            .get_attempt(attempt.session_key(), attempt.id)
-            .is_none();
+        let previous = self.get_attempt(attempt.session_key(), attempt.id);
+        let previous_outpoint = previous
+            .as_ref()
+            .and_then(|a| a.first_hop_channel_outpoint());
 
         let mut batch = self.batch();
 
@@ -1762,8 +1911,19 @@ impl NetworkGraphStateStore for Store {
         let kv = KeyValue::Attempt((attempt.session_key(), attempt.id), attempt.clone());
         batch.put(kv.key(), kv.value());
 
-        // Add to channel index only for new attempts
-        if is_new {
+        // Route changes and their wake-up index must become durable together.
+        // Status/preimage updates must not recreate an already retired index.
+        if previous.is_none() || previous_outpoint != first_hop_outpoint.as_ref() {
+            if let Some(outpoint) = previous_outpoint {
+                batch.delete(
+                    KeyValue::AttemptChannelIndex((
+                        outpoint.clone(),
+                        attempt.session_key(),
+                        attempt.id,
+                    ))
+                    .key(),
+                );
+            }
             if let Some(outpoint) = first_hop_outpoint {
                 let kv =
                     KeyValue::AttemptChannelIndex((outpoint, attempt.session_key(), attempt.id));
@@ -1809,11 +1969,36 @@ impl NetworkGraphStateStore for Store {
         batch.commit();
     }
 
-    fn clear_attempts_channel_index(&self, session_key: impl Into<PaymentSessionKey>) {
+    fn delete_unsettled_attempts(&self, session_key: impl Into<PaymentSessionKey>) {
         let session_key = session_key.into();
         let mut batch = self.batch();
+        for attempt in self.get_attempts(session_key) {
+            // Retain delivered value so retrying cannot overpay the recipient.
+            if attempt.is_success() {
+                continue;
+            }
+            if let Some(outpoint) = attempt.first_hop_channel_outpoint() {
+                batch.delete(
+                    KeyValue::AttemptChannelIndex((outpoint.clone(), session_key, attempt.id))
+                        .key(),
+                );
+            }
+            batch.delete(KeyValue::Attempt((session_key, attempt.id), attempt).key());
+        }
+        batch.commit();
+    }
 
-        // Only delete channel index entries, keep the attempts themselves
+    fn clear_attempts_channel_index(&self, session_key: impl Into<PaymentSessionKey>) {
+        let session_key = session_key.into();
+        let finished = self
+            .get_payment_session(session_key)
+            .is_some_and(|session| {
+                session.status.is_final() && !session.has_pending_payment_work(self)
+            });
+        if !finished {
+            return;
+        }
+        let mut batch = self.batch();
         for attempt in self.get_attempts(session_key) {
             if let Some(outpoint) = attempt.first_hop_channel_outpoint() {
                 let index =
@@ -1964,7 +2149,7 @@ impl WatchtowerStore for Store {
             funding_udt_type_script,
             keys,
             settlement_data,
-            CommitmentContractFeatures::LEGACY,
+            ChannelFeatures::V2,
         );
     }
 
@@ -1975,7 +2160,7 @@ impl WatchtowerStore for Store {
         funding_udt_type_script: Option<Script>,
         keys: WatchChannelKeys,
         settlement_data: SettlementData,
-        commitment_contract_features: CommitmentContractFeatures,
+        channel_features: ChannelFeatures,
     ) {
         let lock = self.watchtower_write_lock(&node_id);
         let _guard = lock.lock();
@@ -1985,7 +2170,16 @@ impl WatchtowerStore for Store {
             channel_id.as_ref(),
         ]
         .concat();
+        // Registration is at-least-once across channel actor crashes. Never reset
+        // an already monitored channel's usable settlement/revocation or signer state.
+        if self.get(&key).is_some() {
+            return;
+        }
         let external = keys.local_settlement.is_external();
+        if let Err(error) = settlement_data.validate_signing_keys(external) {
+            tracing::error!(%channel_id, %error, "invalid watch channel signing keys");
+            return;
+        }
         let (local_settlement_key, local_settlement_key_pubkey) = keys.local_settlement.to_parts();
         let value = serialize_to_vec(
             &ChannelData {
@@ -2000,7 +2194,7 @@ impl WatchtowerStore for Store {
                 remote_settlement_data: settlement_data.clone(),
                 local_settlement_data: settlement_data.clone(),
                 revocation_data: None,
-                commitment_contract_features,
+                channel_features,
             },
             "ChannelData",
         );
@@ -2046,15 +2240,24 @@ impl WatchtowerStore for Store {
         .concat();
         let lock = self.watchtower_write_lock(&node_id);
         let _guard = lock.lock();
+        let superseded = self.get_superseded_remote_settlements(&node_id, &channel_id);
         let payment_hashes = self
             .get(key.clone())
             .map(|v| deserialize_from::<ChannelData>(v.as_ref(), "ChannelData"))
-            .map(|channel_data| Self::watch_channel_payment_hashes(&channel_data))
+            .map(|channel_data| Self::watch_channel_payment_hashes(&channel_data, &superseded))
             .unwrap_or_default();
         self.delete(key);
         self.delete(
             [
                 &[WATCHTOWER_SIGNER_PREFIX],
+                node_id.as_ref(),
+                channel_id.as_ref(),
+            ]
+            .concat(),
+        );
+        self.delete(
+            [
+                &[WATCHTOWER_SUPERSEDED_SETTLEMENT_PREFIX],
                 node_id.as_ref(),
                 channel_id.as_ref(),
             ]
@@ -2087,6 +2290,21 @@ impl WatchtowerStore for Store {
             .get(key)
             .map(|v| deserialize_from::<ChannelData>(v.as_ref(), "ChannelData"))
         {
+            if let Err(error) = remote_settlement_data
+                .validate_signing_keys(channel_data.local_settlement_key.is_none())
+            {
+                tracing::error!(%channel_id, %error, "invalid remote settlement signing keys");
+                return;
+            }
+            // Recovery replays exact durable snapshots. An older queued delivery
+            // must not replace a newer revocation (or its settlement snapshot).
+            if channel_data
+                .revocation_data
+                .as_ref()
+                .is_some_and(|old| old.commitment_number >= revocation_data.commitment_number)
+            {
+                return;
+            }
             channel_data.remote_settlement_data = remote_settlement_data;
             channel_data.revocation_data = Some(revocation_data);
             let mut batch = self.batch();
@@ -2116,16 +2334,77 @@ impl WatchtowerStore for Store {
             channel_id.as_ref(),
         ]
         .concat();
+        let superseded_key = [
+            &[WATCHTOWER_SUPERSEDED_SETTLEMENT_PREFIX],
+            node_id.as_ref(),
+            channel_id.as_ref(),
+        ]
+        .concat();
         if let Some(mut channel_data) = self
             .get(key)
             .map(|v| deserialize_from::<ChannelData>(v.as_ref(), "ChannelData"))
         {
-            channel_data.pending_remote_settlement_data = pending_remote_settlement_data;
+            if let Err(error) = pending_remote_settlement_data
+                .validate_signing_keys(channel_data.local_settlement_key.is_none())
+            {
+                tracing::error!(%channel_id, %error, "invalid pending settlement signing keys");
+                return;
+            }
+            // A replay of a snapshot we already hold must not rotate anything.
+            if pending_remote_settlement_data == channel_data.pending_remote_settlement_data
+                || pending_remote_settlement_data == channel_data.remote_settlement_data
+            {
+                return;
+            }
+            // `remote_settlement_data` is the peer's latest unrevoked commitment and must stay
+            // selectable even after a same-number re-sign. Keep each replaced pending snapshot
+            // in a separate bounded list instead of rotating the remote slot.
+            let previous = std::mem::replace(
+                &mut channel_data.pending_remote_settlement_data,
+                pending_remote_settlement_data,
+            );
+            let keep_previous = previous != channel_data.remote_settlement_data;
             let mut batch = self.batch();
             let kv = KeyValue::WatchtowerChannel(node_id, channel_id, channel_data);
             batch.put(kv.key(), kv.value());
+            if keep_previous {
+                const MAX_SUPERSEDED: usize = 2;
+                let mut superseded: Vec<SettlementData> = self
+                    .get(superseded_key.clone())
+                    .map(|value| {
+                        deserialize_from(value.as_ref(), "WATCHTOWER_SUPERSEDED_SETTLEMENT_PREFIX")
+                    })
+                    .unwrap_or_default();
+                if !superseded.contains(&previous) {
+                    if superseded.len() >= MAX_SUPERSEDED {
+                        superseded.remove(0);
+                    }
+                    superseded.push(previous);
+                }
+                batch.put(
+                    superseded_key,
+                    serialize_to_vec(&superseded, "WATCHTOWER_SUPERSEDED_SETTLEMENT_PREFIX"),
+                );
+            }
             batch.commit();
         }
+    }
+
+    fn get_superseded_remote_settlements(
+        &self,
+        node_id: &NodeId,
+        channel_id: &Hash256,
+    ) -> Vec<SettlementData> {
+        self.get(
+            [
+                &[WATCHTOWER_SUPERSEDED_SETTLEMENT_PREFIX],
+                node_id.as_ref(),
+                channel_id.as_ref(),
+            ]
+            .concat(),
+        )
+        .map(|value| deserialize_from(value.as_ref(), "WATCHTOWER_SUPERSEDED_SETTLEMENT_PREFIX"))
+        .unwrap_or_default()
     }
 
     fn update_local_settlement(
@@ -2146,6 +2425,12 @@ impl WatchtowerStore for Store {
             .get(key)
             .map(|v| deserialize_from::<ChannelData>(v.as_ref(), "ChannelData"))
         {
+            if let Err(error) = local_settlement_data
+                .validate_signing_keys(channel_data.local_settlement_key.is_none())
+            {
+                tracing::error!(%channel_id, %error, "invalid local settlement signing keys");
+                return;
+            }
             channel_data.local_settlement_data = local_settlement_data;
             let mut batch = self.batch();
             let kv = KeyValue::WatchtowerChannel(node_id, channel_id, channel_data);
@@ -2285,36 +2570,10 @@ impl WatchtowerStore for Store {
         node_id: &NodeId,
         channel_id: &Hash256,
         tlc_id: TLCId,
-        payment_hash: &Hash256,
-    ) -> Option<StoredOnChainTlcSettlement> {
-        if let Some(value) = self.get(Store::tlc_on_chain_settled_key(node_id, channel_id, tlc_id))
-        {
-            return Some(StoredOnChainTlcSettlement::Exact(deserialize_from(
-                value.as_ref(),
-                "OnChainTlcSettlement",
-            )));
-        }
-
-        let payment_hash_prefix: [u8; 20] = payment_hash.as_ref()[0..20]
-            .try_into()
-            .expect("payment hash prefix");
-        let value = self.get(Store::legacy_tlc_on_chain_settled_key(
-            channel_id,
-            &payment_hash_prefix,
-        ))?;
-        if value.is_empty() {
-            return Some(StoredOnChainTlcSettlement::Legacy(
-                LegacyOnChainTlcSettlement {
-                    preimage: None,
-                    tx_hash: None,
-                    tlc_index: None,
-                },
-            ));
-        }
-        Some(StoredOnChainTlcSettlement::Legacy(deserialize_from(
-            value.as_ref(),
-            "LegacyOnChainTlcSettlement",
-        )))
+        _payment_hash: &Hash256,
+    ) -> Option<OnChainTlcSettlement> {
+        self.get(Store::tlc_on_chain_settled_key(node_id, channel_id, tlc_id))
+            .map(|value| deserialize_from(value.as_ref(), "OnChainTlcSettlement"))
     }
 }
 

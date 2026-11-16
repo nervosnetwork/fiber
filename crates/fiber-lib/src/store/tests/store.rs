@@ -2,10 +2,7 @@ use crate::ckb::signer::LocalSigner;
 use crate::fiber::channel::*;
 use crate::fiber::gossip::{get_latest_startup_broadcast_message_cursor, GossipMessageStore};
 use crate::fiber::network::get_chain_hash;
-#[cfg(not(target_arch = "wasm32"))]
-use crate::fiber::onchain_tlc_reconcile::{
-    LegacyOnChainTlcSettlement, OnChainTlcSettlement, StoredOnChainTlcSettlement,
-};
+use crate::fiber::onchain_tlc_reconcile::OnChainTlcSettlement;
 use crate::fiber::types::new_channel_update_unsigned;
 use crate::fiber::types::*;
 #[allow(unused)]
@@ -26,6 +23,8 @@ use crate::gen_rand_secp256k1_keypair_tuple;
 use crate::gen_rand_sha256_hash;
 use crate::invoice::*;
 use crate::now_timestamp_as_millis_u64;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::rpc::payment::PaymentRpcServer;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::store::sample::StoreSample;
 use crate::store::store_impl::deserialize_from;
@@ -54,12 +53,11 @@ use fiber_store::IteratorDirection;
 use fiber_types::protocol::AnnouncedNodeName;
 #[cfg(not(target_arch = "wasm32"))]
 use fiber_types::schema::WATCHTOWER_TLC_SETTLED_PREFIX;
-use fiber_types::CloseFlags;
 #[cfg(not(target_arch = "wasm32"))]
 use fiber_types::{
-    AddTlcCommand, AppliedFlags, CommitmentContractFeatures, CommitmentNumbers, OutboundTlcStatus,
-    RetryableTlcOperation, SettlementKey, SettlementTlc, TLCId, TlcInfo, TlcStatus,
-    WatchChannelKeys,
+    AddTlcCommand, AppliedFlags, ChannelFeatures, CloseFlags, CommitmentNumbers, OutboundTlcStatus,
+    RemoveTlcFulfill, RetryableTlcOperation, SettlementKey, SettlementTlc, TLCId, TlcErrPacket,
+    TlcErrorCode, TlcInfo, TlcStatus, WatchChannelKeys,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use fiber_types::{Attempt, AttemptStatus, HashAlgorithm, PaymentHopData, RouterHop, SessionRoute};
@@ -138,6 +136,37 @@ fn test_node_namespace_isolates_shared_physical_store() {
     assert_eq!(tenant_u1.get_preimage(&payment_hash), Some(u1_preimage));
     assert_eq!(tenant_u2.get_preimage(&payment_hash), Some(u2_preimage));
     assert_eq!(store.get_preimage(&payment_hash), None);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_schema_preflight_scans_only_its_logical_namespace() {
+    let path = TempDir::new("namespace_migration_scope");
+    let store = open_store(path).expect("shared store");
+    let tenant = store.namespaced(NodeNamespace::hosted_tenant("one"));
+    tenant.ensure_current_schema().expect("initialize tenant");
+    let corrupt_key = [
+        &[fiber_types::schema::CHANNEL_ACTOR_STATE_PREFIX],
+        &[19; 32][..],
+    ]
+    .concat();
+    tenant.put(&corrupt_key, b"corrupt tenant state");
+    store
+        .ensure_current_schema()
+        .expect("root must not scan tenant rows");
+    assert!(
+        tenant.ensure_current_schema().is_err(),
+        "tenant validates its own rows"
+    );
+    tenant.delete(&corrupt_key);
+    store.put(&corrupt_key, b"corrupt root state");
+    tenant
+        .ensure_current_schema()
+        .expect("tenant must not scan root rows");
+    assert!(
+        store.ensure_current_schema().is_err(),
+        "root validates its own rows"
+    );
 }
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "watchtower"))]
@@ -608,7 +637,7 @@ fn test_store_watchtower() {
             local_settlement_data: settlement_data.clone(),
             pending_remote_settlement_data: settlement_data.clone(),
             remote_settlement_data: settlement_data.clone(),
-            commitment_contract_features: Default::default(),
+            channel_features: Default::default(),
         }]
     );
 
@@ -639,9 +668,60 @@ fn test_store_watchtower() {
             revocation_data: Some(revocation_data),
             pending_remote_settlement_data: settlement_data.clone(),
             remote_settlement_data: settlement_data,
-            commitment_contract_features: Default::default(),
+            channel_features: Default::default(),
         }]
     );
+
+    let old = RevocationData {
+        commitment_number: 0,
+        aggregated_signature: CompactSignature::from_bytes(&[0u8; 64]).unwrap(),
+        output: CellOutput::default(),
+        output_data: Bytes::default(),
+    };
+    let mut newer = old.clone();
+    newer.commitment_number = 1;
+    let newer_settlement = SettlementData {
+        local_amount: 300,
+        remote_amount: 400,
+        tlcs: vec![],
+    };
+    store.update_revocation(
+        node_id.clone(),
+        channel_id,
+        newer.clone(),
+        newer_settlement.clone(),
+    );
+    store.update_revocation(
+        node_id.clone(),
+        channel_id,
+        old,
+        SettlementData {
+            local_amount: 1,
+            remote_amount: 2,
+            tlcs: vec![],
+        },
+    );
+    let stored = store.get_watch_channels().pop().unwrap();
+    assert_eq!(stored.revocation_data, Some(newer));
+    assert_eq!(stored.remote_settlement_data, newer_settlement);
+    // Replayed bootstrap registration cannot erase accepted revocation data.
+    store.insert_watch_channel(
+        node_id.clone(),
+        channel_id,
+        None,
+        WatchChannelKeys {
+            local_settlement: SettlementKey::local(Privkey::from(&[1; 32])),
+            remote_settlement: remote_settlement_key,
+            local_funding: local_funding_pubkey,
+            remote_funding: remote_funding_pubkey,
+        },
+        SettlementData {
+            local_amount: 100,
+            remote_amount: 200,
+            tlcs: vec![],
+        },
+    );
+    assert_eq!(store.get_watch_channels().pop().unwrap(), stored);
 
     store.remove_watch_channel(node_id, channel_id);
     assert_eq!(store.get_watch_channels(), vec![]);
@@ -701,12 +781,60 @@ fn test_store_external_watch_channel_contains_no_private_keys() {
             fiber_types::WatchtowerExternalSignerState::default()
         )
     );
+    let original = SettlementData {
+        local_amount: 300,
+        remote_amount: 400,
+        tlcs: vec![],
+    };
+    let resigned = SettlementData {
+        local_amount: 500,
+        remote_amount: 600,
+        tlcs: vec![],
+    };
+    store.update_pending_remote_settlement(node_id.clone(), channel_id, original.clone());
+    store.update_pending_remote_settlement(node_id.clone(), channel_id, resigned.clone());
+    let stored = store.get_watch_channel(&node_id, &channel_id).unwrap();
+    assert_eq!(
+        stored.remote_settlement_data,
+        channel.remote_settlement_data
+    );
+    assert_eq!(stored.pending_remote_settlement_data, resigned);
+    assert_eq!(
+        store.get_superseded_remote_settlements(&node_id, &channel_id),
+        vec![original]
+    );
+    assert!(
+        matches!(
+            store.get_watchtower_signer(&node_id, &channel_id),
+            fiber_types::WatchtowerSignerState::External(_)
+        ),
+        "superseded snapshots cannot overwrite signer state"
+    );
+    let mut with_secret = channel.local_settlement_data.clone();
+    with_secret.tlcs[0].local_key = Some(Privkey::from(&[5; 32]));
+    store.update_local_settlement(node_id.clone(), channel_id, with_secret);
+    assert_eq!(
+        store
+            .get_watch_channel(&node_id, &channel_id)
+            .unwrap()
+            .local_settlement_data,
+        channel.local_settlement_data,
+        "external channels must not persist host-held TLC secrets"
+    );
+    assert!(store.remove_watch_channel(node_id.clone(), channel_id));
+    assert!(store
+        .get_superseded_remote_settlements(&node_id, &channel_id)
+        .is_empty());
+    assert_eq!(
+        store.get_watchtower_signer(&node_id, &channel_id),
+        fiber_types::WatchtowerSignerState::Internal
+    );
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
-fn test_store_watchtower_v1_registration_round_trip() {
-    let path = TempDir::new("test-watchtower-v1-store");
+fn test_store_watchtower_v2_registration_round_trip() {
+    let path = TempDir::new("test-watchtower-v2-store");
     let store = open_store(path).expect("created store failed");
     let node_id = NodeId::from_bytes(PeerId::random().into_bytes());
     let channel_id = gen_rand_sha256_hash();
@@ -716,7 +844,7 @@ fn test_store_watchtower_v1_registration_round_trip() {
         tlcs: vec![],
     };
 
-    store.insert_watch_channel_with_features(
+    store.insert_watch_channel(
         node_id,
         channel_id,
         None,
@@ -727,7 +855,6 @@ fn test_store_watchtower_v1_registration_round_trip() {
             remote_funding: Privkey::from(&[4; 32]).pubkey(),
         },
         settlement_data,
-        CommitmentContractFeatures::ONCHAIN_FULL_PAYMENT_HASH,
     );
 
     assert_eq!(
@@ -736,8 +863,8 @@ fn test_store_watchtower_v1_registration_round_trip() {
             .into_iter()
             .find(|channel| channel.channel_id == channel_id)
             .expect("stored channel")
-            .commitment_contract_features,
-        CommitmentContractFeatures::ONCHAIN_FULL_PAYMENT_HASH
+            .channel_features,
+        ChannelFeatures::V2
     );
 }
 
@@ -1310,7 +1437,7 @@ fn test_onchain_tlc_settlement_roundtrip() {
             tlc_id,
             &payment_hash,
         ),
-        Some(StoredOnChainTlcSettlement::Exact(settlement))
+        Some(settlement)
     );
     assert_eq!(
         WatchtowerStore::get_onchain_tlc_settlement(
@@ -1374,7 +1501,7 @@ fn test_onchain_tlc_settlement_resolves_hosted_tenant_namespace() {
         store.insert_onchain_tlc_settlement(&u1_node_id, &channel_id, tlc_id, u1_proof.clone());
         assert_eq!(
             read(&tenant_u1, &channel_id, tlc_id),
-            Some(StoredOnChainTlcSettlement::Exact(u1_proof.clone()))
+            Some(u1_proof.clone())
         );
         assert_eq!(read(&tenant_u2, &channel_id, tlc_id), None);
         assert_eq!(read(&store, &channel_id, tlc_id), None);
@@ -1396,10 +1523,7 @@ fn test_onchain_tlc_settlement_resolves_hosted_tenant_namespace() {
             (&tenant_u2, u2_proof),
             (&store, &public_proof),
         ] {
-            assert_eq!(
-                read(reader, &channel_id, tlc_id),
-                Some(StoredOnChainTlcSettlement::Exact(expected.clone()))
-            );
+            assert_eq!(read(reader, &channel_id, tlc_id), Some(expected.clone()));
             assert_eq!(read(reader, &channel_id, TLCId::Offered(1)), None);
         }
         assert_eq!(read(&unowned_tenant, &channel_id, tlc_id), None);
@@ -1437,18 +1561,10 @@ fn test_onchain_tlc_settlement_hosted_tenant_rejects_unscoped_legacy_proof() {
         &payment_hash.as_ref()[..20],
     ]
     .concat();
-    let legacy = LegacyOnChainTlcSettlement {
-        preimage: None,
-        tx_hash: None,
-        tlc_index: None,
-    };
-    for value in [
-        vec![],
-        serialize_to_vec(&legacy, "LegacyOnChainTlcSettlement"),
-    ] {
+    for value in [vec![], vec![0, 0, 0]] {
         store.put(&legacy_key, value);
-        // Legacy records do not identify their owner. Preserve the public
-        // node's fallback without exposing its proof to a hosted tenant.
+        // V2 requires exact proofs with node and TLC identity. Neither the
+        // public node nor a tenant may consume unscoped legacy rows.
         assert_eq!(
             ChannelActorStateStore::get_onchain_tlc_settlement(
                 &store,
@@ -1456,7 +1572,7 @@ fn test_onchain_tlc_settlement_hosted_tenant_rejects_unscoped_legacy_proof() {
                 tlc_id,
                 &payment_hash,
             ),
-            Some(StoredOnChainTlcSettlement::Legacy(legacy.clone()))
+            None
         );
         assert_eq!(
             ChannelActorStateStore::get_onchain_tlc_settlement(
@@ -1510,7 +1626,7 @@ fn test_onchain_tlc_settlements_with_shared_prefix_are_independent() {
             first_id,
             &first_hash,
         ),
-        Some(StoredOnChainTlcSettlement::Exact(first))
+        Some(first)
     );
     assert_eq!(
         WatchtowerStore::get_onchain_tlc_settlement(
@@ -1520,7 +1636,7 @@ fn test_onchain_tlc_settlements_with_shared_prefix_are_independent() {
             second_id,
             &second_hash,
         ),
-        Some(StoredOnChainTlcSettlement::Exact(second))
+        Some(second)
     );
 }
 
@@ -1564,7 +1680,7 @@ fn test_onchain_tlc_settlement_no_preimage_does_not_downgrade() {
             tlc_id,
             &payment_hash,
         ),
-        Some(StoredOnChainTlcSettlement::Exact(with_preimage))
+        Some(with_preimage)
     );
 }
 
@@ -1613,13 +1729,13 @@ fn test_onchain_tlc_settlements_are_isolated_between_watchtower_tenants() {
             tlc_id,
             &payment_hash,
         ),
-        Some(StoredOnChainTlcSettlement::Exact(OnChainTlcSettlement {
+        Some(OnChainTlcSettlement {
             payment_hash,
             hash_algorithm: HashAlgorithm::CkbHash,
             preimage: Some(Hash256::from([9u8; 32])),
             tx_hash: Hash256::from([7u8; 32]),
             tlc_index: 0,
-        }))
+        })
     );
     assert_eq!(
         WatchtowerStore::get_onchain_tlc_settlement(
@@ -1629,71 +1745,13 @@ fn test_onchain_tlc_settlements_are_isolated_between_watchtower_tenants() {
             tlc_id,
             &payment_hash,
         ),
-        Some(StoredOnChainTlcSettlement::Exact(OnChainTlcSettlement {
+        Some(OnChainTlcSettlement {
             payment_hash,
             hash_algorithm: HashAlgorithm::CkbHash,
             preimage: None,
             tx_hash: Hash256::from([8u8; 32]),
             tlc_index: 0,
-        }))
-    );
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-fn test_onchain_tlc_settlement_legacy_empty_value() {
-    let path = TempDir::new("test-onchain-tlc-settlement-legacy");
-    let store = open_store(path).expect("created store failed");
-    let channel_id = Hash256::from([1u8; 32]);
-    let payment_hash = Hash256::from([3u8; 32]);
-    let prefix: [u8; 20] = payment_hash.as_ref()[0..20].try_into().unwrap();
-    let key = [
-        &[WATCHTOWER_TLC_SETTLED_PREFIX],
-        channel_id.as_ref(),
-        prefix.as_ref(),
-    ]
-    .concat();
-
-    store.put(key, []);
-    let tlc_id = TLCId::Offered(0);
-    let node_id = NodeId::local();
-
-    assert_eq!(
-        WatchtowerStore::get_onchain_tlc_settlement(
-            &store,
-            &node_id,
-            &channel_id,
-            tlc_id,
-            &payment_hash,
-        ),
-        Some(StoredOnChainTlcSettlement::Legacy(
-            LegacyOnChainTlcSettlement {
-                preimage: None,
-                tx_hash: None,
-                tlc_index: None,
-            }
-        ))
-    );
-
-    let exact = OnChainTlcSettlement {
-        payment_hash,
-        hash_algorithm: HashAlgorithm::CkbHash,
-        preimage: None,
-        tx_hash: Hash256::from([7u8; 32]),
-        tlc_index: 0,
-    };
-    store.insert_onchain_tlc_settlement(&node_id, &channel_id, tlc_id, exact.clone());
-    assert_eq!(
-        WatchtowerStore::get_onchain_tlc_settlement(
-            &store,
-            &node_id,
-            &channel_id,
-            tlc_id,
-            &payment_hash,
-        ),
-        Some(StoredOnChainTlcSettlement::Exact(exact)),
-        "the unified lookup must prefer an exact record over the legacy prefix fallback"
+        })
     );
 }
 
@@ -1743,7 +1801,7 @@ fn test_store_watchtower_with_wrong_node_id() {
         local_settlement_data: settlement_data.clone(),
         pending_remote_settlement_data: settlement_data.clone(),
         remote_settlement_data: settlement_data.clone(),
-        commitment_contract_features: Default::default(),
+        channel_features: Default::default(),
     }];
     assert_eq!(store.get_watch_channels(), expected_value);
 
@@ -1799,14 +1857,11 @@ fn test_channel_actor_state_store() {
     let sec_nonce = SecNonce::build(seckey).build();
     let pub_nonce = sec_nonce.public_nonce();
     let channel_id = gen_rand_sha256_hash();
-
     let state = ChannelActorState {
         channel_signer: crate::fiber::channel_signer::ChannelSigner::local(signer.clone()),
         core: ChannelActorData {
             state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::THEIR_INIT_SENT),
             signing_context: Default::default(),
-            local_commitment_points: HashMap::new(),
-            local_public_nonces: HashMap::new(),
             public_channel_info: Some(PublicChannelInfo {
                 local_channel_announcement_signature: Some((
                     mock_ecdsa_signature(),
@@ -1846,6 +1901,7 @@ fn test_channel_actor_state_store() {
             waiting_forward_tlc_tasks: Default::default(),
             local_shutdown_script: Script::default(),
             local_channel_public_keys: signer.get_base_public_keys(),
+            session: crate::fiber::session::new_session(channel_id, &signer.funding_key, None),
             signer: Some(signer),
             remote_channel_public_keys: Some(ChannelBasePublicKeys {
                 funding_pubkey: gen_rand_fiber_public_key(),
@@ -1853,10 +1909,6 @@ fn test_channel_actor_state_store() {
             }),
             commitment_numbers: Default::default(),
             remote_shutdown_script: Some(Script::default()),
-            last_committed_remote_nonce: None,
-            remote_revocation_nonce_for_verify: None,
-            remote_revocation_nonce_for_send: None,
-            remote_revocation_nonce_for_next: None,
             remote_commitment_points: vec![
                 (0, gen_rand_fiber_public_key()),
                 (1, gen_rand_fiber_public_key()),
@@ -1871,7 +1923,6 @@ fn test_channel_actor_state_store() {
             remote_constraints: ChannelConstraints::default(),
             reestablishing: false,
             connectivity_state: fiber_types::ChannelConnectivityState::Online,
-            last_revoke_ack_msg: None,
             pending_replay_updates: vec![TlcReplayUpdate::Add(AddTlc {
                 channel_id,
                 tlc_id: 1,
@@ -1883,16 +1934,15 @@ fn test_channel_actor_state_store() {
             })],
             last_was_revoke: true,
             external_funding: None,
-            commitment_contract_features: Default::default(),
+            channel_features: Default::default(),
             created_at: SystemTime::now(),
         },
         waiting_peer_response: None,
-        revocation_nonce_unbalanced_since: None,
-        reestablish_started_at: None,
+        reestablish_timer: None,
+        recovery_peer_v2: None,
         network: None,
         scheduled_channel_update_handle: None,
         pending_notify_settle_tlcs: vec![],
-        pending_reestablish_channel_ready: false,
         defer_peer_tlc_updates: false,
         deferred_peer_tlc_updates: Default::default(),
         ephemeral_config: Default::default(),
@@ -1900,6 +1950,9 @@ fn test_channel_actor_state_store() {
         private_key: None,
         needs_backup: false,
         pending_messages: Default::default(),
+        pending_remove_effects_v2: 0,
+        pending_payment_notifications: Default::default(),
+        replayed_tlc_updates_v2: 0,
     };
 
     let bincode_encoded = bincode::serialize(&state).unwrap();
@@ -1953,13 +2006,12 @@ fn sample_channel_actor_state(
     let sec_nonce = SecNonce::build(seckey).build();
     let pub_nonce = sec_nonce.public_nonce();
 
+    let channel_id = gen_rand_sha256_hash();
     ChannelActorState {
         channel_signer: crate::fiber::channel_signer::ChannelSigner::local(signer.clone()),
         core: ChannelActorData {
             state,
             signing_context: Default::default(),
-            local_commitment_points: HashMap::new(),
-            local_public_nonces: HashMap::new(),
             public_channel_info: Some(PublicChannelInfo {
                 local_channel_announcement_signature: Some((
                     mock_ecdsa_signature(),
@@ -1993,12 +2045,13 @@ fn sample_channel_actor_state(
             commitment_fee_rate: 100,
             commitment_delay_epoch: 100,
             funding_fee_rate: 100,
-            id: gen_rand_sha256_hash(),
+            id: channel_id,
             tlc_state: Default::default(),
             retryable_tlc_operations: Default::default(),
             waiting_forward_tlc_tasks: Default::default(),
             local_shutdown_script: Script::default(),
             local_channel_public_keys: signer.get_base_public_keys(),
+            session: crate::fiber::session::new_session(channel_id, &signer.funding_key, None),
             signer: Some(signer),
             remote_channel_public_keys: Some(ChannelBasePublicKeys {
                 funding_pubkey: gen_rand_fiber_public_key(),
@@ -2006,10 +2059,6 @@ fn sample_channel_actor_state(
             }),
             commitment_numbers: Default::default(),
             remote_shutdown_script: Some(Script::default()),
-            last_committed_remote_nonce: None,
-            remote_revocation_nonce_for_verify: None,
-            remote_revocation_nonce_for_send: None,
-            remote_revocation_nonce_for_next: None,
             remote_commitment_points: vec![
                 (0, gen_rand_fiber_public_key()),
                 (1, gen_rand_fiber_public_key()),
@@ -2024,20 +2073,18 @@ fn sample_channel_actor_state(
             remote_constraints: ChannelConstraints::default(),
             reestablishing: false,
             connectivity_state: fiber_types::ChannelConnectivityState::Online,
-            last_revoke_ack_msg: None,
             pending_replay_updates: vec![],
             last_was_revoke: false,
             external_funding: None,
-            commitment_contract_features: Default::default(),
+            channel_features: Default::default(),
             created_at: SystemTime::now(),
         },
         waiting_peer_response: None,
-        revocation_nonce_unbalanced_since: None,
-        reestablish_started_at: None,
+        reestablish_timer: None,
+        recovery_peer_v2: None,
         network: None,
         scheduled_channel_update_handle: None,
         pending_notify_settle_tlcs: vec![],
-        pending_reestablish_channel_ready: false,
         defer_peer_tlc_updates: false,
         deferred_peer_tlc_updates: Default::default(),
         ephemeral_config: Default::default(),
@@ -2045,6 +2092,9 @@ fn sample_channel_actor_state(
         private_key: None,
         needs_backup: false,
         pending_messages: Default::default(),
+        pending_remove_effects_v2: 0,
+        pending_payment_notifications: Default::default(),
+        replayed_tlc_updates_v2: 0,
     }
 }
 
@@ -2065,12 +2115,13 @@ fn test_serde_channel_actor_state_ciborium() {
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 fn test_closed_onchain_settlement_state_round_trips() {
-    let state = sample_channel_actor_state(
+    let mut state = sample_channel_actor_state(
         ChannelState::Closed(
             CloseFlags::UNCOOPERATIVE_LOCAL | CloseFlags::WAITING_ONCHAIN_SETTLEMENT,
         ),
         Some(H256::default()),
     );
+    state.pending_remove_effects_v2 = 1;
     let (store, _dir) = generate_store();
 
     store.insert_channel_actor_state(state.clone());
@@ -2092,7 +2143,7 @@ fn test_closed_onchain_settlement_state_round_trips() {
     assert!(restored.network.is_none());
     assert!(restored.scheduled_channel_update_handle.is_none());
     assert!(restored.pending_notify_settle_tlcs.is_empty());
-    assert!(!restored.pending_reestablish_channel_ready);
+    assert_eq!(restored.pending_remove_effects_v2, 0);
     assert!(!restored.defer_peer_tlc_updates);
     assert!(restored.deferred_peer_tlc_updates.is_empty());
     assert!(restored.private_key.is_none());
@@ -2193,8 +2244,25 @@ fn test_hosted_payment_execution_store_isolation() {
             .len(),
         3
     );
-    // Clearing a hash-only index must preserve both hosted executions and all
-    // attempt records. Repeated cleanup must be harmless.
+    // Recovery indices must remain until the execution actually finishes.
+    store.clear_attempts_channel_index(hash);
+    assert_eq!(
+        store
+            .get_pending_attempts_by_channel_outpoint(&outpoint)
+            .len(),
+        3
+    );
+    let finish = |key| {
+        let mut attempt = store.get_attempt(key, 1).unwrap();
+        attempt.set_failed_status("finished", false);
+        store.insert_attempt(attempt);
+        let mut session = store.get_payment_session(key).unwrap();
+        session.set_failed_status("finished");
+        store.insert_payment_session(session);
+    };
+    finish(hash.into());
+    // Clearing a completed hash-only index must preserve hosted executions and
+    // all attempt records. Repeated cleanup must be harmless.
     store.clear_attempts_channel_index(hash);
     store.clear_attempts_channel_index(hash);
     assert!(store.get_attempt(hash, 1).is_some());
@@ -2207,6 +2275,7 @@ fn test_hosted_payment_execution_store_isolation() {
         .iter()
         .any(|attempt| attempt.session_key() == keys[2]));
 
+    finish(keys[1]);
     store.clear_attempts_channel_index(keys[1]);
     store.clear_attempts_channel_index(keys[1]);
     assert_eq!(
@@ -2332,15 +2401,17 @@ fn test_channel_ready_retry_index_handles_created_attempt_channel_ownership() {
             incoming_tlc_id: 1,
         }),
     };
-    assert!(channel_state.owns_payment_attempt(payment_hash, attempt.id));
-    assert!(!channel_state.owns_payment_attempt(scoped_key, attempt.id));
+    let mut scoped_attempt = attempt.clone();
+    scoped_attempt.upstream_tlc_key = scoped_key.upstream_tlc_key;
+    assert!(channel_state.owns_payment_attempt(&attempt));
+    assert!(!channel_state.owns_payment_attempt(&scoped_attempt));
     channel_state.tlc_state.offered_tlcs.tlcs[0].upstream_tlc_key = scoped_key.upstream_tlc_key;
     assert_eq!(
         channel_state.tlc_state.offered_tlcs.tlcs[0].session_key(),
         scoped_key
     );
-    assert!(channel_state.owns_payment_attempt(scoped_key, attempt.id));
-    assert!(!channel_state.owns_payment_attempt(payment_hash, attempt.id));
+    assert!(channel_state.owns_payment_attempt(&scoped_attempt));
+    assert!(!channel_state.owns_payment_attempt(&attempt));
     channel_state.tlc_state.offered_tlcs.tlcs[0].upstream_tlc_key = None;
     store.insert_channel_actor_state(channel_state.clone());
     assert!(
@@ -2393,8 +2464,8 @@ fn test_channel_ready_retry_index_handles_created_attempt_channel_ownership() {
     } else {
         panic!("expected queued AddTlc");
     }
-    assert!(channel_state.owns_payment_attempt(scoped_key, attempt.id));
-    assert!(!channel_state.owns_payment_attempt(payment_hash, attempt.id));
+    assert!(channel_state.owns_payment_attempt(&scoped_attempt));
+    assert!(!channel_state.owns_payment_attempt(&attempt));
     if let Some(RetryableTlcOperation::AddTlc(command)) =
         channel_state.retryable_tlc_operations.front_mut()
     {
@@ -2456,6 +2527,890 @@ fn test_store_payment_sessions_with_status() {
     let res = store.get_payment_sessions_with_status(PaymentStatus::Failed);
     assert_eq!(res.len(), 0);
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_review_rerouted_attempt_index_recovery() {
+    use crate::store::store_trait::FiberStore;
+    use fiber_types::schema::{
+        ATTEMPT_CHANNEL_INDEX_PREFIX, ATTEMPT_PREFIX, PAYMENT_SESSION_PREFIX,
+    };
+    let (store, _dir) = generate_store();
+    let hash = gen_rand_sha256_hash();
+    let request = SendPaymentDataBuilder::new(gen_rand_fiber_public_key(), 100, hash)
+        .max_fee_amount(Some(1000))
+        .build()
+        .unwrap();
+    let mut session = PaymentSession::new_session(&store, request, 10);
+    let a = ckb_types::packed::OutPoint::new(gen_rand_sha256_hash().into(), 0);
+    let b = ckb_types::packed::OutPoint::new(gen_rand_sha256_hash().into(), 0);
+    let mut attempt = session.new_attempt(
+        1,
+        gen_rand_fiber_public_key(),
+        gen_rand_fiber_public_key(),
+        vec![PaymentHopData {
+            amount: 100,
+            funding_tx_hash: a.tx_hash().into(),
+            ..Default::default()
+        }],
+    );
+    let key = |outpoint: &ckb_types::packed::OutPoint| {
+        [
+            &[ATTEMPT_CHANNEL_INDEX_PREFIX],
+            outpoint.as_slice(),
+            hash.as_ref(),
+            &1u64.to_le_bytes(),
+        ]
+        .concat()
+    };
+    store.insert_payment_session(session.clone());
+    store.insert_attempt(attempt.clone());
+    attempt.status = AttemptStatus::Retrying;
+    let mut hops = attempt.route_hops.clone();
+    hops[0].funding_tx_hash = b.tx_hash().into();
+    attempt.update_route(hops);
+    store.insert_attempt(attempt.clone());
+    let current = attempt.first_hop_channel_outpoint().unwrap();
+    assert!(store.get(key(&a)).is_none());
+    assert!(store.get(key(current)).is_some());
+    assert!(store
+        .get_pending_attempts_by_channel_outpoint(&a)
+        .is_empty());
+    assert_eq!(
+        store
+            .get_pending_attempts_by_channel_outpoint(current)
+            .len(),
+        1
+    );
+
+    // Restore the released layout: the attempt points at B, but only A is indexed.
+    store.delete(key(current));
+    store.put(key(&a), []);
+    // Missing attempt/session records leave removable orphan keys, including
+    // enough aliases to cross a bounded repair batch.
+    for id in 2u64..=300 {
+        store.put(
+            [
+                &[ATTEMPT_CHANNEL_INDEX_PREFIX],
+                a.as_slice(),
+                hash.as_ref(),
+                &id.to_le_bytes(),
+            ]
+            .concat(),
+            [],
+        );
+    }
+    let orphan = gen_rand_sha256_hash();
+    store.put(
+        [
+            &[ATTEMPT_CHANNEL_INDEX_PREFIX],
+            a.as_slice(),
+            orphan.as_ref(),
+            &1u64.to_le_bytes(),
+        ]
+        .concat(),
+        [],
+    );
+    let attempt_key = [&[ATTEMPT_PREFIX], hash.as_ref(), &1u64.to_le_bytes()].concat();
+    let session_key = [&[PAYMENT_SESSION_PREFIX], hash.as_ref()].concat();
+    let records_before = (store.get(&attempt_key), store.get(&session_key));
+    // Unindexed history must never be deserialized, even during repair.
+    let history = gen_rand_sha256_hash();
+    store.put([&[PAYMENT_SESSION_PREFIX], history.as_ref()].concat(), []);
+    store.put(
+        [&[ATTEMPT_PREFIX], history.as_ref(), &1u64.to_le_bytes()].concat(),
+        [],
+    );
+    assert_eq!(
+        store.reconcile_attempts_channel_index(),
+        [hash.into()].into_iter().collect()
+    );
+    assert!(store.get(key(&a)).is_none());
+    assert!(store.get(key(current)).is_some());
+    assert_eq!(
+        (store.get(&attempt_key), store.get(&session_key)),
+        records_before
+    );
+    assert_eq!(
+        store
+            .collect_by_prefix(&[ATTEMPT_CHANNEL_INDEX_PREFIX])
+            .len(),
+        1
+    );
+
+    assert_eq!(
+        store
+            .get_pending_attempts_by_channel_outpoint(current)
+            .len(),
+        1
+    );
+
+    // A final local result cannot retire a still-owned queued Add.
+    let mut channel = sample_channel_actor_state(ChannelState::ChannelReady, None);
+    let channel_outpoint = channel.must_get_funding_transaction_outpoint();
+    let mut hops = attempt.route_hops.clone();
+    hops[0].funding_tx_hash = channel_outpoint.tx_hash().into();
+    attempt.update_route(hops);
+    attempt.set_failed_status("stopped", false);
+    store.insert_attempt(attempt.clone());
+    session.set_failed_status("stopped");
+    store.insert_payment_session(session);
+    channel
+        .retryable_tlc_operations
+        .push_back(RetryableTlcOperation::AddTlc(AddTlcCommand {
+            amount: 100,
+            payment_hash: hash,
+            attempt_id: Some(1),
+            expiry: 0,
+            hash_algorithm: HashAlgorithm::CkbHash,
+            onion_packet: None,
+            shared_secret: [0; 32],
+            is_trampoline_hop: false,
+            previous_tlc: None,
+            upstream_tlc_key: None,
+        }));
+    store.insert_channel_actor_state(channel.clone());
+    store.delete(key(&channel_outpoint));
+    store.put(key(&a), []);
+    store.reconcile_attempts_channel_index();
+    assert!(store.get(key(&channel_outpoint)).is_some());
+    channel.retryable_tlc_operations.clear();
+    store.insert_channel_actor_state(channel);
+    // Include an additional historical alias: cleanup must delete actual keys.
+    store.put(key(&a), []);
+    store.reconcile_attempts_channel_index();
+    assert!(store.get_payment_hashes_with_channel_index().is_empty());
+    // Same-route result updates must not resurrect retired indexes.
+    store.insert_attempt(attempt);
+    assert!(store.get_payment_hashes_with_channel_index().is_empty());
+    assert!(store.reconcile_attempts_channel_index().is_empty());
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_payment_recovery_hashes_read_only_channel_index_keys() {
+    use fiber_types::schema::{
+        ATTEMPT_CHANNEL_INDEX_PREFIX, ATTEMPT_PREFIX, PAYMENT_SESSION_PREFIX,
+    };
+    use std::collections::HashSet;
+
+    let (store, _dir) = generate_store();
+    let hashes = [gen_rand_sha256_hash(), gen_rand_sha256_hash()];
+    for hash in hashes {
+        // Neither record is needed to enumerate recovery candidates.
+        store.put([&[PAYMENT_SESSION_PREFIX], hash.as_ref()].concat(), []);
+        for id in 1u64..=2 {
+            let outpoint = gen_rand_channel_outpoint();
+            store.put(
+                [
+                    &[ATTEMPT_CHANNEL_INDEX_PREFIX],
+                    outpoint.as_slice(),
+                    hash.as_ref(),
+                    &id.to_le_bytes(),
+                ]
+                .concat(),
+                [],
+            );
+            store.put(
+                [&[ATTEMPT_PREFIX], hash.as_ref(), &id.to_le_bytes()].concat(),
+                [],
+            );
+        }
+    }
+    // Historical records without wake-up entries must not become candidates.
+    let history = gen_rand_sha256_hash();
+    store.put([&[PAYMENT_SESSION_PREFIX], history.as_ref()].concat(), []);
+    assert_eq!(
+        store.get_payment_hashes_with_channel_index(),
+        HashSet::from(hashes)
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_payment_status_queries_skip_attempts_for_mismatched_terminal_sessions() {
+    for terminal_status in [PaymentStatus::Success, PaymentStatus::Failed] {
+        let (store, _dir) = generate_store();
+        let hash = Hash256::from([1; 32]);
+        let request = SendPaymentDataBuilder::new(gen_rand_fiber_public_key(), 100, hash)
+            .max_fee_amount(Some(1000))
+            .build()
+            .unwrap();
+        let mut session = PaymentSession::new_session(&store, request, 1);
+        session.status = terminal_status;
+        store.insert_payment_session(session);
+
+        // An unreadable sentinel makes unnecessary attempt hydration fail.
+        let attempt_key = [
+            &[fiber_types::schema::ATTEMPT_PREFIX],
+            hash.as_ref(),
+            &1u64.to_le_bytes(),
+        ]
+        .concat();
+        store.put(attempt_key, []);
+
+        for status in [
+            PaymentStatus::Created,
+            PaymentStatus::Inflight,
+            PaymentStatus::Success,
+            PaymentStatus::Failed,
+        ] {
+            if status == terminal_status
+                || (terminal_status == PaymentStatus::Failed
+                    && matches!(status, PaymentStatus::Success | PaymentStatus::Inflight))
+            {
+                continue;
+            }
+            assert!(store.get_payment_sessions_with_status(status).is_empty());
+            assert!(store
+                .get_payment_sessions_with_limit(1, None, Some(status))
+                .is_empty());
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_payment_list_skips_unneeded_channel_reads() {
+    use fiber_types::schema::{ATTEMPT_CHANNEL_INDEX_PREFIX, CHANNEL_ACTOR_STATE_PREFIX};
+    for indexed in [false, true] {
+        let (store, _dir) = generate_store();
+        let channel = sample_channel_actor_state(ChannelState::ChannelReady, None);
+        let outpoint = channel.must_get_funding_transaction_outpoint();
+        store.insert_channel_actor_state(channel.clone());
+        let mut originals = Vec::new();
+        for tag in 1u8..=32 {
+            let hash = Hash256::from([tag; 32]);
+            let request = SendPaymentDataBuilder::new(channel.remote_pubkey, 100, hash)
+                .max_fee_amount(Some(1000))
+                .build()
+                .unwrap();
+            let mut session = PaymentSession::new_session(&store, request, 1);
+            let mut attempt = session.new_attempt(
+                1,
+                channel.local_pubkey,
+                channel.remote_pubkey,
+                vec![PaymentHopData {
+                    amount: 100,
+                    funding_tx_hash: outpoint.tx_hash().into(),
+                    ..Default::default()
+                }],
+            );
+            attempt.set_failed_status("historical failure", false);
+            store.insert_attempt(attempt.clone());
+            session.set_failed_status("historical failure");
+            store.insert_payment_session(session);
+            if !indexed {
+                store.delete(
+                    [
+                        &[ATTEMPT_CHANNEL_INDEX_PREFIX],
+                        outpoint.as_slice(),
+                        hash.as_ref(),
+                        &attempt.id.to_le_bytes(),
+                    ]
+                    .concat(),
+                );
+            }
+            originals.push(attempt);
+        }
+        // Any channel deserialization now panics: list filtering must not read it.
+        store.put(
+            [&[CHANNEL_ACTOR_STATE_PREFIX], channel.id.as_ref()].concat(),
+            [],
+        );
+        assert!(store
+            .get_payment_sessions_with_status(PaymentStatus::Success)
+            .is_empty());
+        assert!(store
+            .get_payment_sessions_with_limit(10, None, Some(PaymentStatus::Success))
+            .is_empty());
+        if !indexed {
+            assert!(store
+                .get_payment_sessions_with_status(PaymentStatus::Inflight)
+                .is_empty());
+            assert!(store
+                .get_payment_sessions_with_limit(10, None, Some(PaymentStatus::Inflight))
+                .is_empty());
+            for filter in [None, Some(PaymentStatus::Failed)] {
+                let page = store.get_payment_sessions_with_limit(3, Some([1; 32].into()), filter);
+                assert_eq!(
+                    page.iter().map(|s| s.payment_hash()).collect::<Vec<_>>(),
+                    vec![[2; 32].into(), [3; 32].into(), [4; 32].into()]
+                );
+                for session in page {
+                    let status = session.status;
+                    let response =
+                        crate::fiber::network::SendPaymentResponse::from_session_with_status(
+                            session, status,
+                        );
+                    assert_eq!(response.status, PaymentStatus::Failed);
+                }
+            }
+            assert_eq!(
+                store
+                    .get_payment_sessions_with_status(PaymentStatus::Failed)
+                    .len(),
+                32
+            );
+        }
+        // Successful attempt evidence must remain visible despite the persisted Failed.
+        let mut success = originals[0].clone();
+        success.set_success_status();
+        store.insert_attempt(success);
+        for page in [
+            store.get_payment_sessions_with_status(PaymentStatus::Success),
+            store.get_payment_sessions_with_limit(1, None, Some(PaymentStatus::Success)),
+        ] {
+            assert_eq!(page.len(), 1);
+            assert_eq!(page[0].payment_hash(), originals[0].payment_hash);
+            assert_eq!(page[0].status, PaymentStatus::Success);
+        }
+        // An explicitly Inflight attempt needs neither an index nor channel reads.
+        if !indexed {
+            let mut inflight = originals[1].clone();
+            inflight.status = AttemptStatus::Inflight;
+            store.insert_attempt(inflight);
+            let page = store.get_payment_sessions_with_status(PaymentStatus::Inflight);
+            assert_eq!(page.len(), 1);
+            assert_eq!(page[0].status, PaymentStatus::Inflight);
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
+async fn test_payment_list_index_gate_does_not_change_settlement_status() {
+    use fiber_types::schema::{
+        ATTEMPT_CHANNEL_INDEX_PREFIX, ATTEMPT_PREFIX, PAYMENT_SESSION_PREFIX,
+    };
+    let (store, _dir) = generate_store();
+    let node = NetworkNode::new().await;
+    let rpc =
+        crate::rpc::payment::PaymentRpcServerImpl::new(node.network_actor.clone(), store.clone());
+
+    let mut channel = sample_channel_actor_state(ChannelState::ChannelReady, None);
+    let outpoint = channel.must_get_funding_transaction_outpoint();
+    let hash = gen_rand_sha256_hash();
+    let request = SendPaymentDataBuilder::new(channel.remote_pubkey, 100, hash)
+        .max_fee_amount(Some(1000))
+        .build()
+        .unwrap();
+    let mut session = PaymentSession::new_session(&store, request, 1);
+    let mut attempt = session.new_attempt(
+        1,
+        channel.local_pubkey,
+        channel.remote_pubkey,
+        vec![PaymentHopData {
+            amount: 100,
+            funding_tx_hash: outpoint.tx_hash().into(),
+            ..Default::default()
+        }],
+    );
+    attempt.set_failed_status("dispatch stopped", false);
+    store.insert_attempt(attempt);
+    session.set_failed_status("dispatch stopped");
+    store.insert_payment_session(session);
+    channel
+        .retryable_tlc_operations
+        .push_back(RetryableTlcOperation::AddTlc(AddTlcCommand {
+            amount: 100,
+            payment_hash: hash,
+            attempt_id: Some(1),
+            expiry: 0,
+            hash_algorithm: HashAlgorithm::CkbHash,
+            onion_packet: None,
+            shared_secret: [0; 32],
+            is_trampoline_hop: false,
+            previous_tlc: None,
+            upstream_tlc_key: None,
+        }));
+    store.insert_channel_actor_state(channel);
+    let session_key = [&[PAYMENT_SESSION_PREFIX], hash.as_ref()].concat();
+    let attempt_key = [&[ATTEMPT_PREFIX], hash.as_ref(), &1u64.to_le_bytes()].concat();
+    let before = (store.get(&session_key), store.get(&attempt_key));
+    for indexed in [true, false] {
+        if !indexed {
+            store.delete(
+                [
+                    &[ATTEMPT_CHANNEL_INDEX_PREFIX],
+                    outpoint.as_slice(),
+                    hash.as_ref(),
+                    &1u64.to_le_bytes(),
+                ]
+                .concat(),
+            );
+        }
+        let expected = if indexed {
+            PaymentStatus::Inflight
+        } else {
+            PaymentStatus::Failed
+        };
+        let excluded = if indexed {
+            PaymentStatus::Failed
+        } else {
+            PaymentStatus::Inflight
+        };
+        assert!(store.get_payment_sessions_with_status(excluded).is_empty());
+        assert!(store
+            .get_payment_sessions_with_limit(1, None, Some(excluded))
+            .is_empty());
+        for page in [
+            store.get_payment_sessions_with_status(expected),
+            store.get_payment_sessions_with_limit(1, None, Some(expected)),
+            store.get_payment_sessions_with_limit(1, None, None),
+        ] {
+            assert_eq!(page.len(), 1);
+            let view = page.into_iter().next().unwrap();
+            assert_eq!(view.status, expected);
+            let response = crate::fiber::network::SendPaymentResponse::from_session_with_status(
+                view, expected,
+            );
+            assert_eq!(response.status, expected);
+        }
+        for filter in [None, Some(expected)] {
+            let response = rpc
+                .list_payments(
+                    &jsonrpsee::Extensions::new(),
+                    crate::rpc::payment::ListPaymentsParams {
+                        status: filter.map(Into::into),
+                        limit: Some(1),
+                        after: None,
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.payments.len(), 1);
+            assert_eq!(response.payments[0].status, expected.into());
+            assert_eq!(response.last_cursor, Some(hash.into()));
+            let next = rpc
+                .list_payments(
+                    &jsonrpsee::Extensions::new(),
+                    crate::rpc::payment::ListPaymentsParams {
+                        status: filter.map(Into::into),
+                        limit: Some(1),
+                        after: response.last_cursor,
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(next.payments.is_empty());
+        }
+        let session = store.get_payment_session(hash).unwrap();
+        assert_eq!(session.effective_status(&store), PaymentStatus::Inflight);
+        assert_eq!(
+            crate::fiber::network::SendPaymentResponse::from_session(session, &store).status,
+            PaymentStatus::Inflight
+        );
+        assert_eq!((store.get(&session_key), store.get(&attempt_key)), before);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_legacy_partial_mpp_proof_is_success_in_all_payment_queries() {
+    let (store, _dir) = generate_store();
+    let source = gen_rand_fiber_public_key();
+    let target = gen_rand_fiber_public_key();
+    let preimage = gen_rand_sha256_hash();
+    let hash = Hash256::from(HashAlgorithm::CkbHash.hash(preimage));
+    let request = SendPaymentDataBuilder::new(target, 100, hash)
+        .max_fee_amount(Some(1000))
+        .build()
+        .unwrap();
+    let mut session = PaymentSession::new_session(&store, request, 1);
+    let mut attempt = session.new_attempt(
+        1,
+        source,
+        target,
+        vec![PaymentHopData {
+            amount: 60,
+            ..Default::default()
+        }],
+    );
+    attempt.set_success_status();
+    attempt.preimage = Some(preimage);
+    store.insert_attempt(attempt);
+    session.set_failed_status("legacy partial MPP failure");
+    store.insert_payment_session(session);
+    assert_eq!(
+        store.get_payment_session(hash).unwrap().status,
+        PaymentStatus::Success
+    );
+    assert_eq!(
+        store
+            .get_payment_sessions_with_status(PaymentStatus::Success)
+            .len(),
+        1
+    );
+    assert_eq!(
+        store
+            .get_payment_sessions_with_limit(1, None, Some(PaymentStatus::Success))
+            .len(),
+        1
+    );
+    assert!(store
+        .get_payment_sessions_with_status(PaymentStatus::Failed)
+        .is_empty());
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_review_settled_legacy_timeout_is_not_pending() {
+    let (store, _dir) = generate_store();
+    let preimage = gen_rand_sha256_hash();
+    let hash = HashAlgorithm::CkbHash.hash(preimage).into();
+    let mut channel = sample_channel_actor_state(ChannelState::ChannelReady, None);
+    let outpoint = channel.must_get_funding_transaction_outpoint();
+    let request = SendPaymentDataBuilder::new(gen_rand_fiber_public_key(), 100, hash)
+        .max_fee_amount(Some(1000))
+        .build()
+        .unwrap();
+    let mut session = PaymentSession::new_session(&store, request, 1);
+    let mut attempt = session.new_attempt(
+        1,
+        channel.local_pubkey,
+        channel.remote_pubkey,
+        vec![PaymentHopData {
+            amount: 100,
+            funding_tx_hash: outpoint.tx_hash().into(),
+            ..Default::default()
+        }],
+    );
+    attempt.set_failed_status("legacy chain timeout", false);
+    store.insert_attempt(attempt.clone());
+    session.set_failed_status("legacy chain timeout");
+    store.insert_payment_session(session);
+    channel.tlc_state.add_offered_tlc(TlcInfo {
+        upstream_tlc_key: None,
+        status: TlcStatus::Outbound(OutboundTlcStatus::Committed),
+        tlc_id: TLCId::Offered(0),
+        amount: 100,
+        payment_hash: hash,
+        total_amount: None,
+        payment_secret: None,
+        attempt_id: Some(attempt.id),
+        expiry: 0,
+        hash_algorithm: HashAlgorithm::CkbHash,
+        onion_packet: None,
+        shared_secret: [0; 32],
+        is_trampoline_hop: false,
+        created_at: CommitmentNumbers::new(),
+        removed_reason: None,
+        forwarding_tlc: None,
+        removed_confirmed_at: None,
+        applied_flags: AppliedFlags::ADD,
+    });
+    // Released chain-timeout completion used this setter without applying REMOVE.
+    channel.tlc_state.set_offered_tlc_removed(
+        0,
+        RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+            TlcErr::new(TlcErrorCode::ExpiryTooSoon),
+            &[0; 32],
+        )),
+    );
+    channel.state = ChannelState::Closed(CloseFlags::UNCOOPERATIVE_LOCAL);
+    store.insert_channel_actor_state(channel.clone());
+    let session = store.get_payment_session(hash).unwrap();
+    let original = bincode::serialize(&channel.core).unwrap();
+    assert!(
+        !session.has_outstanding_channel_work(&store),
+        "a finalized legacy timeout cannot block explicit retries"
+    );
+    assert_eq!(session.effective_status(&store), PaymentStatus::Failed);
+    assert_eq!(
+        store
+            .get_payment_sessions_with_limit(1, None, Some(PaymentStatus::Failed))
+            .len(),
+        1
+    );
+    assert_eq!(
+        bincode::serialize(&store.get_channel_actor_state(&channel.id).unwrap().core).unwrap(),
+        original
+    );
+
+    channel
+        .retryable_tlc_operations
+        .push_back(RetryableTlcOperation::AddTlc(AddTlcCommand {
+            amount: 100,
+            payment_hash: hash,
+            attempt_id: Some(attempt.id),
+            expiry: DEFAULT_TLC_EXPIRY_DELTA,
+            hash_algorithm: HashAlgorithm::CkbHash,
+            onion_packet: None,
+            shared_secret: [0; 32],
+            is_trampoline_hop: false,
+            previous_tlc: None,
+            upstream_tlc_key: None,
+        }));
+    store.insert_channel_actor_state(channel.clone());
+    assert!(
+        session.has_outstanding_channel_work(&store),
+        "a pending Add is still owned even when a historical TLC has finished"
+    );
+    channel.retryable_tlc_operations.clear();
+
+    channel.state = ChannelState::Closed(
+        CloseFlags::UNCOOPERATIVE_LOCAL | CloseFlags::WAITING_ONCHAIN_SETTLEMENT,
+    );
+    store.insert_channel_actor_state(channel.clone());
+    assert_eq!(
+        session.effective_status(&store),
+        PaymentStatus::Inflight,
+        "a reason alone is not final while settlement is pending"
+    );
+    channel.state = ChannelState::Closed(CloseFlags::UNCOOPERATIVE_LOCAL);
+    channel
+        .tlc_state
+        .get_mut(&TLCId::Offered(0))
+        .unwrap()
+        .removed_reason = Some(RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+        payment_preimage: preimage,
+    }));
+    store.insert_channel_actor_state(channel.clone());
+    assert!(
+        session.has_outstanding_channel_work(&store),
+        "an unobserved fulfillment must still wake the payer"
+    );
+    attempt.set_success_status();
+    attempt.preimage = Some(preimage);
+    store.insert_attempt(attempt.clone());
+    let session = store.get_payment_session(hash).unwrap();
+    let original = bincode::serialize(&channel.core).unwrap();
+    assert!(
+        !session.has_pending_payment_work(&store),
+        "an acknowledged historical on-chain fulfill must not retain a payer forever"
+    );
+    assert_eq!(
+        bincode::serialize(&store.get_channel_actor_state(&channel.id).unwrap().core).unwrap(),
+        original
+    );
+    channel.state = ChannelState::Closed(
+        CloseFlags::UNCOOPERATIVE_LOCAL | CloseFlags::WAITING_ONCHAIN_SETTLEMENT,
+    );
+    store.insert_channel_actor_state(channel.clone());
+    assert!(session.has_pending_payment_work(&store));
+    channel.state = ChannelState::Closed(CloseFlags::UNCOOPERATIVE_LOCAL);
+    attempt.preimage = Some(gen_rand_sha256_hash());
+    store.insert_attempt(attempt);
+    store.insert_channel_actor_state(channel);
+    assert!(
+        store
+            .get_payment_session(hash)
+            .unwrap()
+            .has_pending_payment_work(&store),
+        "a mismatched preimage must not retire historical work"
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_publish_payment_result_notifies_without_changing_persisted_stop() {
+    use std::sync::{Arc, Mutex};
+
+    let (mut store, _dir) = generate_store();
+    let hash = gen_rand_sha256_hash();
+    let source = gen_rand_fiber_public_key();
+    let target = gen_rand_fiber_public_key();
+    let request = SendPaymentDataBuilder::new(target, 100, hash)
+        .max_fee_amount(Some(1000))
+        .build()
+        .unwrap();
+    let mut session = PaymentSession::new_session(&store, request, 1);
+    session.set_failed_status("stop dispatch");
+    let mut attempt = session.new_attempt(
+        1,
+        source,
+        target,
+        vec![PaymentHopData {
+            amount: 100,
+            ..Default::default()
+        }],
+    );
+    attempt.status = AttemptStatus::Inflight;
+    store.insert_attempt(attempt.clone());
+    store.insert_payment_session(session);
+    let key = [
+        &[fiber_types::schema::PAYMENT_SESSION_PREFIX],
+        hash.as_ref(),
+    ]
+    .concat();
+    let persisted = store.get(&key).unwrap();
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let statuses = observed.clone();
+    store.set_watcher(Arc::new(move |change| {
+        if let crate::store::store_impl::StoreChange::PutPaymentSession {
+            payment_session, ..
+        } = change
+        {
+            statuses.lock().unwrap().push(payment_session.status);
+        }
+    }));
+    store.publish_payment_result(hash);
+    attempt.set_failed_status("last issued work completed", false);
+    store.insert_attempt(attempt);
+    store.publish_payment_result(hash);
+    assert_eq!(
+        *observed.lock().unwrap(),
+        vec![PaymentStatus::Inflight, PaymentStatus::Failed]
+    );
+    assert_eq!(store.get(key).unwrap(), persisted);
+    assert_eq!(
+        store.get_persisted_payment_status(hash),
+        Some(PaymentStatus::Failed)
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_payment_status_queries_filter_hydrated_attempts_before_pagination() {
+    let (store, _dir) = generate_store();
+    let source = gen_rand_fiber_public_key();
+    let target = gen_rand_fiber_public_key();
+    let cases = [
+        (
+            PaymentStatus::Created,
+            AttemptStatus::Inflight,
+            PaymentStatus::Inflight,
+        ),
+        (
+            PaymentStatus::Inflight,
+            AttemptStatus::Created,
+            PaymentStatus::Created,
+        ),
+        (
+            PaymentStatus::Created,
+            AttemptStatus::Success,
+            PaymentStatus::Success,
+        ),
+        (
+            PaymentStatus::Created,
+            AttemptStatus::Failed,
+            PaymentStatus::Failed,
+        ),
+        (
+            PaymentStatus::Success,
+            AttemptStatus::Inflight,
+            PaymentStatus::Success,
+        ),
+        (
+            PaymentStatus::Failed,
+            AttemptStatus::Inflight,
+            PaymentStatus::Inflight,
+        ),
+        (
+            PaymentStatus::Created,
+            AttemptStatus::Inflight,
+            PaymentStatus::Inflight,
+        ),
+        (
+            PaymentStatus::Created,
+            AttemptStatus::Inflight,
+            PaymentStatus::Inflight,
+        ),
+    ];
+    for (index, &(persisted, attempt_status, effective)) in cases.iter().enumerate() {
+        let hash = Hash256::from([index as u8 + 1; 32]);
+        let request = SendPaymentDataBuilder::new(target, 100, hash)
+            .max_fee_amount(Some(1000))
+            .build()
+            .unwrap();
+        let mut session = PaymentSession::new_session(&store, request, 1);
+        session.status = persisted;
+        store.insert_payment_session(session.clone());
+        let mut attempt = session.new_attempt(
+            1,
+            source,
+            target,
+            vec![PaymentHopData {
+                amount: 100,
+                expiry: DEFAULT_TLC_EXPIRY_DELTA,
+                ..Default::default()
+            }],
+        );
+        attempt.status = attempt_status;
+        store.insert_attempt(attempt);
+        assert_eq!(
+            store
+                .get_payment_session(hash)
+                .unwrap()
+                .effective_status(&store),
+            effective
+        );
+    }
+    for status in [
+        PaymentStatus::Created,
+        PaymentStatus::Inflight,
+        PaymentStatus::Success,
+        PaymentStatus::Failed,
+    ] {
+        let expected: Vec<_> = cases
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, _, effective))| *effective == status)
+            .map(|(index, _)| Hash256::from([index as u8 + 1; 32]))
+            .collect();
+        for sessions in [
+            store.get_payment_sessions_with_status(status),
+            store.get_payment_sessions_with_limit(100, None, Some(status)),
+        ] {
+            assert!(
+                sessions
+                    .iter()
+                    .all(|session| session.effective_status(&store) == status),
+                "filter must match returned status: {status:?}"
+            );
+            assert_eq!(
+                sessions
+                    .iter()
+                    .map(|session| session.payment_hash())
+                    .collect::<Vec<_>>(),
+                expected
+            );
+        }
+    }
+    for (limit, after, expected) in [
+        (2, 1, vec![6, 7]),
+        (1, 3, vec![6]),
+        (1, 7, vec![8]),
+        (1, 8, vec![]),
+        (0, 0, vec![]),
+    ] {
+        let page = store.get_payment_sessions_with_limit(
+            limit,
+            Some([after; 32].into()),
+            Some(PaymentStatus::Inflight),
+        );
+        assert_eq!(
+            page.iter()
+                .map(|session| session.payment_hash())
+                .collect::<Vec<_>>(),
+            expected
+                .into_iter()
+                .map(|tag| Hash256::from([tag; 32]))
+                .collect::<Vec<_>>()
+        );
+    }
+    let unfiltered = store.get_payment_sessions_with_limit(3, Some([1; 32].into()), None);
+    assert_eq!(
+        unfiltered
+            .iter()
+            .map(|session| session.effective_status(&store))
+            .collect::<Vec<_>>(),
+        vec![
+            PaymentStatus::Created,
+            PaymentStatus::Success,
+            PaymentStatus::Failed
+        ]
+    );
+    for (index, &(persisted, _, _)) in cases.iter().enumerate() {
+        assert_eq!(
+            store.get_persisted_payment_status(Hash256::from([index as u8 + 1; 32])),
+            Some(persisted),
+            "queries must not rewrite durable aggregate status"
+        );
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
@@ -2770,18 +3725,16 @@ fn test_store_sample_channel_actor_state() {
     // Insert all samples
     for sample in &samples {
         assert!(store.get_channel_actor_state(&sample.id).is_none());
-        let mut legacy = sample.clone();
-        legacy
-            .local_commitment_points
-            .insert(100, gen_rand_fiber_public_key());
-        legacy.local_public_nonces.insert(
-            fiber_types::NonceSlot {
-                purpose: fiber_types::NoncePurpose::Commitment,
-                commitment_number: 100,
-            },
-            musig2::SecNonce::build([42; 32]).build().public_nonce(),
-        );
-        store.insert_channel_actor_state(legacy);
+        let mut with_public_cache = sample.clone();
+        with_public_cache
+            .signing_context
+            .v2_commitment_points
+            .push((100, gen_rand_fiber_public_key()));
+        with_public_cache
+            .signing_context
+            .v2_nonce_pool
+            .push(musig2::SecNonce::build([42; 32]).build().public_nonce());
+        store.insert_channel_actor_state(with_public_cache);
         // Decode the raw core to verify the write removed derivable material.
         let key = [
             &[fiber_types::schema::CHANNEL_ACTOR_STATE_PREFIX],
@@ -2791,10 +3744,14 @@ fn test_store_sample_channel_actor_state() {
         let raw = store.get(key).unwrap();
         let persisted: ChannelActorData = deserialize_from(raw.as_ref(), "ChannelActorData");
         if sample.signer.is_some() {
-            assert!(persisted.local_commitment_points.is_empty());
-            assert!(persisted.local_public_nonces.is_empty());
+            assert!(persisted.signing_context.v2_commitment_points.is_empty());
+            assert!(persisted.signing_context.v2_nonce_pool.is_empty());
         } else {
-            assert!(persisted.local_commitment_points.contains_key(&100));
+            assert!(persisted
+                .signing_context
+                .v2_commitment_points
+                .iter()
+                .any(|(number, _)| *number == 100));
         }
     }
 

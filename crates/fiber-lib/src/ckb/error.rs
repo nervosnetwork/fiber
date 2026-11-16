@@ -24,6 +24,16 @@ pub enum FundingError {
     #[error("Peer sent us an invalid funding tx")]
     InvalidPeerFundingTx,
 
+    #[error(
+        "Funding tx rejected: peer funded {peer_fee} shannons of fee, below the {required_fee} shannons required by the declared funding fee rate {funding_fee_rate} for a {tx_size}-byte funding tx"
+    )]
+    PeerFundingFeeTooLow {
+        peer_fee: u64,
+        required_fee: u64,
+        funding_fee_rate: u64,
+        tx_size: u64,
+    },
+
     #[error("Funding tx rejected: peer-added complexity exceeds allowed limit ({0})")]
     PeerFundingTxExceedsLimit(String),
 

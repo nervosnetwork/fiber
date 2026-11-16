@@ -59,7 +59,7 @@ async fn test_hosted_payment_preimage_available_before_removal_signature() {
     assert_eq!(sent.payment_hash, payment_hash.into());
     assert!(sent.payment_preimage.is_none());
 
-    let mut observed_inflight_preimage = false;
+    let mut observed_pre_removal_preimage = false;
     tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             // Query after the signing request exists, so receipt of RemoveTlc
@@ -76,7 +76,11 @@ async fn test_hosted_payment_preimage_available_before_removal_signature() {
                 .await
                 .unwrap();
             if let Some(preimage) = payment.payment_preimage {
-                observed_inflight_preimage |= payment.status == PaymentStatus::Inflight;
+                // V2 exposes Success as soon as a valid fulfillment proof is
+                // durable, independently of the remaining external-signing work.
+                assert_ne!(payment.status, PaymentStatus::Failed);
+                observed_pre_removal_preimage |=
+                    matches!(&status, ChannelSigningStatus::SignatureRequired { .. });
                 // The payer only authorizes evidence obtained through its tenant RPC.
                 payer
                     .signer
@@ -109,8 +113,8 @@ async fn test_hosted_payment_preimage_available_before_removal_signature() {
     .await
     .expect("payment must settle using RPC evidence alone");
     assert!(
-        observed_inflight_preimage,
-        "preimage must be available before settlement"
+        observed_pre_removal_preimage,
+        "preimage must be available while removal still requires an external signature"
     );
     assert_eq!(
         fixture.public_t.get_invoice_status(&payment_hash),

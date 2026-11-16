@@ -62,10 +62,20 @@ evidence for the old peer commitment before broadcasting it.
 
 The inbound fixtures create hold invoices from wallet-owned terms; they never
 give the LSP a preimage before SDK recovery checks pass. Outbound payment control
-is not implemented. Nonce reuse is reported as a review warning and does not block signing policy.
+is not implemented. Only V2 channels are supported. Nonces are fresh SDK-owned
+pool entries, never derived from a commitment number alone. Requests bind the
+channel ID, commitment owner, number, purpose and exact public nonce; a changed
+binding fails closed rather than producing a review warning. Cooperative close
+uses its own `Closing` purpose. Old unreleased LSP signer stores are unsupported.
 
 The Rust fixtures construct valid commitment locks, participant nonces and peer
-partial signatures. The watchtower restart test first signs a complete local
+partial signatures. Signing tests reject missing or altered V2 channel/owner/
+nonce bindings, number, purpose and legacy counter metadata without a submission
+or persisted-state mutation. Successful submission replenishes fresh public
+nonces and indexed commitment points. The cooperative-close test signs both
+commitment-owner lanes, rejects a commitment-domain close request, and verifies
+the SDK's closing partial signature against a distinct fresh allocation.
+The watchtower restart test first signs a complete local
 commitment, reopens the file-backed SDK store, and spends that commitment with
 verified input/witness/output data. It also checks that missing evidence and a
 spent input produce no submission and leave the persisted snapshot unchanged.

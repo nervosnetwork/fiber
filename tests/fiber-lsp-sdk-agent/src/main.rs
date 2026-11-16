@@ -243,9 +243,13 @@ where
         },
         minimum_shutdown_fee: 100_000_000,
     };
-    agent
+    let result = agent
         .open_tenant_channel(request.params, &network, ckb_rpc)
-        .await
+        .await?;
+    agent
+        .wait_for_opening_commitment(result.channel_id.into())
+        .await?;
+    Ok(result)
 }
 
 async fn wait_for_shutdown(receiver: &mut Option<oneshot::Receiver<()>>) {

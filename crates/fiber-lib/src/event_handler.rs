@@ -44,7 +44,7 @@ pub async fn forward_event_to_client<T: WatchtowerRpcClient + Sync>(
             funding_udt_type_script,
             keys,
             settlement_data,
-            commitment_contract_features,
+            channel_features,
         ) => {
             let (local_settlement_key, local_settlement_key_pubkey) =
                 keys.local_settlement.to_parts();
@@ -59,7 +59,7 @@ pub async fn forward_event_to_client<T: WatchtowerRpcClient + Sync>(
                     local_funding_pubkey: keys.local_funding.into(),
                     remote_funding_pubkey: keys.remote_funding.into(),
                     settlement_data: settlement_data.into(),
-                    commitment_contract_features: commitment_contract_features.into(),
+                    channel_features: channel_features.into(),
                 })
                 .await
                 .map_err(|e| format!("Failed to create watch channel: {e}"))?;
@@ -259,7 +259,7 @@ mod tests {
                     remote_amount: 1,
                     tlcs: Vec::new(),
                 },
-                fiber_types::CommitmentContractFeatures::LEGACY,
+                fiber_types::ChannelFeatures::V2,
             ),
             &store,
             node_id.clone(),

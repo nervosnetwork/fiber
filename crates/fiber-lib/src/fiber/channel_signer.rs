@@ -1,25 +1,21 @@
 //! Node-side channel signer.
 //!
 //! This is the host counterpart to [`fiber_lsp_sdk::ChannelSigner`]: a
-//! channel-scoped signing entry that either signs immediately with a bound
-//! [`InMemorySigner`] or waits for an external submission. The caller's
-//! continuation still goes through [`SignerNotification`], so local and remote
-//! paths stay uniform without a shared signer actor.
+//! channel-scoped key provider with a bound [`InMemorySigner`] or an external
+//! submission path. Actual local signatures always use the durable V2 session
+//! nonce guard; external signatures arrive through [`SignerNotification`].
 //!
 //! Distinct from persistable [`fiber_types::ChannelSigningContext`], which tracks
 //! awaiting/signed receipts on disk.
 //!
 //! Morphologically aligned with [`crate::watchtower::WatchtowerSigner`]:
-//! both are `Local(...) | External` enums with request / apply_submitted APIs.
+//! both are `Local(...) | External` enums with explicit key ownership.
 
 use fiber_types::{
-    blake2b_hash_with_salt, ChannelSignatureRequest, Hash256, InMemorySigner, Musig2Context,
-    Musig2SigningContent, NextChannelSignerMaterial, NoncePurpose, SignatureRequestId,
-    SubmitSignatureOutcome,
+    Hash256, InMemorySigner, NextChannelSignerMaterial, SignatureRequestId, SubmitSignatureOutcome,
 };
-use musig2::{sign_partial, PartialSignature, SecNonce};
+use musig2::PartialSignature;
 use ractor::RpcReplyPort;
-use tracing::warn;
 
 /// Command used by RPC/network to submit one external channel signature.
 #[derive(Clone, Debug)]
@@ -49,15 +45,6 @@ pub enum SignerNotification {
         next_material: Option<NextChannelSignerMaterial>,
         rpc_reply: Option<RpcReplyPort<Result<SubmitSignatureOutcome, String>>>,
     },
-}
-
-/// Outcome of requesting a signature from [`ChannelSigner`].
-#[derive(Debug)]
-pub enum ChannelSignOutcome {
-    /// Local key material produced a notification immediately.
-    Ready(SignerNotification),
-    /// No local keys; wait for an external submit against `ChannelSigningContext`.
-    AwaitingExternal,
 }
 
 /// Host-side signing entry for one Fiber channel.
@@ -117,38 +104,9 @@ impl ChannelSigner {
         }
     }
 
+    /// Whether channel secrets are explicitly available locally.
     pub fn is_local(&self) -> bool {
         matches!(self, Self::Local(_))
-    }
-
-    /// Request a MuSig2 partial signature for a typed channel request.
-    ///
-    /// Local signers return [`ChannelSignOutcome::Ready`] immediately. External
-    /// signers return [`ChannelSignOutcome::AwaitingExternal`]; the caller must
-    /// already have recorded the request in [`fiber_types::ChannelSigningContext`].
-    pub fn request_signature(
-        &self,
-        channel_id: Hash256,
-        request_id: SignatureRequestId,
-        request: ChannelSignatureRequest,
-    ) -> ChannelSignOutcome {
-        let Self::Local(signer) = self else {
-            return ChannelSignOutcome::AwaitingExternal;
-        };
-        let signature = sign_channel_request(signer, &request);
-        if let Err(error) = &signature {
-            warn!(
-                "ChannelSigner: signing failed for channel {:?} request {:?}: {}",
-                channel_id, request_id, error
-            );
-        }
-        ChannelSignOutcome::Ready(SignerNotification::ChannelSignatureReady {
-            channel_id,
-            request_id,
-            signature,
-            next_material: None,
-            rpc_reply: None,
-        })
     }
 
     /// Package an externally submitted signature as a notification.
@@ -166,191 +124,5 @@ impl ChannelSigner {
             next_material,
             rpc_reply,
         }
-    }
-}
-
-/// Sign one typed channel request, deriving the secnonce exactly like the
-/// previous signer-actor / inline local path.
-fn sign_channel_request(
-    signer: &InMemorySigner,
-    request: &ChannelSignatureRequest,
-) -> Result<PartialSignature, String> {
-    let content: &Musig2SigningContent = request.content();
-    let message = content.content.signing_message();
-    let secnonce = match content.slot.purpose {
-        NoncePurpose::Commitment => {
-            signer.derive_musig2_nonce(content.slot.commitment_number, Musig2Context::Commitment)
-        }
-        NoncePurpose::Revocation => {
-            signer.derive_musig2_nonce(content.slot.commitment_number, Musig2Context::Revoke)
-        }
-        NoncePurpose::ChannelAnnouncement => {
-            let seckey = blake2b_hash_with_salt(
-                signer.musig2_base_nonce.as_ref(),
-                b"channel_announcement".as_slice(),
-            );
-            SecNonce::build(seckey).build()
-        }
-    };
-    sign_partial(
-        &content.key_agg_ctx,
-        &signer.funding_key,
-        secnonce,
-        &content.agg_nonce,
-        message,
-    )
-    .map_err(|error| error.to_string())
-}
-
-#[cfg(test)]
-mod tests {
-    use ckb_types::core::TransactionBuilder;
-    use fiber_types::{
-        CommitmentCounter, Musig2SignableContent, NonceSlot, Privkey, SignatureRequestId,
-    };
-    use musig2::{verify_partial, AggNonce, KeyAggContext};
-
-    use super::*;
-
-    fn revocation_request(
-        signer: &InMemorySigner,
-        remote: &InMemorySigner,
-    ) -> (
-        ChannelSignatureRequest,
-        KeyAggContext,
-        AggNonce,
-        [u8; 32],
-        musig2::PubNonce,
-    ) {
-        let slot = NonceSlot {
-            purpose: NoncePurpose::Revocation,
-            commitment_number: 3,
-        };
-        let local_secnonce =
-            signer.derive_musig2_nonce(slot.commitment_number, Musig2Context::Revoke);
-        let local_pubnonce = local_secnonce.public_nonce();
-        let remote_secnonce =
-            remote.derive_musig2_nonce(slot.commitment_number, Musig2Context::Revoke);
-        let key_agg_ctx = KeyAggContext::new([
-            signer.get_base_public_keys().funding_pubkey,
-            remote.get_base_public_keys().funding_pubkey,
-        ])
-        .expect("valid aggregate keys");
-        let agg_nonce = AggNonce::sum([local_pubnonce.clone(), remote_secnonce.public_nonce()]);
-        let unsigned_tx = TransactionBuilder::default().build().data();
-        let content = Musig2SigningContent {
-            slot,
-            commitment_counter: Some(CommitmentCounter::Remote),
-            key_agg_ctx: key_agg_ctx.clone(),
-            agg_nonce: agg_nonce.clone(),
-            content: Musig2SignableContent::CommitmentTransaction(unsigned_tx.clone()),
-        };
-        let message = content.content.signing_message();
-        (
-            ChannelSignatureRequest::SendRevokeAndAck { content },
-            key_agg_ctx,
-            agg_nonce,
-            message,
-            local_pubnonce,
-        )
-    }
-
-    #[test]
-    fn local_request_signs_and_returns_ready() {
-        let signer = InMemorySigner::generate_from_seed(b"channel-signer-test-local");
-        let remote = InMemorySigner::generate_from_seed(b"channel-signer-test-remote");
-        let channel_id = Hash256::from([7u8; 32]);
-        let (request, key_agg_ctx, agg_nonce, message, local_pubnonce) =
-            revocation_request(&signer, &remote);
-        let request_id = SignatureRequestId(Hash256::from([9u8; 32]));
-
-        let outcome =
-            ChannelSigner::local(signer.clone()).request_signature(channel_id, request_id, request);
-        let ChannelSignOutcome::Ready(SignerNotification::ChannelSignatureReady {
-            channel_id: notified_channel,
-            request_id: notified_request,
-            next_material,
-            signature,
-            ..
-        }) = outcome
-        else {
-            panic!("expected Ready notification");
-        };
-        assert!(
-            next_material.is_none(),
-            "local signing must not accumulate derivable public material"
-        );
-        assert_eq!(notified_channel, channel_id);
-        assert_eq!(notified_request, request_id);
-        let partial = signature.expect("signature ok");
-
-        verify_partial(
-            &key_agg_ctx,
-            partial,
-            &agg_nonce,
-            signer.get_base_public_keys().funding_pubkey,
-            &local_pubnonce,
-            message,
-        )
-        .expect("partial signature must verify");
-    }
-
-    #[test]
-    fn external_request_awaits_submission() {
-        let remote = InMemorySigner::generate_from_seed(b"channel-signer-external-remote");
-        let local = InMemorySigner::generate_from_seed(b"channel-signer-external-local");
-        let (request, _, _, _, _) = revocation_request(&local, &remote);
-        let outcome = ChannelSigner::external().request_signature(
-            Hash256::from([1u8; 32]),
-            SignatureRequestId(Hash256::from([2u8; 32])),
-            request,
-        );
-        assert!(matches!(outcome, ChannelSignOutcome::AwaitingExternal));
-    }
-
-    /// Must produce byte-identical signatures to the previous inline path.
-    #[test]
-    fn signature_matches_inline_derivation() {
-        use musig2::sign_partial as inline_sign_partial;
-
-        let signer = InMemorySigner::generate_from_seed(b"parity-check");
-        let slot = NonceSlot {
-            purpose: NoncePurpose::Commitment,
-            commitment_number: 5,
-        };
-        let key_agg_ctx = KeyAggContext::new([
-            signer.get_base_public_keys().funding_pubkey,
-            Privkey::from(&[3u8; 32]).pubkey(),
-        ])
-        .expect("keys");
-        let agg_nonce = AggNonce::sum([signer
-            .derive_musig2_nonce(slot.commitment_number, Musig2Context::Commitment)
-            .public_nonce()]);
-        let unsigned_tx = TransactionBuilder::default().build().data();
-        let message =
-            Musig2SignableContent::CommitmentTransaction(unsigned_tx.clone()).signing_message();
-        let content = Musig2SigningContent {
-            slot,
-            commitment_counter: Some(fiber_types::CommitmentCounter::Local),
-            key_agg_ctx: key_agg_ctx.clone(),
-            agg_nonce: agg_nonce.clone(),
-            content: Musig2SignableContent::CommitmentTransaction(unsigned_tx),
-        };
-        let request = ChannelSignatureRequest::SendRevokeAndAck { content };
-
-        let via_gate = sign_channel_request(&signer, &request).expect("gate signature");
-
-        let secnonce =
-            signer.derive_musig2_nonce(slot.commitment_number, Musig2Context::Commitment);
-        let inline = inline_sign_partial(
-            &key_agg_ctx,
-            &signer.funding_key,
-            secnonce,
-            &agg_nonce,
-            message,
-        )
-        .expect("inline signature");
-
-        assert_eq!(via_gate, inline);
     }
 }

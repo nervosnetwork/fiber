@@ -4,7 +4,7 @@ use std::ops::Bound;
 use std::sync::Arc;
 use tracing::info;
 
-use crate::backend::StorageBackend;
+use crate::backend::{BatchWriter, StorageBackend};
 use crate::iterator::{IteratorDirection, KVPair};
 
 /// Minimal object-safe store trait for migration operations.
@@ -13,14 +13,23 @@ pub trait MigrationStore {
     fn get(&self, key: &[u8]) -> Option<Vec<u8>>;
     fn put(&self, key: &[u8], value: &[u8]);
 
+    /// Atomically preserve archived records and remove their active keys.
+    fn write_batch(&self, puts: &[(Vec<u8>, Vec<u8>)], deletes: &[Vec<u8>]);
+
     /// Collect all key-value pairs whose keys start with the given prefix.
     fn collect_prefix(&self, prefix: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)>;
 
     /// Whether this store's writes wait for the disk before they return.
     fn sync_writes(&self) -> bool;
+
+    /// Read a prefix in bounded backend pages, without retaining all record payloads.
+    fn iter_prefix(&self, prefix: &[u8]) -> Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>)> + '_>;
 }
 
 impl<T: StorageBackend + ?Sized> MigrationStore for T {
+    fn iter_prefix(&self, prefix: &[u8]) -> Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>)> + '_> {
+        Box::new(self.prefix_iterator(prefix.to_vec()))
+    }
     fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
         StorageBackend::get(self, key)
     }
@@ -31,6 +40,17 @@ impl<T: StorageBackend + ?Sized> MigrationStore for T {
 
     fn put(&self, key: &[u8], value: &[u8]) {
         StorageBackend::put(self, key, value)
+    }
+
+    fn write_batch(&self, puts: &[(Vec<u8>, Vec<u8>)], deletes: &[Vec<u8>]) {
+        let mut batch = self.batch();
+        for (key, value) in puts {
+            batch.put(key, value);
+        }
+        for key in deletes {
+            batch.delete(key);
+        }
+        batch.commit();
     }
 
     fn collect_prefix(&self, prefix: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
@@ -46,7 +66,8 @@ impl<T: StorageBackend + ?Sized> MigrationStore for T {
 }
 
 pub const MIGRATION_VERSION_KEY: &[u8] = b"db-version";
-pub const INIT_DB_VERSION: &str = "20260302100001";
+// Oldest recognized layout that can contain V2 signing sessions.
+pub const INIT_DB_VERSION: &str = "20260925120000";
 include!(concat!(env!("OUT_DIR"), "/latest_db_version.rs"));
 
 // --- Callback types for platform-specific UI ---
@@ -96,7 +117,7 @@ impl std::fmt::Display for MigrateError {
                 write!(
                     f,
                     "Database version {} is too old. Minimum supported version is {}. \
-                     Please use fnn-migrate v0.8.x to upgrade first.",
+                     Use the matching old binary to finish V1 channels and upgrade to a recognized database layout. Existing data is preserved.",
                     db_version, min_version
                 )
             }
@@ -142,6 +163,11 @@ pub trait Migration: Send + Sync {
 
     /// Execute migration using a storage backend.
     fn migrate(&self, store: &dyn MigrationStore) -> Result<(), String>;
+
+    /// Validate the database without writes, before any migration is executed.
+    fn preflight(&self, _store: &dyn MigrationStore) -> Result<(), String> {
+        Ok(())
+    }
 
     /// Whether this migration is a breaking change requiring user action.
     fn is_break_change(&self) -> bool {
@@ -217,6 +243,19 @@ impl Migrations {
         }
     }
 
+    /// Validate all migrations without changing any stored record or version.
+    pub fn preflight(&self, store: &dyn MigrationStore) -> Result<(), MigrateError> {
+        for migration in self.migrations.values() {
+            migration
+                .preflight(store)
+                .map_err(|error| MigrateError::MigrationFailed {
+                    version: migration.version().to_string(),
+                    error,
+                })?;
+        }
+        Ok(())
+    }
+
     /// Run the full auto-migration flow.
     pub fn auto_migrate<S: StorageBackend>(
         &self,
@@ -226,8 +265,16 @@ impl Migrations {
     ) -> Result<(), MigrateError> {
         let latest_version = self.effective_latest_version();
 
+        self.preflight(store)?;
+
         let db_version = match self.get_db_version(store) {
             None => {
+                if store.prefix_iterator(Vec::new()).next().is_some() {
+                    return Err(MigrateError::MigrationFailed {
+                        version: latest_version.to_owned(),
+                        error: "Unversioned nonempty database is unsupported; use a new database. Existing data is preserved.".to_owned(),
+                    });
+                }
                 // New database -- stamp with latest version
                 self.init_db_version(store);
                 return Ok(());

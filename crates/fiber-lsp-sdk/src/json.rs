@@ -24,6 +24,17 @@ use crate::{
 /// Decode node-supplied MuSig2 signing plaintext.
 pub fn musig2_from_rpc(content: JsonMusig2SigningContent) -> Result<Musig2SigningContent, String> {
     Ok(Musig2SigningContent {
+        v2: content
+            .v2
+            .map(|v| {
+                Ok::<_, String>(fiber_types::V2NonceBinding {
+                    channel_id: v.channel_id.into(),
+                    owner: v.owner.try_into()?,
+                    public_nonce: musig2::PubNonce::from_bytes(&v.public_nonce)
+                        .map_err(|e| e.to_string())?,
+                })
+            })
+            .transpose()?,
         slot: NonceSlot {
             purpose: nonce_purpose_from_rpc(content.slot.purpose),
             commitment_number: content.slot.commitment_number,
@@ -39,10 +50,19 @@ pub fn musig2_from_rpc(content: JsonMusig2SigningContent) -> Result<Musig2Signin
 /// Encode signer-owned MuSig2 plaintext for tests and RPC clients.
 pub fn musig2_to_rpc(content: &Musig2SigningContent) -> JsonMusig2SigningContent {
     JsonMusig2SigningContent {
+        v2: content
+            .v2
+            .as_ref()
+            .map(|v| fiber_json_types::V2NonceBinding {
+                channel_id: v.channel_id.into(),
+                owner: v.owner.into(),
+                public_nonce: v.public_nonce.serialize().to_vec(),
+            }),
         slot: fiber_json_types::NonceSlot {
             purpose: match content.slot.purpose {
                 NoncePurpose::Commitment => fiber_json_types::NoncePurpose::Commitment,
                 NoncePurpose::Revocation => fiber_json_types::NoncePurpose::Revocation,
+                NoncePurpose::Closing => fiber_json_types::NoncePurpose::Closing,
                 NoncePurpose::ChannelAnnouncement => {
                     fiber_json_types::NoncePurpose::ChannelAnnouncement
                 }
@@ -62,6 +82,11 @@ pub fn musig2_to_rpc(content: &Musig2SigningContent) -> JsonMusig2SigningContent
 /// Encode channel-open public material for `open_channel_with_external_funding`.
 pub fn open_material_to_rpc(material: &ChannelOpenSignerMaterial) -> JsonChannelOpenSignerMaterial {
     JsonChannelOpenSignerMaterial {
+        v2_nonces: material
+            .v2_nonces
+            .iter()
+            .map(|n| n.serialize().to_vec())
+            .collect(),
         base_public_keys: fiber_json_types::ChannelBasePublicKeys {
             funding_pubkey: material.base_public_keys.funding_pubkey.into(),
             tlc_base_key: material.base_public_keys.tlc_base_key.into(),
@@ -81,6 +106,16 @@ pub fn open_material_to_rpc(material: &ChannelOpenSignerMaterial) -> JsonChannel
 /// Encode the next-round public material submitted with a signature.
 pub fn next_material_to_rpc(material: &NextChannelSignerMaterial) -> JsonNextChannelSignerMaterial {
     JsonNextChannelSignerMaterial {
+        v2_nonces: material
+            .v2_nonces
+            .iter()
+            .map(|n| n.serialize().to_vec())
+            .collect(),
+        commitment_points: material
+            .commitment_points
+            .iter()
+            .map(|(n, p)| (*n, (*p).into()))
+            .collect(),
         next_commitment_point: material.next_commitment_point.map(Into::into),
         next_commitment_nonce: material
             .next_commitment_nonce
@@ -171,6 +206,7 @@ fn nonce_purpose_from_rpc(purpose: fiber_json_types::NoncePurpose) -> NoncePurpo
     match purpose {
         fiber_json_types::NoncePurpose::Commitment => NoncePurpose::Commitment,
         fiber_json_types::NoncePurpose::Revocation => NoncePurpose::Revocation,
+        fiber_json_types::NoncePurpose::Closing => NoncePurpose::Closing,
         fiber_json_types::NoncePurpose::ChannelAnnouncement => NoncePurpose::ChannelAnnouncement,
     }
 }
@@ -346,6 +382,7 @@ mod tests {
         let remote_pubkey = PublicKey::from_secret_key(SECP256K1, &remote_secret);
         let remote_nonce = SecNonce::build([7u8; 32]).build().public_nonce();
         let content = Musig2SigningContent {
+            v2: None,
             slot,
             commitment_counter: Some(CommitmentCounter::Local),
             key_agg_ctx: KeyAggContext::new([

@@ -86,6 +86,7 @@ async fn live_events_filter_deduplicate_and_remove_without_a_database() {
         request_id: Hash256::from([3; 32]).into(),
         transition: ChannelSigningTransition::SignChannelAnnouncement,
         content: Musig2SigningContent {
+            v2: None,
             slot: NonceSlot {
                 purpose: NoncePurpose::ChannelAnnouncement,
                 commitment_number: 0,

@@ -234,7 +234,9 @@ impl<S: SignerStore> HostedSession<S> {
     /// The transport call is the generic `open_channel_with_external_funding` RPC, and the
     /// response must include `opening_context`. The original intent is persisted before the
     /// RPC. Retry the identical request after interruption; the existing pending signer and
-    /// intent are reused.
+    /// intent are reused. The returned transaction is an unsigned proposal, not permission
+    /// to release wallet signatures: first drive both initial channel-signing lanes and verify
+    /// a complete local recovery commitment.
     pub async fn open_tenant_channel<R, V, P>(
         &mut self,
         request: fiber_json_types::OpenChannelWithExternalFundingParams,
@@ -430,7 +432,7 @@ impl<S: SignerStore> HostedSession<S> {
         remote_settlement_key: fiber_types::Pubkey,
         funding_udt_type_script: Option<ckb_jsonrpc_types::Script>,
         settlement_data: fiber_json_types::SettlementData,
-        commitment_contract_features: fiber_types::CommitmentContractFeatures,
+        commitment_contract_features: fiber_types::ChannelFeatures,
     ) -> Result<CreateWatchChannelParams, SessionError> {
         let key_id = self
             .state
@@ -449,7 +451,7 @@ impl<S: SignerStore> HostedSession<S> {
             local_funding_pubkey: keys.funding_pubkey.into(),
             remote_funding_pubkey: remote_funding_pubkey.into(),
             settlement_data,
-            commitment_contract_features: commitment_contract_features.into(),
+            channel_features: commitment_contract_features.into(),
         })
     }
 
@@ -696,6 +698,7 @@ impl<S: SignerStore> HostedSession<S> {
             .ok_or(SessionError::ChannelNotInDirectory)?;
         let signer = self.root.open_channel(key_id).await?;
         let slot = pending.prepared.content().nonce_slot();
+        let content_hash = pending.prepared.review().content_hash;
         let signature = match &pending.prepared.validation {
             crate::protocol::PreparedValidation::Commitment { .. } => {
                 signer.sign_commitment(pending.prepared, now_ms).await?
@@ -716,7 +719,9 @@ impl<S: SignerStore> HostedSession<S> {
         match (pending.kind, signature) {
             (RequestKind::Channel, ChannelSignature::Musig2(signature)) => {
                 let next_material = match slot {
-                    Some(slot) => Some(next_material_to_rpc(&signer.next_material(slot).await?)),
+                    Some(slot) => Some(next_material_to_rpc(
+                        &signer.next_material_for_request(slot, content_hash).await?,
+                    )),
                     None => None,
                 };
                 Ok(SubmitParams::Channel(SubmitChannelSignatureParams {
@@ -1020,7 +1025,7 @@ mod tests {
                     remote_amount: 1,
                     tlcs: Vec::new(),
                 },
-                fiber_types::CommitmentContractFeatures::LEGACY,
+                fiber_types::ChannelFeatures::V2,
             )
             .await
             .expect("watch params");

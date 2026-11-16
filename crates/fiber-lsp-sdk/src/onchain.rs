@@ -3,7 +3,7 @@ use ckb_types::{
     packed::{CellDep, CellInput, CellOutput, OutPoint, Script},
     prelude::*,
 };
-use fiber_types::{settlement_data_to_witness, CommitmentContractFeatures, Hash256};
+use fiber_types::{settlement_data_to_witness, ChannelFeatures, Hash256};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 
@@ -97,9 +97,8 @@ pub(crate) async fn validate<C: ChainVerifier>(
     let source_lock = source.output.lock();
     let args = source_lock.args().raw_data();
     let original_args = original.lock().args().raw_data();
-    let features =
-        CommitmentContractFeatures::from_lock_args(&original_args).map_err(|e| invalid(&e))?;
-    let tlc_len = 65 + features.payment_hash_len();
+    ChannelFeatures::from_lock_args(&original_args).map_err(|e| invalid(&e))?;
+    let tlc_len = 65 + ChannelFeatures::PAYMENT_HASH_LEN;
     if args.len() != original_args.len()
         || args[57..] != original_args[57..]
         || args[..36] != original_args[..36]
@@ -130,7 +129,6 @@ pub(crate) async fn validate<C: ChainVerifier>(
     let initial = settlement_data_to_witness(
         &record.settlement.data,
         record.reference.for_remote,
-        features,
         record.settlement.local_settlement_key,
         record.settlement.remote_settlement_key,
     );

@@ -1295,6 +1295,16 @@ mod watchtower_cli_tests {
     use fiber_json_types::watchtower::*;
 
     #[test]
+    fn test_create_watch_channel_requires_features_argument() {
+        let cmd = CreateWatchChannelParams::augment_command(clap::Command::new("test"));
+        let arg = cmd
+            .get_arguments()
+            .find(|arg| arg.get_long() == Some("channel-features"))
+            .unwrap();
+        assert!(arg.is_required_set());
+    }
+
+    #[test]
     fn test_remove_watch_channel_params() {
         let hash_hex = "0x".to_string() + &"ef".repeat(32);
         let matches = parse_args(

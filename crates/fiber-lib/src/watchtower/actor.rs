@@ -11,7 +11,7 @@ use ckb_hash::new_blake2b;
 use ckb_jsonrpc_types::{Either, Status};
 use ckb_sdk::{
     rpc::ckb_indexer::{Cell, Order, ScriptType, SearchKey, SearchKeyFilter, SearchMode},
-    traits::{CellCollector, CellQueryOptions, DefaultCellCollector, ValueRangeOption},
+    traits::{CellCollector, CellQueryOptions, ValueRangeOption},
     transaction::builder::FeeCalculator,
     util::blake160,
     CkbRpcClient, RpcError, Since, SinceType,
@@ -34,12 +34,10 @@ use crate::{
         signer::LocalSigner,
         CkbConfig,
     },
-    fiber::{
-        channel::{settlement_data_to_witness, settlement_tlc_to_witness, XUDT_COMPATIBLE_WITNESS},
-        onchain_tlc_reconcile::{
-            tracked_settlement_tlcs, verify_and_select_settlement_data, OnChainTlcSettlement,
-            TrackedSettlementTlc,
-        },
+    fiber::channel::XUDT_COMPATIBLE_WITNESS,
+    fiber::onchain_tlc_reconcile::{
+        tracked_settlement_tlcs, verify_and_select_settlement_data_with_superseded,
+        OnChainTlcSettlement, TrackedSettlementTlc,
     },
     now_timestamp_as_millis_u64,
     utils::{
@@ -54,8 +52,9 @@ use crate::{
     },
 };
 use fiber_types::{
-    ChannelData, CommitmentContractFeatures, Hash256, HashAlgorithm, NodeId, Privkey, Pubkey,
-    RevocationData, SettlementData, SettlementTlc, WatchChannelKeys,
+    settlement_data_to_witness, settlement_tlc_to_witness, ChannelData, ChannelFeatures, Hash256,
+    HashAlgorithm, NodeId, Privkey, RevocationData, SettlementData, SettlementTlc,
+    WatchChannelKeys,
 };
 
 use super::{WatchtowerSignOutcome, WatchtowerSigner, WatchtowerStore};
@@ -120,7 +119,7 @@ pub enum WatchtowerMessage {
         Option<Script>,
         WatchChannelKeys,
         SettlementData,
-        CommitmentContractFeatures,
+        ChannelFeatures,
     ),
     RemoveChannel(Hash256),
     UpdateRevocation(Hash256, RevocationData, SettlementData),
@@ -179,7 +178,7 @@ where
                 funding_udt_type_script,
                 keys,
                 settlement_data,
-                commitment_contract_features,
+                channel_features,
             ) => {
                 let signing_scope = self.signing_events.watchtower(&NodeId::local());
                 let signing_update = signing_scope.prepare_created(channel_id);
@@ -189,10 +188,11 @@ where
                     funding_udt_type_script,
                     keys,
                     settlement_data,
-                    commitment_contract_features,
+                    channel_features,
                 );
                 signing_update.publish();
             }
+
             WatchtowerMessage::RemoveChannel(channel_id) => {
                 let signing_scope = self.signing_events.watchtower(&NodeId::local());
                 let signing_update = signing_scope.prepare_removed(channel_id);
@@ -285,13 +285,53 @@ fn run_periodic_check<S>(
 ) where
     S: WatchtowerStore + Send + Sync + 'static,
 {
-    let mut cell_collector = new_default_cell_collector(&rpc_url);
+    // Each cell it picks is held at once, so an opening cannot pick it meanwhile (`held_cells`).
+    let mut cell_collector = crate::ckb::held_cells::TakingCollector::new(
+        new_default_cell_collector(&rpc_url),
+        crate::ckb::held_cells::Taker::Watchtower,
+        rpc_url.clone(),
+    );
+    let channels = store.get_watch_channels_with_nodes();
+    // Restore and renew reservations before processing any other channel. These
+    // requests survive a restart, unlike the process-local held-cell registry.
+    for (node, channel) in &channels {
+        if let fiber_types::WatchtowerSignerState::External(external) =
+            store.get_watchtower_signer(node, &channel.channel_id)
+        {
+            for content in external.pending_requests.values().chain(
+                external
+                    .signed_signatures
+                    .values()
+                    .map(|(content, _)| content),
+            ) {
+                crate::ckb::held_cells::hold_for_watchtower(
+                    content
+                        .transaction
+                        .raw()
+                        .inputs()
+                        .into_iter()
+                        .skip(1)
+                        .map(|input| input.previous_output()),
+                    crate::now_timestamp_as_millis_u64(),
+                );
+            }
+        }
+    }
+    // Not the cells an opening put in its funding, nor those of this watchtower's own
+    // transactions still in the pool (`held_cells`).
+    if let Err(err) =
+        crate::ckb::held_cells::lock_held(&mut cell_collector, crate::now_timestamp_as_millis_u64())
+    {
+        error!("Failed to lock held cells: {:?}", err);
+    }
 
-    for (channel_node_id, channel_data) in store.get_watch_channels_with_nodes() {
-        let ckb_client = CkbRpcClient::with_builder(&rpc_url, |builder| {
-            builder.timeout(CKB_RPC_TIMEOUT).no_proxy()
-        })
-        .expect("create ckb rpc client should not fail");
+    // One client for the round: building one loads the TLS root store, about 6 ms of CPU, and it
+    // was built for every watched channel.
+    let ckb_client = CkbRpcClient::with_builder(&rpc_url, |builder| {
+        builder.timeout(CKB_RPC_TIMEOUT).no_proxy()
+    })
+    .expect("create ckb rpc client should not fail");
+    for (channel_node_id, channel_data) in channels {
         let tx_hash = match crate::ckb::client::find_first_input_tx_hash(
             &ckb_client,
             &channel_data_funding_tx_lock(&channel_data),
@@ -333,6 +373,16 @@ fn run_periodic_check<S>(
                                 let output = tx.raw().outputs().get(0).expect("get output 0 of tx");
                                 let commitment_lock = output.lock();
                                 let lock_args = commitment_lock.args().raw_data();
+                                if !valid_v2_commitment_args(&lock_args)
+                                    || commitment_lock
+                                        != get_script_by_contract(
+                                            Contract::CommitmentLock,
+                                            &lock_args,
+                                        )
+                                {
+                                    warn!(%channel_data.channel_id, "ignoring non-V2 commitment output");
+                                    continue;
+                                }
                                 let pub_key_hash: [u8; 20] =
                                     lock_args[0..20].try_into().expect("checked length");
                                 let commitment_number = u64::from_be_bytes(
@@ -374,8 +424,13 @@ fn run_periodic_check<S>(
                                                                 ) {
                                                                     Ok(tx_hash) => {
                                                                         info!("Revocation tx: {:?} sent, tx_hash: {:?}", tx, tx_hash);
+                                                                        hold_sent(
+                                                                            &tx,
+                                                                            &mut cell_collector,
+                                                                        );
                                                                     }
                                                                     Err(err) => {
+                                                                        crate::ckb::held_cells::release_for_watchtower(tx.input_pts_iter());
                                                                         error!(
                                                                             channel_id = %channel_data.channel_id,
                                                                             stored_commitment_number,
@@ -411,7 +466,7 @@ fn run_periodic_check<S>(
                                                 events,
                                                 commitment_lock,
                                                 first_commitment_tx_out_point,
-                                                ckb_client,
+                                                &ckb_client,
                                                 channel_data,
                                                 true,
                                                 &signer,
@@ -427,7 +482,7 @@ fn run_periodic_check<S>(
                                         events,
                                         commitment_lock,
                                         first_commitment_tx_out_point,
-                                        ckb_client,
+                                        &ckb_client,
                                         channel_data,
                                         false,
                                         &signer,
@@ -463,12 +518,27 @@ fn run_periodic_check<S>(
     }
 }
 
+/// Holds the cells `tx` spends (`held_cells`), and locks them in `cell_collector` for the rest of
+/// this round.
+fn hold_sent(tx: &TransactionView, cell_collector: &mut dyn CellCollector) {
+    let cells: Vec<OutPoint> = tx.input_pts_iter().collect();
+    crate::ckb::held_cells::hold_for_watchtower(
+        cells.iter().cloned(),
+        crate::now_timestamp_as_millis_u64(),
+    );
+    for cell in cells {
+        if let Err(err) = cell_collector.lock_cell(cell, u64::MAX) {
+            error!("Failed to lock a sent cell: {:?}", err);
+        }
+    }
+}
+
 fn build_revocation_tx(
     commitment_tx_out_point: OutPoint,
     revocation_data: RevocationData,
     x_only_aggregated_pubkey: [u8; 32],
     signer: &LocalSigner,
-    cell_collector: &mut DefaultCellCollector,
+    cell_collector: &mut impl CellCollector,
 ) -> Result<TransactionView, Box<dyn std::error::Error>> {
     let witness = [
         XUDT_COMPATIBLE_WITNESS.to_vec(),
@@ -525,7 +595,7 @@ fn build_revocation_tx(
     query.secondary_script_len_range = Some(ValueRangeOption::new_exact(0));
     query.data_len_range = Some(ValueRangeOption::new_exact(0));
     query.min_total_capacity = min_total_capacity;
-    let (cells, _total_capacity) = cell_collector.collect_live_cells(&query, false)?;
+    let (cells, _total_capacity) = cell_collector.collect_live_cells(&query, true)?;
     let mut inputs_capacity = 0u64;
     for cell in cells {
         let input_capacity: u64 = cell.output.capacity().unpack();
@@ -575,20 +645,24 @@ fn try_settle_commitment_tx<S: WatchtowerStore>(
     events: &crate::signing::SigningEvents,
     commitment_lock: Script,
     first_commitment_tx_out_point: OutPoint,
-    ckb_client: CkbRpcClient,
+    ckb_client: &CkbRpcClient,
     channel_data: ChannelData,
     for_remote: bool,
     signer: &LocalSigner,
-    cell_collector: &mut DefaultCellCollector,
+    cell_collector: &mut impl CellCollector,
     store: &S,
     self_node_id: NodeId,
     first_commitment_block_number: u64,
 ) {
     // Keep the snapshot verified against the original commitment lock throughout
     // settlement. Successor cells have different witness hashes after each unlock.
-    let Some((direction, _, settlement_data)) =
-        verify_and_select_settlement_data(&channel_data, &commitment_lock)
-    else {
+    let superseded =
+        store.get_superseded_remote_settlements(&self_node_id, &channel_data.channel_id);
+    let Some((direction, _, settlement_data)) = verify_and_select_settlement_data_with_superseded(
+        &channel_data,
+        &superseded,
+        &commitment_lock,
+    ) else {
         error!(
             "Cannot recover settlement snapshot for channel {:?}",
             channel_data.channel_id
@@ -602,12 +676,16 @@ fn try_settle_commitment_tx<S: WatchtowerStore>(
         );
         return;
     }
-    let lock_args = commitment_lock.args().raw_data();
-    let initial_tlcs = tracked_settlement_tlcs(
-        settlement_data,
-        for_remote,
-        channel_data.commitment_contract_features,
+    prune_dead_fee_signing_requests(
+        events,
+        ckb_client,
+        store,
+        &self_node_id,
+        &channel_data.channel_id,
     );
+    let lock_args = commitment_lock.args().raw_data();
+    let initial_tlcs =
+        tracked_settlement_tlcs(settlement_data, for_remote, channel_data.channel_features);
     let script = commitment_lock
         .as_builder()
         .args(lock_args[0..36].to_vec().pack())
@@ -657,14 +735,13 @@ fn try_settle_commitment_tx<S: WatchtowerStore>(
 
     let settlement_scan = scan_watched_settlement_txs(
         search_key.clone(),
-        &ckb_client,
+        ckb_client,
         &script,
         first_commitment_tx_out_point.clone(),
         initial_tlcs,
         &channel_data.channel_id,
         store,
         &self_node_id,
-        channel_data.commitment_contract_features,
     );
     prune_spent_signing_requests(
         events,
@@ -747,8 +824,6 @@ fn try_settle_commitment_tx<S: WatchtowerStore>(
                                                     {
                                                         SettlementWitness::build_from_witness(
                                                             &witness[16..],
-                                                            channel_data
-                                                                .commitment_contract_features,
                                                         )
                                                     } else {
                                                         warn!("Found a commitment tx, but the witness is invalid: {:?}", commitment_tx_hash);
@@ -803,8 +878,10 @@ fn try_settle_commitment_tx<S: WatchtowerStore>(
                         Ok(Some(tx)) => match ckb_client.send_transaction(tx.data().into(), None) {
                             Ok(tx_hash) => {
                                 info!("Settlement tx: {:?} sent, tx_hash: {:#x}", tx, tx_hash);
+                                hold_sent(&tx, cell_collector);
                             }
                             Err(err) => {
+                                crate::ckb::held_cells::release_for_watchtower(tx.input_pts_iter());
                                 error!("Failed to send settlement tx: {:?}, error: {:?}", tx, err);
                             }
                         },
@@ -826,13 +903,9 @@ fn try_settle_commitment_tx<S: WatchtowerStore>(
 }
 
 impl TrackedSettlementTlc {
-    fn from_settlement_tlc(
-        tlc: &SettlementTlc,
-        for_remote: bool,
-        features: CommitmentContractFeatures,
-    ) -> Self {
+    fn from_settlement_tlc(tlc: &SettlementTlc, for_remote: bool) -> Self {
         Self {
-            commitment_contract_features: features,
+            channel_features: ChannelFeatures::V2,
             tlc_id: if for_remote {
                 tlc.tlc_id
             } else {
@@ -840,7 +913,7 @@ impl TrackedSettlementTlc {
             },
             payment_hash: tlc.payment_hash,
             hash_algorithm: tlc.hash_algorithm,
-            witness: settlement_tlc_to_witness(tlc, for_remote, features),
+            witness: settlement_tlc_to_witness(tlc, for_remote),
         }
     }
 
@@ -856,13 +929,7 @@ impl TrackedSettlementTlc {
         let tlc = settlement_data
             .tlcs
             .iter()
-            .find(|tlc| {
-                Self::from_settlement_tlc(
-                    tlc,
-                    for_remote,
-                    channel_data.commitment_contract_features,
-                ) == *self
-            })
+            .find(|tlc| Self::from_settlement_tlc(tlc, for_remote) == *self)
             .ok_or_else(|| {
                 anyhow!("settlement unlock TLC is missing from the selected snapshot")
             })?;
@@ -878,7 +945,10 @@ impl TrackedSettlementTlc {
         };
         if tlc.local_key.is_none() {
             let expected = channel_data
-                .expected_onchain_pubkey(&purpose)
+                .expected_onchain_pubkey_with_settlements(
+                    &purpose,
+                    std::slice::from_ref(settlement_data),
+                )
                 .map_err(std::io::Error::other)?;
             if Some(expected) != tlc.local_key_pubkey {
                 return Err(anyhow!(
@@ -907,7 +977,6 @@ fn scan_watched_settlement_txs<S: WatchtowerStore>(
     channel_id: &Hash256,
     store: &S,
     self_node_id: &NodeId,
-    commitment_contract_features: CommitmentContractFeatures,
 ) -> WatchedSettlementScan {
     let mut watched_outpoints = HashMap::from([(first_commitment_tx_out_point, initial_tlcs)]);
     let mut settlement_witness_input_indices = HashMap::new();
@@ -984,7 +1053,7 @@ fn scan_watched_settlement_txs<S: WatchtowerStore>(
             if processed_tx_hashes.contains(&tx_hash) {
                 continue;
             }
-            if let Some(witness_index) = process_watched_settlement_tx_with_features(
+            if let Some(witness_index) = process_watched_settlement_tx(
                 tx,
                 &mut watched_outpoints,
                 &mut processed_tx_hashes,
@@ -992,7 +1061,6 @@ fn scan_watched_settlement_txs<S: WatchtowerStore>(
                 channel_id,
                 store,
                 self_node_id,
-                commitment_contract_features,
             ) {
                 settlement_witness_input_indices.insert(tx_hash, witness_index);
                 progress = true;
@@ -1009,11 +1077,99 @@ fn scan_watched_settlement_txs<S: WatchtowerStore>(
     }
 }
 
+fn valid_v2_commitment_args(args: &[u8]) -> bool {
+    args.len() == ChannelFeatures::LOCK_ARGS_LEN && ChannelFeatures::from_bits(args[57]).is_ok()
+}
+
 fn lock_matches_commitment_prefix(lock: &Script, commitment_lock_prefix: &Script) -> bool {
     let lock_args = lock.args().raw_data();
-    lock.code_hash() == commitment_lock_prefix.code_hash()
+    valid_v2_commitment_args(&lock_args)
+        && lock.code_hash() == commitment_lock_prefix.code_hash()
         && lock.hash_type() == commitment_lock_prefix.hash_type()
         && lock_args.starts_with(commitment_lock_prefix.args().raw_data().as_ref())
+}
+
+fn prune_dead_fee_signing_requests<S: WatchtowerStore>(
+    events: &crate::signing::SigningEvents,
+    client: &CkbRpcClient,
+    store: &S,
+    node_id: &NodeId,
+    channel_id: &Hash256,
+) {
+    let fiber_types::WatchtowerSignerState::External(external) =
+        store.get_watchtower_signer(node_id, channel_id)
+    else {
+        return;
+    };
+    // Do not perform RPC calls while holding the signer-state write lock.
+    let dead: HashSet<Hash256> = external
+        .pending_requests
+        .iter()
+        .chain(
+            external
+                .signed_signatures
+                .iter()
+                .map(|(id, (content, _))| (id, content)),
+        )
+        .filter_map(|(id, content)| {
+            content
+                .transaction
+                .raw()
+                .inputs()
+                .into_iter()
+                .skip(1)
+                .any(|input| {
+                    client
+                        .get_live_cell(input.previous_output().into(), false)
+                        .is_ok_and(|cell| cell.status != "live")
+                })
+                .then_some(*id)
+        })
+        .collect();
+    if dead.is_empty() {
+        return;
+    }
+    let scope = events.watchtower(node_id);
+    let mut notification = scope.prepare_update();
+    store
+        .update_watchtower_signer(node_id, channel_id, |state| {
+            if let fiber_types::WatchtowerSignerState::External(external) = state {
+                external.pending_requests.retain(|id, content| {
+                    if !dead.contains(id) {
+                        return true;
+                    }
+                    crate::ckb::held_cells::release_for_watchtower(
+                        content
+                            .transaction
+                            .raw()
+                            .inputs()
+                            .into_iter()
+                            .skip(1)
+                            .map(|input| input.previous_output()),
+                    );
+                    false
+                });
+                external.signed_signatures.retain(|id, (content, _)| {
+                    if !dead.contains(id) {
+                        return true;
+                    }
+                    crate::ckb::held_cells::release_for_watchtower(
+                        content
+                            .transaction
+                            .raw()
+                            .inputs()
+                            .into_iter()
+                            .skip(1)
+                            .map(|input| input.previous_output()),
+                    );
+                    false
+                });
+                notification.watchtower_state(*channel_id, state);
+            }
+            Ok::<_, std::convert::Infallible>(())
+        })
+        .expect("infallible signer update");
+    notification.publish();
 }
 
 fn prune_spent_signing_requests<S: WatchtowerStore>(
@@ -1033,12 +1189,24 @@ fn prune_spent_signing_requests<S: WatchtowerStore>(
             if let fiber_types::WatchtowerSignerState::External(external) = state {
                 let count = external.pending_requests.len() + external.signed_signatures.len();
                 let is_unspent = |content: &fiber_types::OnchainSigningContent| {
-                    content
+                    let unspent = content
                         .transaction
                         .raw()
                         .inputs()
                         .into_iter()
-                        .all(|input| !spent_inputs.contains(&input.previous_output()))
+                        .all(|input| !spent_inputs.contains(&input.previous_output()));
+                    if !unspent {
+                        crate::ckb::held_cells::release_for_watchtower(
+                            content
+                                .transaction
+                                .raw()
+                                .inputs()
+                                .into_iter()
+                                .skip(1)
+                                .map(|input| input.previous_output()),
+                        );
+                    }
+                    unspent
                 };
                 external
                     .pending_requests
@@ -1057,7 +1225,7 @@ fn prune_spent_signing_requests<S: WatchtowerStore>(
     signing_update.publish();
 }
 
-#[allow(dead_code)]
+#[allow(clippy::too_many_arguments)]
 fn process_watched_settlement_tx<S: WatchtowerStore>(
     tx: &Transaction,
     watched_outpoints: &mut HashMap<OutPoint, Vec<TrackedSettlementTlc>>,
@@ -1066,29 +1234,6 @@ fn process_watched_settlement_tx<S: WatchtowerStore>(
     channel_id: &Hash256,
     store: &S,
     self_node_id: &NodeId,
-) -> Option<usize> {
-    process_watched_settlement_tx_with_features(
-        tx,
-        watched_outpoints,
-        processed_tx_hashes,
-        commitment_lock_prefix,
-        channel_id,
-        store,
-        self_node_id,
-        CommitmentContractFeatures::LEGACY,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn process_watched_settlement_tx_with_features<S: WatchtowerStore>(
-    tx: &Transaction,
-    watched_outpoints: &mut HashMap<OutPoint, Vec<TrackedSettlementTlc>>,
-    processed_tx_hashes: &mut HashSet<ckb_types::packed::Byte32>,
-    commitment_lock_prefix: &Script,
-    channel_id: &Hash256,
-    store: &S,
-    self_node_id: &NodeId,
-    commitment_contract_features: CommitmentContractFeatures,
 ) -> Option<usize> {
     let tx_hash = tx.calc_tx_hash();
     if processed_tx_hashes.contains(&tx_hash) {
@@ -1122,7 +1267,6 @@ fn process_watched_settlement_tx_with_features<S: WatchtowerStore>(
         self_node_id,
         &tracked_tlcs,
         terminal,
-        commitment_contract_features,
     )?;
     processed_tx_hashes.insert(tx_hash.clone());
     watched_outpoints.remove(&watched_outpoint);
@@ -1155,7 +1299,6 @@ fn reconcile_settlement_witness<S: WatchtowerStore>(
     self_node_id: &NodeId,
     tracked_tlcs: &[TrackedSettlementTlc],
     terminal: bool,
-    commitment_contract_features: CommitmentContractFeatures,
 ) -> Option<Vec<TrackedSettlementTlc>> {
     let Some(witness) = tx.witnesses().get(witness_index) else {
         warn!(
@@ -1172,9 +1315,7 @@ fn reconcile_settlement_witness<S: WatchtowerStore>(
         );
         return None;
     }
-    let Some(settlement_witness) =
-        SettlementWitness::build_from_witness(&witness[16..], commitment_contract_features)
-    else {
+    let Some(settlement_witness) = SettlementWitness::build_from_witness(&witness[16..]) else {
         warn!(
             "Cannot decode settlement witness for tx {:?}",
             tx.calc_tx_hash()
@@ -1309,22 +1450,6 @@ fn verified_watch_preimage<S: WatchtowerStore>(
     }
 }
 
-fn first_settlement_witness(
-    settlement_data: &SettlementData,
-    for_remote: bool,
-    commitment_contract_features: CommitmentContractFeatures,
-    local_settlement_key: Pubkey,
-    remote_settlement_key: Pubkey,
-) -> Vec<u8> {
-    settlement_data_to_witness(
-        settlement_data,
-        for_remote,
-        commitment_contract_features,
-        local_settlement_key,
-        remote_settlement_key,
-    )
-}
-
 #[allow(clippy::too_many_arguments)]
 fn build_settlement_tx<S: WatchtowerStore>(
     events: &crate::signing::SigningEvents,
@@ -1344,6 +1469,9 @@ fn build_settlement_tx<S: WatchtowerStore>(
 ) -> Result<Option<TransactionView>, Box<dyn std::error::Error>> {
     let cell_output: CellOutput = commitment_cell.output.clone().into();
     let lock_script_args = cell_output.lock().args().raw_data();
+    if !valid_v2_commitment_args(&lock_script_args) {
+        return Err(anyhow!("invalid V2 commitment lock arguments").into());
+    }
     let since = u64::from_le_bytes(lock_script_args[20..28].try_into().expect("u64 from slice"));
     let commitment_number =
         u64::from_be_bytes(lock_script_args[28..36].try_into().expect("u64 from slice"));
@@ -1584,11 +1712,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
             if settlement_data.tlcs.len() != tracked_tlcs.len()
                 || settlement_data.tlcs.iter().zip(tracked_tlcs).any(
                     |(settlement_tlc, tracked_tlc)| {
-                        settlement_tlc_to_witness(
-                            settlement_tlc,
-                            for_remote,
-                            channel_data.commitment_contract_features,
-                        ) != tracked_tlc.witness
+                        settlement_tlc_to_witness(settlement_tlc, for_remote) != tracked_tlc.witness
                     },
                 )
             {
@@ -1686,10 +1810,9 @@ fn build_settlement_tx<S: WatchtowerStore>(
                     unlock,
                     unlock_amount,
                     private_key,
-                    first_settlement_witness(
+                    settlement_data_to_witness(
                         settlement_data,
                         for_remote,
-                        channel_data.commitment_contract_features,
                         channel_data.local_settlement_pubkey(),
                         channel_data.remote_settlement_key,
                     ),
@@ -1721,11 +1844,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
         // The contract requires an absolute timestamp since >= the TLC expiry.
         // Reuse the verified witness's expiry so advancing chain median time
         // does not change the transaction awaiting an external signature.
-        Htlc::build_from_witness(
-            &tracked_tlc.witness,
-            tracked_tlc.commitment_contract_features.payment_hash_len(),
-        )
-        .htlc_expiry
+        Htlc::build_from_witness(&tracked_tlc.witness).htlc_expiry
     } else {
         0
     };
@@ -1734,7 +1853,6 @@ fn build_settlement_tx<S: WatchtowerStore>(
     let new_script_hash = {
         let mut sw = SettlementWitness::build_from_witness(
             &[&[0x01], new_settlement_witness.as_slice()].concat(),
-            channel_data.commitment_contract_features,
         )
         .expect("valid data");
         sw.unlocks.push(unlock.clone());
@@ -1743,15 +1861,72 @@ fn build_settlement_tx<S: WatchtowerStore>(
     };
     new_commitment_lock_script_args.extend_from_slice(&new_script_hash);
     new_commitment_lock_script_args.extend_from_slice(&[0x01]);
-    // Propagate the commitment contract features bitmap so a V1 commitment
-    // cell stays V1 after settlement.
-    if lock_script_args.len() > 57 {
-        new_commitment_lock_script_args.extend_from_slice(&lock_script_args[57..]);
-    }
+    new_commitment_lock_script_args.push(ChannelFeatures::V2.bits());
 
     let placeholder_witness_for_change = WitnessArgs::new_builder()
         .lock(Some(ckb_types::bytes::Bytes::from(vec![0u8; 65])).pack())
         .build();
+
+    if channel_data.local_settlement_key.is_none() {
+        // Fee inputs are reserved while an external signature is outstanding.
+        // Rebuilding with a new collector would skip those inputs and change
+        // the request on every check, making the submitted signature unusable.
+        let expected_witness = [
+            XUDT_COMPATIBLE_WITNESS.as_slice(),
+            &[1],
+            new_settlement_witness.as_slice(),
+            unlock.to_witness().as_slice(),
+        ]
+        .concat();
+        if let fiber_types::WatchtowerSignerState::External(external) =
+            store.get_watchtower_signer(self_node_id, &channel_data.channel_id)
+        {
+            let previous = external
+                .signed_signatures
+                .values()
+                .map(|(content, _)| content)
+                .chain(external.pending_requests.values())
+                .find(|content| {
+                    content.key_purpose == key_purpose
+                        && content
+                            .transaction
+                            .raw()
+                            .inputs()
+                            .get(0)
+                            .is_some_and(|input| {
+                                input.previous_output()
+                                    == OutPoint::from(commitment_cell.out_point.clone())
+                            })
+                        && content
+                            .transaction
+                            .witnesses()
+                            .get(0)
+                            .is_some_and(|witness| {
+                                witness.raw_data().as_ref() == expected_witness.as_slice()
+                            })
+                        && content
+                            .transaction
+                            .raw()
+                            .inputs()
+                            .into_iter()
+                            .skip(1)
+                            .all(|input| Unpack::<u64>::unpack(&input.since()) == fee_input_since)
+                });
+            if let Some(content) = previous {
+                return build_signed_settlement_tx(
+                    events,
+                    store,
+                    self_node_id,
+                    channel_data.channel_id,
+                    content.transaction.clone().into_view(),
+                    key_purpose,
+                    unlock.with_preimage,
+                    None,
+                    signer,
+                );
+            }
+        }
+    }
 
     if cell_output.type_().is_none() {
         let capacity: u64 = cell_output.capacity().unpack();
@@ -1857,7 +2032,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
         if min_total_capacity > 0 {
             query.min_total_capacity = min_total_capacity;
         }
-        let (cells, _total_capacity) = cell_collector.collect_live_cells(&query, false)?;
+        let (cells, _total_capacity) = cell_collector.collect_live_cells(&query, true)?;
         let mut inputs_capacity = capacity;
         for cell in cells {
             let input_capacity: u64 = cell.output.capacity().unpack();
@@ -2089,7 +2264,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
         query.secondary_script_len_range = Some(ValueRangeOption::new_exact(0));
         query.data_len_range = Some(ValueRangeOption::new_exact(0));
         query.min_total_capacity = min_total_capacity;
-        let (cells, _total_capacity) = cell_collector.collect_live_cells(&query, false)?;
+        let (cells, _total_capacity) = cell_collector.collect_live_cells(&query, true)?;
         let mut inputs_capacity = commitment_cell.output.capacity.value();
         for cell in cells {
             let input_capacity: u64 = cell.output.capacity().unpack();
@@ -2197,6 +2372,16 @@ fn build_signed_settlement_tx<S: WatchtowerStore>(
             request_id,
             content: awaiting,
         } => {
+            crate::ckb::held_cells::hold_for_watchtower(
+                awaiting
+                    .transaction
+                    .raw()
+                    .inputs()
+                    .into_iter()
+                    .skip(1)
+                    .map(|input| input.previous_output()),
+                crate::now_timestamp_as_millis_u64(),
+            );
             let signing_scope = events.watchtower(node_id);
             let mut signing_update = signing_scope.prepare_update();
             let signature = store.update_watchtower_signer(
@@ -2387,7 +2572,8 @@ struct Htlc {
 }
 
 impl Htlc {
-    pub fn build_from_witness(witness: &[u8], payment_hash_len: usize) -> Self {
+    pub fn build_from_witness(witness: &[u8]) -> Self {
+        let payment_hash_len = ChannelFeatures::PAYMENT_HASH_LEN;
         let htlc_type = witness[0];
         let payment_amount = u128::from_le_bytes(witness[1..17].try_into().unwrap());
         let payment_hash = witness[17..17 + payment_hash_len].to_vec();
@@ -2491,11 +2677,8 @@ impl Unlock {
 }
 
 impl SettlementWitness {
-    pub fn build_from_witness(
-        witness: &[u8],
-        commitment_contract_features: CommitmentContractFeatures,
-    ) -> Option<Self> {
-        let payment_hash_len = commitment_contract_features.payment_hash_len();
+    pub fn build_from_witness(witness: &[u8]) -> Option<Self> {
+        let payment_hash_len = ChannelFeatures::PAYMENT_HASH_LEN;
         let htlc_script_len = 65 + payment_hash_len;
         let mut reader = WitnessReader::new(witness);
         let _unlock_count = reader.take_u8()?;
@@ -2503,10 +2686,7 @@ impl SettlementWitness {
 
         let mut pending_htlcs = Vec::with_capacity(pending_htlc_count);
         for _ in 0..pending_htlc_count {
-            pending_htlcs.push(Htlc::build_from_witness(
-                reader.take(htlc_script_len)?,
-                payment_hash_len,
-            ));
+            pending_htlcs.push(Htlc::build_from_witness(reader.take(htlc_script_len)?));
         }
 
         let settlement_remote_pubkey_hash = reader.take_array::<20>()?;
@@ -2619,29 +2799,25 @@ mod tests {
     use fiber_types::TLCId;
     use secp256k1::SecretKey;
 
-    use crate::fiber::onchain_tlc_reconcile::StoredOnChainTlcSettlement;
+    use crate::fiber::onchain_tlc_reconcile::OnChainTlcSettlement;
 
     use super::*;
 
     #[derive(Default)]
     struct TestWatchtowerStore {
+        channels: Mutex<Vec<(NodeId, ChannelData)>>,
         settlements: Mutex<Vec<(Hash256, TLCId, OnChainTlcSettlement)>>,
         preimages: Mutex<Vec<(NodeId, Hash256, Hash256)>>,
-        registered_features: Mutex<Vec<CommitmentContractFeatures>>,
+        registered_features: Mutex<Vec<ChannelFeatures>>,
     }
 
     impl TestWatchtowerStore {
-        fn settled_tlcs(&self) -> Vec<(Hash256, [u8; 20])> {
+        fn settled_tlcs(&self) -> Vec<(Hash256, [u8; 32])> {
             self.settlements
                 .lock()
                 .expect("lock poisoned")
                 .iter()
-                .map(|(channel_id, _, settlement)| {
-                    let prefix = settlement.payment_hash.as_ref()[..20]
-                        .try_into()
-                        .expect("payment hash prefix");
-                    (*channel_id, prefix)
-                })
+                .map(|(channel_id, _, settlement)| (*channel_id, settlement.payment_hash.into()))
                 .collect()
         }
 
@@ -2652,7 +2828,7 @@ mod tests {
 
     impl WatchtowerStore for TestWatchtowerStore {
         fn get_watch_channels_with_nodes(&self) -> Vec<(NodeId, ChannelData)> {
-            vec![]
+            self.channels.lock().expect("lock poisoned").clone()
         }
 
         fn insert_watch_channel(
@@ -2666,7 +2842,7 @@ mod tests {
             self.registered_features
                 .lock()
                 .expect("lock poisoned")
-                .push(CommitmentContractFeatures::LEGACY);
+                .push(ChannelFeatures::V2);
         }
 
         fn insert_watch_channel_with_features(
@@ -2676,12 +2852,12 @@ mod tests {
             _funding_udt_type_script: Option<Script>,
             _keys: WatchChannelKeys,
             _settlement_data: SettlementData,
-            commitment_contract_features: CommitmentContractFeatures,
+            channel_features: ChannelFeatures,
         ) {
             self.registered_features
                 .lock()
                 .expect("lock poisoned")
-                .push(commitment_contract_features);
+                .push(channel_features);
         }
 
         fn remove_watch_channel(&self, _node_id: NodeId, _channel_id: Hash256) -> bool {
@@ -2777,14 +2953,13 @@ mod tests {
             channel_id: &Hash256,
             tlc_id: TLCId,
             _payment_hash: &Hash256,
-        ) -> Option<StoredOnChainTlcSettlement> {
+        ) -> Option<OnChainTlcSettlement> {
             self.settlements
                 .lock()
                 .expect("lock poisoned")
                 .iter()
                 .find_map(|(id, stored_tlc_id, settlement)| {
-                    (id == channel_id && *stored_tlc_id == tlc_id)
-                        .then(|| StoredOnChainTlcSettlement::Exact(settlement.clone()))
+                    (id == channel_id && *stored_tlc_id == tlc_id).then(|| settlement.clone())
                 })
         }
     }
@@ -2801,10 +2976,11 @@ mod tests {
         let mut args = prefix.args().raw_data().to_vec();
         args.extend_from_slice(&[3u8; 20]);
         args.push(1);
+        args.push(ChannelFeatures::V2.bits());
         prefix.clone().as_builder().args(args.pack()).build()
     }
 
-    fn settlement_witness(payment_hash: [u8; 20]) -> Vec<u8> {
+    fn settlement_witness(payment_hash: [u8; 32]) -> Vec<u8> {
         settlement_witness_with_unlock(
             payment_hash,
             Unlock {
@@ -2816,7 +2992,7 @@ mod tests {
         )
     }
 
-    fn test_htlc(payment_hash: [u8; 20]) -> Htlc {
+    fn test_htlc(payment_hash: [u8; 32]) -> Htlc {
         Htlc {
             htlc_type: 0,
             payment_amount: 1_000,
@@ -2827,22 +3003,19 @@ mod tests {
         }
     }
 
-    fn tracked_tlc(payment_hash_prefix: [u8; 20], tlc_id: u64) -> TrackedSettlementTlc {
-        let mut payment_hash = [0u8; 32];
-        payment_hash[..20].copy_from_slice(&payment_hash_prefix);
-        payment_hash[24..].copy_from_slice(&tlc_id.to_be_bytes());
+    fn tracked_tlc(payment_hash: [u8; 32], tlc_id: u64) -> TrackedSettlementTlc {
         TrackedSettlementTlc {
             tlc_id: TLCId::Offered(tlc_id),
             payment_hash: payment_hash.into(),
             hash_algorithm: HashAlgorithm::CkbHash,
-            witness: test_htlc(payment_hash_prefix).to_witness(),
-            commitment_contract_features: CommitmentContractFeatures::LEGACY,
+            witness: test_htlc(payment_hash).to_witness(),
+            channel_features: ChannelFeatures::V2,
         }
     }
 
     fn watched_outpoints(
         outpoint: OutPoint,
-        payment_hashes: &[[u8; 20]],
+        payment_hashes: &[[u8; 32]],
     ) -> HashMap<OutPoint, Vec<TrackedSettlementTlc>> {
         HashMap::from([(
             outpoint,
@@ -2855,7 +3028,7 @@ mod tests {
     }
 
     #[test]
-    fn tracked_settlement_tlcs_accepts_legacy_private_key_only_channel() {
+    fn tracked_settlement_tlcs_accepts_private_key_only_channel() {
         let local_settlement_key = Privkey::from(&[1; 32]);
         let remote_settlement_key = Privkey::from(&[2; 32]).pubkey();
         let settlement_data = SettlementData {
@@ -2875,12 +3048,11 @@ mod tests {
             pending_remote_settlement_data: settlement_data.clone(),
             local_settlement_data: settlement_data.clone(),
             revocation_data: None,
-            commitment_contract_features: CommitmentContractFeatures::LEGACY,
+            channel_features: ChannelFeatures::V2,
         };
         let witness = settlement_data_to_witness(
             &settlement_data,
             false,
-            CommitmentContractFeatures::LEGACY,
             local_settlement_key.pubkey(),
             remote_settlement_key,
         );
@@ -2890,6 +3062,7 @@ mod tests {
         lock_args.extend_from_slice(&0u64.to_le_bytes());
         lock_args.extend_from_slice(&0u64.to_be_bytes());
         lock_args.extend_from_slice(blake160(&witness).as_ref());
+        lock_args.extend_from_slice(&[0, ChannelFeatures::V2.bits()]);
         let commitment_lock = get_script_by_contract(Contract::CommitmentLock, &lock_args);
 
         assert_eq!(
@@ -2902,19 +3075,22 @@ mod tests {
         );
     }
 
-    fn settlement_witness_with_unlock(payment_hash: [u8; 20], unlock: Unlock) -> Vec<u8> {
+    fn settlement_witness_with_unlock(payment_hash: [u8; 32], unlock: Unlock) -> Vec<u8> {
         settlement_witness_with_unlocks(&[payment_hash], vec![unlock])
     }
 
     fn settlement_witness_with_unlocks(
-        payment_hashes: &[[u8; 20]],
+        payment_hashes: &[[u8; 32]],
         unlocks: Vec<Unlock>,
     ) -> Vec<u8> {
         let settlement_witness = SettlementWitness {
             pending_htlc_count: payment_hashes.len(),
             pending_htlcs: payment_hashes
                 .iter()
-                .map(|payment_hash| test_htlc(*payment_hash))
+                .enumerate()
+                .map(|(index, prefix)| {
+                    test_htlc(tracked_tlc(*prefix, index as u64).payment_hash.into())
+                })
                 .collect(),
             settlement_remote_pubkey_hash: [6u8; 20],
             settlement_remote_amount: 2_000,
@@ -2936,12 +3112,18 @@ mod tests {
     }
 
     fn settlement_witness_final_party_unlock(
-        payment_hashes: [[u8; 20]; 2],
+        payment_hashes: [[u8; 32]; 2],
         unlock_type: u8,
     ) -> Vec<u8> {
         let settlement_witness = SettlementWitness {
             pending_htlc_count: 2,
-            pending_htlcs: payment_hashes.into_iter().map(test_htlc).collect(),
+            pending_htlcs: payment_hashes
+                .into_iter()
+                .enumerate()
+                .map(|(index, prefix)| {
+                    test_htlc(tracked_tlc(prefix, index as u64).payment_hash.into())
+                })
+                .collect(),
             settlement_remote_pubkey_hash: [6u8; 20],
             settlement_remote_amount: 2_000,
             settlement_local_pubkey_hash: [7u8; 20],
@@ -3028,12 +3210,8 @@ mod tests {
             tlc_id: settlement_tlc.tlc_id.flip(),
             payment_hash: settlement_tlc.payment_hash,
             hash_algorithm: settlement_tlc.hash_algorithm,
-            witness: settlement_tlc_to_witness(
-                &settlement_tlc,
-                false,
-                CommitmentContractFeatures::LEGACY,
-            ),
-            commitment_contract_features: CommitmentContractFeatures::LEGACY,
+            witness: settlement_tlc_to_witness(&settlement_tlc, false),
+            channel_features: ChannelFeatures::V2,
         }];
         let settlement_data = SettlementData {
             local_amount: 100_000_000_000,
@@ -3052,7 +3230,7 @@ mod tests {
             pending_remote_settlement_data: settlement_data.clone(),
             local_settlement_data: settlement_data.clone(),
             revocation_data: None,
-            commitment_contract_features: CommitmentContractFeatures::LEGACY,
+            channel_features: ChannelFeatures::V2,
         };
         let settlement_witness = SettlementWitness::build_from_witness(
             &[
@@ -3060,14 +3238,12 @@ mod tests {
                 settlement_data_to_witness(
                     &settlement_data,
                     false,
-                    CommitmentContractFeatures::LEGACY,
                     local_settlement_key.pubkey(),
                     remote_settlement_key,
                 )
                 .as_slice(),
             ]
             .concat(),
-            CommitmentContractFeatures::LEGACY,
         )
         .expect("settlement witness");
 
@@ -3081,6 +3257,16 @@ mod tests {
         let mut lock_args = vec![0u8; 20];
         lock_args.extend_from_slice(&since.to_le_bytes());
         lock_args.extend_from_slice(&0u64.to_be_bytes());
+        lock_args.extend_from_slice(
+            blake160(&settlement_data_to_witness(
+                &settlement_data,
+                false,
+                local_settlement_key.pubkey(),
+                remote_settlement_key,
+            ))
+            .as_ref(),
+        );
+        lock_args.extend_from_slice(&[1, ChannelFeatures::V2.bits()]);
         let lock = Script::new_builder()
             .code_hash(Byte32::from([1u8; 32]))
             .hash_type(ScriptHashType::Type)
@@ -3134,17 +3320,17 @@ mod tests {
     }
 
     #[test]
-    fn settlement_witness_parses_both_layouts() {
+    fn settlement_witness_rejects_short_payment_hash() {
         let payment_hash: Vec<u8> = (0..32).collect();
-        let mut v1_htlc = vec![0u8];
-        v1_htlc.extend_from_slice(&1_000u128.to_le_bytes());
-        v1_htlc.extend_from_slice(&payment_hash);
-        v1_htlc.extend_from_slice(&[4u8; 20]);
-        v1_htlc.extend_from_slice(&[5u8; 20]);
-        v1_htlc.extend_from_slice(&0u64.to_le_bytes());
-        let v1_witness = [
+        let mut v2_htlc = vec![0u8];
+        v2_htlc.extend_from_slice(&1_000u128.to_le_bytes());
+        v2_htlc.extend_from_slice(&payment_hash);
+        v2_htlc.extend_from_slice(&[4u8; 20]);
+        v2_htlc.extend_from_slice(&[5u8; 20]);
+        v2_htlc.extend_from_slice(&0u64.to_le_bytes());
+        let v2_witness = [
             &[0u8, 1u8],
-            v1_htlc.as_slice(),
+            v2_htlc.as_slice(),
             &[6u8; 20],
             &2_000u128.to_le_bytes(),
             &[7u8; 20],
@@ -3154,34 +3340,18 @@ mod tests {
             &payment_hash,
         ]
         .concat();
-        let parsed = SettlementWitness::build_from_witness(
-            &v1_witness,
-            CommitmentContractFeatures::ONCHAIN_FULL_PAYMENT_HASH,
-        )
-        .expect("V1 settlement witness");
+        let parsed =
+            SettlementWitness::build_from_witness(&v2_witness).expect("V2 settlement witness");
         assert_eq!(parsed.pending_htlcs[0].payment_hash, payment_hash);
         assert_eq!(parsed.unlocks[0].witness_len(), 99);
 
-        let legacy = settlement_witness_with_unlock(
-            [1u8; 20],
-            Unlock {
-                unlock_type: 0,
-                with_preimage: false,
-                signature: [0u8; 65],
-                preimage: None,
-            },
-        );
-        let parsed = SettlementWitness::build_from_witness(
-            &legacy[16..],
-            CommitmentContractFeatures::LEGACY,
-        )
-        .expect("legacy settlement witness");
-        assert_eq!(parsed.pending_htlcs[0].payment_hash, vec![1u8; 20]);
-        assert_eq!(parsed.unlocks[0].witness_len(), 67);
+        let mut old_witness = v2_witness;
+        old_witness.drain(2 + 17 + 20..2 + 17 + 32);
+        assert!(SettlementWitness::build_from_witness(&old_witness).is_none());
     }
 
     #[test]
-    fn first_settlement_witness_uses_v1_layout() {
+    fn first_settlement_witness_uses_v2_layout() {
         let payment_hash_bytes: [u8; 32] = (0..32)
             .map(|value| value as u8)
             .collect::<Vec<_>>()
@@ -3204,18 +3374,14 @@ mod tests {
             }],
         };
 
-        let witness = first_settlement_witness(
+        let witness = settlement_data_to_witness(
             &settlement_data,
             false,
-            CommitmentContractFeatures::ONCHAIN_FULL_PAYMENT_HASH,
             Privkey::from(&[3u8; 32]).pubkey(),
             Privkey::from(&[4u8; 32]).pubkey(),
         );
-        let parsed = SettlementWitness::build_from_witness(
-            &[&[0u8], witness.as_slice()].concat(),
-            CommitmentContractFeatures::ONCHAIN_FULL_PAYMENT_HASH,
-        )
-        .expect("V1 first settlement witness");
+        let parsed = SettlementWitness::build_from_witness(&[&[0u8], witness.as_slice()].concat())
+            .expect("V2 first settlement witness");
 
         assert_eq!(parsed.pending_htlcs[0].payment_hash, payment_hash.as_ref());
     }
@@ -3228,7 +3394,7 @@ mod tests {
             remote_amount: 2,
             tlcs: vec![],
         };
-        store.insert_watch_channel_with_features(
+        store.insert_watch_channel(
             NodeId::local(),
             [1u8; 32].into(),
             None,
@@ -3239,12 +3405,11 @@ mod tests {
                 remote_funding: Privkey::from(&[4u8; 32]).pubkey(),
             },
             settlement_data,
-            CommitmentContractFeatures::ONCHAIN_FULL_PAYMENT_HASH,
         );
 
         assert_eq!(
             *store.registered_features.lock().expect("lock poisoned"),
-            vec![CommitmentContractFeatures::ONCHAIN_FULL_PAYMENT_HASH]
+            vec![ChannelFeatures::V2]
         );
     }
 
@@ -3252,14 +3417,14 @@ mod tests {
     fn unrelated_same_prefix_tx_does_not_pollute_store() {
         let lock_prefix = commitment_lock_prefix();
         let channel_id: Hash256 = [9u8; 32].into();
-        let payment_hash = [42u8; 20];
+        let payment_hash = [42u8; 32];
         let attacker_tx = tx_with_input_output_and_witness(
             OutPoint::new([8u8; 32].pack(), 0),
             settlement_lock(&lock_prefix),
             Some(settlement_witness(payment_hash)),
         );
         let mut watched_outpoints =
-            watched_outpoints(OutPoint::new([7u8; 32].pack(), 0), &[[43u8; 20]]);
+            watched_outpoints(OutPoint::new([7u8; 32].pack(), 0), &[[43u8; 32]]);
         let mut processed_tx_hashes = HashSet::new();
         let store = TestWatchtowerStore::default();
         let self_node_id = NodeId::local();
@@ -3283,7 +3448,7 @@ mod tests {
     fn watched_non_first_input_does_not_parse_unrelated_witness_zero() {
         let lock_prefix = commitment_lock_prefix();
         let channel_id: Hash256 = [9u8; 32].into();
-        let malicious_payment_hash = [42u8; 20];
+        let malicious_payment_hash = [42u8; 32];
         let watched_out_point = OutPoint::new([7u8; 32].pack(), 0);
         let fee_out_point = OutPoint::new([8u8; 32].pack(), 0);
         let tx = tx_with_inputs_outputs_and_witnesses(
@@ -3314,7 +3479,7 @@ mod tests {
     fn watched_settlement_tx_updates_store_and_tracks_next_outpoint() {
         let lock_prefix = commitment_lock_prefix();
         let channel_id: Hash256 = [9u8; 32].into();
-        let payment_hash = [42u8; 20];
+        let payment_hash = [42u8; 32];
         let first_commitment_out_point = OutPoint::new([7u8; 32].pack(), 0);
         let tx = tx_with_input_output_and_witness(
             first_commitment_out_point.clone(),
@@ -3361,8 +3526,11 @@ mod tests {
     fn shared_prefix_unlock_index_maps_to_exact_tlc() {
         let lock_prefix = commitment_lock_prefix();
         let channel_id: Hash256 = [9u8; 32].into();
-        let shared_prefix = [42u8; 20];
-        let tracked = [tracked_tlc(shared_prefix, 0), tracked_tlc(shared_prefix, 1)];
+        let first_hash = [42u8; 32];
+        let mut second_hash = first_hash;
+        second_hash[31] = 43;
+        assert_eq!(&first_hash[..20], &second_hash[..20]);
+        let tracked = [tracked_tlc(first_hash, 0), tracked_tlc(second_hash, 1)];
         assert_ne!(tracked[0].payment_hash, tracked[1].payment_hash);
 
         let first_commitment_out_point = OutPoint::new([7u8; 32].pack(), 0);
@@ -3370,7 +3538,7 @@ mod tests {
             first_commitment_out_point.clone(),
             settlement_lock(&lock_prefix),
             Some(settlement_witness_with_unlocks(
-                &[shared_prefix, shared_prefix],
+                &[first_hash, second_hash],
                 vec![Unlock {
                     unlock_type: 1,
                     with_preimage: false,
@@ -3410,7 +3578,7 @@ mod tests {
     fn final_party_unlock_keeps_pending_tlcs_tracked() {
         let lock_prefix = commitment_lock_prefix();
         let channel_id: Hash256 = [9u8; 32].into();
-        let payment_hashes = [[41u8; 20], [42u8; 20]];
+        let payment_hashes = [[41u8; 32], [42u8; 32]];
         let first_commitment_out_point = OutPoint::new([7u8; 32].pack(), 0);
         let tx = tx_with_input_output_and_witness(
             first_commitment_out_point.clone(),
@@ -3457,7 +3625,7 @@ mod tests {
         // reconciliation stays incomplete forever and `RemoveTlc` is never propagated upstream.
         let lock_prefix = commitment_lock_prefix();
         let channel_id: Hash256 = [9u8; 32].into();
-        let payment_hashes = [[41u8; 20], [42u8; 20]];
+        let payment_hashes = [[41u8; 32], [42u8; 32]];
         let first_commitment_out_point = OutPoint::new([7u8; 32].pack(), 0);
         let tracked = [
             tracked_tlc(payment_hashes[0], 0),
@@ -3528,7 +3696,7 @@ mod tests {
     fn final_party_unlock_only_removes_explicitly_unlocked_tlc() {
         let lock_prefix = commitment_lock_prefix();
         let channel_id: Hash256 = [9u8; 32].into();
-        let payment_hashes = [[41u8; 20], [42u8; 20]];
+        let payment_hashes = [[41u8; 32], [42u8; 32]];
         let first_commitment_out_point = OutPoint::new([7u8; 32].pack(), 0);
         let tx = tx_with_input_output_and_witness(
             first_commitment_out_point.clone(),
@@ -3585,7 +3753,7 @@ mod tests {
     fn watched_tx_does_not_track_extra_same_prefix_output() {
         let lock_prefix = commitment_lock_prefix();
         let channel_id: Hash256 = [9u8; 32].into();
-        let payment_hash = [42u8; 20];
+        let payment_hash = [42u8; 32];
         let first_commitment_out_point = OutPoint::new([7u8; 32].pack(), 0);
         let tx = tx_with_inputs_outputs_and_witnesses(
             vec![first_commitment_out_point.clone()],
@@ -3616,8 +3784,8 @@ mod tests {
     fn asc_processing_handles_parent_before_child_without_candidate_cache() {
         let lock_prefix = commitment_lock_prefix();
         let channel_id: Hash256 = [9u8; 32].into();
-        let parent_payment_hash = [42u8; 20];
-        let child_payment_hash = [43u8; 20];
+        let parent_payment_hash = [42u8; 32];
+        let child_payment_hash = [43u8; 32];
         let first_commitment_out_point = OutPoint::new([7u8; 32].pack(), 0);
         let parent_tx = tx_with_input_output_and_witness(
             first_commitment_out_point.clone(),
@@ -3687,8 +3855,8 @@ mod tests {
     fn one_pass_processing_misses_child_when_indexer_returns_child_before_parent() {
         let lock_prefix = commitment_lock_prefix();
         let channel_id: Hash256 = [9u8; 32].into();
-        let parent_payment_hash = [42u8; 20];
-        let child_payment_hash = [43u8; 20];
+        let parent_payment_hash = [42u8; 32];
+        let child_payment_hash = [43u8; 32];
         let first_commitment_out_point = OutPoint::new([7u8; 32].pack(), 0);
         let parent_tx = tx_with_input_output_and_witness(
             first_commitment_out_point.clone(),
@@ -3833,12 +4001,11 @@ mod tests {
             pending_remote_settlement_data: pending,
             local_settlement_data: preceding.clone(),
             revocation_data: None,
-            commitment_contract_features: CommitmentContractFeatures::LEGACY,
+            channel_features: ChannelFeatures::V2,
         };
         let witness = settlement_data_to_witness(
             &preceding,
             true,
-            CommitmentContractFeatures::LEGACY,
             channel_data.local_settlement_pubkey(),
             channel_data.remote_settlement_key,
         );
@@ -3856,6 +4023,7 @@ mod tests {
         args.extend_from_slice(&1u64.to_be_bytes());
         args.extend_from_slice(&blake160(&witness).0);
         args.push(0);
+        args.push(ChannelFeatures::V2.bits());
         let commitment_lock = get_script_by_contract(Contract::CommitmentLock, &args);
         assert_eq!(
             crate::fiber::onchain_tlc_reconcile::verified_tracked_settlement_tlcs(
@@ -3891,6 +4059,12 @@ mod tests {
             block_number: 1,
             tx_index: 1,
         });
+        let store = TestWatchtowerStore::default();
+        store
+            .channels
+            .lock()
+            .unwrap()
+            .push((NodeId::local(), channel_data.clone()));
         // Supply the correct empty TLC mapping independently so this catches the builder
         // reselecting the pending snapshot even after snapshot verification is repaired.
         let tx = build_settlement_tx(
@@ -3907,7 +4081,7 @@ mod tests {
             &[],
             &signer,
             &mut collector,
-            &TestWatchtowerStore::default(),
+            &store,
         )
         .expect("build settlement")
         .expect("mature pre-TLC commitment must settle");

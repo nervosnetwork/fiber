@@ -1,5 +1,5 @@
 meta {
-  name: verify payment awaits on-chain reconciliation
+  name: verify payment succeeds before on-chain reconciliation
   type: http
   seq: 24
 }
@@ -28,5 +28,11 @@ body:json {
 
 assert {
   res.body.error: isUndefined
-  res.body.result.status: eq Inflight
+  res.body.result.status: eq Success
+}
+
+script:post-response {
+  if (res.body.result.payment_preimage !== "0x0000000000000000000000000000000000000000000000000000000000000000") {
+    throw new Error(`unexpected payment preimage ${res.body.result.payment_preimage}`);
+  }
 }

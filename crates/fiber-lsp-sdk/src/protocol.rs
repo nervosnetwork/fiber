@@ -106,7 +106,8 @@ pub struct SigningReview {
     pub content_hash: [u8; 32],
     /// Exact canonical bytes from which the digest was computed.
     pub canonical_content: Vec<u8>,
-    /// Non-blocking compatibility and safety warnings.
+    /// Additional review warnings. These never authorize reuse of a V2 nonce
+    /// for a different signing context; that is rejected before signing.
     pub warnings: Vec<SigningWarning>,
 }
 
@@ -118,16 +119,6 @@ pub(crate) struct SigningData {
     pub state_revision: u64,
     pub content: ChannelSigningContent,
     pub review: SigningReview,
-}
-
-#[cfg(test)]
-impl SigningData {
-    pub fn review(&self) -> &SigningReview {
-        &self.review
-    }
-    pub fn content(&self) -> &ChannelSigningContent {
-        &self.content
-    }
 }
 
 /// Each variant carries every required result of its intent-specific verifier.

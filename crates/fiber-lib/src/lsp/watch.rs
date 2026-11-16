@@ -34,7 +34,7 @@ pub fn ensure_hosted_watch_channel(
             snapshot.funding_udt_type_script,
             snapshot.keys,
             snapshot.settlement_data,
-            snapshot.commitment_contract_features,
+            snapshot.channel_features,
         );
         signing_update.publish();
         return Ok(());
@@ -67,7 +67,7 @@ pub fn ensure_hosted_watch_channel(
         // settlement secret.
         snapshot.keys.inverted(),
         invert_empty_settlement(snapshot.settlement_data),
-        snapshot.commitment_contract_features,
+        snapshot.channel_features,
     );
     signing_update.publish();
     Ok(())

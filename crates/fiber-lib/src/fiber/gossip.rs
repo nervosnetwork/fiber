@@ -3487,6 +3487,7 @@ async fn get_channel_tx(
             tx_hash: outpoint.tx_hash().into(),
             confirmations: 0,
             mask: crate::ckb::CkbTxTracingMask::all_flags(),
+            watched_inputs: Vec::new(),
             callback,
         }),
         DEFAULT_CHAIN_ACTOR_TIMEOUT

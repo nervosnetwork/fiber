@@ -3136,8 +3136,15 @@ pub trait NetworkGraphStateStore {
         payment_hash: impl Into<PaymentSessionKey>,
     ) -> Option<PaymentStatus>;
     fn get_all_payment_sessions(&self) -> Vec<PaymentSession>;
+    /// Payment hashes with attempt-channel wake-up entries, including final
+    /// attempts whose channel work may not have completed. Reads only index keys.
+    fn get_payment_hashes_with_channel_index(&self) -> HashSet<Hash256>;
+    /// Repair legacy route-index aliases and retire completed recovery keys at startup.
+    /// Reads only indexed payments; returns their hashes for result/upstream recovery.
+    fn reconcile_attempts_channel_index(&self) -> HashSet<PaymentSessionKey>;
+    /// Returns list views with their resolved status; unindexed legacy failures do not probe channels.
     fn get_payment_sessions_with_status(&self, status: PaymentStatus) -> Vec<PaymentSession>;
-    /// Get payment sessions with pagination support.
+    /// Get payment list views with resolved status and pagination support.
     /// `limit`: maximum number of results to return.
     /// `after`: if provided, start after this payment_hash (exclusive cursor).
     /// `status`: optional status filter.
@@ -3149,6 +3156,8 @@ pub trait NetworkGraphStateStore {
         status: Option<PaymentStatus>,
     ) -> Vec<PaymentSession>;
     fn insert_payment_session(&self, session: PaymentSession);
+    /// Publish the current effective result without rewriting the session record.
+    fn publish_payment_result(&self, payment_hash: impl Into<PaymentSessionKey>);
     fn insert_payment_history_result(
         &mut self,
         channel_outpoint: OutPoint,
@@ -3166,6 +3175,8 @@ pub trait NetworkGraphStateStore {
     fn get_attempts(&self, payment_hash: impl Into<PaymentSessionKey>) -> Vec<Attempt>;
     /// Deletes all attempts and their channel index entries for the given payment hash.
     fn delete_attempts(&self, payment_hash: impl Into<PaymentSessionKey>);
+    /// Deletes unsettled attempts, retaining delivered value and its channel index.
+    fn delete_unsettled_attempts(&self, payment_hash: impl Into<PaymentSessionKey>);
     /// Clears only the channel index entries for attempts, keeping the attempt records.
     fn clear_attempts_channel_index(&self, payment_hash: impl Into<PaymentSessionKey>);
     /// Returns attempts that should be woken by a ChannelReady scan.

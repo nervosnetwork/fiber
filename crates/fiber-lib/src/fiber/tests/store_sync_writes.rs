@@ -45,7 +45,7 @@ struct SyncProbe {
 
 impl Migration for SyncProbe {
     fn version(&self) -> &str {
-        "20260302200001"
+        fiber_store::migration::LATEST_DB_VERSION
     }
 
     fn migrate(&self, store: &dyn MigrationStore) -> Result<(), String> {

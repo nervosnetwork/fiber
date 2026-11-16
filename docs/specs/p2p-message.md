@@ -1,389 +1,184 @@
 # Fiber Network P2P Message Protocol
 
-This document describes the protocol between nodes of the fiber network on CKB, used to establish payment channels, construct transactions, close channels, and perform payment operations. Essentially, it is an adaptation and simplification of [BOLT 02] to suit the transaction structure of CKB.
+Fiber uses [Molecule] messages to establish CKB payment channels, collaborate on
+funding transactions, exchange payments and close channels. This release supports
+**Channel V2 only**. The authoritative field definitions and wire IDs are in
+[`fiber.mol`](../../crates/fiber-types/src/schema/fiber.mol).
 
-Please note that BOLT 02 uses HTLC (Hashed Time Locked Contract) for payment operations, and many message definitions use HTLC as field names and descriptions. In this document, we will use TLC instead of HTLC to facilitate future support for PTLC (Point Time Locked Contract). Additionally, this protocol will use [Molecule] to define message formats, making it easier to integrate with CKB.
+## Compatibility and initialization
 
-***This document is a work in progress and may be updated at any time.***
+Peers exchange `Init { features, chain_hash }` before processing channel messages.
+The chain genesis hash must match. Nodes advertise `CHANNEL_V2` as required
+(feature bit 6); a peer must advertise support through bit 6 or its optional pair,
+bit 7. A peer without V2 support is disconnected during Init, including when an
+existing channel would otherwise be reestablished. There is no V1 fallback.
 
-## Channel Establishment
+The commitment-lock feature byte is `1`. Opening messages must explicitly carry
+`channel_features = 1`; zero and unknown feature combinations are rejected.
+V2 uses 58-byte commitment-lock arguments and full 32-byte TLC payment hashes.
+The configured commitment-lock contract must support this layout before rollout.
 
-We use a protocol similar to BOLTS 02 Channel Establishment v2 to establish payment channels, an example process is as follows:
+V1 wire IDs `1, 2, 5, 9, 10, 14, 15, 16, 17` are permanently reserved and rejected,
+not reassigned to other messages. Remaining messages retain their existing IDs:
 
-```
-    +-------+                              +-------+
-    |       |--(1)--- OpenChannel     ---->|       |
-    |       |<-(2)--- AcceptChannel   -----|       |
-    |       |                              |       |
---->|       |      <tx collaboration>      |       |
-|   |       |                              |       |
-|   |       |--(3)--  commitment_signed -->|       |
-|   |       |<-(4)--  commitment_signed ---|       |
-|   |   A   |                              |   B   |
-|   |       |<-(5)--  tx_signatures -------|       |
-|   |       |--(6)--  tx_signatures ------>|       |
-|   |       |                              |       |
-|   |       |--(a)--- tx_init_rbf -------->|       |
-----|       |<-(b)--- tx_ack_rbf ----------|       |
-    |       |                              |       |
-    |       |    <tx rbf collaboration>    |       |
-    |       |                              |       |
-    |       |--(c)--  commitment_signed -->|       |
-    |       |<-(d)--  commitment_signed ---|       |
-    |       |                              |       |
-    |       |<-(e)--  tx_signatures -------|       |
-    |       |--(f)--  tx_signatures ------>|       |
-    |       |                              |       |
-    |       |--(7)--- channel_ready  ----->|       |
-    |       |<-(8)--- channel_ready  ------|       |
-    +-------+                              +-------+
+| ID | Message |
+| --- | --- |
+| 0 | Init |
+| 3 | TxSignatures |
+| 4 | TxUpdate |
+| 6 | TxAbort |
+| 7 | TxInitRBF |
+| 8 | TxAckRBF |
+| 11 | UpdateTlcInfo |
+| 12 | AddTlc |
+| 13 | RemoveTlc |
+| 18 | AnnouncementSignatures |
+| 19 | OpenChannelV2 |
+| 20 | AcceptChannelV2 |
+| 21 | CommitmentSignedV2 |
+| 22 | RevokeAndAckV2 |
+| 23 | ChannelReadyV2 |
+| 24 | ReestablishChannelV2 |
+| 25 | ShutdownV2 |
+| 26 | ClosingSignedV2 |
+| 27 | TxCompleteV2 |
 
-    - where node A is *opener*/*initiator* and node B is
-      *accepter*/*non-initiator*
-```
-### OpenChannel
+Malformed messages, including removed wire IDs, are rejected before dispatch.
+The onion/trampoline packet version is independent of the channel protocol.
 
-`OpenChannel` is sent by the initiator of the channel to the receiver of the channel to request the establishment of a payment channel.
+## Channel establishment
 
-```
-table OpenChannel {
-    chain_hash:                  Byte32,
-    channel_id:                  Byte32,
-    funding_type_script:         ScriptOpt,
-    funding_amount:              Uint128,
-    funding_fee_rate:            Uint64,
-    commitment_fee_rate:         Uint64,
-    max_tlc_value_in_flight:     Uint128,
-    max_tlc_number_in_flight:    Uint64,
-    min_tlc_value:               Uint128,
-    to_self_delay:               Uint64,
-    funding_pubkey:              Byte33,
-    tlc_basepoint:               Byte33,
-    first_per_commitment_point:  Byte33,
-    second_per_commitment_point: Byte33,
-    next_local_nonce:            Byte66,
-    channel_flags:               Byte,
-}
+The establishment flow is adapted from [BOLT 02]:
+
+```text
+Initiator                              Acceptor
+    |-------- OpenChannelV2 ----------->|
+    |<------- AcceptChannelV2 ---------|
+    |<------ funding collaboration --->|
+    |<------ CommitmentSignedV2 ------>|
+    |<--------- TxSignatures --------->|
+    |<-------- ChannelReadyV2 -------->|
 ```
 
-- chain_hash: Chain genesis block hash
-- channel_id: The ID of the channel, which is a temporary ID derived from the tlc_basepoint before the channel is officially established. After the channel is established, it will be replaced with the actual channel ID, derived from a blake2b hash of the sorted tlc_basepoints of both parties.
-- funding_type_script: Specifies the asset type of the channel. If empty, it indicates using CKB native token as the asset.
-- funding_amount: The amount of assets the channel initiator wants to contribute.
-- funding_fee_rate: Funding transaction fee rate, in shannons per kilo-bytes.
-- commitment_fee_rate: Commitment transaction fee rate, in shannons per kilo-bytes.
-- max_tlc_value_in_flight: The maximum total value of unconfirmed TLCs (Time Locked Contracts) that the channel initiator can accept in this channel.
-- max_tlc_number_in_flight: The maximum number of unconfirmed TLCs that the channel initiator can accept in this channel.
-- min_tlc_value: The minimum value of TLCs that the channel initiator can accept.
-- commitment_delay_epoch: The delay time for the channel initiator to unlock the outputs from the commitment transaction, in EpochNumberWithFraction.
-- funding_pubkey: The pubkey of the channel initiator, used for generating 2-2 multisig contracts.
-- tlc_basepoint: The master key used to derive child keys required for tlcs, we will use the same method as lightning network to derive these keys, see [Secret Derivations] for more details.
-- first_per_commitment_point:
-- second_per_commitment_point:
-- next_local_nonce: Used for generating partial signatures for unlocking 2-2 Schnorr multisig.
-- channel_flags: Channel flags, currently only using one bit to indicate whether to broadcast this channel information on the P2P network.
+`OpenChannelV2` offers the asset type, funding amount, reserved CKB, shutdown
+script, fee rates, commitment delay, TLC limits and channel public keys.
+`AcceptChannelV2` confirms the peer's parameters and contribution, which may be
+zero. Both advertise an `initial_commitment_nonce` for their initial owner
+session and explicitly confirm `channel_features = 1`.
 
-### AcceptChannel
+The opening channel ID is temporary. The final channel ID is derived from the
+sorted TLC basepoints of both parties. Public channels also exchange channel
+announcement nonces and, once ready, `AnnouncementSignatures`.
 
-`AcceptChannel` is sent by the receiver of the channel to the initiator of the channel to accept the establishment of a payment channel.
+Both parties must exchange and verify `CommitmentSignedV2` before exchanging
+funding `TxSignatures`, so each holds a usable unilateral exit before funding can
+be published. The lower funding contributor sends `TxSignatures` first; equal
+contributions are ordered by funding public key. `ChannelReadyV2` advertises the
+next commitment number and nonce. An identical Ready replay is idempotent; a
+conflicting number or nonce is rejected.
 
-```
-table AcceptChannel {
-    channel_id:                  Byte32,
-    funding_amount:              Uint128,
-    max_tlc_value_in_flight:     Uint128,
-    max_tlc_number_in_flight:    Uint64,
-    min_tlc_value:               Uint128,
-    funding_pubkey:              Byte33,
-    tlc_basepoint:               Byte33,
-    payment_basepoint:           Byte33,
-    delayed_payment_basepoint:   Byte33,
-    first_per_commitment_point:  Byte33,
-    second_per_commitment_point: Byte33,
-    next_local_nonce:            Byte66,
-}
-```
+External funding uses the same V2 protocol. The unsigned wallet transaction is
+returned only after commitment exchange provides a durable exit. Submitted
+funding witnesses and opening recovery records survive restart.
 
-- channel_id: The ID of the channel, must match the channel_id in OpenChannel.
-- funding_amount: The amount of assets the channel receiver wants to contribute, can be 0, indicating no contribution.
-- max_tlc_value_in_flight: The maximum total value of unconfirmed TLCs that the channel receiver can accept in this channel.
-- max_tlc_number_in_flight: The maximum number of unconfirmed TLCs that the channel receiver can accept in this channel.
-- min_tlc_value: The minimum value of TLCs that the channel receiver can accept.
-- funding_pubkey: The pubkey of the channel receiver, used for generating 2-2 multisig contracts.
-- tlc_basepoint: See the description in `OpenChannel` message.
-- first_per_commitment_point:
-- second_per_commitment_point:
-- next_local_nonce: Used for generating partial signatures for unlocking 2-2 Schnorr multisig.
+## Funding transaction collaboration
 
-### CommitmentSigned
+The initiator sends `TxUpdate { channel_id, tx }`. The peer responds with a new
+`TxUpdate` or `TxCompleteV2`. Both parties must agree on the final transaction
+before signing. `TxCompleteV2.initial_commitment_nonce` must match the advertised
+bootstrap nonce; it cannot replace that session.
 
-After both parties establish the funding transaction and complete the signing of the commitment transaction in the [Transaction Collaboration](#Transaction-Collaboration) process, they will send CommitmentSigned messages to each other.
+The full CKB transaction is exchanged, rather than individual input/output
+messages. A node must reject removal or modification of its own inputs/outputs.
+`TxAbort { channel_id, message }` can terminate a still-abortable funding flow;
+it must not discard a potentially live, already-signed funding channel.
 
-```
-table CommitmentSigned {
-    channel_id:        Byte32,
-	partial_signature: Byte32,
-    next_local_nonce:  Byte66,
-}
-```
+### Peer-added complexity limits
 
-The meaning of each field is as follows:
-
-- partial_signature: The partial signature for unlocking the 2-2 Schnorr multisig.
-- next_local_nonce: Used for generating the next commitment transaction partial signature.
-
-### TxSignatures
-
-After both parties have signed the commitment transaction and verified the correctness of each other's signatures, they need to send TxSignatures messages to each other to complete the signing of the funding transaction.
-
-```
-table TxSignatures {
-    channel_id: Byte32,
-    tx_hash:    Byte32,
-    witnesses:  BytesVec,
-}
-```
-
-Here, tx_hash is the hash of the corresponding funding transaction, and witnesses corresponds to the signed witnesses of all inputs of the contributor. If a party's contribution is 0 (i.e., no inputs), an empty witnesses message should also be sent to complete the message exchange.
-
-In addition, in order to simplify the message interaction process, we defined that the party with the lesser amount of funding must send the
-TxSignatures message first, in the case of the same amount, the one with the smaller funding_pubkey must send the TxSignatures message first. This avoids deadlocks caused by both parties waiting for the other party's TxSignatures message at the same time.
-
-### ChannelReady
-
-After completing the signing and broadcasting the funding transaction, both parties send ChannelReady messages to each other to indicate the channel is ready.
-
-```
-table ChannelReady {
-    channel_id: Byte32,
-}
-```
-
-## Transaction Collaboration
-
-In the fiber network, the channel initiator begins the transaction construction protocol using the TxUpdate message. The responder replies with either TxUpdate or TxComplete messages. The transaction construction process is completed when both nodes have sent and received consecutive TxComplete messages.
-
-Here is the `Dual Funding` example, A initially funds part of the channel (2 inputs), then B adds their contribution (1 input). A replies with TxComplete, and B responds with TxComplete, completing the transaction construction process.
-
-```
-    +-------+                       +-------+
-    |       |--(1)- tx_update   --->|       |
-    |       |<-(2)- tx_update   ----|       |
-    |   A   |--(3)- tx_complete --->|   B   |
-    |       |<-(4)- tx_complete ----|       |
-    +-------+                       +-------+
-```
-
-Since CKB's transaction structure is more complex than Bitcoin's, the message structure is simplified compared to BOLT 02 interactive transaction construction. We use the full CKB transaction structure for transaction collaboration, without defining separate messages like tx_add_input, tx_add_output, tx_remove_input, and tx_remove_output. Nodes are required to parse the inputs of the transactions and do not need to provide previous tx in the messages. The specific message definitions are as follows:
-
-### TxUpdate
-
-The TxUpdate message is used by the channel initiator to start the transaction construction protocol.
-
-```
-table TxUpdate {
-    channel_id: Byte32,
-    tx:         Transaction,
-}
-```
-
-Both parties must save the funding tx field of the previous message to compare it with the latest message field. They must also mark which inputs/outputs belong to their side. If a TxUpdate message from the other party removes or modifies inputs/outputs from their side, it is considered an illegal operation, and the entire process should be terminated.
-
-#### Peer-added complexity limits
-
-Verifying a peer's `tx` requires one chain lookup per peer-added input, so an unbounded `TxUpdate` lets a single message amplify into many chain RPC requests. To bound this, a node MUST reject a `TxUpdate` whose `tx` exceeds any of the following peer-added limits relative to its own previous version of the funding transaction, before performing any chain lookup. When the local node still has the default empty funding transaction, these deltas equal the remote transaction totals. The rejection is signalled with a `TxAbort` describing the violated budget.
+Verifying a peer's `tx` requires a chain lookup per peer-added input. Before any
+chain lookup, reject transactions exceeding these limits relative to the local
+previous funding transaction. When the local transaction is empty, the deltas are
+the remote totals. Signal rejection with a `TxAbort` describing the budget.
 
 | Limit | Maximum |
 | --- | --- |
-| Serialized transaction size (in block) | `133120` bytes (the P2P frame cap, `1024 * (128 + 2)`) |
-| Peer-added inputs (beyond the local version) | `64` |
-| Peer-added outputs (beyond the local version) | `3` (funding cell plus UDT and CKB change when the peer funds first; CKB-only channels use two) |
-| Peer-added cell deps (beyond the local version) | `8` |
+| Serialized transaction size (in block) | `133120` bytes (`1024 * (128 + 2)`, the P2P frame cap) |
+| Peer-added inputs | `64` |
+| Peer-added outputs | `3` (funding cell plus UDT and CKB change; CKB-only channels use two) |
+| Peer-added cell deps | `8` |
 
-These values are the implementation defaults; future versions may make them configurable and advertise them during connection or channel negotiation so the initiator can build a compliant transaction up front.
+`TxInitRBF` and `TxAckRBF` retain their wire definitions, but the current runtime
+does not implement RBF collaboration.
 
-### TxComplete
+## Payment operations and commitment rounds
 
-After successfully exchanging TxComplete messages, both parties should have constructed the transaction and move to the next part of the protocol to exchange signatures for the commitment transaction.
+`AddTlc` carries a channel-local TLC ID, amount, full payment hash, hash algorithm,
+absolute expiry and onion packet. Each direction assigns TLC IDs starting at zero.
+Only the recipient of an Add can remove it, using `RemoveTlc` with either a
+preimage or an encrypted failure packet. `UpdateTlcInfo` updates forwarding policy.
 
+V2 maintains independent commitment-owner signing sessions. `CommitmentSignedV2`
+identifies the commitment number and carries its funding partial signature,
+funding nonce and, outside bootstrap, revocation nonce. `RevokeAndAckV2` carries
+the matching number, revocation partial signature/nonce, next commitment point
+and next commitment nonce. It does not use the removed V1 nonce chain.
 
-```
-table TxComplete {
-    channel_id: Byte32,
+TLC updates and the outgoing commitment intent are persisted together before
+publication. ACK processing applies settled effects durably and exactly once.
+Nonce contexts are bound to their keys, aggregate nonce and transaction: a
+consumed nonce must never sign a different context. See the
+[V2 session and persistence notes](../notes/channel-v2.md) for signing and replay
+invariants.
+
+## Reestablishment
+
+After reconnecting, both sides exchange:
+
+```text
+ReestablishChannelV2 {
+    channel_id,
+    next_commitment_number,
+    next_ack_number,
+    next_local_commitment_nonce,
 }
 ```
 
-### TxAbort
+`next_commitment_number` identifies the sender's own verification session
+(`session.own.number`, the sender's remote commitment cursor).
+`next_ack_number` is the sender's local commitment cursor. The receiver checks
+these cursors against its durable incoming/outgoing history before accepting
+replay or new updates. Outstanding updates are replayed in their original order;
+retransmission must retain the original signing context or use a genuinely fresh
+session, never reuse a consumed nonce for changed data.
 
-During the transaction collaboration process, a node can send a TxAbort message to terminate the collaboration before sending the TxSignatures message.
+Opening Ready, outstanding ACKs and cooperative close have their own retained
+replay records. Duplicate messages do not create a new round or silently extend
+peer-response deadlines. Recovery excludes offline time from its online waiting
+budget and remains bounded by the existing watchdogs.
 
-```
-table TxAbort {
-    channel_id: Byte32,
-    message:    Bytes,
-}
-```
+A backup-restored `Stale` channel is quarantined. Peer assertions cannot prove
+freshness after rollback: they do not authorize new signatures, automatic
+unquarantine or publication of a potentially revoked local commitment.
 
-### TxInitRbf
+## Channel closing
 
-After broadcasting the funding transaction, if the channel initiator finds that the fee is insufficient, they can send a TxInitRbf message to request the other party's cooperation in performing RBF (Replace-By-Fee) operation to increase the fee and rebroadcast the funding transaction.
+A cooperative close exchanges `ShutdownV2`, drains pending TLCs, then exchanges
+`ClosingSignedV2`. Shutdown advertises the close script, fee rate and an independent
+closing nonce. The closing session retains the transaction, signing context and
+both partial responses before publication; commitment/revocation nonces are not
+reused for closing. Reconnect replays retained records rather than changing an
+already-signed closing transaction.
 
-```
-table TxInitRBF {
-    channel_id: Byte32,
-    fee_rate:   Uint64,
-}
-```
+Force close publishes the latest usable signed commitment and follows the V2
+on-chain settlement layout. Quarantine and signing-context checks still apply.
 
-### TxAckRbf
+## Upgrading
 
-Upon receiving a TxInitRbf message, the channel responder can send a TxAckRbf message to agree to the RBF operation.
+There is no old-channel conversion or old-database migration in this release.
+Use the old binary to close all existing channels and complete settlement, stop
+it, back up its data, then start the new binary with a new empty database. Do not
+delete old data while it may still be needed to recover funds. See the
+[upgrade instructions](../../README.md#upgrading-to-the-v2-only-release).
 
-```
-table TxAckRBF {
-    channel_id: Byte32,
-}
-```
-
-After receiving the TxAckRbf message from the other party, the channel initiator can restart the process of funding transaction collaboration with the new fee rate. It should be noted that the new funding transaction must have overlapping inputs with the previous funding transaction to ensure it meets the RBF rules.
-
-## Channel Closing
-
-Nodes can negotiate to close a channel mutually, unlike a unilateral close, which allows nodes to immediately obtain funds. The process of closing a channel is as follows:
-
-```
-    +-------+                             +-------+
-    |       |--(1)- shutdown           -->|       |
-    |       |<-(2)- shutdown           ---|       |
-    |   A   | <complete all pending TLCs> |   B   |
-    |       |<-(3)- closing_signed     ---|       |
-    |       |--(4)- closing_signed     -->|       |
-    +-------+                             +-------+
-```
-
-### Shutdown
-
-Any node can send a Shutdown message to request the closure of the channel.
-
-```
-table Shutdown {
-    channel_id:   Byte32,
-    close_script: Script,
-    fee_rate:     Uint64,
-}
-```
-
-The close_script specifies the lock script to which the assets will be sent when the channel is closed.
-
-### ClosingSigned
-
-After completing all pending Time Locked Contracts (TLCs) in the channel, either party can send a ClosingSigned message to sign the close transaction.
-
-```
-table ClosingSigned {
-    channel_id:         Byte32,
-    partial_signature:  Byte32,
-}
-```
-
-If the receiver verified the correctness of the signature, they will respond with a ClosingSigned message, completing the channel closure.
-
-## Payment Operation
-
-After establishing a channel, nodes can perform payment operations by sending AddTlc messages for payment requests and then updating the commitment transactions through CommitmentSigned and RevokeAndAck messages. Here is an example process:
-
-```
-    +-------+                               +-------+
-    |       |--(1)---- add_tlc         ---->|       |
-    |       |                               |       |
-    |       |--(2)---- commitment_signed -->|       |
-    |       |<-(3)---- revoke_and_ack  -----|       |
-    |       |                               |       |
-    |       |<-(4)---- commitment_signed ---|       |
-    |       |--(5)---- revoke_and_ack  ---->|       |
-    |       |                               |       |
-    |   A   |                               |   B   |
-    |       |                               |       |
-    |       |<-(6)---- remove_tlc      -----|       |
-    |       |                               |       |
-    |       |<-(7)---- commitment_signed ---|       |
-    |       |--(8)---- revoke_and_ack  ---->|       |
-    |       |                               |       |
-    |       |--(9)---- commitment_signed -->|       |
-    |       |<-(10)---- revoke_and_ack  ----|       |
-    +-------+                               +-------+
-```
-
-### AddTlc
-
-Either node can send an AddTlc message to the other party to initiate a payment operation. This message can also be used to forward payment requests from other nodes.
-
-```
-table AddTlc {
-    channel_id:     Byte32,
-    tlc_id:         Uint64,
-    amount:         Uint128,
-    payment_hash:   Byte32,
-    expiry:         Uint64,
-}
-```
-
-- channel_id: ID of the channel.
-- tlc_id: ID of the TLC (Time Locked Contract), used to uniquely identify a TLC. The first TLC in the channel has an ID of 0, and subsequent IDs increment by 1.
-- amount: Amount of assets requested for payment.
-- payment_hash: Hash value used to identify the payment request for subsequent payment verification.
-- expiry: Expiry time of the payment request, specified as an absolute timestamp. When forwarding a payment request, this field should be decremented appropriately.
-
-## RevokeAndAck
-
-Upon receiving the CommitmentSigned message and verifying the signature, the node may reveal the previous commitment transaction secret to the other party by sending a RevokeAndAck message.
-
-```
-table RevokeAndAck {
-    channel_id:                 Byte32,
-    per_commitment_secret:      Byte32,
-    next_per_commitment_point:  Byte33,
-    next_local_nonce:           Byte66,
-}
-```
-
-- per_commitment_secret: Secret used to generate the revocation secret key for the previous commitment transaction.
-- next_per_commitment_point: Point used to generate the next revocation public key.
-- next_local_nonce: Used for generating the partial signature for the next commitment transaction.
-
-Upon receiving the RevokeAndAck message, the node should update the remote commitment transaction.
-
-## RemoveTlc
-
-To simplify the implementation, only the recipient of the AddTkc message can remove the TLC.
-
-```
-table RemoveTlc {
-    channel_id:         Byte32,
-    tlc_id:             Uint64,
-    reason:             RemoveTlcReason
-}
-
-union RemoveTlcReason {
-    RemoveTlcFulfill,
-    RemoveTlcFail,
-}
-
-struct RemoveTlcFulfill {
-    payment_preimage:   Byte32,
-}
-
-struct RemoveTlcFail {
-    error_code:         Uint32,
-}
-```
-
-- channel_id: ID of the channel.
-- tlc_id: ID of the TLC being removed.
-- reason: Reason for removing the TLC, which can be either RemoveTlcFulfill or RemoveTlcFail.
-    - RemoveTlcFulfill: Contains the payment_preimage required to fulfill the payment.
-    - RemoveTlcFail: Contains an error_code indicating the reason for failure.
-
-[BOLT 02]: https://github.com/lightning/bolts/blob/master/02-peer-protocol.md#channel-establishment-v2
+[BOLT 02]: https://github.com/lightning/bolts/blob/master/02-peer-protocol.md
 [Molecule]: https://github.com/nervosnetwork/molecule
-[Secret Derivations]: https://github.com/lnbook/lnbook/blob/54453c7b1cf82186614ab929b80876ba18bdc65d/07_payment_channels.asciidoc#revocation_sidebar

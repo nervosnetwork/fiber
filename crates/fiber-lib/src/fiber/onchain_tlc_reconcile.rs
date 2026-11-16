@@ -1,19 +1,20 @@
-//! On-chain identity invariant: a settlement witness only exposes a 20-byte payment-hash
-//! prefix and an unlock index. The watchtower must resolve that index against the immutable
+//! On-chain identity invariant: a V2 settlement witness exposes the full payment hash
+//! and an unlock index. The watchtower must resolve that index against the immutable
 //! settlement snapshot committed by the force-closed commitment transaction before persisting
 //! a settlement proof for an exact local TLC id and full 32-byte payment hash.
 
 use crate::fiber::channel::{
-    settlement_data_to_witness, settlement_tlc_to_witness, ChannelActorState,
+    settlement_data_to_witness, settlement_tlc_to_witness, tlc_expiry_delay, ChannelActorState,
     ChannelActorStateStore,
 };
 use ckb_hash::blake2b_256;
 use ckb_sdk::util::blake160;
+use ckb_types::core::EpochNumberWithFraction;
 use ckb_types::packed::Script;
 use fiber_types::{
-    AppliedFlags, ChannelData, ChannelState, CloseFlags, CommitmentContractFeatures, Hash256,
-    HashAlgorithm, InboundTlcStatus, OutboundTlcStatus, Pubkey, RemoveTlcFulfill, RemoveTlcReason,
-    SettlementData, TLCId, TlcInfo,
+    AppliedFlags, ChannelData, ChannelFeatures, ChannelState, CloseFlags, Hash256, HashAlgorithm,
+    InboundTlcStatus, OutboundTlcStatus, Pubkey, RemoveTlcFulfill, RemoveTlcReason, SettlementData,
+    TLCId, TlcErrorCode, TlcInfo,
 };
 use musig2::{secp::Point, KeyAggContext};
 use serde::{Deserialize, Serialize};
@@ -25,7 +26,7 @@ pub struct TrackedSettlementTlc {
     pub payment_hash: Hash256,
     pub hash_algorithm: HashAlgorithm,
     pub witness: Vec<u8>,
-    pub commitment_contract_features: CommitmentContractFeatures,
+    pub channel_features: ChannelFeatures,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -51,7 +52,7 @@ pub fn parse_commitment_lock(
         return None;
     }
     let lock_args = commitment_lock.args().raw_data();
-    if lock_args.len() < 56 {
+    if lock_args.len() != 58 || lock_args[57] != ChannelFeatures::V2.bits() {
         return None;
     }
     let pubkey_hash = &lock_args[0..20];
@@ -129,6 +130,16 @@ pub fn verify_and_select_settlement_data<'a>(
     channel_data: &'a ChannelData,
     commitment_lock: &Script,
 ) -> Option<(bool, u64, &'a SettlementData)> {
+    verify_and_select_settlement_data_with_superseded(channel_data, &[], commitment_lock)
+}
+
+/// Like [`verify_and_select_settlement_data`], also accepting superseded same-number
+/// remote snapshots kept outside [`ChannelData`].
+pub fn verify_and_select_settlement_data_with_superseded<'a>(
+    channel_data: &'a ChannelData,
+    superseded: &'a [SettlementData],
+    commitment_lock: &Script,
+) -> Option<(bool, u64, &'a SettlementData)> {
     let parsed = parse_commitment_lock(
         commitment_lock,
         &channel_data.local_funding_pubkey,
@@ -137,10 +148,13 @@ pub fn verify_and_select_settlement_data<'a>(
     // Before the first RAA there is no revocation number to distinguish the initial
     // remote commitment from a newer pending one. Bind candidates to the lock hash
     // instead of treating the commitment-number heuristic as authoritative.
-    let remote_candidates = [
-        &channel_data.remote_settlement_data,
-        &channel_data.pending_remote_settlement_data,
-    ];
+    let remote_candidates: Vec<&SettlementData> =
+        std::iter::once(&channel_data.remote_settlement_data)
+            .chain(std::iter::once(
+                &channel_data.pending_remote_settlement_data,
+            ))
+            .chain(superseded.iter())
+            .collect();
     let local_candidates = [&channel_data.local_settlement_data];
     let candidates: &[&SettlementData] = if parsed.for_remote {
         &remote_candidates
@@ -151,7 +165,6 @@ pub fn verify_and_select_settlement_data<'a>(
         let settlement_witness = settlement_data_to_witness(
             settlement_data,
             parsed.for_remote,
-            channel_data.commitment_contract_features,
             channel_data.local_settlement_pubkey(),
             channel_data.remote_settlement_key,
         );
@@ -171,8 +184,9 @@ pub fn verify_and_select_settlement_data<'a>(
 /// Represent their scope as empty; this is not a witness snapshot and must never be used by
 /// the watchtower to decode settlement witnesses. Completion still requires the chain signal
 /// that all commitment cells have been spent.
-pub(crate) fn recover_shutdown_settlement_data(
+pub(crate) fn recover_shutdown_settlement_data_with_superseded(
     channel_data: &ChannelData,
+    superseded: &[SettlementData],
     commitment_lock: &Script,
 ) -> Option<(bool, u64, SettlementData)> {
     let parsed = parse_commitment_lock(
@@ -196,7 +210,7 @@ pub(crate) fn recover_shutdown_settlement_data(
             },
         ));
     }
-    verify_and_select_settlement_data(channel_data, commitment_lock)
+    verify_and_select_settlement_data_with_superseded(channel_data, superseded, commitment_lock)
         .map(|(for_remote, number, data)| (for_remote, number, data.clone()))
 }
 
@@ -206,7 +220,7 @@ pub(crate) fn recover_shutdown_settlement_data(
 pub fn tracked_settlement_tlcs(
     settlement_data: &SettlementData,
     for_remote: bool,
-    commitment_contract_features: CommitmentContractFeatures,
+    channel_features: ChannelFeatures,
 ) -> Vec<TrackedSettlementTlc> {
     settlement_data
         .tlcs
@@ -219,8 +233,8 @@ pub fn tracked_settlement_tlcs(
             },
             payment_hash: tlc.payment_hash,
             hash_algorithm: tlc.hash_algorithm,
-            witness: settlement_tlc_to_witness(tlc, for_remote, commitment_contract_features),
-            commitment_contract_features,
+            witness: settlement_tlc_to_witness(tlc, for_remote),
+            channel_features,
         })
         .collect()
 }
@@ -239,43 +253,18 @@ pub struct OnChainTlcSettlement {
     pub tlc_index: u8,
 }
 
-/// Prefix-keyed settlement records written by older versions.
-///
-/// These records are retained for database compatibility. A matching preimage can still safely
-/// prove fulfillment after validating the complete hash, but a no-preimage record cannot prove
-/// which TLC sharing the prefix was consumed.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LegacyOnChainTlcSettlement {
-    /// Preimage observed in the old prefix-keyed settlement record.
-    pub preimage: Option<Hash256>,
-    /// Settlement transaction hash when recorded by a newer legacy writer.
-    pub tx_hash: Option<Hash256>,
-    /// Witness index when recorded by a newer legacy writer.
-    pub tlc_index: Option<u8>,
-}
-
-/// A settlement record decoded from either the exact current key format or the legacy
-/// payment-hash-prefix key format.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum StoredOnChainTlcSettlement {
-    /// An exact record keyed by `(channel_id, TLCId)`.
-    Exact(OnChainTlcSettlement),
-    /// A prefix-keyed record written by an older version.
-    Legacy(LegacyOnChainTlcSettlement),
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OnChainTlcResolution {
     Unknown,
     Fulfilled(Hash256),
     SettledWithoutPreimage,
-    /// The output was consumed with a preimage matching the committed 20-byte prefix but not
-    /// the full payment hash, so the settlement must fail forward rather than remain unresolved.
+    /// The output was consumed with a preimage that does not match the full payment hash.
     SettledWithInvalidPreimage,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct OnChainFulfilledTlc {
+    pub upstream_tlc_key: Option<crate::fiber_types::UpstreamTlcKey>,
     pub tlc_id: TLCId,
     pub forwarding_tlc: Option<(Hash256, u64)>,
     pub payment_hash: Hash256,
@@ -290,10 +279,29 @@ pub(crate) struct OnChainFulfilledTlc {
 /// inflight because the remove commitment handshake never reached `apply_remove_tlc_operation`.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct OnChainConfirmedPayerTlc {
+    pub upstream_tlc_key: Option<crate::fiber_types::UpstreamTlcKey>,
     pub tlc_id: TLCId,
     pub payment_hash: Hash256,
     pub attempt_id: u64,
     pub preimage: Hash256,
+}
+
+impl OnChainFulfilledTlc {
+    pub(crate) fn session_key(&self) -> crate::fiber_types::PaymentSessionKey {
+        crate::fiber_types::PaymentSessionKey {
+            payment_hash: self.payment_hash,
+            upstream_tlc_key: self.upstream_tlc_key,
+        }
+    }
+}
+
+impl OnChainConfirmedPayerTlc {
+    pub(crate) fn session_key(&self) -> crate::fiber_types::PaymentSessionKey {
+        crate::fiber_types::PaymentSessionKey {
+            payment_hash: self.payment_hash,
+            upstream_tlc_key: self.upstream_tlc_key,
+        }
+    }
 }
 
 /// An offered TLC failed by an on-chain timeout or exclusion from a confirmed commitment.
@@ -343,51 +351,32 @@ pub(crate) fn resolve_onchain_tlc(
     else {
         return OnChainTlcResolution::Unknown;
     };
-    match settlement {
-        StoredOnChainTlcSettlement::Exact(settlement) => {
-            if settlement.payment_hash != payment_hash
-                || settlement.hash_algorithm != hash_algorithm
-            {
-                warn!(
-                    "Ignoring mismatched on-chain settlement identity for channel {:?} tlc {:?} tx {:?}: stored hash {:?}/{:?}, expected {:?}/{:?}",
-                    channel_id,
-                    tlc_id,
-                    settlement.tx_hash,
-                    settlement.payment_hash,
-                    settlement.hash_algorithm,
-                    payment_hash,
-                    hash_algorithm
-                );
-                return OnChainTlcResolution::Unknown;
-            }
-            let Some(preimage) = settlement.preimage else {
-                return OnChainTlcResolution::SettledWithoutPreimage;
-            };
-            let discovered_payment_hash: Hash256 = hash_algorithm.hash(preimage).into();
-            if discovered_payment_hash == payment_hash {
-                return OnChainTlcResolution::Fulfilled(preimage);
-            }
-            error!(
-                "On-chain preimage for channel {:?} tlc {:?} tx {:?} hashes to {:?}, expected full hash {:?}: treat as failed settlement",
-                channel_id, tlc_id, settlement.tx_hash, discovered_payment_hash, payment_hash
-            );
-            OnChainTlcResolution::SettledWithInvalidPreimage
-        }
-        StoredOnChainTlcSettlement::Legacy(legacy) => {
-            let Some(preimage) = legacy.preimage else {
-                return OnChainTlcResolution::Unknown;
-            };
-            let discovered_payment_hash: Hash256 = hash_algorithm.hash(preimage).into();
-            if discovered_payment_hash == payment_hash {
-                return OnChainTlcResolution::Fulfilled(preimage);
-            }
-            warn!(
-                "Ignoring legacy prefix-keyed settlement for channel {:?} tlc {:?} tx {:?}: preimage hash {:?}, expected {:?}",
-                channel_id, tlc_id, legacy.tx_hash, discovered_payment_hash, payment_hash
-            );
-            OnChainTlcResolution::Unknown
-        }
+
+    if settlement.payment_hash != payment_hash || settlement.hash_algorithm != hash_algorithm {
+        warn!(
+            "Ignoring mismatched on-chain settlement identity for channel {:?} tlc {:?} tx {:?}: stored hash {:?}/{:?}, expected {:?}/{:?}",
+            channel_id,
+            tlc_id,
+            settlement.tx_hash,
+            settlement.payment_hash,
+            settlement.hash_algorithm,
+            payment_hash,
+            hash_algorithm
+        );
+        return OnChainTlcResolution::Unknown;
     }
+    let Some(preimage) = settlement.preimage else {
+        return OnChainTlcResolution::SettledWithoutPreimage;
+    };
+    let discovered_payment_hash: Hash256 = hash_algorithm.hash(preimage).into();
+    if discovered_payment_hash == payment_hash {
+        return OnChainTlcResolution::Fulfilled(preimage);
+    }
+    error!(
+        "On-chain preimage for channel {:?} tlc {:?} tx {:?} hashes to {:?}, expected full hash {:?}: treat as failed settlement",
+        channel_id, tlc_id, settlement.tx_hash, discovered_payment_hash, payment_hash
+    );
+    OnChainTlcResolution::SettledWithInvalidPreimage
 }
 
 pub(crate) fn onchain_fulfilled_preimage(
@@ -429,6 +418,7 @@ pub(crate) fn collect_onchain_fulfilled_tlcs(
                 return None;
             };
             Some(OnChainFulfilledTlc {
+                upstream_tlc_key: tlc.upstream_tlc_key,
                 tlc_id: tlc.tlc_id,
                 forwarding_tlc: tlc.forwarding_tlc,
                 payment_hash: tlc.payment_hash,
@@ -470,6 +460,7 @@ pub(crate) fn collect_onchain_confirmed_payer_tlcs(
                 return None;
             }
             Some(OnChainConfirmedPayerTlc {
+                upstream_tlc_key: tlc.upstream_tlc_key,
                 tlc_id: tlc.tlc_id,
                 payment_hash: tlc.payment_hash,
                 attempt_id,
@@ -488,7 +479,8 @@ fn is_uncommitted_payer_failure(tlc: &TlcInfo) -> bool {
         && !tlc.applied_flags.contains(AppliedFlags::REMOVE)
 }
 
-/// Replace an uncommitted peer failure only after payer reconciliation has acknowledged it.
+/// Release an origin-payer TLC only after its on-chain fulfillment was acknowledged.
+/// Also replaces an uncommitted peer failure when the chain proves fulfillment.
 pub(crate) fn confirm_onchain_payer_fulfill(
     state: &mut ChannelActorState,
     fulfilled: OnChainConfirmedPayerTlc,
@@ -496,7 +488,17 @@ pub(crate) fn confirm_onchain_payer_fulfill(
     let Some(tlc) = state.tlc_state.get_mut(&fulfilled.tlc_id) else {
         return false;
     };
-    if !is_uncommitted_payer_failure(tlc) {
+    if !tlc.is_offered()
+        || tlc.forwarding_tlc.is_some()
+        || tlc.payment_hash != fulfilled.payment_hash
+        || tlc.attempt_id != Some(fulfilled.attempt_id)
+        || tlc.applied_flags.contains(AppliedFlags::REMOVE)
+        || Hash256::from(tlc.hash_algorithm.hash(fulfilled.preimage)) != tlc.payment_hash
+        || !(is_uncommitted_payer_failure(tlc)
+            || matches!(&tlc.removed_reason,
+                Some(RemoveTlcReason::RemoveTlcFulfill(reason))
+                    if reason.payment_preimage == fulfilled.preimage))
+    {
         return false;
     }
     tlc.removed_reason = Some(RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
@@ -595,6 +597,7 @@ pub(crate) fn collect_onchain_timeout_settled_tlcs(
         .offered_tlcs
         .tlcs
         .iter()
+        .filter(|tlc| !tlc.applied_flags.contains(AppliedFlags::REMOVE))
         .filter(|tlc| tlc.removed_confirmed_at.is_none())
         .filter_map(|tlc| {
             match resolve_onchain_tlc(
@@ -629,6 +632,26 @@ pub(crate) fn collect_onchain_timeout_settled_tlcs(
                 role,
             })
         })
+        .collect()
+}
+
+/// Revalidate a payer failure against durable chain evidence before delivery or acknowledgement.
+pub(crate) fn collect_onchain_payer_failures(
+    state: &ChannelActorState,
+    store: &impl ChannelActorStateStore,
+) -> Vec<(OnChainTimeoutSettledTlc, TlcErrorCode)> {
+    let expect_expiry = crate::now_timestamp_as_millis_u64().saturating_add(tlc_expiry_delay(
+        &EpochNumberWithFraction::from_full_value(state.commitment_delay_epoch),
+    ));
+    collect_onchain_excluded_tlcs(state, store)
+        .into_iter()
+        .map(|tlc| (tlc, TlcErrorCode::PermanentChannelFailure))
+        .chain(
+            collect_onchain_timeout_settled_tlcs(state, store, expect_expiry)
+                .into_iter()
+                .map(|tlc| (tlc, TlcErrorCode::ExpiryTooSoon)),
+        )
+        .filter(|(tlc, _)| matches!(tlc.role, OnChainTimeoutTlcRole::OriginPayer { .. }))
         .collect()
 }
 
@@ -776,6 +799,6 @@ pub(crate) fn verified_tracked_settlement_tlcs(
     Some(tracked_settlement_tlcs(
         snapshot,
         for_remote,
-        channel.commitment_contract_features,
+        channel.channel_features,
     ))
 }

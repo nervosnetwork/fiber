@@ -28,6 +28,8 @@ pub enum NoncePurpose {
     Revocation,
     /// The one-off public-channel announcement signature.
     ChannelAnnouncement,
+    /// Dedicated cooperative-close nonce, never a commitment nonce.
+    Closing,
 }
 
 /// Unique deterministic MuSig2 nonce location within one channel signer.
@@ -152,9 +154,8 @@ impl Musig2SignableContent {
     /// Nonce domain required by this plaintext variant.
     pub fn expected_nonce_purpose(&self) -> NoncePurpose {
         match self {
-            Self::CommitmentTransaction(_) | Self::CooperativeCloseTransaction(_) => {
-                NoncePurpose::Commitment
-            }
+            Self::CommitmentTransaction(_) => NoncePurpose::Commitment,
+            Self::CooperativeCloseTransaction(_) => NoncePurpose::Closing,
             Self::Revocation { .. } => NoncePurpose::Revocation,
             Self::ChannelAnnouncement(_) => NoncePurpose::ChannelAnnouncement,
         }
@@ -164,6 +165,8 @@ impl Musig2SignableContent {
 /// MuSig2 plaintext and session context signed by a channel signer.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Musig2SigningContent {
+    /// Required V2 allocation identity; contains public data only.
+    pub v2: Option<V2NonceBinding>,
     /// Domain-separated nonce slot.
     pub slot: NonceSlot,
     /// Counter whose value was used for `slot`; absent for announcements.
@@ -174,6 +177,19 @@ pub struct Musig2SigningContent {
     pub agg_nonce: AggNonce,
     /// Plaintext object from which the signer computes the digest.
     pub content: Musig2SignableContent,
+}
+
+/// Public identity of one fresh V2 nonce allocation. The SDK retains its secret.
+#[serde_as]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct V2NonceBinding {
+    /// Channel this allocation is signing for.
+    pub channel_id: Hash256,
+    /// Commitment owner (not necessarily the signing participant).
+    pub owner: Pubkey,
+    /// Fresh nonce allocated by the signer, identifying its durable secret record.
+    #[serde_as(as = "PubNonceAsBytes")]
+    pub public_nonce: PubNonce,
 }
 
 /// Signer-owned key used to authorize a commitment-output spend.
@@ -242,6 +258,7 @@ impl ChannelSigningContent {
         match self {
             Self::Musig2(content) => {
                 bytes.push(0);
+                bytes.extend_from_slice(&bincode::serialize(&content.v2).map_err(to_string)?);
                 bytes.extend_from_slice(&bincode::serialize(&content.slot).map_err(to_string)?);
                 bytes.extend_from_slice(
                     &bincode::serialize(&content.commitment_counter).map_err(to_string)?,
@@ -298,6 +315,12 @@ impl ChannelSigningContent {
 #[serde_as]
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum ChannelSignatureRequest {
+    /// V2 durable continuation. Peer inputs and exact transactions live in the V2 session.
+    V2 {
+        content: Musig2SigningContent,
+        transition: ChannelSigningTransition,
+        settlement_data: Option<SettlementData>,
+    },
     /// Sign and then send our `CommitmentSigned` message.
     SendCommitmentSigned {
         content: Musig2SigningContent,
@@ -335,6 +358,7 @@ impl ChannelSignatureRequest {
     /// Public signing plaintext sent to the external signer.
     pub fn content(&self) -> &Musig2SigningContent {
         match self {
+            Self::V2 { content, .. } => content,
             Self::SendCommitmentSigned { content, .. }
             | Self::CompleteReceivedCommitment { content, .. }
             | Self::SendRevokeAndAck { content }
@@ -347,6 +371,9 @@ impl ChannelSignatureRequest {
     /// Settlement snapshot captured with this request, when it assigns balances.
     pub fn settlement_data(&self) -> Option<&SettlementData> {
         match self {
+            Self::V2 {
+                settlement_data, ..
+            } => settlement_data.as_ref(),
             Self::SendCommitmentSigned {
                 settlement_data, ..
             }
@@ -360,6 +387,7 @@ impl ChannelSignatureRequest {
     /// User-facing transition associated with this internal state-machine point.
     pub fn transition(&self) -> ChannelSigningTransition {
         match self {
+            Self::V2 { transition, .. } => *transition,
             Self::SendCommitmentSigned { .. } => ChannelSigningTransition::SendCommitmentSigned,
             Self::CompleteReceivedCommitment { .. } => {
                 ChannelSigningTransition::CompleteReceivedCommitment
@@ -379,11 +407,11 @@ impl ChannelSignatureRequest {
     /// strictly requires follow-up public material from an external signer.
     pub fn requires_next_signer_material(&self) -> bool {
         matches!(
-            self,
-            Self::SendCommitmentSigned { .. }
-                | Self::CompleteReceivedCommitment { .. }
-                | Self::SendRevokeAndAck { .. }
-                | Self::CompleteReceivedRevokeAndAck { .. }
+            self.transition(),
+            ChannelSigningTransition::SendCommitmentSigned
+                | ChannelSigningTransition::CompleteReceivedCommitment
+                | ChannelSigningTransition::SendRevokeAndAck
+                | ChannelSigningTransition::CompleteReceivedRevokeAndAck
         )
     }
 }
@@ -412,6 +440,17 @@ pub struct PendingChannelSignature {
 /// for recovery; once the request is cleared, the receipt identifies completed retries.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct ChannelSigningContext {
+    /// Peer opened with external funding; retain across actor eviction so its
+    /// immutable external signing intent can pin exact CS replay on reconnect.
+    pub peer_external_funding: bool,
+    /// Fresh signer-generated public nonces, never seeds or secret nonces.
+    pub v2_nonce_pool: Vec<PubNonce>,
+    /// Dedicated external public announcement nonce.
+    pub v2_announcement_nonce: Option<PubNonce>,
+    /// Immutable allocation records; retained to prevent recycling on replay/restart.
+    pub v2_allocations: Vec<crate::SigningNonceV2>,
+    /// Public-only local commitment points supplied by the external signer.
+    pub v2_commitment_points: Vec<(u64, Pubkey)>,
     pub pending_signature: Option<PendingChannelSignature>,
     last_applied: Option<LastAppliedChannelSignature>,
 }
@@ -442,6 +481,8 @@ pub enum SubmitSignatureOutcome {
 #[serde_as]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ChannelOpenSignerMaterial {
+    /// Additional fresh V2 public nonces; secrets remain in the SDK store.
+    pub v2_nonces: Vec<PubNonce>,
     /// Static funding and TLC public keys for this channel.
     pub base_public_keys: ChannelBasePublicKeys,
     /// Per-commitment point for commitment number 1.
@@ -466,6 +507,10 @@ pub struct ChannelOpenSignerMaterial {
 #[serde_as]
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct NextChannelSignerMaterial {
+    /// Fresh independent V2 public nonces for future allocations.
+    pub v2_nonces: Vec<PubNonce>,
+    /// Public commitment points indexed by exact V2 commitment number.
+    pub commitment_points: Vec<(u64, Pubkey)>,
     /// Next local per-commitment point the node will need.
     pub next_commitment_point: Option<Pubkey>,
     /// Next commitment public nonce the node will need.
@@ -680,11 +725,16 @@ mod tests {
         let public_key = secret_key.public_key(secp256k1::SECP256K1);
         let nonce = SecNonceBuilder::new([7; 32]).build().public_nonce();
         Musig2SigningContent {
+            v2: Some(V2NonceBinding {
+                channel_id: Hash256::from([5; 32]),
+                owner: public_key.into(),
+                public_nonce: nonce.clone(),
+            }),
             slot: NonceSlot {
                 purpose: NoncePurpose::Commitment,
                 commitment_number: 1,
             },
-            commitment_counter: Some(CommitmentCounter::Local),
+            commitment_counter: None,
             key_agg_ctx: KeyAggContext::new([public_key]).unwrap(),
             agg_nonce: AggNonce::sum([nonce]),
             content: Musig2SignableContent::CommitmentTransaction(Transaction::default()),
