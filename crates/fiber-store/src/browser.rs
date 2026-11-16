@@ -98,6 +98,20 @@ impl StorageBackend for Store {
         };
     }
 
+    fn multi_get<K: AsRef<[u8]>>(&self, keys: &[K]) -> Vec<Option<Vec<u8>>> {
+        // One read command, so the worker sees one database state for all of them.
+        return match self
+            .chan
+            .dispatch_database_command(DbCommandRequestWithTakeWhile::Read {
+                keys: keys.iter().map(|key| key.as_ref().to_vec()).collect(),
+            })
+            .unwrap()
+        {
+            DbCommandResponse::Read { values } => values,
+            _ => unreachable!(),
+        };
+    }
+
     fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&self, key: K, value: V) {
         match self
             .chan

@@ -9787,6 +9787,13 @@ pub trait ChannelActorStateStore {
         tlc_id: u64,
     ) -> bool;
     fn get_channel_actor_state(&self, id: &Hash256) -> Option<ChannelActorState>;
+    /// Persist a channel, replacing both records.
+    ///
+    /// The fixed record is written only while the channel is opening, so a caller has to bring a
+    /// channel whose fixed record already exists. Copying an already established state into a store
+    /// that never saw its opening phase leaves a record that cannot be read back (the node's own
+    /// opening path writes it, and test fixtures go through
+    /// `Store::insert_channel_actor_state_for_test`).
     fn insert_channel_actor_state(&self, state: ChannelActorState);
 
     fn move_channel_actor_state(&self, old_id: &Hash256, state: ChannelActorState);
@@ -9811,6 +9818,11 @@ pub trait ChannelActorStateStore {
             .collect()
     }
     fn get_channel_state_by_outpoint(&self, id: &OutPoint) -> Option<ChannelActorState>;
+    /// Every channel the store holds.
+    ///
+    /// A bulk read for offline tooling (restore). It walks the records rather than taking one
+    /// transaction snapshot, so a channel that is moved or deleted while it runs can be missing;
+    /// call it only while the node is not running.
     fn get_all_channel_states(&self) -> Vec<ChannelActorState>;
     fn insert_payment_custom_records(
         &self,
@@ -12025,7 +12037,7 @@ mod tests {
             state
                 .retryable_tlc_operations
                 .push_back(RetryableTlcOperation::AddTlc(command.clone()));
-            store.insert_channel_actor_state(state.clone());
+            store.insert_channel_actor_state_for_test(state.clone());
             let actor = ChannelActor::new(
                 state.local_pubkey,
                 state.remote_pubkey,
@@ -12081,6 +12093,8 @@ mod tests {
         tlc.attempt_id = Some(1);
         let hash = tlc.payment_hash;
         state.tlc_state.add_offered_tlc(tlc);
+        // Synthetic established channel: seed the fixed-field record it would have.
+        store.insert_channel_actor_state_for_test(state.clone());
         let actor = ChannelActor::new(
             state.local_pubkey,
             state.remote_pubkey,

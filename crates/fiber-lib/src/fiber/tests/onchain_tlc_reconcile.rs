@@ -288,7 +288,8 @@ async fn assert_uncommitted_remove_relay(
     settlement_tlc.tlc_id = tlc.tlc_id.flip();
     state.tlc_state.add_offered_tlc(tlc);
     state.sign_test_bootstrap_v2().expect("signed V2 fixture");
-    node.store.insert_channel_actor_state(state.clone());
+    node.store
+        .insert_channel_actor_state_for_test(state.clone());
     node.store.store_shutdown_settlement_record(
         &channel_id,
         &ShutdownSettlementRecord {
@@ -407,7 +408,7 @@ async fn assert_uncommitted_remove_relay(
                 reason.clone(),
             ));
     }
-    node.store.insert_channel_actor_state(upstream);
+    node.store.insert_channel_actor_state_for_test(upstream);
     if restart_after_queue {
         node.stop().await;
         node.start().await;
@@ -2578,7 +2579,7 @@ async fn assert_confirmed_snapshot_recovery(wrong_direction: bool, revoked: bool
     let preceding_tx_hash: ckb_types::H256 = preceding_tx.hash().unpack();
 
     state.shutdown_transaction_hash = Some(preceding_tx_hash.clone());
-    store.insert_channel_actor_state(state.clone());
+    store.insert_channel_actor_state_for_test(state.clone());
 
     if wrong_direction {
         store.store_shutdown_settlement_record(
@@ -2672,7 +2673,7 @@ async fn test_scenario_b_transient_rpc_failure_retries_and_recovers_under_confir
     let tx_hash: ckb_types::H256 = tx.hash().unpack();
 
     state.shutdown_transaction_hash = Some(tx_hash.clone());
-    store.insert_channel_actor_state(state.clone());
+    store.insert_channel_actor_state_for_test(state.clone());
 
     let chain_client = MockSettlementChainClient::new();
     let (sender, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -2797,7 +2798,7 @@ async fn test_scenario_c_cell_dep_pending_tx_recovers_snapshot_and_blocks_until_
     let pending_tx_hash: ckb_types::H256 = pending_tx_with_deps.hash().unpack();
 
     state.shutdown_transaction_hash = Some(pending_tx_hash.clone());
-    store.insert_channel_actor_state(state.clone());
+    store.insert_channel_actor_state_for_test(state.clone());
 
     let chain_client = MockSettlementChainClient::new();
     chain_client.set_tx(pending_tx_hash.clone(), pending_tx_with_deps);
@@ -2955,7 +2956,7 @@ async fn test_scenario_e_real_db_persistence_and_reopen() {
         let store = open_store(temp_dir.path()).expect("open store");
         store.store_shutdown_settlement_record(&channel_id, &record);
         state.sign_test_bootstrap_v2().expect("signed V2 fixture");
-        store.insert_channel_actor_state(state.clone());
+        store.insert_channel_actor_state_for_test(state.clone());
     } // store is dropped here, all DB handles released
 
     // 2. Reopen store from the same path
@@ -3040,7 +3041,7 @@ async fn test_scenario_f_live_actor_and_no_actor_recovery_and_finalization() {
         }
 
         state.sign_test_bootstrap_v2().expect("signed V2 fixture");
-        store.insert_channel_actor_state(state.clone());
+        store.insert_channel_actor_state_for_test(state.clone());
 
         let record = ShutdownSettlementRecord {
             shutdown_tx_hash: tx_hash.clone(),
@@ -3176,7 +3177,7 @@ async fn test_scenario_f_live_actor_and_no_actor_recovery_and_finalization() {
         }
 
         state.sign_test_bootstrap_v2().expect("signed V2 fixture");
-        store.insert_channel_actor_state(state.clone());
+        store.insert_channel_actor_state_for_test(state.clone());
 
         let record = ShutdownSettlementRecord {
             shutdown_tx_hash: tx_hash.clone(),
@@ -3675,7 +3676,7 @@ async fn assert_excluded_payer_reconciliation(
         },
     );
     state.sign_test_bootstrap_v2().expect("signed V2 fixture");
-    node.store.insert_channel_actor_state(state);
+    node.store.insert_channel_actor_state_for_test(state);
     let mut live_ref = None;
     if live_actor {
         let key = Privkey::from([11; 32]);
@@ -3945,7 +3946,8 @@ async fn assert_timeout_payer_reconciliation(live_actor: bool, kind: TimeoutPaye
             },
         },
     );
-    node.store.insert_channel_actor_state(state.clone());
+    node.store
+        .insert_channel_actor_state_for_test(state.clone());
 
     let source = state.get_local_pubkey();
     let target = gen_rand_fiber_public_key();
@@ -4122,7 +4124,8 @@ async fn assert_excluded_tlc_relays_failure_before_finalization(
         &tlc.shared_secret,
     ));
     state.tlc_state.add_offered_tlc(tlc);
-    node.store.insert_channel_actor_state(state.clone());
+    node.store
+        .insert_channel_actor_state_for_test(state.clone());
     node.store.store_shutdown_settlement_record(
         &channel_id,
         &ShutdownSettlementRecord {
@@ -4161,7 +4164,7 @@ async fn assert_excluded_tlc_relays_failure_before_finalization(
         payment_hash,
         HashAlgorithm::CkbHash,
     ));
-    node.store.insert_channel_actor_state(upstream);
+    node.store.insert_channel_actor_state_for_test(upstream);
     // The offline upstream must durably queue the failure before acknowledging it.
     for _ in 0..3 {
         node.network_actor
@@ -4539,7 +4542,7 @@ async fn assert_excluded_payer_with_unclaimed_balance(
     let commitment_tx = create_test_commitment_tx(funding_outpoint, lock.clone(), vec![]);
     state.shutdown_transaction_hash = Some(commitment_tx.hash().unpack());
     state.sign_test_bootstrap_v2().expect("signed V2 fixture");
-    node.store.insert_channel_actor_state(state);
+    node.store.insert_channel_actor_state_for_test(state);
     {
         let mut chain = node.chain_client.state.write().unwrap();
         chain.txs.insert(
