@@ -2,9 +2,7 @@ use crate::ckb::signer::LocalSigner;
 use crate::fiber::channel::*;
 use crate::fiber::gossip::{get_latest_startup_broadcast_message_cursor, GossipMessageStore};
 use crate::fiber::network::get_chain_hash;
-use crate::fiber::onchain_tlc_reconcile::{
-    LegacyOnChainTlcSettlement, OnChainTlcSettlement, StoredOnChainTlcSettlement,
-};
+use crate::fiber::onchain_tlc_reconcile::OnChainTlcSettlement;
 use crate::fiber::types::new_channel_update_unsigned;
 use crate::fiber::types::*;
 #[allow(unused)]
@@ -606,7 +604,7 @@ fn test_store_watchtower_v1_registration_round_trip() {
         tlcs: vec![],
     };
 
-    store.insert_watch_channel_with_features(
+    store.insert_watch_channel(
         node_id,
         channel_id,
         None,
@@ -615,7 +613,6 @@ fn test_store_watchtower_v1_registration_round_trip() {
         Privkey::from(&[3; 32]).pubkey(),
         Privkey::from(&[4; 32]).pubkey(),
         settlement_data,
-        ChannelFeatures::V2,
     );
 
     assert_eq!(
@@ -990,7 +987,7 @@ fn test_onchain_tlc_settlement_roundtrip() {
             tlc_id,
             &payment_hash,
         ),
-        Some(StoredOnChainTlcSettlement::Exact(settlement))
+        Some(settlement)
     );
     assert_eq!(
         WatchtowerStore::get_onchain_tlc_settlement(
@@ -1044,7 +1041,7 @@ fn test_onchain_tlc_settlements_with_shared_prefix_are_independent() {
             first_id,
             &first_hash,
         ),
-        Some(StoredOnChainTlcSettlement::Exact(first))
+        Some(first)
     );
     assert_eq!(
         WatchtowerStore::get_onchain_tlc_settlement(
@@ -1054,7 +1051,7 @@ fn test_onchain_tlc_settlements_with_shared_prefix_are_independent() {
             second_id,
             &second_hash,
         ),
-        Some(StoredOnChainTlcSettlement::Exact(second))
+        Some(second)
     );
 }
 
@@ -1098,7 +1095,7 @@ fn test_onchain_tlc_settlement_no_preimage_does_not_downgrade() {
             tlc_id,
             &payment_hash,
         ),
-        Some(StoredOnChainTlcSettlement::Exact(with_preimage))
+        Some(with_preimage)
     );
 }
 
@@ -1147,13 +1144,13 @@ fn test_onchain_tlc_settlements_are_isolated_between_watchtower_tenants() {
             tlc_id,
             &payment_hash,
         ),
-        Some(StoredOnChainTlcSettlement::Exact(OnChainTlcSettlement {
+        Some(OnChainTlcSettlement {
             payment_hash,
             hash_algorithm: HashAlgorithm::CkbHash,
             preimage: Some(Hash256::from([9u8; 32])),
             tx_hash: Hash256::from([7u8; 32]),
             tlc_index: 0,
-        }))
+        })
     );
     assert_eq!(
         WatchtowerStore::get_onchain_tlc_settlement(
@@ -1163,71 +1160,13 @@ fn test_onchain_tlc_settlements_are_isolated_between_watchtower_tenants() {
             tlc_id,
             &payment_hash,
         ),
-        Some(StoredOnChainTlcSettlement::Exact(OnChainTlcSettlement {
+        Some(OnChainTlcSettlement {
             payment_hash,
             hash_algorithm: HashAlgorithm::CkbHash,
             preimage: None,
             tx_hash: Hash256::from([8u8; 32]),
             tlc_index: 0,
-        }))
-    );
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-fn test_onchain_tlc_settlement_legacy_empty_value() {
-    let path = TempDir::new("test-onchain-tlc-settlement-legacy");
-    let store = open_store(path).expect("created store failed");
-    let channel_id = Hash256::from([1u8; 32]);
-    let payment_hash = Hash256::from([3u8; 32]);
-    let prefix: [u8; 20] = payment_hash.as_ref()[0..20].try_into().unwrap();
-    let key = [
-        &[WATCHTOWER_TLC_SETTLED_PREFIX],
-        channel_id.as_ref(),
-        prefix.as_ref(),
-    ]
-    .concat();
-
-    store.put(key, []);
-    let tlc_id = TLCId::Offered(0);
-    let node_id = NodeId::local();
-
-    assert_eq!(
-        WatchtowerStore::get_onchain_tlc_settlement(
-            &store,
-            &node_id,
-            &channel_id,
-            tlc_id,
-            &payment_hash,
-        ),
-        Some(StoredOnChainTlcSettlement::Legacy(
-            LegacyOnChainTlcSettlement {
-                preimage: None,
-                tx_hash: None,
-                tlc_index: None,
-            }
-        ))
-    );
-
-    let exact = OnChainTlcSettlement {
-        payment_hash,
-        hash_algorithm: HashAlgorithm::CkbHash,
-        preimage: None,
-        tx_hash: Hash256::from([7u8; 32]),
-        tlc_index: 0,
-    };
-    store.insert_onchain_tlc_settlement(&node_id, &channel_id, tlc_id, exact.clone());
-    assert_eq!(
-        WatchtowerStore::get_onchain_tlc_settlement(
-            &store,
-            &node_id,
-            &channel_id,
-            tlc_id,
-            &payment_hash,
-        ),
-        Some(StoredOnChainTlcSettlement::Exact(exact)),
-        "the unified lookup must prefer an exact record over the legacy prefix fallback"
+        })
     );
 }
 
@@ -1330,7 +1269,6 @@ fn test_channel_actor_state_store() {
     let sec_nonce = SecNonce::build(seckey).build();
     let pub_nonce = sec_nonce.public_nonce();
     let channel_id = gen_rand_sha256_hash();
-
     let state = ChannelActorState {
         core: ChannelActorData {
             state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::THEIR_INIT_SENT),
@@ -1376,6 +1314,7 @@ fn test_channel_actor_state_store() {
                 funding_pubkey: gen_rand_fiber_public_key(),
                 tlc_base_key: gen_rand_fiber_public_key(),
             },
+            session: crate::fiber::session::new_session(channel_id, &signer.funding_key, None),
             signer,
             remote_channel_public_keys: Some(ChannelBasePublicKeys {
                 funding_pubkey: gen_rand_fiber_public_key(),
@@ -1383,10 +1322,6 @@ fn test_channel_actor_state_store() {
             }),
             commitment_numbers: Default::default(),
             remote_shutdown_script: Some(Script::default()),
-            last_committed_remote_nonce: None,
-            remote_revocation_nonce_for_verify: None,
-            remote_revocation_nonce_for_send: None,
-            remote_revocation_nonce_for_next: None,
             remote_commitment_points: vec![
                 (0, gen_rand_fiber_public_key()),
                 (1, gen_rand_fiber_public_key()),
@@ -1401,7 +1336,6 @@ fn test_channel_actor_state_store() {
             remote_constraints: ChannelConstraints::default(),
             reestablishing: false,
             connectivity_state: fiber_types::ChannelConnectivityState::Online,
-            last_revoke_ack_msg: None,
             pending_replay_updates: vec![TlcReplayUpdate::Add(AddTlc {
                 channel_id,
                 tlc_id: 1,
@@ -1415,16 +1349,13 @@ fn test_channel_actor_state_store() {
             external_funding: None,
             channel_features: Default::default(),
             created_at: SystemTime::now(),
-            session_v2: None,
         },
         waiting_peer_response: None,
-        revocation_nonce_unbalanced_since: None,
         reestablish_timer: None,
         recovery_peer_v2: None,
         network: None,
         scheduled_channel_update_handle: None,
         pending_notify_settle_tlcs: vec![],
-        pending_reestablish_channel_ready: false,
         defer_peer_tlc_updates: false,
         deferred_peer_tlc_updates: Default::default(),
         ephemeral_config: Default::default(),
@@ -1487,6 +1418,7 @@ fn sample_channel_actor_state(
     let sec_nonce = SecNonce::build(seckey).build();
     let pub_nonce = sec_nonce.public_nonce();
 
+    let channel_id = gen_rand_sha256_hash();
     ChannelActorState {
         core: ChannelActorData {
             state,
@@ -1523,7 +1455,7 @@ fn sample_channel_actor_state(
             commitment_fee_rate: 100,
             commitment_delay_epoch: 100,
             funding_fee_rate: 100,
-            id: gen_rand_sha256_hash(),
+            id: channel_id,
             tlc_state: Default::default(),
             retryable_tlc_operations: Default::default(),
             waiting_forward_tlc_tasks: Default::default(),
@@ -1532,6 +1464,7 @@ fn sample_channel_actor_state(
                 funding_pubkey: gen_rand_fiber_public_key(),
                 tlc_base_key: gen_rand_fiber_public_key(),
             },
+            session: crate::fiber::session::new_session(channel_id, &signer.funding_key, None),
             signer,
             remote_channel_public_keys: Some(ChannelBasePublicKeys {
                 funding_pubkey: gen_rand_fiber_public_key(),
@@ -1539,10 +1472,6 @@ fn sample_channel_actor_state(
             }),
             commitment_numbers: Default::default(),
             remote_shutdown_script: Some(Script::default()),
-            last_committed_remote_nonce: None,
-            remote_revocation_nonce_for_verify: None,
-            remote_revocation_nonce_for_send: None,
-            remote_revocation_nonce_for_next: None,
             remote_commitment_points: vec![
                 (0, gen_rand_fiber_public_key()),
                 (1, gen_rand_fiber_public_key()),
@@ -1557,22 +1486,18 @@ fn sample_channel_actor_state(
             remote_constraints: ChannelConstraints::default(),
             reestablishing: false,
             connectivity_state: fiber_types::ChannelConnectivityState::Online,
-            last_revoke_ack_msg: None,
             pending_replay_updates: vec![],
             last_was_revoke: false,
             external_funding: None,
             channel_features: Default::default(),
             created_at: SystemTime::now(),
-            session_v2: None,
         },
         waiting_peer_response: None,
-        revocation_nonce_unbalanced_since: None,
         reestablish_timer: None,
         recovery_peer_v2: None,
         network: None,
         scheduled_channel_update_handle: None,
         pending_notify_settle_tlcs: vec![],
-        pending_reestablish_channel_ready: false,
         defer_peer_tlc_updates: false,
         deferred_peer_tlc_updates: Default::default(),
         ephemeral_config: Default::default(),
@@ -1631,7 +1556,6 @@ fn test_closed_onchain_settlement_state_round_trips() {
     assert!(restored.scheduled_channel_update_handle.is_none());
     assert!(restored.pending_notify_settle_tlcs.is_empty());
     assert_eq!(restored.pending_remove_effects_v2, 0);
-    assert!(!restored.pending_reestablish_channel_ready);
     assert!(!restored.defer_peer_tlc_updates);
     assert!(restored.deferred_peer_tlc_updates.is_empty());
     assert!(restored.private_key.is_none());

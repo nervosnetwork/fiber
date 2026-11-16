@@ -1,15 +1,14 @@
 use ckb_types::{packed::Script, prelude::Pack};
 use fiber_types::{
     gen::fiber::{self as molecule_fiber, PubNonceOpt},
-    ChannelFlags, Hash256, Privkey, Pubkey,
+    ChannelFlags, Privkey, Pubkey,
 };
 use molecule::prelude::{Builder, Entity};
 use musig2::{PartialSignature, PubNonce};
 
 use super::{
-    AcceptChannelV2, ChannelReadyV2, ClosingSigned, ClosingSignedV2, CommitmentSigned,
-    CommitmentSignedV2, FiberChannelMessage, FiberMessage, OpenChannelV2, ReestablishChannelV2,
-    RevokeAndAckV2, ShutdownV2, TxCompleteV2,
+    AcceptChannelV2, ChannelReadyV2, ClosingSignedV2, CommitmentSignedV2, FiberChannelMessage,
+    FiberMessage, OpenChannelV2, ReestablishChannelV2, RevokeAndAckV2, ShutdownV2, TxCompleteV2,
 };
 
 fn nonce(seed: u8) -> PubNonce {
@@ -203,36 +202,16 @@ fn test_wire_v2_rejects_invalid_crypto_fields_and_truncation() {
 }
 
 #[test]
-fn test_wire_legacy_roundtrip_remains_v1() {
-    let id: Hash256 = [40; 32].into();
-    let bytes = FiberMessage::commitment_signed(CommitmentSigned {
-        channel_id: id,
-        funding_tx_partial_signature: signature(),
-        next_commitment_nonce: nonce(41),
-    })
-    .to_molecule_bytes();
-    assert_eq!(u32::from_le_bytes(bytes[..4].try_into().unwrap()), 9);
-    let FiberMessage::ChannelNormalOperation(FiberChannelMessage::CommitmentSigned(actual)) =
-        FiberMessage::from_molecule_slice(&bytes).unwrap()
-    else {
-        panic!("V1 must remain V1");
-    };
-    assert_eq!(actual.channel_id, id);
-    assert_eq!(actual.funding_tx_partial_signature, signature());
-    assert_eq!(actual.next_commitment_nonce, nonce(41));
-    let bytes = FiberMessage::closing_signed(ClosingSigned {
-        channel_id: id,
-        partial_signature: signature(),
-    })
-    .to_molecule_bytes();
-    assert_eq!(u32::from_le_bytes(bytes[..4].try_into().unwrap()), 16);
-    let FiberMessage::ChannelNormalOperation(FiberChannelMessage::ClosingSigned(actual)) =
-        FiberMessage::from_molecule_slice(&bytes).unwrap()
-    else {
-        panic!("V1 closing signature must remain V1");
-    };
-    assert_eq!(actual.channel_id, id);
-    assert_eq!(actual.partial_signature, signature());
+fn test_wire_rejects_reserved_v1_message_ids() {
+    for id in [1u32, 2, 5, 9, 10, 14, 15, 16, 17] {
+        let mut bytes = id.to_le_bytes().to_vec();
+        bytes.extend_from_slice(&[0; 256]);
+        assert!(matches!(
+            molecule_fiber::FiberMessage::from_slice(&bytes),
+            Err(molecule::error::VerificationError::UnknownItem(..))
+        ));
+        assert!(FiberMessage::from_molecule_slice(&bytes).is_err());
+    }
 }
 
 fn open_v2() -> OpenChannelV2 {
@@ -324,7 +303,7 @@ fn test_wire_v2_opening_requires_explicit_confirmation() {
 }
 
 #[test]
-fn test_wire_legacy_discriminants_stable() {
+fn test_wire_shared_discriminants_stable() {
     macro_rules! check {
         ($($name:ident = $id:expr),* $(,)?) => { $(
             let wire = molecule_fiber::FiberMessage::new_builder()
@@ -334,23 +313,14 @@ fn test_wire_legacy_discriminants_stable() {
     }
     check!(
         Init = 0,
-        OpenChannel = 1,
-        AcceptChannel = 2,
         TxSignatures = 3,
         TxUpdate = 4,
-        TxComplete = 5,
         TxAbort = 6,
         TxInitRBF = 7,
         TxAckRBF = 8,
-        CommitmentSigned = 9,
-        ChannelReady = 10,
         UpdateTlcInfo = 11,
         AddTlc = 12,
         RemoveTlc = 13,
-        RevokeAndAck = 14,
-        Shutdown = 15,
-        ClosingSigned = 16,
-        ReestablishChannel = 17,
         AnnouncementSignatures = 18
     );
 }

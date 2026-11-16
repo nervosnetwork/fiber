@@ -68,7 +68,8 @@ use super::gossip::{
 };
 use super::graph::{NetworkGraph, NetworkGraphStateStore, OwnedChannelUpdateEvent};
 use super::types::{
-    BroadcastMessageWithTimestamp, FiberMessage, ForwardTlcResult, GossipMessage, Init, OpenChannel,
+    BroadcastMessageWithTimestamp, FiberMessage, ForwardTlcResult, GossipMessage, Init,
+    OpenChannelV2,
 };
 use super::{
     FiberConfig, InFlightCkbTxActor, InFlightCkbTxActorArguments, InFlightCkbTxActorMessage,
@@ -721,6 +722,8 @@ pub enum PeerDisconnectReason {
     InitMessageTimeout,
     /// Chain hash mismatch.
     ChainHashMismatch,
+    /// Peer does not support the required Fiber features.
+    IncompatibleFeatures,
     /// Duplicate Init message.
     DuplicateInitMessage,
     /// Gossip peer temporarily banned.
@@ -867,10 +870,7 @@ impl TestFiberMessageHold {
             (&self.kind, channel_message),
             (
                 TestFiberMessageKind::CommitmentOrAck,
-                FiberChannelMessage::CommitmentSigned(_)
-                    | FiberChannelMessage::CommitmentSignedV2(_)
-                    | FiberChannelMessage::RevokeAndAck(_)
-                    | FiberChannelMessage::RevokeAndAckV2(_)
+                FiberChannelMessage::CommitmentSignedV2(_) | FiberChannelMessage::RevokeAndAckV2(_)
             ) | (
                 TestFiberMessageKind::TxUpdate,
                 FiberChannelMessage::TxUpdate(_)
@@ -880,25 +880,23 @@ impl TestFiberMessageHold {
             ) | (TestFiberMessageKind::AddTlc, FiberChannelMessage::AddTlc(_))
                 | (
                     TestFiberMessageKind::CommitmentSigned,
-                    FiberChannelMessage::CommitmentSigned(_)
-                        | FiberChannelMessage::CommitmentSignedV2(_)
+                    FiberChannelMessage::CommitmentSignedV2(_)
                 )
                 | (
                     TestFiberMessageKind::RevokeAndAck,
-                    FiberChannelMessage::RevokeAndAck(_) | FiberChannelMessage::RevokeAndAckV2(_)
+                    FiberChannelMessage::RevokeAndAckV2(_)
                 )
                 | (
                     TestFiberMessageKind::Shutdown,
-                    FiberChannelMessage::Shutdown(_) | FiberChannelMessage::ShutdownV2(_)
+                    FiberChannelMessage::ShutdownV2(_)
                 )
                 | (
                     TestFiberMessageKind::ClosingSigned,
-                    FiberChannelMessage::ClosingSigned(_) | FiberChannelMessage::ClosingSignedV2(_)
+                    FiberChannelMessage::ClosingSignedV2(_)
                 )
                 | (
                     TestFiberMessageKind::ReestablishChannel,
-                    FiberChannelMessage::ReestablishChannel(_)
-                        | FiberChannelMessage::ReestablishChannelV2(_)
+                    FiberChannelMessage::ReestablishChannelV2(_)
                 )
         )
     }
@@ -926,9 +924,6 @@ pub enum OnChainTlcRemoveCompletion {
 pub enum NetworkActorCommand {
     /// Ask the payer actor to observe persisted TLC fulfillment proof.
     PaymentTlcUpdated(Hash256),
-    /// Explicit legacy-only test fixture; unavailable in production builds.
-    #[cfg(test)]
-    TestEnableLegacyFixture(RpcReplyPort<()>),
     /// Complete a closed channel's queued local Add after the payment outcome is saved.
     CompleteClosedLocalAdd {
         channel_id: Hash256,
@@ -1721,46 +1716,20 @@ where
         peer_pubkey: Pubkey,
         message: FiberMessage,
     ) -> crate::Result<()> {
-        let message = match message {
-            FiberMessage::ChannelInitializationV2(open) => {
-                if open.channel_features != 1
-                    || !state
-                        .negotiated_channel_features(&peer_pubkey)
-                        .has_full_payment_hash()
-                {
-                    return Err(ProcessingChannelError::InvalidState(
-                        "OpenChannelV2 requires explicit negotiated features=1".to_owned(),
-                    )
-                    .into());
-                }
-                FiberMessage::ChannelInitialization(super::session_v2::open_parameters(open))
-            }
-            FiberMessage::ChannelInitialization(_)
-                if state
-                    .negotiated_channel_features(&peer_pubkey)
-                    .has_full_payment_hash() =>
-            {
-                return Err(ProcessingChannelError::InvalidState(
-                    "V1 opening cannot select a V2 channel".to_owned(),
-                )
-                .into());
-            }
-            other => other,
-        };
         match message {
-            FiberMessage::ChannelInitializationV2(_) => {
-                return Err(ProcessingChannelError::InvalidState(
-                    "Received OpenChannelV2 before V2 actor integration".to_string(),
-                )
-                .into());
-            }
             FiberMessage::Init(init_message) => {
                 state.on_init_msg(myself, peer_pubkey, init_message).await?;
             }
             // We should process OpenChannel message here because there is no channel corresponding
             // to the channel id in the message yet.
-            FiberMessage::ChannelInitialization(open_channel) => {
+            FiberMessage::ChannelInitializationV2(open_channel) => {
                 state.check_feature_compatibility(&peer_pubkey)?;
+                if open_channel.channel_features != 1 {
+                    return Err(ProcessingChannelError::InvalidParameter(
+                        "OpenChannelV2 requires features=1".to_owned(),
+                    )
+                    .into());
+                }
                 let temp_channel_id = open_channel.channel_id;
                 let peer_pubkey_for_logging = peer_pubkey;
                 match state
@@ -3116,12 +3085,7 @@ where
                     .offered_tlcs
                     .tlcs
                     .iter()
-                    .chain(
-                        source
-                            .session_v2
-                            .iter()
-                            .flat_map(|session| session.remove_effects.iter().map(|(tlc, _)| tlc)),
-                    )
+                    .chain(source.session.remove_effects.iter().map(|(tlc, _)| tlc))
                     .any(|tlc| {
                         tlc.payment_hash == command.payment_hash
                             && tlc.attempt_id == command.attempt_id
@@ -3156,11 +3120,7 @@ where
                     .map(|attempt| attempt.tried_times);
                 let _ = reply.send(execution);
             }
-            #[cfg(test)]
-            NetworkActorCommand::TestEnableLegacyFixture(reply) => {
-                state.to_be_accepted_channels.test_allow_legacy = true;
-                let _ = reply.send(());
-            }
+
             NetworkActorCommand::RelayV2RemoveEffect {
                 channel_id,
                 tlc,
@@ -3173,14 +3133,15 @@ where
                 let Some(source) = self.store.get_channel_actor_state(&channel_id) else {
                     return Ok(());
                 };
-                if !source.session_v2.as_ref().is_some_and(|session| {
+                if !{
+                    let session = &source.session;
                     session.remove_effects.iter().any(|(pending, bound)| {
                         pending.tlc_id == tlc.tlc_id
                             && pending.payment_hash == tlc.payment_hash
                             && pending.removed_reason == tlc.removed_reason
                             && *bound == execution
                     })
-                }) {
+                } {
                     return Ok(());
                 }
                 if let Some((upstream, upstream_tlc)) = tlc.forwarding_tlc {
@@ -3258,12 +3219,10 @@ where
                         .store
                         .get_channel_actor_state(&downstream_channel_id)
                         .is_some_and(|source| {
-                            if source.session_v2.as_ref().is_some_and(|session| {
-                                session.remove_effects.iter().any(|(tlc, _)| {
-                                    tlc.tlc_id == downstream_tlc_id
-                                        && tlc.payment_hash == payment_hash
-                                        && tlc.removed_reason.as_ref() == Some(&reason)
-                                })
+                            if source.session.remove_effects.iter().any(|(tlc, _)| {
+                                tlc.tlc_id == downstream_tlc_id
+                                    && tlc.payment_hash == payment_hash
+                                    && tlc.removed_reason.as_ref() == Some(&reason)
                             }) {
                                 return true;
                             }
@@ -3950,11 +3909,10 @@ where
             .store
             .get_channel_actor_state(&downstream_channel_id)
             .is_some_and(|source| {
-                source.session_v2.as_ref().is_some_and(|session| {
-                    !session.remove_effects.iter().any(|(tlc, _)| {
-                        tlc.tlc_id == downstream_tlc_id && tlc.payment_hash == payment_hash
-                    }) && source.tlc_state.get(&downstream_tlc_id).is_none()
-                })
+                let session = &source.session;
+                !session.remove_effects.iter().any(|(tlc, _)| {
+                    tlc.tlc_id == downstream_tlc_id && tlc.payment_hash == payment_hash
+                }) && source.tlc_state.get(&downstream_tlc_id).is_none()
             })
         {
             // A duplicate receipt for a drained V2 outbox is a no-op, including
@@ -3967,15 +3925,14 @@ where
             .store
             .get_channel_actor_state(&downstream_channel_id)
             .and_then(|source| {
-                source.session_v2.as_ref().and_then(|session| {
-                    session
-                        .remove_effects
-                        .iter()
-                        .find(|(tlc, _)| {
-                            tlc.tlc_id == downstream_tlc_id && tlc.payment_hash == payment_hash
-                        })
-                        .and_then(|(tlc, _)| tlc.removed_reason.clone())
-                })
+                let session = &source.session;
+                session
+                    .remove_effects
+                    .iter()
+                    .find(|(tlc, _)| {
+                        tlc.tlc_id == downstream_tlc_id && tlc.payment_hash == payment_hash
+                    })
+                    .and_then(|(tlc, _)| tlc.removed_reason.clone())
             })
             .unwrap_or(reason);
         if let RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill { payment_preimage }) = &reason {
@@ -3993,7 +3950,8 @@ where
             if let Some(mut channel_state) =
                 self.store.get_channel_actor_state(&downstream_channel_id)
             {
-                if let Some(session) = &mut channel_state.session_v2 {
+                {
+                    let session = &mut channel_state.session;
                     let before = session.remove_effects.len();
                     session.remove_effects.retain(|(tlc, _)| {
                         tlc.tlc_id != downstream_tlc_id || tlc.payment_hash != payment_hash
@@ -6194,7 +6152,7 @@ where
     fn log_receiver_auto_accept_failure(
         &self,
         pubkey: &Pubkey,
-        open_channel: &OpenChannel,
+        open_channel: &OpenChannelV2,
         temp_channel_id: Hash256,
     ) {
         if !tracing::enabled!(tracing::Level::WARN) {
@@ -6306,7 +6264,6 @@ where
         } = open_channel;
         let remote_pubkey = pubkey;
         self.check_feature_compatibility(&remote_pubkey)?;
-        let channel_features = self.required_new_channel_features(&remote_pubkey)?;
 
         if public && one_way {
             return Err(ProcessingChannelError::InvalidParameter(
@@ -6388,7 +6345,6 @@ where
                         .unwrap_or(DEFAULT_MAX_TLC_VALUE_IN_FLIGHT),
                     max_tlc_number_in_flight: max_tlc_number_in_flight
                         .unwrap_or(MAX_TLC_NUMBER_IN_FLIGHT),
-                    channel_features,
                 }),
                 ephemeral_config: self.channel_ephemeral_config.clone(),
                 private_key: self.private_key.clone(),
@@ -6402,12 +6358,7 @@ where
         self.on_channel_created(temp_channel_id, remote_pubkey, channel.clone());
 
         // Record the channel opening attempt so it can be queried via RPC.
-        let record = ChannelOpenRecord::new_with_features(
-            temp_channel_id,
-            remote_pubkey,
-            funding_amount,
-            channel_features,
-        );
+        let record = ChannelOpenRecord::new(temp_channel_id, remote_pubkey, funding_amount);
         self.store.insert_channel_open_record(record);
 
         Ok((channel, temp_channel_id))
@@ -6450,7 +6401,6 @@ where
             )))?;
 
         self.check_feature_compatibility(&remote_pubkey)?;
-        let channel_features = self.required_new_channel_features(&remote_pubkey)?;
 
         if let Some(udt_type_script) = funding_udt_type_script.as_ref() {
             if !check_udt_script(udt_type_script) {
@@ -6514,7 +6464,6 @@ where
                             .unwrap_or(DEFAULT_MAX_TLC_VALUE_IN_FLIGHT),
                         max_tlc_number_in_flight: max_tlc_number_in_flight
                             .unwrap_or(MAX_TLC_NUMBER_IN_FLIGHT),
-                        channel_features,
                     },
                 ),
                 ephemeral_config: self.channel_ephemeral_config.clone(),
@@ -6530,12 +6479,7 @@ where
 
         // Record the external-funding opening attempt under the temporary id.
         // It will be re-keyed once the peer accepts and the final channel id is known.
-        let record = ChannelOpenRecord::new_with_features(
-            temp_channel_id,
-            remote_pubkey,
-            funding_amount,
-            channel_features,
-        );
+        let record = ChannelOpenRecord::new(temp_channel_id, remote_pubkey, funding_amount);
         self.store.insert_channel_open_record(record);
 
         Ok((channel, temp_channel_id))
@@ -6557,9 +6501,6 @@ where
             tlc_expiry_delta,
         } = accept_channel;
 
-        self.to_be_accepted_channels
-            .require_channel_v2(&temp_channel_id)?;
-
         let (remote_pubkey, pending_open) = self
             .to_be_accepted_channels
             .remove(&temp_channel_id)
@@ -6573,7 +6514,6 @@ where
             funding_amount,
             &shutdown_script,
             &pending_open.open_channel.funding_udt_type_script,
-            pending_open.channel_features,
         )?;
 
         let network = self.network.clone();
@@ -6619,7 +6559,6 @@ where
                     max_tlc_number_in_flight: max_tlc_number_in_flight
                         .unwrap_or(MAX_TLC_NUMBER_IN_FLIGHT),
                     max_tlc_value_in_flight: max_tlc_value_in_flight.unwrap_or(u128::MAX),
-                    channel_features: pending_open.channel_features,
                 }),
                 ephemeral_config: self.channel_ephemeral_config.clone(),
                 private_key: self.private_key.clone(),
@@ -6678,7 +6617,8 @@ where
             .and_then(|peer| peer.features.as_ref())
         {
             // check peer features
-            if !self.features.compatible_with(peer_features) {
+            if !peer_features.supports_channel_v2() || !self.features.compatible_with(peer_features)
+            {
                 return Err(ProcessingChannelError::InvalidParameter(format!(
                     "Peer {:?} features {:?} are not compatible with our features {:?}",
                     pubkey, peer_features, self.features
@@ -6691,35 +6631,6 @@ where
             )));
         }
         Ok(())
-    }
-
-    /// Select the commitment-lock features for a new channel from both peers'
-    /// advertised feature vectors.
-    fn negotiated_channel_features(&self, peer_pubkey: &Pubkey) -> ChannelFeatures {
-        let peer_supports = self
-            .peer_session_map
-            .get(peer_pubkey)
-            .and_then(|peer| peer.features.as_ref())
-            .map(|features| features.supports_channel_v2());
-        ChannelFeatures::for_negotiated(self.features.supports_channel_v2(), peer_supports)
-    }
-
-    fn required_new_channel_features(
-        &self,
-        peer_pubkey: &Pubkey,
-    ) -> Result<ChannelFeatures, ProcessingChannelError> {
-        let features = self.negotiated_channel_features(peer_pubkey);
-        #[cfg(test)]
-        if self.to_be_accepted_channels.test_allow_legacy {
-            return Ok(features);
-        }
-        if !features.is_v2() {
-            return Err(ProcessingChannelError::InvalidParameter(format!(
-                "Cannot open channel with peer {:?}: CHANNEL_V2 is required",
-                peer_pubkey,
-            )));
-        }
-        Ok(features)
     }
 
     fn only_abort_funding_on_input_spent(&self, channel_id: &Hash256) -> bool {
@@ -7460,7 +7371,8 @@ where
                         _ => None,
                     }),
             );
-            if let Some(session) = &channel_actor_state.session_v2 {
+            {
+                let session = &channel_actor_state.session;
                 payment_hashes.extend(
                     session
                         .remove_effects
@@ -7468,9 +7380,7 @@ where
                         .filter_map(|(tlc, _)| tlc.attempt_id.map(|_| tlc.payment_hash)),
                 );
             }
-            if channel_actor_state.channel_features.is_v2()
-                && matches!(channel_actor_state.state, ChannelState::Closed(_))
-            {
+            if matches!(channel_actor_state.state, ChannelState::Closed(_)) {
                 // A receipt can retire the source before a persisted payment retry's timer runs.
                 if let Some(outpoint) = channel_actor_state.get_funding_transaction_outpoint() {
                     let attempts = self
@@ -7491,13 +7401,13 @@ where
                     for attempt in attempts {
                         // Recovery keys follow the current first hop; recheck durable ownership.
                         let owned = attempt.first_hop_channel_outpoint_eq(&outpoint)
-                            && (channel_actor_state.owns_payment_attempt(&attempt)
-                                || channel_actor_state.session_v2.iter().any(|session| {
-                                    session.remove_effects.iter().any(|(tlc, _)| {
-                                        tlc.payment_hash == attempt.payment_hash
-                                            && tlc.attempt_id == Some(attempt.id)
-                                    })
-                                }));
+                            && (channel_actor_state.owns_payment_attempt(&attempt) || {
+                                let session = &channel_actor_state.session;
+                                session.remove_effects.iter().any(|(tlc, _)| {
+                                    tlc.payment_hash == attempt.payment_hash
+                                        && tlc.attempt_id == Some(attempt.id)
+                                })
+                            });
                         if !owned {
                             let _ = self.network.send_message(NetworkActorMessage::new_event(
                                 NetworkActorEvent::ResumePaymentAfterClosedChannel(
@@ -7942,6 +7852,23 @@ where
             ProcessingChannelError::InvalidParameter(e.to_string())
         })?;
 
+        if !init_msg.features.supports_channel_v2()
+            || !self.features.compatible_with(&init_msg.features)
+        {
+            self.network
+                .send_message(NetworkActorMessage::new_command(
+                    NetworkActorCommand::DisconnectPeer(
+                        peer_pubkey,
+                        PeerDisconnectReason::IncompatibleFeatures,
+                        None,
+                    ),
+                ))
+                .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+            return Err(ProcessingChannelError::InvalidParameter(
+                "Incompatible peer features: CHANNEL_V2 is required".to_owned(),
+            ));
+        }
+
         if let Some(info) = self.peer_session_map.get_mut(&peer_pubkey) {
             info.features = Some(init_msg.features);
         } else {
@@ -7977,7 +7904,7 @@ where
     pub async fn on_open_channel_msg(
         &mut self,
         peer_pubkey: Pubkey,
-        open_channel: OpenChannel,
+        open_channel: OpenChannelV2,
     ) -> ProcessingChannelResult {
         let id = open_channel.channel_id;
         let remote_funding_amount = open_channel.funding_amount;
@@ -7990,9 +7917,8 @@ where
             )));
         }
 
-        let channel_features = self.negotiated_channel_features(&peer_pubkey);
         let result = self
-            .required_new_channel_features(&peer_pubkey)
+            .check_feature_compatibility(&peer_pubkey)
             .and_then(|_| {
                 check_open_channel_parameters(
                     &open_channel.funding_udt_type_script,
@@ -8000,7 +7926,6 @@ where
                     open_channel.reserved_ckb_amount,
                     open_channel.funding_fee_rate,
                     open_channel.commitment_fee_rate,
-                    channel_features,
                     open_channel.commitment_delay_epoch,
                     open_channel.max_tlc_number_in_flight,
                 )
@@ -8009,24 +7934,15 @@ where
                 if !self.to_be_accepted_channels.map.contains_key(&id) {
                     self.check_pending_channel_limit(peer_pubkey)?;
                 }
-                self.to_be_accepted_channels.try_insert(
-                    id,
-                    peer_pubkey,
-                    open_channel,
-                    channel_features,
-                )
+                self.to_be_accepted_channels
+                    .try_insert(id, peer_pubkey, open_channel)
             });
 
         match result {
             Ok(_) => {
                 // Create a persistent record so the accepting side can see this pending channel
                 // via list_channels(only_pending=true) and across node restarts.
-                let record = ChannelOpenRecord::new_inbound_with_features(
-                    id,
-                    peer_pubkey,
-                    remote_funding_amount,
-                    channel_features,
-                );
+                let record = ChannelOpenRecord::new_inbound(id, peer_pubkey, remote_funding_amount);
                 self.store.insert_channel_open_record(record);
 
                 // Notify outside observers.
@@ -8310,7 +8226,7 @@ where
         match self.channels.get(&channel_id) {
             None => match (message, peer_pubkey) {
                 (
-                    ChannelActorMessage::PeerMessage(FiberChannelMessage::ReestablishChannel(r)),
+                    ChannelActorMessage::PeerMessage(FiberChannelMessage::ReestablishChannelV2(r)),
                     Some(remote_pubkey),
                 ) if self.store.get_channel_actor_state(&channel_id).is_some() => {
                     debug!(
@@ -8324,7 +8240,7 @@ where
                         Ok(actor) => {
                             actor
                                 .send_message(ChannelActorMessage::PeerMessage(
-                                    FiberChannelMessage::ReestablishChannel(r),
+                                    FiberChannelMessage::ReestablishChannelV2(r),
                                 ))
                                 .expect("channel actor alive");
                         }
@@ -9276,8 +9192,6 @@ fn target_default_transport_matches(addr: &Multiaddr) -> bool {
 }
 
 struct ToBeAcceptedChannels {
-    #[cfg(test)]
-    test_allow_legacy: bool,
     total_number_limit: usize,
     total_bytes_limit: usize,
     map: HashMap<Hash256, (Pubkey, PendingOpenChannel)>,
@@ -9285,15 +9199,12 @@ struct ToBeAcceptedChannels {
 
 #[derive(Debug)]
 struct PendingOpenChannel {
-    open_channel: OpenChannel,
-    channel_features: ChannelFeatures,
+    open_channel: OpenChannelV2,
 }
 
 impl Default for ToBeAcceptedChannels {
     fn default() -> Self {
         Self {
-            #[cfg(test)]
-            test_allow_legacy: false,
             total_number_limit: usize::MAX,
             total_bytes_limit: usize::MAX,
             map: HashMap::default(),
@@ -9309,27 +9220,8 @@ const DEFAULT_TO_BE_ACCEPTED_CHANNELS_BYTES_LIMIT: usize = 51200;
 const DEFAULT_PENDING_CHANNELS_NUMBER_LIMIT: usize = 100;
 
 impl ToBeAcceptedChannels {
-    fn require_channel_v2(&self, id: &Hash256) -> ProcessingChannelResult {
-        #[cfg(test)]
-        if self.test_allow_legacy {
-            return Ok(());
-        }
-        if self
-            .map
-            .get(id)
-            .is_some_and(|(_, pending)| !pending.channel_features.is_v2())
-        {
-            return Err(ProcessingChannelError::InvalidParameter(
-                "Cannot accept Legacy channel: CHANNEL_V2 is required".to_string(),
-            ));
-        }
-        Ok(())
-    }
-
     fn new_with_config(config: &FiberConfig) -> Self {
         Self {
-            #[cfg(test)]
-            test_allow_legacy: false,
             total_number_limit: config
                 .to_be_accepted_channels_number_limit
                 .unwrap_or(DEFAULT_TO_BE_ACCEPTED_CHANNELS_NUMBER_LIMIT),
@@ -9356,8 +9248,7 @@ impl ToBeAcceptedChannels {
         &mut self,
         id: Hash256,
         pubkey: Pubkey,
-        open_channel: OpenChannel,
-        channel_features: ChannelFeatures,
+        open_channel: OpenChannelV2,
     ) -> ProcessingChannelResult {
         if let Some(existing_value) = self.map.get(&id) {
             let err_message = format!(
@@ -9396,65 +9287,8 @@ impl ToBeAcceptedChannels {
             "Channel from {:?} of id {:?} is now awaiting to be accepted: {:?}",
             &pubkey, &id, &open_channel
         );
-        self.map.insert(
-            id,
-            (
-                pubkey,
-                PendingOpenChannel {
-                    open_channel,
-                    channel_features,
-                },
-            ),
-        );
+        self.map
+            .insert(id, (pubkey, PendingOpenChannel { open_channel }));
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod pending_open_tests {
-    use super::*;
-    use musig2::SecNonce;
-
-    #[test]
-    fn pending_open_retains_contract_features_selected_at_receipt() {
-        let mut pending = ToBeAcceptedChannels::default();
-        let channel_id = [1u8; 32].into();
-        let peer = Privkey::from_slice(&[2u8; 32]).pubkey();
-        let open_channel = OpenChannel {
-            chain_hash: get_chain_hash(),
-            channel_id,
-            funding_udt_type_script: None,
-            funding_amount: 1,
-            shutdown_script: Default::default(),
-            reserved_ckb_amount: 0,
-            funding_fee_rate: 0,
-            commitment_fee_rate: 0,
-            commitment_delay_epoch: 0,
-            max_tlc_value_in_flight: 0,
-            max_tlc_number_in_flight: 0,
-            channel_flags: fiber_types::ChannelFlags::empty(),
-            first_per_commitment_point: peer,
-            second_per_commitment_point: peer,
-            funding_pubkey: peer,
-            tlc_basepoint: peer,
-            next_commitment_nonce: SecNonce::build([3u8; 32]).build().public_nonce(),
-            next_revocation_nonce: SecNonce::build([4u8; 32]).build().public_nonce(),
-            channel_announcement_nonce: None,
-        };
-
-        pending
-            .try_insert(channel_id, peer, open_channel.clone(), ChannelFeatures::V2)
-            .expect("pending open should be inserted");
-
-        let legacy_id = [5u8; 32].into();
-        pending
-            .try_insert(legacy_id, peer, open_channel, ChannelFeatures::LEGACY)
-            .expect("legacy pending fixture");
-        assert!(pending.require_channel_v2(&legacy_id).is_err());
-        assert!(pending.map.contains_key(&legacy_id));
-        assert!(pending.require_channel_v2(&channel_id).is_ok());
-
-        let (_, pending_open) = pending.remove(&channel_id).expect("pending open exists");
-        assert_eq!(pending_open.channel_features, ChannelFeatures::V2);
     }
 }

@@ -3,7 +3,7 @@
 //! Two persisted states survive a process exit but used to have no restore path:
 //!
 //! * `waiting_forward_tlc_tasks`, which only lives in memory as a network actor task, and
-//! * `session_v2.remove_effects` entries whose payment effect could not be bound because the
+//! * `session.remove_effects` entries whose payment effect could not be bound because the
 //!   network actor was busy.
 
 use std::sync::{Arc, Mutex};
@@ -658,7 +658,7 @@ async fn test_v2_settled_remove_defers_when_payment_effect_lookup_times_out() {
     let payment_hash = gen_rand_sha256_hash();
     let data = fiber_types::ChannelActorData::samples(7)
         .into_iter()
-        .find(|data| data.session_v2.is_some())
+        .next()
         .expect("a V2 sample");
     let mut state = ChannelActorState::from(data);
     // Only the settled removal under test: the sample state carries its own TLCs.
@@ -697,12 +697,7 @@ async fn test_v2_settled_remove_defers_when_payment_effect_lookup_times_out() {
         "a deferred removal must stay unapplied so it can be retried"
     );
     assert!(
-        state
-            .session_v2
-            .as_ref()
-            .expect("v2 session")
-            .remove_effects
-            .is_empty(),
+        state.session.remove_effects.is_empty(),
         "no outbox entry may be durable before its payment effect is bound"
     );
 }
@@ -717,7 +712,7 @@ async fn test_v2_inapplicable_settled_remove_closes_instead_of_panicking() {
     let payment_hash = gen_rand_sha256_hash();
     let data = fiber_types::ChannelActorData::samples(7)
         .into_iter()
-        .find(|data| data.session_v2.is_some())
+        .next()
         .expect("a V2 sample");
     let mut state = ChannelActorState::from(data);
     state.tlc_state = Default::default();

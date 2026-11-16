@@ -2,6 +2,8 @@
 
 # Fiber Breaking Change Migration Guide
 
+> Historical guide for old releases only. These older layouts must first be upgraded with their matching old migration tools. The V2-only release can then migrate the recognized layout if all unfinished channels are V2; unfinished V1 work must finish with the old binary. See the [current upgrade instructions](../../README.md#upgrading-to-the-v2-only-release).
+
 ## Why
 
 Fiber's got some big updates, including changes to the database schema that don't play nice with older versions. We introduced our first breaking change to roll out the cool new basic MPP feature and some security patches.

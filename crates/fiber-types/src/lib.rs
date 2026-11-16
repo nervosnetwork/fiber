@@ -73,8 +73,7 @@ pub fn now_timestamp_as_millis_u64() -> u64 {
 ///
 /// This function is used to deserialize values stored in the node's RocksDB.
 /// External applications can use this to read and parse store data directly.
-/// Channel actor data uses the exact, structurally checked published-legacy compatibility
-/// decoder. Stored values are owned so this dispatch can use their actual type.
+/// Channel actor data uses the exact, structurally checked V2 decoder. Stored values are owned so this dispatch can use their actual type.
 ///
 /// # Example
 ///

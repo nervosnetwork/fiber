@@ -12,15 +12,13 @@ use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::cch::{CchOrderStore, CchStoreError};
 use crate::fiber::gossip::GossipMessageStore;
-use crate::fiber::onchain_tlc_reconcile::StoredOnChainTlcSettlement;
-#[cfg(feature = "watchtower")]
-use crate::fiber::onchain_tlc_reconcile::{LegacyOnChainTlcSettlement, OnChainTlcSettlement};
+use crate::fiber::onchain_tlc_reconcile::OnChainTlcSettlement;
 use crate::fiber::types::HoldTlc;
 #[cfg(feature = "watchtower")]
 use crate::watchtower::WatchtowerStore;
 use crate::{
     fiber::{
-        channel::{ChannelActorState, ChannelActorStateStore, ChannelOpenRecordStore, CommitDiff},
+        channel::{ChannelActorState, ChannelActorStateStore, ChannelOpenRecordStore},
         graph::NetworkGraphStateStore,
         network::NetworkActorStateStore,
         payment::{attempt_has_channel_work, PaymentSessionExt},
@@ -306,6 +304,21 @@ pub(crate) fn open_store_with_migrations<P: AsRef<Path>>(
 
 pub fn check_validate<P: AsRef<Path>>(path: P) -> Result<(), String> {
     let db = fiber_store::Store::open_db(path.as_ref())?;
+    let mut migrate = DbMigrate::new();
+    fiber_store::migrations::register_all_migrations(&mut migrate);
+    migrate.preflight(&db).map_err(|error| error.to_string())?;
+    let version = db
+        .get(MIGRATION_VERSION_KEY)
+        .ok_or("Database has no version; use its matching old binary first")?;
+    let version = std::str::from_utf8(&version).map_err(|_| "Invalid database version")?;
+    if !(INIT_DB_VERSION..=fiber_store::migration::LATEST_DB_VERSION).contains(&version) {
+        return Err(format!(
+            "Unsupported database version {version}; supported upgrade base is {INIT_DB_VERSION}"
+        ));
+    }
+    if migrate.check(&db) == std::cmp::Ordering::Less {
+        info!("Database is eligible for migration at startup");
+    }
     let store = Store {
         inner: db,
         watcher: None,
@@ -333,16 +346,7 @@ pub fn check_validate<P: AsRef<Path>>(path: P) -> Result<(), String> {
         }
 
         match key[0] {
-            CHANNEL_ACTOR_STATE_PREFIX => {
-                if let Err(e) =
-                    fiber_types::channel_v2_validation::decode_and_validate_channel_actor_data(
-                        &value,
-                    )
-                {
-                    errors.insert(format!(
-                        "Failed to deserialize CHANNEL_ACTOR_STATE_PREFIX: {e}"
-                    ));
-                }
+            CHANNEL_ACTOR_STATE_PREFIX | CHANNEL_OPEN_RECORD_PREFIX | WATCHTOWER_CHANNEL_PREFIX => {
             }
             PUBLIC_KEY_NETWORK_ACTOR_STATE_PREFIX => {
                 check_deserialization::<PersistentNetworkActorState>(
@@ -425,14 +429,6 @@ pub fn check_validate<P: AsRef<Path>>(path: P) -> Result<(), String> {
                 );
             }
             #[cfg(feature = "watchtower")]
-            WATCHTOWER_CHANNEL_PREFIX => {
-                check_deserialization::<ChannelData>(
-                    &value,
-                    "WATCHTOWER_CHANNEL_PREFIX",
-                    &mut errors,
-                );
-            }
-            #[cfg(feature = "watchtower")]
             WATCHTOWER_SUPERSEDED_SETTLEMENT_PREFIX => {
                 check_deserialization::<Vec<SettlementData>>(
                     &value,
@@ -453,47 +449,7 @@ pub fn check_validate<P: AsRef<Path>>(path: P) -> Result<(), String> {
     }
 
     let mut errors: Vec<String> = errors.into_iter().collect();
-    {
-        let mut migrate = DbMigrate::new();
-        fiber_store::migrations::register_all_migrations(&mut migrate);
-        let ordering = migrate.check(&store.inner);
-        match ordering {
-            std::cmp::Ordering::Greater => {
-                let db_version = store
-                    .inner
-                    .get(MIGRATION_VERSION_KEY)
-                    .map(|v| String::from_utf8(v).unwrap_or_default())
-                    .unwrap_or_default();
-                errors.push(format!(
-                    "Database version ({}) is newer than the binary. \
-                     Please upgrade fiber to a newer version.",
-                    db_version
-                ));
-            }
-            std::cmp::Ordering::Less => {
-                let db_version = store
-                    .inner
-                    .get(MIGRATION_VERSION_KEY)
-                    .map(|v| String::from_utf8(v).unwrap_or_default())
-                    .unwrap_or_default();
-                let mut msg = format!(
-                    "Database version ({}) is older than the binary. Migration needed.",
-                    db_version
-                );
-                // If the DB is older than the initial migration epoch, the user
-                // must run the legacy fnn-migrate tool first.
-                if db_version.as_str() < INIT_DB_VERSION {
-                    msg.push_str(&format!(
-                        " DB version {} predates the unified migration epoch ({}). \
-                         Run fnn-migrate v0.8.x to upgrade before starting this binary.",
-                        db_version, INIT_DB_VERSION
-                    ));
-                }
-                errors.push(msg);
-            }
-            std::cmp::Ordering::Equal => {}
-        }
-    }
+    errors.sort();
     if errors.is_empty() {
         info!("All keys and values in the store are valid.");
         Ok(())
@@ -789,15 +745,6 @@ impl StoreKeyValue for KeyValue {
 
 #[cfg(feature = "watchtower")]
 impl Store {
-    fn legacy_tlc_on_chain_settled_key(channel_id: &Hash256, payment_hash: &[u8; 20]) -> Vec<u8> {
-        [
-            &[WATCHTOWER_TLC_SETTLED_PREFIX],
-            channel_id.as_ref(),
-            payment_hash.as_ref(),
-        ]
-        .concat()
-    }
-
     fn tlc_on_chain_settled_key(node_id: &NodeId, channel_id: &Hash256, tlc_id: TLCId) -> Vec<u8> {
         let (direction, id) = match tlc_id {
             TLCId::Offered(id) => (0u8, id),
@@ -929,7 +876,7 @@ impl Store {
         // ChannelData retains several candidate commitment snapshots. Once an exact settlement
         // exists, only snapshots containing exact evidence can represent the active on-chain
         // chain. Within those candidates every same-hash TLC must be settled before its shared
-        // preimage can be removed. Prefix-keyed legacy records intentionally provide no evidence
+        // preimage can be removed. Unrecognized prefix-keyed records provide no evidence
         // here because they cannot identify a specific TLC.
         if snapshot_statuses
             .iter()
@@ -1120,28 +1067,6 @@ impl ChannelActorStateStore for Store {
         batch.commit();
     }
 
-    fn insert_channel_actor_state_with_pending_commit_diff(
-        &self,
-        state: ChannelActorState,
-        diff: &CommitDiff,
-    ) {
-        let channel_id = state.get_id();
-        let mut batch = self.batch();
-
-        let kv = KeyValue::PubkeyChannelId((state.get_remote_pubkey(), state.id), state.state);
-        batch.put(kv.key(), kv.value());
-        if let Some(outpoint) = state.get_funding_transaction_outpoint() {
-            let kv = KeyValue::OutPointChannelId(outpoint, state.id);
-            batch.put(kv.key(), kv.value());
-        }
-        let kv = KeyValue::ChannelActorState(state.id, state);
-        batch.put(kv.key(), kv.value());
-
-        let key = [&[PENDING_COMMIT_DIFF_PREFIX], channel_id.as_ref()].concat();
-        batch.put(key, serialize_to_vec(diff, "CommitDiff"));
-        batch.commit();
-    }
-
     fn move_channel_actor_state(&self, old_id: &Hash256, state: ChannelActorState) {
         if old_id == &state.id {
             self.insert_channel_actor_state(state);
@@ -1195,7 +1120,6 @@ impl ChannelActorStateStore for Store {
                 batch.delete([&[CHANNEL_OUTPOINT_CHANNEL_ID_PREFIX], outpoint.as_slice()].concat());
             }
             batch.delete([&[CHANNEL_SHUTDOWN_SETTLEMENT_PREFIX], id.as_ref()].concat());
-            batch.delete([&[PENDING_COMMIT_DIFF_PREFIX], id.as_ref()].concat());
             batch.commit();
         }
     }
@@ -1322,7 +1246,7 @@ impl ChannelActorStateStore for Store {
         channel_id: &Hash256,
         tlc_id: TLCId,
         payment_hash: &Hash256,
-    ) -> Option<StoredOnChainTlcSettlement> {
+    ) -> Option<OnChainTlcSettlement> {
         #[cfg(feature = "watchtower")]
         {
             WatchtowerStore::get_onchain_tlc_settlement(
@@ -1338,22 +1262,6 @@ impl ChannelActorStateStore for Store {
             let _ = (channel_id, tlc_id, payment_hash);
             None
         }
-    }
-
-    fn store_pending_commit_diff(&self, channel_id: &Hash256, diff: &CommitDiff) {
-        let key = [&[PENDING_COMMIT_DIFF_PREFIX], channel_id.as_ref()].concat();
-        let value = serialize_to_vec(diff, "CommitDiff");
-        self.put(key, value);
-    }
-
-    fn get_pending_commit_diff(&self, channel_id: &Hash256) -> Option<CommitDiff> {
-        let key = [&[PENDING_COMMIT_DIFF_PREFIX], channel_id.as_ref()].concat();
-        self.get(&key).map(|v| deserialize_from(&v, "CommitDiff"))
-    }
-
-    fn delete_pending_commit_diff(&self, channel_id: &Hash256) {
-        let key = [&[PENDING_COMMIT_DIFF_PREFIX], channel_id.as_ref()].concat();
-        self.delete(&key);
     }
 
     fn store_shutdown_settlement_record(
@@ -1987,31 +1895,6 @@ impl WatchtowerStore for Store {
         remote_funding_pubkey: Pubkey,
         settlement_data: SettlementData,
     ) {
-        self.insert_watch_channel_with_features(
-            node_id,
-            channel_id,
-            funding_udt_type_script,
-            local_settlement_key,
-            remote_settlement_key,
-            local_funding_pubkey,
-            remote_funding_pubkey,
-            settlement_data,
-            ChannelFeatures::LEGACY,
-        );
-    }
-
-    fn insert_watch_channel_with_features(
-        &self,
-        node_id: NodeId,
-        channel_id: Hash256,
-        funding_udt_type_script: Option<Script>,
-        local_settlement_key: Privkey,
-        remote_settlement_key: Pubkey,
-        local_funding_pubkey: Pubkey,
-        remote_funding_pubkey: Pubkey,
-        settlement_data: SettlementData,
-        channel_features: ChannelFeatures,
-    ) {
         let lock = self.watchtower_write_lock(&node_id);
         let _guard = lock.lock();
         let key = [
@@ -2037,7 +1920,7 @@ impl WatchtowerStore for Store {
                 remote_settlement_data: settlement_data.clone(),
                 local_settlement_data: settlement_data.clone(),
                 revocation_data: None,
-                channel_features,
+                channel_features: ChannelFeatures::V2,
             },
             "ChannelData",
         );
@@ -2293,36 +2176,10 @@ impl WatchtowerStore for Store {
         node_id: &NodeId,
         channel_id: &Hash256,
         tlc_id: TLCId,
-        payment_hash: &Hash256,
-    ) -> Option<StoredOnChainTlcSettlement> {
-        if let Some(value) = self.get(Store::tlc_on_chain_settled_key(node_id, channel_id, tlc_id))
-        {
-            return Some(StoredOnChainTlcSettlement::Exact(deserialize_from(
-                value.as_ref(),
-                "OnChainTlcSettlement",
-            )));
-        }
-
-        let payment_hash_prefix: [u8; 20] = payment_hash.as_ref()[0..20]
-            .try_into()
-            .expect("payment hash prefix");
-        let value = self.get(Store::legacy_tlc_on_chain_settled_key(
-            channel_id,
-            &payment_hash_prefix,
-        ))?;
-        if value.is_empty() {
-            return Some(StoredOnChainTlcSettlement::Legacy(
-                LegacyOnChainTlcSettlement {
-                    preimage: None,
-                    tx_hash: None,
-                    tlc_index: None,
-                },
-            ));
-        }
-        Some(StoredOnChainTlcSettlement::Legacy(deserialize_from(
-            value.as_ref(),
-            "LegacyOnChainTlcSettlement",
-        )))
+        _payment_hash: &Hash256,
+    ) -> Option<OnChainTlcSettlement> {
+        self.get(Store::tlc_on_chain_settled_key(node_id, channel_id, tlc_id))
+            .map(|value| deserialize_from(value.as_ref(), "OnChainTlcSettlement"))
     }
 }
 
