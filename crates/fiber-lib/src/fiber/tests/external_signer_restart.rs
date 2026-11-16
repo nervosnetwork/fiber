@@ -113,9 +113,13 @@ impl ExternalSignerHttpClient<'_> {
         &self,
         params: SubmitChannelSignatureParams,
     ) -> Result<SubmitChannelSignatureResult, String> {
-        self.node
+        let channel_id = params.channel_id.into();
+        let result = self
+            .node
             .send_rpc_request("submit_channel_signature", params)
-            .await
+            .await?;
+        maybe_submit_fixture_funding(self.node, channel_id).await;
+        Ok(result)
     }
 }
 
@@ -269,7 +273,6 @@ pub(crate) async fn approve_fixture_opening(
                 commitment_fee: crate::fiber::fee::checked_calculate_commitment_tx_fee(
                     state.commitment_fee_rate,
                     &state.funding_udt_type_script,
-                    state.commitment_contract_features,
                 )
                 .unwrap(),
                 local_amount: local_amount + if ckb { u128::from(local_reserved) } else { 0 },
@@ -645,27 +648,47 @@ async fn setup_pending_external_channel(
         true,
     )
     .await;
-    let _: SubmitSignedFundingTxResult = node_a
-        .send_rpc_request(
-            "submit_signed_funding_tx",
-            SubmitSignedFundingTxParams {
-                channel_id: channel_id.into(),
-                signed_funding_tx: mock_sign_external_funding_tx(&unsigned_tx).into(),
-            },
-        )
-        .await
-        .unwrap();
-
+    // Funding input signatures are withheld until the SDK has completed both
+    // initial owner lanes and the node has persisted our usable local exit.
     ([node_a, node_b], channel_id, unsigned_tx)
 }
 
 /// Exercise the mandatory SDK validator against real ChannelActor/RPC opening requests.
 #[tokio::test]
 async fn test_sdk_validates_real_opening_commitments() {
+    // Keep the complete bidirectional SDK/actor lifecycle off the small default
+    // libtest stack; all protocol checks below still execute unchanged.
+    Box::pin(check_real_opening_commitments()).await;
+}
+
+async fn check_real_opening_commitments() {
     init_tracing();
     let (_restartable, signer) = RestartableExternalSigner::create().await;
-    let ([node_a, node_b], channel_id, _funding) =
-        setup_pending_external_channel(false, &signer).await;
+    let ([node_a, node_b], channel_id, funding) =
+        Box::pin(setup_pending_external_channel(false, &signer)).await;
+    let before = node_a.get_channel_actor_state(channel_id);
+    assert!(before.signer.is_none());
+    assert!(before.latest_commitment_transaction.is_none());
+    let premature: Result<SubmitSignedFundingTxResult, String> = node_a
+        .send_rpc_request(
+            "submit_signed_funding_tx",
+            SubmitSignedFundingTxParams {
+                channel_id: channel_id.into(),
+                signed_funding_tx: mock_sign_external_funding_tx(&funding).into(),
+            },
+        )
+        .await;
+    assert!(
+        premature.is_err(),
+        "funding signatures must not be accepted before a usable exit"
+    );
+    assert!(
+        !node_a
+            .get_channel_actor_state(channel_id)
+            .ephemeral_config
+            .external_funding
+            .signed_submitted
+    );
     let mut verified = 0;
     tokio::time::timeout(Duration::from_secs(30), async {
         loop {
@@ -742,6 +765,26 @@ async fn test_sdk_validates_real_opening_commitments() {
     .await
     .expect("verified opening reaches ChannelReady");
     assert_eq!(verified, 2);
+    let snapshot = node_a.get_channel_actor_state(channel_id).core;
+    fiber_types::channel_v2_validation::validate_channel_v2(&snapshot).unwrap();
+    let mut corrupt = snapshot.clone();
+    corrupt
+        .signing_context
+        .v2_allocations
+        .iter_mut()
+        .find(|r| r.signature.is_some())
+        .unwrap()
+        .signature = Some(musig2::PartialSignature::from_slice(&[1; 32]).unwrap());
+    assert!(
+        fiber_types::channel_v2_validation::validate_channel_v2(&corrupt).is_err(),
+        "all external cached signatures must be verified at restore, not trusted"
+    );
+    let mut corrupt = snapshot;
+    corrupt.signing_context.v2_allocations[0].seed = [1; 32];
+    assert!(
+        fiber_types::channel_v2_validation::validate_channel_v2(&corrupt).is_err(),
+        "host must never retain a secret external nonce seed"
+    );
     // Exercise all real commitment/revocation phases with mandatory SDK validation.
     for inbound in [false, true] {
         let (sender, receiver) = if inbound {
@@ -921,13 +964,40 @@ pub async fn get_signing_status(
     .await
 }
 
+async fn maybe_submit_fixture_funding(node: &NetworkNode, channel_id: Hash256) {
+    let state = node.get_channel_actor_state(channel_id);
+    let funding = &state.ephemeral_config.external_funding;
+    if funding.enabled
+        && !funding.signed_submitted
+        && state.latest_commitment_transaction.is_some()
+        && matches!(state.state, ChannelState::SigningCommitment(flags)
+            if flags.contains(fiber_types::SigningCommitmentFlags::COMMITMENT_SIGNED_SENT))
+    {
+        let signed = mock_sign_external_funding_tx(funding.unsigned_funding_tx.as_ref().unwrap());
+        let _: SubmitSignedFundingTxResult = node
+            .send_rpc_request(
+                "submit_signed_funding_tx",
+                SubmitSignedFundingTxParams {
+                    channel_id: channel_id.into(),
+                    signed_funding_tx: signed.into(),
+                },
+            )
+            .await
+            .unwrap();
+    }
+}
+
 /// Submit an external channel signature to the node.
 pub async fn submit_signature(
     node: &NetworkNode,
     params: SubmitChannelSignatureParams,
 ) -> Result<SubmitChannelSignatureResult, String> {
-    node.send_rpc_request("submit_channel_signature", params)
-        .await
+    let channel_id = params.channel_id.into();
+    let result = node
+        .send_rpc_request("submit_channel_signature", params)
+        .await?;
+    maybe_submit_fixture_funding(node, channel_id).await;
+    Ok(result)
 }
 
 /// Prepare and submit a signature for the specified SignatureRequired status.
@@ -2083,7 +2153,7 @@ async fn check_restart_after_accepting_signature(checkpoint: ChannelSigningTrans
     tenant.stop().await;
     let mut state = tenant.store.get_channel_actor_state(&channel_id).unwrap();
     let previous_numbers = state.commitment_numbers;
-    let previous_ack = state.last_revoke_ack_msg.clone();
+    let previous_ack = state.session.last_ack.clone();
     let (sender, _messages) = tokio::sync::mpsc::unbounded_channel();
     let (network, network_task) = Actor::spawn(None, DeadlineNetworkProbe, sender)
         .await
@@ -2105,6 +2175,16 @@ async fn check_restart_after_accepting_signature(checkpoint: ChannelSigningTrans
         request_id,
         signature: Ok(musig2::PartialSignature::from_slice(&submission.partial_signature).unwrap()),
         next_material: Some(NextChannelSignerMaterial {
+            v2_nonces: material
+                .v2_nonces
+                .iter()
+                .map(|n| musig2::PubNonce::from_bytes(n).unwrap())
+                .collect(),
+            commitment_points: material
+                .commitment_points
+                .iter()
+                .map(|(n, p)| (*n, (*p).try_into().unwrap()))
+                .collect(),
             next_commitment_point: material
                 .next_commitment_point
                 .map(|p| p.try_into().unwrap()),
@@ -2131,8 +2211,8 @@ async fn check_restart_after_accepting_signature(checkpoint: ChannelSigningTrans
     let persisted = tenant.store.get_channel_actor_state(&channel_id).unwrap();
     assert_eq!(persisted.commitment_numbers, previous_numbers);
     assert_eq!(
-        bincode::serialize(&persisted.last_revoke_ack_msg).unwrap(),
-        bincode::serialize(&previous_ack).unwrap()
+        persisted.session.last_ack.as_ref().map(|a| a.as_slice()),
+        previous_ack.as_ref().map(|a| a.as_slice())
     );
     assert!(
         persisted.signing_context.is_awaiting_signature(),
@@ -2305,7 +2385,6 @@ async fn check_signature_deadline(
     state.state = ChannelState::NegotiatingFunding(fiber_types::NegotiatingFundingFlags::empty());
     assert!(channel
         .handle_shutdown_command(
-            &myself,
             &mut state,
             ShutdownCommand {
                 close_script: None,
@@ -2320,7 +2399,6 @@ async fn check_signature_deadline(
     let signed_tx = state.latest_commitment_transaction.take();
     assert!(channel
         .handle_shutdown_command(
-            &myself,
             &mut state,
             ShutdownCommand {
                 close_script: None,
@@ -2472,32 +2550,4 @@ async fn test_signature_deadline_while_awaiting_received_revoke() {
         ChannelSigningTransition::CompleteReceivedRevokeAndAck,
     )
     .await;
-}
-
-pub(crate) async fn approve_fixture_close(
-    signer: &ChannelSigner<MemoryStore>,
-    state: &crate::fiber::channel::ChannelActorState,
-) {
-    let local = state.get_local_shutdown_script();
-    let remote = state.get_remote_shutdown_script();
-    let local_fee = crate::fiber::fee::checked_calculate_shutdown_tx_fee(
-        0,
-        &state.funding_udt_type_script,
-        (remote.clone(), local.clone()),
-    )
-    .unwrap();
-    let remote_fee = crate::fiber::fee::checked_calculate_shutdown_tx_fee(
-        DEFAULT_COMMITMENT_FEE_RATE,
-        &state.funding_udt_type_script,
-        (local, remote),
-    )
-    .unwrap();
-    signer
-        .authorize_close(fiber_lsp_sdk::CloseAuthorization {
-            fee: local_fee + remote_fee,
-            local_fee_share: local_fee,
-            remote_fee_share: remote_fee,
-        })
-        .await
-        .unwrap();
 }

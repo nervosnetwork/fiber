@@ -8,12 +8,12 @@ use crate::fiber::gossip::get_gossip_actor_name;
 use crate::fiber::gossip::GossipActorMessage;
 use crate::fiber::graph::NetworkGraphStateStore;
 use crate::fiber::network::*;
+use crate::fiber::payment::PaymentSessionExt;
 use crate::fiber::payment::SendPaymentCommand;
 use crate::fiber::payment::SendPaymentWithRouterCommand;
 use crate::fiber::types::FiberMessage;
 use crate::fiber::types::GossipMessage;
 use crate::fiber::types::Init;
-use crate::fiber::types::Shutdown;
 use crate::fiber::ASSUME_NETWORK_ACTOR_ALIVE;
 use crate::fiber::{
     Attempt, EcdsaSignature, FeatureVector, PaymentCustomRecords, PaymentSession, PaymentStatus,
@@ -189,7 +189,7 @@ pub fn init_tracing() {
 
 pub fn gen_rpc_config() -> RpcConfig {
     RpcConfig {
-        listening_addr: None,
+        listening_addr: Some("127.0.0.1:0".to_string()),
         ws_listening_addr: None,
         biscuit_public_key: None,
         biscuit_private_key_path: None,
@@ -1168,6 +1168,11 @@ impl NetworkNode {
         0
     }
 
+    /// Wait until all payment actors have exited and the network has removed them.
+    pub async fn wait_until_no_inflight_payments(&self) {
+        wait_until_async_timeout(|| async { self.get_inflight_payment_count().await == 0 }).await;
+    }
+
     pub async fn get_inflight_payment_count(&self) -> u32 {
         let message = |rpc_reply| {
             NetworkActorMessage::new_command(FiberActorCommand::GetInflightPaymentCount(rpc_reply))
@@ -1389,12 +1394,35 @@ impl NetworkNode {
             |status| {
                 if status == PaymentStatus::Failed {
                     error!("Unexpected payment failed: {:?}\n\n", payment_hash);
-                    assert_eq!(status, PaymentStatus::Success);
+                    assert_eq!(
+                        status,
+                        PaymentStatus::Success,
+                        "payment session: {:?}",
+                        self.get_payment_session(payment_hash)
+                    );
                 }
             },
             "Payment did not succeed within the expected time",
         )
         .await;
+    }
+
+    /// Wait until the successful payment's existing attempts and TLCs have finished.
+    pub async fn wait_until_payment_finished(&self, payment_hash: Hash256) {
+        self.wait_until_success(payment_hash).await;
+        tokio::time::timeout(Duration::from_secs(DEFAULT_WAIT_UNTIL_TIME), async {
+            loop {
+                let session = self
+                    .get_payment_session(payment_hash)
+                    .expect("payment exists");
+                if !session.has_pending_payment_work(&self.store) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("Successful payment still has pending TLCs");
     }
 
     pub async fn wait_until_failed(&self, payment_hash: Hash256) {
@@ -1500,15 +1528,18 @@ impl NetworkNode {
     }
 
     pub async fn disable_channel_stealthy(&self, channel_id: Hash256) {
-        let mut channel_actor_state = self.get_channel_actor_state(channel_id);
-        channel_actor_state.local_tlc_info.enabled = false;
-        self.update_channel_actor_state(
-            channel_actor_state,
-            Some(ReloadParams {
-                notify_changes: false,
-            }),
+        // Mutate the live actor: an external snapshot write can be overwritten before ReloadState.
+        ractor::call_t!(
+            self.network_actor,
+            |reply| NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
+                ChannelCommandWithId {
+                    channel_id,
+                    command: ChannelCommand::TestDisableTlc(reply),
+                }
+            )),
+            5000
         )
-        .await;
+        .expect("channel actor durably disables outbound TLCs");
     }
 
     pub async fn handle_shutdown_command_without_check(
@@ -1517,11 +1548,12 @@ impl NetworkNode {
         command: ShutdownCommand,
     ) {
         let state = self.get_channel_actor_state(channel_id);
+        let nonce_seed: [u8; 32] = gen_rand_sha256_hash().into();
         self.network_actor
             .send_message(NetworkActorMessage::new_command(
                 FiberActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
                     state.get_remote_pubkey(),
-                    FiberMessage::shutdown(Shutdown {
+                    FiberMessage::shutdown_v2(crate::fiber::types::ShutdownV2 {
                         channel_id: state.get_id(),
                         close_script: command
                             .close_script
@@ -1529,7 +1561,9 @@ impl NetworkNode {
                             .unwrap_or_else(|| state.local_shutdown_script.clone()),
                         fee_rate: command
                             .fee_rate
-                            .unwrap_or(FeeRate::from_u64(state.commitment_fee_rate)),
+                            .unwrap_or(FeeRate::from_u64(state.commitment_fee_rate))
+                            .as_u64(),
+                        closing_nonce: musig2::SecNonce::build(nonce_seed).build().public_nonce(),
                     }),
                 )),
             ))

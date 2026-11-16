@@ -5,10 +5,9 @@ GRCOV_EXCL_START = ^\s*((log::|tracing::)?(trace|debug|info|warn|error)|(debug_)
 GRCOV_EXCL_STOP  = ^\s*\)(;)?$$
 GRCOV_EXCL_LINE = ^\s*(\})*(\))*(;)*$$|\s*((log::|tracing::)?(trace|debug|info|warn|error)|(debug_)?assert(_eq|_ne|_error_eq))!\(.*\)(;)?$$
 
-NATIVE_PACKAGES = -p fnn -p fiber-bin -p fnn-cli -p fiber-store -p fiber-types -p fiber-json-types
-# fiber-types excluded because fiber-store depends on fiber-types@0.8.1 from
-# crates.io, making "-p fiber-types" ambiguous. Checked separately.
-NATIVE_NO_FIBER_TYPES = -p fnn -p fiber-bin -p fnn-cli -p fiber-store -p fiber-json-types
+NATIVE_PACKAGES = -p fnn -p fiber-bin -p fnn-cli -p fiber-store -p fiber-types -p fiber-json-types -p fiber-lsp-sdk -p fiber-lsp-sdk-agent
+# fiber-types is checked separately with its own feature set.
+NATIVE_NO_FIBER_TYPES = -p fnn -p fiber-bin -p fnn-cli -p fiber-store -p fiber-json-types -p fiber-lsp-sdk -p fiber-lsp-sdk-agent
 WASM_PACKAGES = -p fiber-wasm -p fiber-wasm-db-worker -p fiber-wasm-db-common -p fiber-lsp-sdk
 
 .PHONY: build-metrics-prof
@@ -36,8 +35,8 @@ check:
 .PHONY: clippy
 clippy:
 	cargo clippy --all-targets --all-features $(NATIVE_NO_FIBER_TYPES) -- -D warnings
-	cargo clippy --no-default-features --features "sqlite watchtower" $(NATIVE_NO_FIBER_TYPES) -- -D warnings
-	# fiber-types checked separately to avoid "-p fiber-types" ambiguity with crates.io dep
+	cargo clippy --no-default-features --features sqlite $(NATIVE_NO_FIBER_TYPES) -- -D warnings
+	# Check fiber-types separately with its own feature set.
 	cd crates/fiber-types && cargo clippy -- -D warnings
 	cargo clippy $(WASM_PACKAGES) --target wasm32-unknown-unknown -- -D warnings
 

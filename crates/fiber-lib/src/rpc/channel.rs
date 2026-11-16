@@ -95,6 +95,10 @@ trait ChannelRpc {
     /// the LSP public node as `pubkey`, explicit `public: false`, and
     /// `external_channel_signer`, and the response includes `opening_context`.
     /// Repeating identical parameters resumes the pending opening or returns its frozen result.
+    /// With an external channel signer, the result is a proposal for independent signer review.
+    /// Complete both initial channel-signing lanes and verify a usable local commitment before
+    /// signing or broadcasting wallet inputs. `submit_signed_funding_tx` enforces that ordering
+    /// on the node, but cannot prevent a wallet from broadcasting directly to CKB.
     #[method(name = "open_channel_with_external_funding", with_extensions)]
     async fn open_channel_with_external_funding(
         &self,
@@ -962,6 +966,14 @@ fn to_rpc_musig2_signing_content(
     content: fiber_types::Musig2SigningContent,
 ) -> Result<fiber_json_types::Musig2SigningContent, String> {
     Ok(fiber_json_types::Musig2SigningContent {
+        v2: Some({
+            let binding = content.v2.ok_or("missing V2 external nonce allocation")?;
+            fiber_json_types::V2NonceBinding {
+                channel_id: binding.channel_id.into(),
+                owner: binding.owner.into(),
+                public_nonce: binding.public_nonce.serialize().to_vec(),
+            }
+        }),
         slot: fiber_json_types::NonceSlot {
             purpose: to_rpc_nonce_purpose(content.slot.purpose),
             commitment_number: content.slot.commitment_number,
@@ -977,6 +989,7 @@ fn to_rpc_nonce_purpose(purpose: fiber_types::NoncePurpose) -> fiber_json_types:
     match purpose {
         fiber_types::NoncePurpose::Commitment => fiber_json_types::NoncePurpose::Commitment,
         fiber_types::NoncePurpose::Revocation => fiber_json_types::NoncePurpose::Revocation,
+        fiber_types::NoncePurpose::Closing => fiber_json_types::NoncePurpose::Closing,
         fiber_types::NoncePurpose::ChannelAnnouncement => {
             fiber_json_types::NoncePurpose::ChannelAnnouncement
         }
@@ -1037,6 +1050,11 @@ fn try_into_channel_open_signer_material(
     material: fiber_json_types::ChannelOpenSignerMaterial,
 ) -> Result<ChannelOpenSignerMaterial, String> {
     Ok(ChannelOpenSignerMaterial {
+        v2_nonces: material
+            .v2_nonces
+            .into_iter()
+            .map(try_into_pub_nonce)
+            .collect::<Result<_, _>>()?,
         base_public_keys: ChannelBasePublicKeys {
             funding_pubkey: Pubkey::try_from(material.base_public_keys.funding_pubkey)?,
             tlc_base_key: Pubkey::try_from(material.base_public_keys.tlc_base_key)?,
@@ -1057,6 +1075,16 @@ fn try_into_next_channel_signer_material(
     material: fiber_json_types::NextChannelSignerMaterial,
 ) -> Result<NextChannelSignerMaterial, String> {
     Ok(NextChannelSignerMaterial {
+        v2_nonces: material
+            .v2_nonces
+            .into_iter()
+            .map(try_into_pub_nonce)
+            .collect::<Result<_, _>>()?,
+        commitment_points: material
+            .commitment_points
+            .into_iter()
+            .map(|(number, point)| Ok((number, Pubkey::try_from(point)?)))
+            .collect::<Result<_, String>>()?,
         next_commitment_point: material
             .next_commitment_point
             .map(Pubkey::try_from)
@@ -1078,6 +1106,11 @@ pub(crate) fn to_rpc_channel_open_signer_material(
     material: &ChannelOpenSignerMaterial,
 ) -> fiber_json_types::ChannelOpenSignerMaterial {
     fiber_json_types::ChannelOpenSignerMaterial {
+        v2_nonces: material
+            .v2_nonces
+            .iter()
+            .map(|nonce| nonce.serialize().to_vec())
+            .collect(),
         base_public_keys: fiber_json_types::ChannelBasePublicKeys {
             funding_pubkey: material.base_public_keys.funding_pubkey.into(),
             tlc_base_key: material.base_public_keys.tlc_base_key.into(),
@@ -1154,7 +1187,62 @@ pub(crate) fn external_funding_command(
 mod signing_snapshot_tests {
     use fiber_types::{Privkey, SettlementData, SettlementTlc, TLCId};
 
-    use super::to_rpc_signing_settlement;
+    use super::{
+        to_rpc_musig2_signing_content, to_rpc_signing_settlement,
+        try_into_next_channel_signer_material,
+    };
+
+    #[test]
+    fn v2_signing_projection_preserves_closing_allocation_and_rejects_missing_binding() {
+        let local = Privkey::from(&[1; 32]).pubkey();
+        let remote = Privkey::from(&[2; 32]).pubkey();
+        let public_nonce = musig2::SecNonce::build([3; 32]).build().public_nonce();
+        let binding = fiber_types::V2NonceBinding {
+            channel_id: [4; 32].into(),
+            owner: local,
+            public_nonce: public_nonce.clone(),
+        };
+        let mut content = fiber_types::Musig2SigningContent {
+            v2: Some(binding.clone()),
+            slot: fiber_types::NonceSlot {
+                purpose: fiber_types::NoncePurpose::Closing,
+                commitment_number: 0,
+            },
+            commitment_counter: None,
+            key_agg_ctx: musig2::KeyAggContext::new([local, remote]).unwrap(),
+            agg_nonce: musig2::AggNonce::sum([public_nonce]),
+            content: fiber_types::Musig2SignableContent::CooperativeCloseTransaction(
+                ckb_types::packed::Transaction::default(),
+            ),
+        };
+        let json = to_rpc_musig2_signing_content(content.clone()).unwrap();
+        let json_binding = json.v2.unwrap();
+        assert_eq!(json_binding.channel_id, binding.channel_id.into());
+        assert_eq!(json_binding.owner, local.into());
+        assert_eq!(json_binding.public_nonce, binding.public_nonce.serialize());
+        assert_eq!(json.slot.purpose, fiber_json_types::NoncePurpose::Closing);
+        content.v2 = None;
+        assert_eq!(
+            to_rpc_musig2_signing_content(content).unwrap_err(),
+            "missing V2 external nonce allocation"
+        );
+    }
+
+    #[test]
+    fn v2_followup_material_validates_public_nonce_encodings() {
+        let local = Privkey::from(&[1; 32]).pubkey();
+        let nonce = musig2::SecNonce::build([3; 32]).build().public_nonce();
+        let mut material = fiber_json_types::NextChannelSignerMaterial {
+            v2_nonces: vec![nonce.serialize().to_vec()],
+            commitment_points: vec![(9, local.into())],
+            ..Default::default()
+        };
+        let internal = try_into_next_channel_signer_material(material.clone()).unwrap();
+        assert_eq!(internal.v2_nonces, vec![nonce]);
+        assert_eq!(internal.commitment_points, vec![(9, local)]);
+        material.v2_nonces.push(vec![0; 1]);
+        assert!(try_into_next_channel_signer_material(material).is_err());
+    }
 
     #[test]
     fn signing_snapshot_preserves_ids_keys_and_wallet_relative_direction() {

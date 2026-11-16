@@ -17,11 +17,11 @@ use ckb_types::prelude::*;
 #[cfg(feature = "watchtower")]
 use fiber_types::NodeId;
 use fiber_types::{
-    AppliedFlags, ChannelBasePublicKeys, ChannelData, ChannelState, CloseFlags,
-    CommitmentContractFeatures, CommitmentNumbers, Hash256, HashAlgorithm, InboundTlcStatus,
-    OutboundTlcStatus, Privkey, Pubkey, RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation,
-    RevocationData, SettlementData, SettlementKey, SettlementTlc, ShutdownSettlementRecord, TLCId,
-    TlcErr, TlcErrPacket, TlcErrorCode, TlcInfo, TlcStatus, WatchChannelKeys,
+    AppliedFlags, ChannelBasePublicKeys, ChannelData, ChannelFeatures, ChannelState, CloseFlags,
+    CommitmentNumbers, Hash256, HashAlgorithm, InboundTlcStatus, OutboundTlcStatus, Privkey,
+    Pubkey, RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation, RevocationData,
+    SettlementData, SettlementKey, SettlementTlc, ShutdownSettlementRecord, TLCId, TlcErr,
+    TlcErrPacket, TlcErrorCode, TlcInfo, TlcStatus, WatchChannelKeys,
 };
 use musig2::{secp::Point, CompactSignature, KeyAggContext};
 use ractor::Actor;
@@ -42,9 +42,9 @@ use crate::fiber::onchain_tlc_reconcile::{
     can_reconcile_onchain_fulfillment, collect_onchain_fulfilled_tlcs,
     collect_onchain_received_timeout_settled_tlcs, collect_onchain_timeout_settled_tlcs,
     has_unresolved_onchain_tlcs, has_unresolved_onchain_tlcs_for_snapshot, parse_commitment_lock,
-    recover_shutdown_settlement_data, resolve_onchain_tlc, settlement_data_for_commitment,
-    tracked_settlement_tlcs, verify_and_select_settlement_data, LegacyOnChainTlcSettlement,
-    OnChainTimeoutTlcRole, OnChainTlcResolution,
+    recover_shutdown_settlement_data_with_superseded, resolve_onchain_tlc,
+    settlement_data_for_commitment, tracked_settlement_tlcs, verify_and_select_settlement_data,
+    verify_and_select_settlement_data_with_superseded, OnChainTimeoutTlcRole, OnChainTlcResolution,
 };
 use crate::fiber::tests::settle_tlc_set_command_tests::{
     create_test_channel_state_with_tlc, MockStore,
@@ -300,6 +300,7 @@ async fn assert_uncommitted_remove_relay(
     let mut settlement_tlc = settlement_tlc_for(&tlc);
     settlement_tlc.tlc_id = tlc.tlc_id.flip();
     state.tlc_state.add_offered_tlc(tlc);
+    state.sign_test_bootstrap_v2().expect("signed V2 fixture");
     node.store.insert_channel_actor_state(state.clone());
     node.store.store_shutdown_settlement_record(
         &channel_id,
@@ -694,60 +695,6 @@ fn resolve_prefix_valid_full_hash_invalid_preimage_is_failed_settlement() {
             hash_algorithm,
         ),
         OnChainTlcResolution::SettledWithInvalidPreimage
-    );
-}
-
-#[test]
-fn legacy_no_preimage_record_is_not_attributed_to_a_tlc() {
-    let channel_id = gen_rand_sha256_hash();
-    let payment_hash = gen_rand_sha256_hash();
-    let store = MockStore::new().with_legacy_onchain_settlement(
-        channel_id,
-        TLCId::Offered(0),
-        LegacyOnChainTlcSettlement {
-            preimage: None,
-            tx_hash: Some(gen_rand_sha256_hash()),
-            tlc_index: Some(0),
-        },
-    );
-
-    assert_eq!(
-        resolve_onchain_tlc(
-            &channel_id,
-            &store,
-            TLCId::Offered(0),
-            payment_hash,
-            HashAlgorithm::CkbHash,
-        ),
-        OnChainTlcResolution::Unknown
-    );
-}
-
-#[test]
-fn legacy_preimage_record_requires_a_full_hash_match() {
-    let channel_id = gen_rand_sha256_hash();
-    let hash_algorithm = HashAlgorithm::CkbHash;
-    let preimage = gen_rand_sha256_hash();
-    let payment_hash = payment_hash_for(preimage, hash_algorithm);
-    let store = MockStore::new().with_legacy_onchain_settlement(
-        channel_id,
-        TLCId::Offered(0),
-        LegacyOnChainTlcSettlement {
-            preimage: Some(preimage),
-            tx_hash: Some(gen_rand_sha256_hash()),
-            tlc_index: Some(0),
-        },
-    );
-
-    assert_eq!(
-        resolve_onchain_tlc(
-            &channel_id,
-            &store,
-            TLCId::Offered(0),
-            payment_hash,
-            hash_algorithm,
-        ),
-        OnChainTlcResolution::Fulfilled(preimage)
     );
 }
 
@@ -1750,7 +1697,7 @@ fn settlement_data_for_commitment_edge_cases_no_revocation_and_zero_commitment()
         pending_remote_settlement_data: pending_remote.clone(),
         local_settlement_data: local.clone(),
         revocation_data: None,
-        commitment_contract_features: CommitmentContractFeatures::LEGACY,
+        channel_features: ChannelFeatures::V2,
     };
 
     // When revocation_data is None, remote commitment falls back to pending_remote_settlement_data
@@ -1786,7 +1733,7 @@ fn settlement_data_for_commitment_edge_cases_no_revocation_and_zero_commitment()
             output: CellOutput::default(),
             output_data: Default::default(),
         }),
-        commitment_contract_features: CommitmentContractFeatures::LEGACY,
+        channel_features: ChannelFeatures::V2,
     };
 
     // Commitment 0 with revocation for 0: checked_sub(1) underflows safely to None -> returns pending
@@ -2026,7 +1973,7 @@ fn multiple_concurrent_tlcs_local_force_close_resolution() {
 }
 
 #[test]
-fn regression_remote_force_close_with_received_announce_wait_prev_ack_does_not_block() {
+fn received_prev_ack_requires_remote_settlement_proof() {
     let snapshot_store = MockStore::new();
     let channel_id = gen_rand_sha256_hash();
     let hash_algorithm = HashAlgorithm::CkbHash;
@@ -2068,8 +2015,8 @@ fn regression_remote_force_close_with_received_announce_wait_prev_ack_does_not_b
     install_unit_snapshot(&mut state, &snapshot_store, true, snapshot);
 
     assert!(
-        !has_unresolved_onchain_tlcs(&state, &snapshot_store),
-        "received AnnounceWaitPrevAck is not included in remote commitment snapshot and must not block settlement"
+        has_unresolved_onchain_tlcs(&state, &snapshot_store),
+        "V2 includes received AnnounceWaitPrevAck; it needs a verified settlement proof"
     );
 }
 
@@ -2095,6 +2042,7 @@ fn test_parse_commitment_lock_direction_and_validation() {
     remote_lock_args.extend_from_slice(&commitment_number.to_be_bytes());
     remote_lock_args.extend_from_slice(&witness_hash);
     remote_lock_args.push(0x00);
+    remote_lock_args.push(ChannelFeatures::V2.bits());
 
     let remote_lock = get_script_by_contract(Contract::CommitmentLock, &remote_lock_args);
 
@@ -2115,6 +2063,7 @@ fn test_parse_commitment_lock_direction_and_validation() {
     local_lock_args.extend_from_slice(&commitment_number.to_be_bytes());
     local_lock_args.extend_from_slice(&witness_hash);
     local_lock_args.push(0x00);
+    local_lock_args.push(ChannelFeatures::V2.bits());
 
     let local_lock = get_script_by_contract(Contract::CommitmentLock, &local_lock_args);
 
@@ -2182,7 +2131,7 @@ fn test_verify_and_select_settlement_data_preceding_and_pending() {
             output: CellOutput::default(),
             output_data: Default::default(),
         }),
-        commitment_contract_features: CommitmentContractFeatures::LEGACY,
+        channel_features: ChannelFeatures::V2,
     };
 
     // A revoked remote lock needs no historical TLC snapshot. The same number in
@@ -2206,7 +2155,7 @@ fn test_verify_and_select_settlement_data_preceding_and_pending() {
         args[40] ^= 0xff;
         lock = lock.as_builder().args(args.pack()).build();
         assert!(verify_and_select_settlement_data(&channel_data, &lock).is_none());
-        let recovered = recover_shutdown_settlement_data(&channel_data, &lock);
+        let recovered = recover_shutdown_settlement_data_with_superseded(&channel_data, &[], &lock);
         assert_eq!(recovered.is_some(), accepted);
         if let Some((remote, recovered_number, scope)) = recovered {
             assert!(remote);
@@ -2242,6 +2191,110 @@ fn test_verify_and_select_settlement_data_preceding_and_pending() {
         let tampered_lock = get_script_by_contract(Contract::CommitmentLock, &tampered_args);
         assert!(verify_and_select_settlement_data(&channel_data, &tampered_lock).is_none());
     }
+}
+
+#[test]
+#[cfg(feature = "watchtower")]
+fn test_store_pending_settlement_replay_keeps_unrevoked_witness() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let store = open_store(temp_dir.path()).expect("open store");
+    let node_id = NodeId::local();
+    let channel_id = gen_rand_sha256_hash();
+
+    let local_privkey = Privkey::from_slice(&[11u8; 32]);
+    let remote_privkey = Privkey::from_slice(&[22u8; 32]);
+    let local_settlement_privkey = Privkey::from_slice(&[33u8; 32]);
+    let remote_settlement_pubkey = Privkey::from_slice(&[44u8; 32]).pubkey();
+
+    let settlement_2 = SettlementData {
+        local_amount: 1000,
+        remote_amount: 2000,
+        tlcs: vec![],
+    };
+    let settlement_3 = SettlementData {
+        local_amount: 900,
+        remote_amount: 2100,
+        tlcs: vec![],
+    };
+
+    store.insert_watch_channel(
+        node_id.clone(),
+        channel_id,
+        None,
+        WatchChannelKeys {
+            local_settlement: SettlementKey::Local(local_settlement_privkey.clone()),
+            remote_settlement: remote_settlement_pubkey,
+            local_funding: local_privkey.pubkey(),
+            remote_funding: remote_privkey.pubkey(),
+        },
+        settlement_2.clone(),
+    );
+    // ACK #2 revokes #1 and makes #2 the preceding remote witness.
+    store.update_revocation(
+        node_id.clone(),
+        channel_id,
+        RevocationData {
+            commitment_number: 1,
+            aggregated_signature: CompactSignature::from_bytes(&[0u8; 64]).unwrap(),
+            output: CellOutput::default(),
+            output_data: Default::default(),
+        },
+        settlement_2.clone(),
+    );
+    // Sign #3, then replay the identical pending event.
+    store.update_pending_remote_settlement(node_id.clone(), channel_id, settlement_3.clone());
+    store.update_pending_remote_settlement(node_id.clone(), channel_id, settlement_3.clone());
+    // A reconnect re-signs #3 with different settlement data.
+    let settlement_3_resigned = SettlementData {
+        local_amount: 800,
+        remote_amount: 2200,
+        tlcs: vec![],
+    };
+    store.update_pending_remote_settlement(
+        node_id.clone(),
+        channel_id,
+        settlement_3_resigned.clone(),
+    );
+
+    let channel_data = store
+        .get_local_watch_channel(&channel_id)
+        .expect("stored channel");
+    let superseded = store.get_superseded_remote_settlements(&node_id, &channel_id);
+    assert_eq!(superseded, vec![settlement_3.clone()]);
+
+    let lock = create_test_commitment_lock_with_keys(
+        &local_privkey,
+        &remote_privkey,
+        &local_settlement_privkey,
+        remote_settlement_pubkey,
+        &settlement_2,
+        true,
+        2,
+    );
+    let (for_remote, number, selected) =
+        verify_and_select_settlement_data_with_superseded(&channel_data, &superseded, &lock)
+            .expect("the still-unrevoked #2 witness must remain selectable");
+    assert!(for_remote);
+    assert_eq!(number, 2);
+    assert_eq!(selected, &settlement_2);
+
+    let superseded_lock = create_test_commitment_lock_with_keys(
+        &local_privkey,
+        &remote_privkey,
+        &local_settlement_privkey,
+        remote_settlement_pubkey,
+        &settlement_3,
+        true,
+        3,
+    );
+    let (_, number, selected) = verify_and_select_settlement_data_with_superseded(
+        &channel_data,
+        &superseded,
+        &superseded_lock,
+    )
+    .expect("the superseded same-number witness must remain selectable");
+    assert_eq!(number, 3);
+    assert_eq!(selected, &settlement_3);
 }
 
 #[test]
@@ -2291,14 +2344,13 @@ fn test_tracked_settlement_tlcs_extraction() {
             tlcs: vec![],
         },
         revocation_data: None,
-        commitment_contract_features: CommitmentContractFeatures::LEGACY,
+        channel_features: ChannelFeatures::V2,
     };
 
     // Commitment 2 = pending
     let pending_witness = settlement_data_to_witness(
         &pending_settlement,
         true,
-        CommitmentContractFeatures::LEGACY,
         local_settlement_key.pubkey(),
         remote_settlement_key,
     );
@@ -2314,25 +2366,19 @@ fn test_tracked_settlement_tlcs_extraction() {
     lock_args.extend_from_slice(&2u64.to_be_bytes());
     lock_args.extend_from_slice(&pending_witness_hash);
     lock_args.push(0x00);
+    lock_args.push(ChannelFeatures::V2.bits());
 
     let lock = get_script_by_contract(Contract::CommitmentLock, &lock_args);
 
     let (_, _, selected_settlement) = verify_and_select_settlement_data(&channel_data, &lock)
         .expect("should select the committed settlement snapshot");
-    let tracked = tracked_settlement_tlcs(
-        selected_settlement,
-        true,
-        channel_data.commitment_contract_features,
-    );
+    let tracked = tracked_settlement_tlcs(selected_settlement, true, channel_data.channel_features);
     assert_eq!(tracked.len(), 1);
     assert_eq!(tracked[0].tlc_id, TLCId::Offered(5));
     assert_eq!(tracked[0].payment_hash, payment_hash);
 
-    let tracked_local = tracked_settlement_tlcs(
-        selected_settlement,
-        false,
-        channel_data.commitment_contract_features,
-    );
+    let tracked_local =
+        tracked_settlement_tlcs(selected_settlement, false, channel_data.channel_features);
     assert_eq!(tracked_local[0].tlc_id, TLCId::Received(5));
 }
 
@@ -2374,12 +2420,11 @@ fn test_tracked_settlement_tlcs_preserves_verified_empty_snapshot() {
         pending_remote_settlement_data: pending_settlement,
         local_settlement_data: committed_settlement.clone(),
         revocation_data: None,
-        commitment_contract_features: CommitmentContractFeatures::LEGACY,
+        channel_features: ChannelFeatures::V2,
     };
     let witness = settlement_data_to_witness(
         &committed_settlement,
         true,
-        CommitmentContractFeatures::LEGACY,
         local_settlement_key.pubkey(),
         remote_settlement_key,
     );
@@ -2392,15 +2437,13 @@ fn test_tracked_settlement_tlcs_preserves_verified_empty_snapshot() {
     lock_args.extend_from_slice(&1u64.to_be_bytes());
     lock_args.extend_from_slice(&blake160(&witness).0);
     lock_args.push(0);
+    lock_args.push(ChannelFeatures::V2.bits());
     let lock = get_script_by_contract(Contract::CommitmentLock, &lock_args);
 
     let (_, _, selected) = verify_and_select_settlement_data(&channel_data, &lock)
         .expect("the on-chain S0 snapshot should verify");
     assert!(selected.tlcs.is_empty());
-    assert!(
-        tracked_settlement_tlcs(selected, true, channel_data.commitment_contract_features,)
-            .is_empty()
-    );
+    assert!(tracked_settlement_tlcs(selected, true, channel_data.channel_features,).is_empty());
 }
 
 #[derive(Clone, Default)]
@@ -2521,7 +2564,6 @@ fn create_test_commitment_lock_with_keys(
     let witness = settlement_data_to_witness(
         settlement_data,
         for_remote,
-        CommitmentContractFeatures::LEGACY,
         local_settlement_privkey.pubkey(),
         remote_settlement_pubkey,
     );
@@ -2542,6 +2584,7 @@ fn create_test_commitment_lock_with_keys(
     lock_args.extend_from_slice(&commitment_number.to_be_bytes());
     lock_args.extend_from_slice(&witness_hash);
     lock_args.push(0x00);
+    lock_args.push(ChannelFeatures::V2.bits());
 
     get_script_by_contract(Contract::CommitmentLock, &lock_args)
 }
@@ -3035,6 +3078,7 @@ async fn test_scenario_e_real_db_persistence_and_reopen() {
     {
         let store = open_store(temp_dir.path()).expect("open store");
         store.store_shutdown_settlement_record(&channel_id, &record);
+        state.sign_test_bootstrap_v2().expect("signed V2 fixture");
         store.insert_channel_actor_state(state.clone());
     } // store is dropped here, all DB handles released
 
@@ -3119,6 +3163,7 @@ async fn test_scenario_f_live_actor_and_no_actor_recovery_and_finalization() {
             );
         }
 
+        state.sign_test_bootstrap_v2().expect("signed V2 fixture");
         store.insert_channel_actor_state(state.clone());
 
         let record = ShutdownSettlementRecord {
@@ -3254,6 +3299,7 @@ async fn test_scenario_f_live_actor_and_no_actor_recovery_and_finalization() {
             );
         }
 
+        state.sign_test_bootstrap_v2().expect("signed V2 fixture");
         store.insert_channel_actor_state(state.clone());
 
         let record = ShutdownSettlementRecord {
@@ -3607,7 +3653,7 @@ fn test_fresh_channel_pre_tlc_commitment_uses_verified_snapshot() {
         pending_remote_settlement_data: pending_settlement.clone(),
         local_settlement_data: local_settlement.clone(),
         revocation_data: None,
-        commitment_contract_features: CommitmentContractFeatures::LEGACY,
+        channel_features: ChannelFeatures::V2,
     };
 
     for (for_remote, number, expected) in [
@@ -3629,12 +3675,10 @@ fn test_fresh_channel_pre_tlc_commitment_uses_verified_snapshot() {
                 .expect("fresh channel must recover the hash-matching snapshot without RAA");
         assert_eq!((direction, actual_number), (for_remote, number));
         assert_eq!(selected, expected);
-        assert!(tracked_settlement_tlcs(
-            selected,
-            for_remote,
-            channel_data.commitment_contract_features,
-        )
-        .is_empty());
+        assert!(
+            tracked_settlement_tlcs(selected, for_remote, channel_data.channel_features,)
+                .is_empty()
+        );
         let mut args = lock.args().raw_data().to_vec();
         args[40] ^= 0xff;
         let invalid = lock.as_builder().args(args.pack()).build();
@@ -3757,6 +3801,7 @@ async fn assert_excluded_payer_reconciliation(
             },
         },
     );
+    state.sign_test_bootstrap_v2().expect("signed V2 fixture");
     node.store.insert_channel_actor_state(state);
     let mut live_ref = None;
     if live_actor {
@@ -3841,7 +3886,7 @@ async fn assert_excluded_payer_reconciliation(
         }
     );
     assert_eq!(
-        node.store.get_payment_session(payment_hash).unwrap().status,
+        node.get_payment_result(payment_hash).await.status,
         if reused_attempt || other_inflight {
             PaymentStatus::Inflight
         } else {
@@ -3850,7 +3895,9 @@ async fn assert_excluded_payer_reconciliation(
     );
     assert_eq!(
         node.store.get_persisted_payment_status(payment_hash),
-        Some(if reused_attempt || other_inflight {
+        // Failed retains the local give-up decision. The public assertion
+        // above must remain Inflight while another shard is unresolved.
+        Some(if reused_attempt {
             PaymentStatus::Inflight
         } else {
             PaymentStatus::Failed
@@ -3917,6 +3964,253 @@ async fn test_excluded_local_announced_preserves_other_inflight_shards() {
 async fn test_excluded_local_announced_relays_failure_before_finalization() {
     assert_excluded_tlc_relays_failure_before_finalization(CloseFlags::UNCOOPERATIVE_REMOTE, true)
         .await;
+}
+
+#[cfg(feature = "watchtower")]
+#[derive(Clone, Copy)]
+enum TimeoutPayerAttempt {
+    InflightHere,
+    ReusedInflight,
+    ReusedSuccess,
+    RetryingElsewhere,
+    Missing,
+}
+
+#[tokio::test]
+#[cfg(feature = "watchtower")]
+async fn test_onchain_timeout_fails_inflight_payer_attempt() {
+    assert_timeout_payer_reconciliation(false, TimeoutPayerAttempt::InflightHere).await;
+}
+
+#[tokio::test]
+#[cfg(feature = "watchtower")]
+async fn test_onchain_timeout_does_not_fail_reused_inflight_attempt() {
+    for live_actor in [false, true] {
+        assert_timeout_payer_reconciliation(live_actor, TimeoutPayerAttempt::ReusedInflight).await;
+    }
+}
+
+#[tokio::test]
+#[cfg(feature = "watchtower")]
+async fn test_onchain_timeout_does_not_fail_reused_success() {
+    assert_timeout_payer_reconciliation(false, TimeoutPayerAttempt::ReusedSuccess).await;
+}
+
+#[tokio::test]
+#[cfg(feature = "watchtower")]
+async fn test_onchain_timeout_does_not_fail_retrying_attempt() {
+    assert_timeout_payer_reconciliation(false, TimeoutPayerAttempt::RetryingElsewhere).await;
+}
+
+#[tokio::test]
+#[cfg(feature = "watchtower")]
+async fn test_onchain_timeout_completes_when_attempt_is_gone() {
+    assert_timeout_payer_reconciliation(false, TimeoutPayerAttempt::Missing).await;
+}
+
+#[cfg(feature = "watchtower")]
+async fn assert_timeout_payer_reconciliation(live_actor: bool, kind: TimeoutPayerAttempt) {
+    use crate::fiber::graph::NetworkGraphStateStore;
+    use fiber_types::{AttemptStatus, PaymentHopData, PaymentSession, PaymentStatus};
+
+    let mut node = NetworkNode::new().await;
+    let channel_id = gen_rand_sha256_hash();
+    let payment_hash = gen_rand_sha256_hash();
+    let mut state = empty_channel_state(channel_id);
+    state.state = ChannelState::Closed(
+        CloseFlags::UNCOOPERATIVE_LOCAL | CloseFlags::WAITING_ONCHAIN_SETTLEMENT,
+    );
+    state.shutdown_transaction_hash = Some(gen_rand_sha256_hash().into());
+    state.funding_tx = Some(
+        TransactionBuilder::default()
+            .output(
+                CellOutput::new_builder()
+                    .capacity(100_000_000_000u64)
+                    .build(),
+            )
+            .output_data(ckb_types::packed::Bytes::default())
+            .build()
+            .data(),
+    );
+    let mut tlc = tlc_info(
+        TLCId::Offered(0),
+        TlcStatus::Outbound(OutboundTlcStatus::Committed),
+        payment_hash,
+        HashAlgorithm::CkbHash,
+    );
+    tlc.attempt_id = Some(1);
+    tlc.expiry = 10;
+    let mut settlement_tlc = settlement_tlc_for(&tlc);
+    settlement_tlc.tlc_id = tlc.tlc_id.flip();
+    state.tlc_state.add_offered_tlc(tlc);
+    let old_outpoint = state.get_funding_transaction_outpoint().unwrap();
+    node.store.insert_onchain_tlc_settlement(
+        &NodeId::local(),
+        &channel_id,
+        TLCId::Offered(0),
+        OnChainTlcSettlement {
+            payment_hash,
+            hash_algorithm: HashAlgorithm::CkbHash,
+            preimage: None,
+            tx_hash: gen_rand_sha256_hash(),
+            tlc_index: 0,
+        },
+    );
+    node.store.store_shutdown_settlement_record(
+        &channel_id,
+        &ShutdownSettlementRecord {
+            shutdown_tx_hash: state.shutdown_transaction_hash.clone().unwrap(),
+            for_remote: false,
+            commitment_number: 1,
+            settlement_data: SettlementData {
+                local_amount: 1000,
+                remote_amount: 1000,
+                tlcs: vec![settlement_tlc],
+            },
+        },
+    );
+    state.sign_test_bootstrap_v2().expect("signed V2 fixture");
+    node.store.insert_channel_actor_state(state.clone());
+
+    let source = state.get_local_pubkey();
+    let target = gen_rand_fiber_public_key();
+    if !matches!(kind, TimeoutPayerAttempt::Missing) {
+        let mut session = PaymentSession {
+            request: crate::fiber::payment::SendPaymentDataBuilder::new(target, 1000, payment_hash)
+                .max_fee_amount(Some(100))
+                .build()
+                .unwrap(),
+            status: PaymentStatus::Inflight,
+            last_error: None,
+            last_error_code: None,
+            try_limit: 1,
+            created_at: 0,
+            last_updated_at: 0,
+            cached_attempts: vec![],
+        };
+        let first_hop = if matches!(kind, TimeoutPayerAttempt::InflightHere) {
+            old_outpoint.clone()
+        } else {
+            ckb_types::packed::OutPoint::new(gen_rand_sha256_hash().into(), 0)
+        };
+        let mut attempt = session.new_attempt(
+            1,
+            source,
+            target,
+            vec![
+                PaymentHopData {
+                    amount: 1000,
+                    next_hop: Some(target),
+                    funding_tx_hash: first_hop.tx_hash().into(),
+                    ..Default::default()
+                },
+                PaymentHopData {
+                    amount: 1000,
+                    ..Default::default()
+                },
+            ],
+        );
+        // Exhausted budget so a real timeout becomes Failed rather than Retrying.
+        attempt.try_limit = 1;
+        attempt.tried_times = 2;
+        match kind {
+            TimeoutPayerAttempt::InflightHere | TimeoutPayerAttempt::ReusedInflight => {
+                attempt.set_inflight_status();
+            }
+            TimeoutPayerAttempt::ReusedSuccess => {
+                attempt.set_success_status();
+                attempt.preimage = Some(gen_rand_sha256_hash());
+                session.set_success_status();
+            }
+            TimeoutPayerAttempt::RetryingElsewhere => {
+                attempt.status = AttemptStatus::Retrying;
+                session.status = PaymentStatus::Inflight;
+            }
+            TimeoutPayerAttempt::Missing => {}
+        }
+        session.append_attempt(attempt.clone());
+        node.store.insert_payment_session(session);
+        node.store.insert_attempt(attempt);
+    }
+
+    if live_actor {
+        let key = Privkey::from([11; 32]);
+        let (actor, _handle) = Actor::spawn(
+            None,
+            ChannelActor::new(
+                key.pubkey(),
+                target,
+                FiberActorRef::from_network(&node.network_actor),
+                node.store.clone(),
+                None,
+            ),
+            ChannelInitializationParameter {
+                operation: ChannelInitializationOperation::RestoreOfflineChannel(channel_id),
+                ephemeral_config: Default::default(),
+                private_key: key,
+            },
+        )
+        .await
+        .unwrap();
+        ractor::call!(
+            node.network_actor,
+            |reply| NetworkActorMessage::new_command(FiberActorCommand::InstallTestChannelActor(
+                channel_id, actor, reply
+            ))
+        )
+        .unwrap();
+    }
+
+    node.network_actor
+        .send_message(NetworkActorMessage::new_event(
+            FiberActorEvent::ChannelSettlementCompleted(channel_id),
+        ))
+        .unwrap();
+    wait_for_settlement_completion(&node, channel_id).await;
+
+    let finished = node.store.get_channel_actor_state(&channel_id).unwrap();
+    let removed = finished.tlc_state.get(&TLCId::Offered(0)).unwrap();
+    assert!(
+        removed.applied_flags.contains(AppliedFlags::REMOVE),
+        "timed-out payer TLC must be acknowledged so the channel can finish"
+    );
+    assert!(
+        matches!(
+            removed.removed_reason,
+            Some(RemoveTlcReason::RemoveTlcFail(_))
+        ),
+        "timed-out payer TLC must record the chain failure"
+    );
+
+    if let Some(attempt) = node.store.get_attempt(payment_hash, 1) {
+        let expected = match kind {
+            TimeoutPayerAttempt::InflightHere => AttemptStatus::Failed,
+            TimeoutPayerAttempt::ReusedInflight => AttemptStatus::Inflight,
+            TimeoutPayerAttempt::ReusedSuccess => AttemptStatus::Success,
+            TimeoutPayerAttempt::RetryingElsewhere => AttemptStatus::Retrying,
+            TimeoutPayerAttempt::Missing => AttemptStatus::Created,
+        };
+        assert_eq!(attempt.status, expected);
+        if matches!(kind, TimeoutPayerAttempt::ReusedSuccess) {
+            assert!(attempt.preimage.is_some());
+        }
+        let updated_at = attempt.last_updated_at;
+        node.network_actor
+            .send_message(NetworkActorMessage::new_command(
+                FiberActorCommand::CheckChannels,
+            ))
+            .unwrap();
+        node.node_info().await;
+        let again = node.store.get_attempt(payment_hash, 1).unwrap();
+        assert_eq!(again.status, expected);
+        assert_eq!(
+            again.last_updated_at, updated_at,
+            "a later CheckChannels must not rewrite the attempt"
+        );
+    } else {
+        assert!(matches!(kind, TimeoutPayerAttempt::Missing));
+    }
+    node.stop().await;
 }
 
 #[tokio::test]
@@ -4244,7 +4538,7 @@ fn test_local_force_close_excluded_tlc_ignores_remote_revocation_number() {
                 output: CellOutput::default(),
                 output_data: Default::default(),
             }),
-            commitment_contract_features: CommitmentContractFeatures::LEGACY,
+            channel_features: ChannelFeatures::V2,
         },
     );
     for for_remote in [false, true] {
@@ -4370,6 +4664,7 @@ async fn assert_excluded_payer_with_unclaimed_balance(
     );
     let commitment_tx = create_test_commitment_tx(funding_outpoint, lock.clone(), vec![]);
     state.shutdown_transaction_hash = Some(commitment_tx.hash().unpack());
+    state.sign_test_bootstrap_v2().expect("signed V2 fixture");
     node.store.insert_channel_actor_state(state);
     {
         let mut chain = node.chain_client.state.write().unwrap();

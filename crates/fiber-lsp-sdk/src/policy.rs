@@ -149,6 +149,14 @@ impl SigningPolicy {
 }
 
 fn decide_auto(input: SigningPolicyInput<'_>) -> SigningDecision {
+    if input.review.warnings.iter().any(|warning| {
+        matches!(
+            warning,
+            crate::SigningWarning::NoncePreviouslyUsedForDifferentMessage { .. }
+        )
+    }) {
+        return SigningDecision::Deny;
+    }
     match input.review.intent {
         SigningIntent::Revocation => SigningDecision::RequireConfirmation,
         SigningIntent::CommitmentTransaction => decide_auto_commitment(input),
@@ -225,8 +233,7 @@ fn commitment_tx_commits_settlement(
 mod tests {
     use super::*;
     use crate::{
-        CommitmentCounter, Musig2SignableContent, Musig2SigningContent, NoncePurpose, NonceSlot,
-        SigningIntent,
+        Musig2SignableContent, Musig2SigningContent, NoncePurpose, NonceSlot, SigningIntent,
     };
     use ckb_types::prelude::*;
     use fiber_types::{settlement_witness_hash, Privkey, SettlementTlc};
@@ -235,7 +242,7 @@ mod tests {
     fn review(intent: SigningIntent) -> SigningReview {
         SigningReview {
             intent,
-            commitment_counter: Some(CommitmentCounter::Local),
+            commitment_counter: None,
             commitment_number: Some(1),
             signing_message: [1; 32],
             content_hash: [2; 32],
@@ -256,16 +263,11 @@ mod tests {
         for_remote: bool,
     ) -> ckb_types::packed::Transaction {
         let (local, remote) = settlement_keys();
-        let hash = settlement_witness_hash(
-            settlement,
-            for_remote,
-            fiber_types::CommitmentContractFeatures::LEGACY,
-            local,
-            remote,
-        );
+        let hash = settlement_witness_hash(settlement, for_remote, local, remote);
         let mut args = vec![0u8; 36];
         args.extend_from_slice(&hash);
         args.push(0x00);
+        args.push(fiber_types::ChannelFeatures::V2.bits());
         ckb_types::core::TransactionBuilder::default()
             .output(
                 ckb_types::packed::CellOutput::new_builder()
@@ -287,11 +289,16 @@ mod tests {
         let public = secret.public_key(secp256k1::SECP256K1);
         let nonce = SecNonce::build([4u8; 32]).build().public_nonce();
         ChannelSigningContent::Musig2(Musig2SigningContent {
+            v2: Some(fiber_types::V2NonceBinding {
+                channel_id: Hash256::from([5; 32]),
+                owner: public.into(),
+                public_nonce: nonce.clone(),
+            }),
             slot: NonceSlot {
                 purpose: NoncePurpose::Commitment,
                 commitment_number: 1,
             },
-            commitment_counter: Some(CommitmentCounter::Local),
+            commitment_counter: None,
             key_agg_ctx: KeyAggContext::new([public]).unwrap(),
             agg_nonce: AggNonce::sum([nonce]),
             content: Musig2SignableContent::CommitmentTransaction(transaction),
@@ -502,7 +509,7 @@ mod tests {
     }
 
     #[test]
-    fn auto_keeps_nonce_reuse_as_a_review_warning() {
+    fn auto_denies_nonce_reuse_across_signing_contexts() {
         let mut review = review(SigningIntent::CommitmentTransaction);
         review.warnings.push(
             crate::SigningWarning::NoncePreviouslyUsedForDifferentMessage {
@@ -522,7 +529,7 @@ mod tests {
                 settlement: Some(binding(&settlement)),
                 registry: &registry,
             }),
-            SigningDecision::Allow
+            SigningDecision::Deny
         );
     }
 }

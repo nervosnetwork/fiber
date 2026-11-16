@@ -646,7 +646,6 @@ async fn open_hosted_external_channel(
         serde_json::to_value(concurrent_result).unwrap()
     );
     let channel_id: crate::fiber_types::Hash256 = open.channel_id.into();
-    let unsigned_tx: Transaction = open.unsigned_funding_tx.clone().into();
     let repeated: OpenChannelWithExternalFundingResult = client
         .request(
             "open_channel_with_external_funding",
@@ -679,21 +678,8 @@ async fn open_hosted_external_channel(
             .contains("different channel opening for this signer"),
         "{error}"
     );
-    let signed_tx = unsigned_tx
-        .as_advanced_builder()
-        .set_witnesses(vec![Bytes::default()])
-        .build()
-        .data();
-    let _: SubmitSignedFundingTxResult = client
-        .request(
-            "submit_signed_funding_tx",
-            rpc_params![SubmitSignedFundingTxParams {
-                channel_id: channel_id.into(),
-                signed_funding_tx: signed_tx.into(),
-            }],
-        )
-        .await
-        .expect("submit hosted external funding transaction");
+    // Leave the first signing request pending for the isolation/replay checks.
+    // Wallet funding signatures are submitted only after both opening lanes.
     channel_id
 }
 
@@ -775,6 +761,62 @@ async fn open_hosted_external_channel_direct(
     );
     let channel_id: crate::fiber_types::Hash256 = open.channel_id.into();
     let unsigned_tx: Transaction = open.unsigned_funding_tx.into();
+    crate::fiber::tests::external_signer_restart::approve_fixture_opening(
+        signer,
+        &unsigned_tx,
+        &public_node.get_channel_actor_state(channel_id),
+        false,
+    )
+    .await;
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let status = get_hosted_signing_status(client, channel_id)
+                .await
+                .unwrap()
+                .status;
+            if matches!(
+                status,
+                fiber_json_types::ChannelSigningStatus::SignatureRequired { .. }
+            ) {
+                let submission = prepare_hosted_signature(signer, channel_id, status).await;
+                assert_eq!(
+                    submit_hosted_signature(client, submission).await.unwrap(),
+                    SubmitChannelSignatureResult::Applied
+                );
+            }
+            if submit_opening_funding_if_safe(client, signer, channel_id, &unsigned_tx).await {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("both opening lanes complete before wallet funding signatures");
+    channel_id
+}
+
+/// Release wallet signatures only after the SDK owns both initial lanes and a usable local exit.
+pub(super) async fn submit_opening_funding_if_safe(
+    client: &HttpClient,
+    signer: &ChannelSigner<MemoryStore>,
+    channel_id: crate::fiber_types::Hash256,
+    unsigned_tx: &Transaction,
+) -> bool {
+    let records = signer.recovery_records().await.unwrap();
+    if !records
+        .iter()
+        .any(|r| !r.reference.for_remote && r.complete_signature.is_some())
+        || !records.iter().any(|r| r.reference.for_remote)
+        || !matches!(
+            get_hosted_signing_status(client, channel_id)
+                .await
+                .unwrap()
+                .status,
+            fiber_json_types::ChannelSigningStatus::NoSignatureRequired
+        )
+    {
+        return false;
+    }
     let signed_tx = unsigned_tx
         .as_advanced_builder()
         .set_witnesses(vec![Bytes::default()])
@@ -789,8 +831,8 @@ async fn open_hosted_external_channel_direct(
             }],
         )
         .await
-        .expect("submit hosted external funding transaction");
-    channel_id
+        .expect("submit funding only after verified usable opening commitments");
+    true
 }
 
 async fn get_hosted_signing_status(
@@ -1040,9 +1082,9 @@ async fn hosted_signer_requests_are_isolated_across_concurrent_tenants() {
             if u1_ready && u2_ready {
                 break;
             }
-            for (client, signer, channel_id) in [
-                (&u1.client, &u1_signer, u1_channel_id),
-                (&u2.client, &u2_signer, u2_channel_id),
+            for (client, signer, node, channel_id) in [
+                (&u1.client, &u1_signer, &u1.node, u1_channel_id),
+                (&u2.client, &u2_signer, &u2.node, u2_channel_id),
             ] {
                 let status = get_hosted_signing_status(client, channel_id)
                     .await
@@ -1059,6 +1101,19 @@ async fn hosted_signer_requests_are_isolated_across_concurrent_tenants() {
                             .expect("submit hosted signature while resuming"),
                         SubmitChannelSignatureResult::Applied
                     );
+                }
+                let funding = node
+                    .get_channel_actor_state(channel_id)
+                    .ephemeral_config
+                    .external_funding;
+                if !funding.signed_submitted {
+                    submit_opening_funding_if_safe(
+                        client,
+                        signer,
+                        channel_id,
+                        funding.unsigned_funding_tx.as_ref().unwrap(),
+                    )
+                    .await;
                 }
             }
             tokio::time::sleep(Duration::from_millis(10)).await;

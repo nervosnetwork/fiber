@@ -460,7 +460,7 @@ mod tests {
 
     use crate::fiber::{
         network::CHANNEL_REESTABLISH_INTERVAL,
-        types::{FiberMessage, ReestablishChannel},
+        types::{FiberMessage, ReestablishChannelV2},
     };
 
     use super::*;
@@ -549,14 +549,15 @@ mod tests {
         const PERSISTED_CHANNELS: u32 = 540;
         let peer = Privkey::from_slice(&[21u8; 32]).pubkey();
         let mut policy = PeerMessagePolicy::new(PeerMessagePolicyConfig::default());
-        let frame_bytes = FiberMessage::reestablish_channel(ReestablishChannel {
+        let frame_bytes = FiberMessage::reestablish_channel_v2(ReestablishChannelV2 {
             channel_id: Default::default(),
-            local_commitment_number: 0,
-            remote_commitment_number: 0,
+            next_ack_number: 0,
+            next_commitment_number: 0,
+            next_local_commitment_nonce: musig2::SecNonce::build([21u8; 32]).build().public_nonce(),
         })
         .to_molecule_bytes()
         .len() as u64;
-        assert_eq!(frame_bytes, 68);
+        assert_eq!(frame_bytes, 118);
         for index in 0..PERSISTED_CHANNELS {
             expect_allowed(
                 &mut policy,

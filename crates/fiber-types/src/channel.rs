@@ -4,7 +4,6 @@ use crate::crate_time::SystemTime;
 use crate::gen::fiber as molecule_fiber;
 use crate::invoice::HashAlgorithm;
 use crate::onion::{PaymentOnionPacket, TlcErrPacket, TlcErrPacketError};
-use crate::payment::PaymentSessionKey;
 use crate::protocol::{ChannelAnnouncement, ChannelUpdate, EcdsaSignature};
 use crate::serde_utils::PartialSignatureAsBytes;
 use crate::serde_utils::PubNonceAsBytes;
@@ -12,9 +11,9 @@ use crate::EntityHex;
 use crate::Hash256;
 use crate::Privkey;
 use crate::Pubkey;
+use crate::RevocationData;
 use crate::SettlementData;
 use bitflags::bitflags;
-use ckb_types::packed::Byte32 as MByte32;
 use ckb_types::packed::Script;
 use ckb_types::packed::Transaction;
 use ckb_types::prelude::{Pack, Unpack};
@@ -24,7 +23,6 @@ use musig2::secp::{Point, Scalar};
 use musig2::BinaryEncoding;
 use musig2::PartialSignature;
 use musig2::PubNonce;
-use musig2::{SecNonce, SecNonceBuilder};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::collections::{HashMap, VecDeque};
@@ -523,7 +521,7 @@ pub struct TlcInfo {
     pub forwarding_tlc: Option<(Hash256, u64)>,
     pub removed_confirmed_at: Option<u64>,
     pub applied_flags: AppliedFlags,
-    /// Local payment execution ownership, not part of the peer wire message.
+    /// Local payment execution ownership, never sent over the wire.
     pub upstream_tlc_key: Option<crate::payment::UpstreamTlcKey>,
 }
 
@@ -546,14 +544,13 @@ impl fmt::Debug for TlcInfo {
 }
 
 impl TlcInfo {
-    /// Local payment execution owning this TLC, including its hosted scope.
-    pub fn session_key(&self) -> PaymentSessionKey {
-        PaymentSessionKey {
+    /// Hosted payment execution owning this TLC.
+    pub fn session_key(&self) -> crate::payment::PaymentSessionKey {
+        crate::payment::PaymentSessionKey {
             payment_hash: self.payment_hash,
             upstream_tlc_key: self.upstream_tlc_key,
         }
     }
-
     pub fn log(&self) -> String {
         format!(
             "id: {:?} status: {:?} amount: {:?} removed: {:?} hash: {:?} ",
@@ -819,6 +816,47 @@ impl TlcState {
             )
     }
 
+    /// Content rule for V2 channels: Lightning's "two-part" rule.
+    ///
+    /// A commitment contains the updates its owner received, plus the updates its owner sent that
+    /// the counterparty has already acknowledged. Fiber's status ladder defers an update by one
+    /// round when a `CommitmentSigned` was already in flight (`*PrevAck`), which makes the answer
+    /// depend on *local* round ordering and lets the two peers disagree. V2 treats those rungs
+    /// like their `*WaitAck` counterparts, so both peers derive the same content from the same
+    /// acknowledged history (see `docs/notes/channel-v2-commitment-rounds.md`).
+    pub fn commitment_signed_tlcs_v2(
+        &self,
+        for_remote: bool,
+    ) -> impl Iterator<Item = &TlcInfo> + '_ {
+        self.offered_tlcs
+            .tlcs
+            .iter()
+            .filter(move |tlc| match tlc.outbound_status() {
+                // Updates we sent apply to the peer's commitment on delivery and to our own only
+                // after the peer acknowledges them.
+                OutboundTlcStatus::LocalAnnounced => for_remote,
+                OutboundTlcStatus::Committed => true,
+                OutboundTlcStatus::RemoteRemoved => for_remote,
+                OutboundTlcStatus::RemoveWaitPrevAck | OutboundTlcStatus::RemoveWaitAck => false,
+                OutboundTlcStatus::RemoveAckConfirmed => false,
+            })
+            .chain(
+                self.received_tlcs
+                    .tlcs
+                    .iter()
+                    .filter(move |tlc| match tlc.inbound_status() {
+                        // Updates we received are in our own commitment immediately and in the
+                        // peer's commitment once we acknowledge them.
+                        InboundTlcStatus::RemoteAnnounced => !for_remote,
+                        InboundTlcStatus::AnnounceWaitPrevAck
+                        | InboundTlcStatus::AnnounceWaitAck => true,
+                        InboundTlcStatus::Committed => true,
+                        InboundTlcStatus::LocalRemoved => !for_remote,
+                        InboundTlcStatus::RemoveAckConfirmed => false,
+                    }),
+            )
+    }
+
     pub fn update_for_commitment_signed(&mut self) -> bool {
         for tlc in self.offered_tlcs.tlcs.iter_mut() {
             if tlc.outbound_status() == OutboundTlcStatus::RemoteRemoved {
@@ -921,14 +959,14 @@ pub struct AddTlcCommand {
     /// not be used for new error attribution logic. Removing it requires a storage migration.
     pub is_trampoline_hop: bool,
     pub previous_tlc: Option<PrevTlcInfo>,
-    /// Local payment execution ownership, not part of the peer wire message.
+    /// Local payment execution ownership, never sent over the wire.
     pub upstream_tlc_key: Option<crate::payment::UpstreamTlcKey>,
 }
 
 impl AddTlcCommand {
-    /// Local payment execution owning this command, including its hosted scope.
-    pub fn session_key(&self) -> PaymentSessionKey {
-        PaymentSessionKey {
+    /// Hosted payment execution owning this command.
+    pub fn session_key(&self) -> crate::payment::PaymentSessionKey {
+        crate::payment::PaymentSessionKey {
             payment_hash: self.payment_hash,
             upstream_tlc_key: self.upstream_tlc_key,
         }
@@ -1064,63 +1102,6 @@ pub enum TlcReplayUpdate {
     Remove(RemoveTlc),
 }
 
-/// Version for `CommitDiff` serialization compatibility.
-pub const CURRENT_COMMIT_DIFF_VERSION: u8 = 2;
-
-fn default_commit_diff_version() -> u8 {
-    CURRENT_COMMIT_DIFF_VERSION
-}
-
-/// Optional template fields for `CommitmentSigned` replay.
-#[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct CommitmentSignedTemplate {
-    #[serde_as(as = "PubNonceAsBytes")]
-    pub next_commitment_nonce: PubNonce,
-    #[serde(default)]
-    #[serde_as(as = "Option<PartialSignatureAsBytes>")]
-    pub funding_tx_partial_signature: Option<PartialSignature>,
-}
-
-/// Replay ordering hint when both revoke+commit are owed.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
-pub enum ReplayOrderHint {
-    RevokeThenCommit,
-    CommitThenRevoke,
-}
-
-/// Everything needed to resend a pending `CommitmentSigned` after reconnect.
-#[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct CommitDiff {
-    /// Structure version for backward/forward compatibility.
-    #[serde(default = "default_commit_diff_version")]
-    pub version: u8,
-    /// Channel that owns this diff.
-    #[serde(default)]
-    pub channel_id: Hash256,
-    /// Local/remote commitment numbers when this commitment was sent.
-    #[serde(default)]
-    pub local_commitment_number_at_send: u64,
-    #[serde(default)]
-    pub remote_commitment_number_at_send: u64,
-    /// The commitment transaction (used for resign, not rebuilt).
-    #[serde_as(as = "EntityHex")]
-    pub commit_tx: Transaction,
-    /// TLC updates included in this commitment (for resending).
-    #[serde(default, alias = "tlc_updates")]
-    pub replay_updates: Vec<TlcReplayUpdate>,
-    /// Optional template fields for `CommitmentSigned` replay.
-    #[serde(default)]
-    pub commitment_signed_template: Option<CommitmentSignedTemplate>,
-    /// Optional replay ordering hint when both revoke+commit are owed.
-    #[serde(default)]
-    pub replay_order_hint: Option<ReplayOrderHint>,
-    /// Creation timestamp.
-    #[serde(default, alias = "created_at")]
-    pub created_at_ms: u64,
-}
-
 /// Information about a channel shutdown.
 #[serde_as]
 #[derive(Clone, Serialize, Deserialize, Eq, PartialEq, Debug)]
@@ -1132,17 +1113,6 @@ pub struct ShutdownInfo {
     pub signature: Option<PartialSignature>,
 }
 
-/// Message to revoke the previous commitment and acknowledge the new one.
-#[serde_as]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RevokeAndAck {
-    pub channel_id: Hash256,
-    #[serde_as(as = "PartialSignatureAsBytes")]
-    pub revocation_partial_signature: PartialSignature,
-    pub next_per_commitment_point: Pubkey,
-    #[serde_as(as = "PubNonceAsBytes")]
-    pub next_revocation_nonce: PubNonce,
-}
 // This struct holds the channel information that are only relevant when the channel
 // is public. The information includes signatures to the channel announcement message,
 // our config for the channel that will be published to the network (via ChannelUpdate).
@@ -1285,24 +1255,6 @@ pub fn get_commitment_point(commitment_seed: &[u8; 32], commitment_number: u64) 
     Privkey::from(&get_commitment_secret(commitment_seed, commitment_number)).pubkey()
 }
 
-/// Context for musig2 nonce derivation.
-pub enum Musig2Context {
-    /// Commitment transaction context.
-    Commitment,
-    /// Revocation context.
-    Revoke,
-}
-
-impl std::fmt::Display for Musig2Context {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let context_str = match self {
-            Musig2Context::Commitment => "COMMITMENT",
-            Musig2Context::Revoke => "REVOKE",
-        };
-        write!(f, "{}", context_str)
-    }
-}
-
 impl InMemorySigner {
     /// Generate an `InMemorySigner` from a seed.
     pub fn generate_from_seed(params: &[u8]) -> InMemorySigner {
@@ -1361,16 +1313,6 @@ impl InMemorySigner {
         let per_commitment_point = self.get_commitment_point(new_commitment_number);
         derive_private_key(&self.tlc_base_key, &per_commitment_point)
     }
-
-    /// Derive a musig2 nonce for the given commitment number and context.
-    pub fn derive_musig2_nonce(&self, commitment_number: u64, context: Musig2Context) -> SecNonce {
-        let commitment_point = self.get_commitment_point(commitment_number);
-        let seckey = derive_private_key(&self.musig2_base_nonce, &commitment_point);
-
-        SecNonceBuilder::new(seckey.as_ref())
-            .with_extra_input(&context.to_string())
-            .build()
-    }
 }
 
 /// The status of a channel opening operation initiated by the local node.
@@ -1418,9 +1360,210 @@ pub struct ChannelOpenRecord {
     pub created_at: u64,
     /// Timestamp (milliseconds since UNIX epoch) of the last status update.
     pub last_updated_at: u64,
-    /// Commitment-lock feature bitmap selected when the channel-open request was received or sent.
+    /// Channel feature bitmap selected when the channel-open request was received or sent.
     #[serde(default)]
-    pub commitment_contract_features: CommitmentContractFeatures,
+    pub channel_features: ChannelFeatures,
+}
+
+/// Domain separation for a V2 nonce allocation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NoncePurposeV2 {
+    /// Funding-cell signature for an owner's commitment.
+    Commitment,
+    /// Commitment-cell revocation signature.
+    Revocation,
+    /// Dedicated cooperative funding-cell close signature.
+    Closing,
+    /// One-off public channel announcement.
+    ChannelAnnouncement,
+}
+
+/// One fresh nonce and its immutable, exact signing context.
+#[serde_as]
+#[derive(Clone, Serialize, Deserialize)]
+pub struct SigningNonceV2 {
+    /// Random seed, retained for exact recovery only.
+    pub seed: [u8; 32],
+    /// Channel identity at allocation (the opening temporary ID may be used).
+    pub channel_id: Hash256,
+    /// Funding public key of the commitment owner, never a peer-relative label.
+    pub owner: Pubkey,
+    /// New commitment number; revocation signs its predecessor.
+    pub number: u64,
+    /// Independent signing purpose.
+    pub purpose: NoncePurposeV2,
+    /// Nonce that may be advertised to the peer.
+    #[serde_as(as = "PubNonceAsBytes")]
+    pub public_nonce: PubNonce,
+    /// Exact ordered keys, aggregate nonce and message bytes, fixed before signing.
+    pub context: Option<Vec<u8>>,
+    /// Cached local partial signature, including local aggregation signatures.
+    #[serde_as(as = "Option<PartialSignatureAsBytes>")]
+    pub signature: Option<PartialSignature>,
+}
+
+impl fmt::Debug for SigningNonceV2 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SigningNonceV2")
+            .field("seed", &"[REDACTED]")
+            .field("channel_id", &self.channel_id)
+            .field("owner", &self.owner)
+            .field("number", &self.number)
+            .field("purpose", &self.purpose)
+            .field("public_nonce", &self.public_nonce)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Packed cached V2 CS, distinct from the public wire domain type.
+pub type PackedCommitmentSignedV2 = molecule_fiber::CommitmentSignedV2;
+
+/// Packed cached V2 ACK, distinct from the public wire domain type.
+pub type PackedRevokeAndAckV2 = molecule_fiber::RevokeAndAckV2;
+
+/// Packed bootstrap Ready retained to reject late nonce reactivation.
+pub type PackedChannelReadyV2 = molecule_fiber::ChannelReadyV2;
+
+/// Packed exact cooperative shutdown advertisement.
+pub type PackedShutdownV2 = molecule_fiber::ShutdownV2;
+
+/// Packed exact cooperative closing signature response.
+pub type PackedClosingSignedV2 = molecule_fiber::ClosingSignedV2;
+
+/// Immutable revocation signing message and outputs fixed with its CS session.
+#[serde_as]
+#[derive(Clone, Serialize, Deserialize)]
+pub struct RevocationContextV2 {
+    /// Exact hash signed by both revocation participants.
+    pub message: [u8; 32],
+    /// Original revocation output.
+    #[serde_as(as = "EntityHex")]
+    pub output: ckb_types::packed::CellOutput,
+    /// Original output data.
+    #[serde_as(as = "EntityHex")]
+    pub output_data: ckb_types::packed::Bytes,
+}
+
+/// An outgoing CS, including the original update sequence and nonce contexts.
+#[serde_as]
+#[derive(Clone, Serialize, Deserialize)]
+pub struct OutgoingCommitmentV2 {
+    /// Original ACK wait start; exact CS replay and restart must not extend it.
+    pub peer_wait_started_at: u64,
+    /// Exact transmitted CS.
+    #[serde_as(as = "EntityHex")]
+    pub request: PackedCommitmentSignedV2,
+    /// Original unsigned commitment transaction.
+    #[serde_as(as = "EntityHex")]
+    pub transaction: Transaction,
+    /// Settlement snapshot associated with the exact transaction.
+    pub settlement: SettlementData,
+    /// Original ordered updates for recovery replay.
+    pub updates: Vec<TlcReplayUpdate>,
+    /// JIT commitment funding signer nonce.
+    pub funding: SigningNonceV2,
+    /// Separate local revocation verifier nonce; absent during opening.
+    pub revocation: Option<SigningNonceV2>,
+    /// Original predecessor revocation context; never rebuilt during ACK recovery.
+    pub revocation_context: Option<RevocationContextV2>,
+}
+
+/// Most recently accepted incoming CS and exact durable response.
+#[serde_as]
+#[derive(Clone, Serialize, Deserialize)]
+pub struct IncomingCommitmentV2 {
+    /// Exact accepted request for duplicate/conflict rejection.
+    #[serde_as(as = "EntityHex")]
+    pub request: PackedCommitmentSignedV2,
+    /// Local funding signature and consumed verification nonce.
+    pub funding: SigningNonceV2,
+    /// Fresh local revocation signer nonce; absent during opening.
+    pub revocation: Option<SigningNonceV2>,
+    /// Original predecessor revocation context fixed before incoming aggregation.
+    pub revocation_context: Option<RevocationContextV2>,
+    /// Usable commitment persisted before revoking its predecessor.
+    #[serde_as(as = "EntityHex")]
+    pub transaction: Transaction,
+    /// Settlement snapshot associated with the exact transaction.
+    pub settlement: SettlementData,
+    /// Exact RAA; initial commitment signing has no RAA.
+    #[serde_as(as = "Option<EntityHex>")]
+    pub response: Option<PackedRevokeAndAckV2>,
+}
+
+/// Persisted V2 sessions with completely independent commitment-owner directions.
+#[serde_as]
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ChannelSessionV2 {
+    /// Schema marker checked on reopen, independently of database epoch.
+    pub marker: u32,
+    /// Exactly one active own commitment verification nonce.
+    pub own: SigningNonceV2,
+    /// Previously advertised own verification nonces, newest first. A reconnect rotates `own`
+    /// (`next_local_nonces`), but a commitment the peer signed before it saw the rotation still
+    /// verifies against the older public nonce, so the latest retired entries are retained.
+    #[serde(default)]
+    pub own_retired: Vec<SigningNonceV2>,
+    /// The remote owner's advertised verification nonce and number.
+    #[serde_as(as = "Option<PubNonceAsBytes>")]
+    pub remote_nonce: Option<PubNonce>,
+    /// Number associated with the remote owner's advertised nonce.
+    pub remote_number: u64,
+    /// Immutable remote bootstrap advertisement, including late TxComplete duplicates.
+    #[serde_as(as = "Option<PubNonceAsBytes>")]
+    pub bootstrap_remote_nonce: Option<PubNonce>,
+    /// Exact accepted bootstrap Ready; duplicates never reset the active remote nonce.
+    #[serde_as(as = "Option<EntityHex>")]
+    pub remote_ready: Option<PackedChannelReadyV2>,
+    /// Outstanding outgoing CS; initial request retained through opening.
+    pub outgoing: Option<OutgoingCommitmentV2>,
+    /// Most recent incoming CS with usable transaction and response.
+    pub incoming: Option<IncomingCommitmentV2>,
+    /// Bound incoming request before local aggregation; its transaction is unsigned.
+    pub pending_incoming: Option<IncomingCommitmentV2>,
+    /// Exact ACK bound before local revocation aggregation.
+    #[serde_as(as = "Option<EntityHex>")]
+    pub pending_ack: Option<PackedRevokeAndAckV2>,
+    /// Exact accepted ACK for idempotent duplicate rejection.
+    #[serde_as(as = "Option<EntityHex>")]
+    pub last_ack: Option<PackedRevokeAndAckV2>,
+    /// Latest accepted revocation effect; retained after enqueue because observers
+    /// have no durable receipt protocol. A newer revocation supersedes this snapshot.
+    pub revocation_effect: Option<(RevocationData, SettlementData)>,
+    /// Original opening settlement for idempotent watchtower registration replay.
+    pub bootstrap_settlement: Option<SettlementData>,
+    /// Removed offered TLC effects waiting for durable payer/upstream receipt.
+    /// The execution count prevents a delayed replay from failing a newer retry.
+    pub remove_effects: Vec<(TlcInfo, Option<u32>)>,
+    /// Dedicated cooperative closing session, retained for exact replay.
+    pub closing: Option<ClosingSessionV2>,
+}
+
+/// Immutable cooperative closing intent and exact cached wire responses.
+#[serde_as]
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ClosingSessionV2 {
+    /// Original peer-response wait start, retained across duplicates and restarts.
+    pub peer_wait_started_at: u64,
+    /// Force close supersedes cooperative publication without deleting its history.
+    pub superseded_by_force_close: bool,
+    /// Fresh local closing nonce, independent of commitment and revocation.
+    pub own: SigningNonceV2,
+    /// Exact own shutdown advertisement, persisted before publication.
+    #[serde_as(as = "EntityHex")]
+    pub shutdown: PackedShutdownV2,
+    /// Exact accepted remote advertisement (including its dedicated nonce).
+    #[serde_as(as = "Option<EntityHex>")]
+    pub remote_shutdown: Option<PackedShutdownV2>,
+    /// Fixed original unsigned closing transaction.
+    #[serde_as(as = "Option<EntityHex>")]
+    pub transaction: Option<Transaction>,
+    /// Exact own partial signature response, persisted before publication.
+    #[serde_as(as = "Option<EntityHex>")]
+    pub response: Option<PackedClosingSignedV2>,
+    /// Exact accepted remote partial signature.
+    #[serde_as(as = "Option<EntityHex>")]
+    pub remote_response: Option<PackedClosingSignedV2>,
 }
 
 impl ChannelOpenRecord {
@@ -1436,20 +1579,8 @@ impl ChannelOpenRecord {
             failure_detail: None,
             created_at: now,
             last_updated_at: now,
-            commitment_contract_features: CommitmentContractFeatures::default(),
+            channel_features: ChannelFeatures::default(),
         }
-    }
-
-    /// Create a new opening record with the negotiated commitment-lock features.
-    pub fn new_with_features(
-        channel_id: Hash256,
-        pubkey: Pubkey,
-        funding_amount: u128,
-        commitment_contract_features: CommitmentContractFeatures,
-    ) -> Self {
-        let mut record = Self::new(channel_id, pubkey, funding_amount);
-        record.commitment_contract_features = commitment_contract_features;
-        record
     }
 
     /// Create a new inbound record in the `WaitingForPeer` state.
@@ -1458,27 +1589,6 @@ impl ChannelOpenRecord {
         let mut record = Self::new(channel_id, pubkey, remote_funding_amount);
         record.is_acceptor = true;
         record
-    }
-
-    /// Create a new inbound record with the negotiated commitment-lock features.
-    pub fn new_inbound_with_features(
-        channel_id: Hash256,
-        pubkey: Pubkey,
-        remote_funding_amount: u128,
-        commitment_contract_features: CommitmentContractFeatures,
-    ) -> Self {
-        Self::new_with_features(
-            channel_id,
-            pubkey,
-            remote_funding_amount,
-            commitment_contract_features,
-        )
-        .with_acceptor()
-    }
-
-    fn with_acceptor(mut self) -> Self {
-        self.is_acceptor = true;
-        self
     }
 
     /// Transition to a new status.
@@ -1535,37 +1645,31 @@ impl PendingNotifySettleTlc {
     }
 }
 
-/// Feature bits committed to a channel's commitment-lock args and witness layout.
+/// Validated feature byte for the supported commitment-lock format.
 ///
-/// Zero represents the 57-byte Legacy args without a features byte. The only
-/// supported nonzero value is bit 0, appended to the 58-byte args.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize)]
+/// Only bit 0 is supported, appended to the 58-byte commitment-lock args.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
-pub struct CommitmentContractFeatures(u8);
+pub struct ChannelFeatures(u8);
 
-impl CommitmentContractFeatures {
-    /// Legacy commitment-lock layout, with no feature byte in the args.
-    pub const LEGACY: Self = Self(0);
-    /// Commit the full 32-byte TLC payment hash on-chain.
-    pub const ONCHAIN_FULL_PAYMENT_HASH: Self = Self(1);
+impl ChannelFeatures {
+    /// Channel V2 nonce sessions and full 32-byte TLC payment hashes on-chain.
+    pub const V2: Self = Self(1);
 
-    /// Accept only feature combinations supported by the current contract.
+    /// Accept only feature combinations supported by the current channel protocol.
     pub fn from_bits(bits: u8) -> Result<Self, String> {
         match bits {
-            0 | 1 => Ok(Self(bits)),
-            _ => Err(format!(
-                "unsupported commitment contract features: 0x{bits:x}"
-            )),
+            1 => Ok(Self(bits)),
+            _ => Err(format!("unsupported channel features: 0x{bits:x}")),
         }
     }
 
-    /// Decode the witness layout from a commitment-lock argument buffer.
+    /// Decode only the V2 commitment-lock argument layout; V1 is unsupported.
     pub fn from_lock_args(args: &[u8]) -> Result<Self, String> {
-        match args.len() {
-            57 => Ok(Self::LEGACY),
-            58 => Self::from_bits(args[57]),
-            _ => Err("invalid commitment lock argument length".into()),
+        if args.len() != Self::LOCK_ARGS_LEN {
+            return Err("invalid V2 commitment lock argument length".into());
         }
+        Self::from_bits(args[57])
     }
 
     /// Return the byte stored with the channel and appended to upgraded args.
@@ -1573,40 +1677,20 @@ impl CommitmentContractFeatures {
         self.0
     }
 
-    /// Whether the settlement witness commits the full payment hash.
-    pub fn has_full_payment_hash(self) -> bool {
-        self.0 & Self::ONCHAIN_FULL_PAYMENT_HASH.0 != 0
-    }
+    /// Length of the supported commitment-lock args.
+    pub const LOCK_ARGS_LEN: usize = 58;
 
-    /// Length of the commitment-lock args in bytes.
-    pub fn lock_args_len(self) -> usize {
-        if self.has_full_payment_hash() {
-            58
-        } else {
-            57
-        }
-    }
+    /// Length of the complete TLC payment hash in settlement witnesses.
+    pub const PAYMENT_HASH_LEN: usize = 32;
+}
 
-    /// Length of a TLC payment hash in the settlement witness.
-    pub fn payment_hash_len(self) -> usize {
-        if self.has_full_payment_hash() {
-            32
-        } else {
-            20
-        }
-    }
-
-    /// Select the bitmap for a new channel from both peers' advertised support.
-    pub fn for_negotiated(ours_supports: bool, peer_supports: Option<bool>) -> Self {
-        if ours_supports && peer_supports == Some(true) {
-            Self::ONCHAIN_FULL_PAYMENT_HASH
-        } else {
-            Self::LEGACY
-        }
+impl Default for ChannelFeatures {
+    fn default() -> Self {
+        Self::V2
     }
 }
 
-impl<'de> Deserialize<'de> for CommitmentContractFeatures {
+impl<'de> Deserialize<'de> for ChannelFeatures {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         Self::from_bits(u8::deserialize(deserializer)?).map_err(serde::de::Error::custom)
     }
@@ -1620,13 +1704,6 @@ impl<'de> Deserialize<'de> for CommitmentContractFeatures {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ChannelActorData {
     pub state: ChannelState,
-    /// Local per-commitment points published by an external channel signer.
-    #[serde(default)]
-    pub local_commitment_points: HashMap<u64, Pubkey>,
-    /// Local public nonces published by an external channel signer.
-    #[serde_as(as = "HashMap<_, PubNonceAsBytes>")]
-    #[serde(default)]
-    pub local_public_nonces: HashMap<crate::NonceSlot, PubNonce>,
     /// The data below are only relevant if the channel is public.
     pub public_channel_info: Option<PublicChannelInfo>,
 
@@ -1680,8 +1757,11 @@ pub struct ChannelActorData {
     /// if it's not set, DEFAULT_FEE_RATE will be used as default value, two sides will use the same fee rate.
     pub funding_fee_rate: u64,
 
-    /// Local signing material. External signers persist only public channel material.
+    /// Signer is used to sign the commitment transactions.
     pub signer: Option<InMemorySigner>,
+
+    /// Durable external signing requests and public-only V2 nonce allocations.
+    pub signing_context: crate::ChannelSigningContext,
 
     /// Cached channel public keys for easier of access.
     pub local_channel_public_keys: ChannelBasePublicKeys,
@@ -1707,18 +1787,6 @@ pub struct ChannelActorData {
     #[serde_as(as = "EntityHex")]
     pub local_shutdown_script: Script,
 
-    /// Basically the latest remote nonce sent by the peer with the CommitmentSigned message,
-    /// but we will only update this field after we have sent a RevokeAndAck to the peer.
-    #[serde_as(as = "Option<PubNonceAsBytes>")]
-    pub last_committed_remote_nonce: Option<PubNonce>,
-
-    #[serde_as(as = "Option<PubNonceAsBytes>")]
-    pub remote_revocation_nonce_for_verify: Option<PubNonce>,
-    #[serde_as(as = "Option<PubNonceAsBytes>")]
-    pub remote_revocation_nonce_for_send: Option<PubNonce>,
-    #[serde_as(as = "Option<PubNonceAsBytes>")]
-    pub remote_revocation_nonce_for_next: Option<PubNonce>,
-
     /// The latest commitment transaction we're holding,
     /// it can be broadcasted to blockchain by us to force close the channel.
     #[serde_as(as = "Option<EntityHex>")]
@@ -1740,12 +1808,11 @@ pub struct ChannelActorData {
     /// A flag to indicate whether the channel is reestablishing,
     /// we won't process any messages until the channel is reestablished.
     pub reestablishing: bool,
-    pub last_revoke_ack_msg: Option<RevokeAndAck>,
 
     pub created_at: SystemTime,
 
-    /// TLC updates sent to peer since the last local CommitmentSigned.
-    /// This preserves send order for reestablish replay.
+    /// TLC updates awaiting the next local CommitmentSigned, in wire order.
+    /// V2 publishes them only after the outgoing commitment is stored.
     #[serde(default)]
     pub pending_replay_updates: Vec<TlcReplayUpdate>,
 
@@ -1760,22 +1827,11 @@ pub struct ChannelActorData {
     #[serde(default)]
     pub external_funding: Option<ExternalFundingPersistState>,
 
-    /// Pending signature and last applied result; lifecycle remains in `state`.
+    /// Channel features decided once at channel-open and never changed.
     #[serde(default)]
-    pub signing_context: crate::ChannelSigningContext,
-
-    /// Commitment-lock features decided once at channel-open and never changed.
-    #[serde(default)]
-    pub commitment_contract_features: CommitmentContractFeatures,
-}
-
-fn partial_signature_to_molecule(partial_signature: PartialSignature) -> MByte32 {
-    MByte32::from_slice(partial_signature.serialize().as_ref()).expect("[Byte; 32] from [u8; 32]")
-}
-
-fn pub_nonce_to_molecule(pub_nonce: PubNonce) -> molecule_fiber::PubNonce {
-    molecule_fiber::PubNonce::from_slice(pub_nonce.to_bytes().as_ref())
-        .expect("PubNonce from 66 bytes")
+    pub channel_features: ChannelFeatures,
+    /// Independent owner signing sessions.
+    pub session: ChannelSessionV2,
 }
 
 impl From<PubNonce> for molecule_fiber::PubNonce {
@@ -1790,41 +1846,6 @@ impl TryFrom<molecule_fiber::PubNonce> for PubNonce {
 
     fn try_from(value: molecule_fiber::PubNonce) -> Result<Self, Self::Error> {
         PubNonce::from_bytes(value.as_slice())
-    }
-}
-
-impl From<RevokeAndAck> for molecule_fiber::RevokeAndAck {
-    fn from(revoke_and_ack: RevokeAndAck) -> Self {
-        molecule_fiber::RevokeAndAck::new_builder()
-            .channel_id(revoke_and_ack.channel_id.into())
-            .revocation_partial_signature(partial_signature_to_molecule(
-                revoke_and_ack.revocation_partial_signature,
-            ))
-            .next_per_commitment_point(revoke_and_ack.next_per_commitment_point.into())
-            .next_revocation_nonce(pub_nonce_to_molecule(revoke_and_ack.next_revocation_nonce))
-            .build()
-    }
-}
-
-impl TryFrom<molecule_fiber::RevokeAndAck> for RevokeAndAck {
-    type Error = anyhow::Error;
-
-    fn try_from(revoke_and_ack: molecule_fiber::RevokeAndAck) -> Result<Self, Self::Error> {
-        Ok(RevokeAndAck {
-            channel_id: revoke_and_ack.channel_id().into(),
-            revocation_partial_signature: PartialSignature::from_slice(
-                revoke_and_ack.revocation_partial_signature().as_slice(),
-            )
-            .map_err(|e| anyhow::anyhow!(e))?,
-            next_per_commitment_point: revoke_and_ack
-                .next_per_commitment_point()
-                .try_into()
-                .map_err(|e: secp256k1::Error| anyhow::anyhow!(e))?,
-            next_revocation_nonce: PubNonce::from_bytes(
-                revoke_and_ack.next_revocation_nonce().as_slice(),
-            )
-            .map_err(|e| anyhow::anyhow!("{}", e))?,
-        })
     }
 }
 

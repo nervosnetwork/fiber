@@ -455,6 +455,31 @@ impl<R: FiberRpc, S: SignerStore> Agent<R, S> {
         Ok(result)
     }
 
+    /// Keep the wallet's funding signature private until the SDK has a verified local exit.
+    pub async fn wait_for_opening_commitment(&mut self, channel_id: Hash256) -> Result<()> {
+        let token = self.tenant_token()?;
+        tokio::time::timeout(std::time::Duration::from_secs(8), async {
+            loop {
+                let records = self
+                    .session
+                    .channel_signer(channel_id)
+                    .await?
+                    .recovery_records()
+                    .await?;
+                if records.iter().any(|record| {
+                    !record.reference.for_remote && record.complete_signature.is_some()
+                }) && records.iter().any(|record| record.reference.for_remote)
+                {
+                    return Ok(());
+                }
+                self.poll_channel(&token, channel_id).await?;
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .context("initial commitment was not independently verified before wallet funding")?
+    }
+
     /// Install an independent dev-chain source and trusted contract dependencies.
     pub async fn configure_chain(&mut self, url: &str, contracts: &Path) -> Result<()> {
         let mut chain = crate::DevChain::new(url)?;
@@ -1420,6 +1445,8 @@ mod tests {
         first.initialize().await.expect("first initialize");
         let tenant_id = first.tenant_id().clone();
         let pending = first.pending_channel_key_id();
+        let before: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.path().join("status.json")).unwrap()).unwrap();
         drop(first);
 
         let mut reopened = Agent::open(node.clone(), config()).await.expect("reopen");
@@ -1428,6 +1455,12 @@ mod tests {
         assert_eq!(reopened.tenant_id(), tenant_id);
         assert_eq!(reopened.pending_channel_key_id(), pending);
         assert_eq!(node.state().register_calls, 1);
+        let after: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.path().join("status.json")).unwrap()).unwrap();
+        assert!(
+            before["channel_open_signer_material"] == after["channel_open_signer_material"],
+            "opening retry must preserve its persisted fresh nonce pool across restart"
+        );
     }
 
     #[tokio::test]
@@ -1510,17 +1543,152 @@ mod tests {
         node.state().statuses.insert(channel_id().into(), malicious);
         let before = fs::read(dir.path().join("snapshot.bin")).unwrap();
         assert!(agent.poll_once().await.is_err());
+        assert!(agent
+            .wait_for_opening_commitment(channel_id())
+            .await
+            .is_err());
         assert!(node.state().submissions.is_empty());
         assert_eq!(fs::read(dir.path().join("snapshot.bin")).unwrap(), before);
+        for tamper in 0..7 {
+            let mut malicious = status.clone();
+            let ChannelSigningStatus::SignatureRequired { content, .. } = &mut malicious else {
+                panic!("fixture must request a signature")
+            };
+            match tamper {
+                0 => content.v2 = None,
+                1 => content.v2.as_mut().unwrap().channel_id = JsonHash256([0x99; 32]),
+                2 => {
+                    content.v2.as_mut().unwrap().owner = signer
+                        .public_material()
+                        .base_public_keys
+                        .funding_pubkey
+                        .into()
+                }
+                3 => {
+                    content.v2.as_mut().unwrap().public_nonce = musig2::SecNonce::build([0x99; 32])
+                        .build()
+                        .public_nonce()
+                        .serialize()
+                        .to_vec()
+                }
+                4 => content.slot.purpose = fiber_json_types::NoncePurpose::Closing,
+                5 => content.slot.commitment_number += 1,
+                6 => content.commitment_counter = Some(fiber_json_types::CommitmentCounter::Local),
+                _ => unreachable!(),
+            }
+            node.state().statuses.insert(channel_id().into(), malicious);
+            assert!(
+                agent.poll_once().await.is_err(),
+                "accepted V2 tamper {tamper}"
+            );
+            assert!(node.state().submissions.is_empty());
+            assert_eq!(fs::read(dir.path().join("snapshot.bin")).unwrap(), before);
+        }
         node.state().statuses.insert(channel_id().into(), status);
 
         agent.poll_once().await.expect("poll and sign");
 
+        let first = {
+            let state = node.state();
+            assert_eq!(state.submissions.len(), 1);
+            assert_eq!(state.submissions[0].request_id, JsonHash256([0x22; 32]));
+            assert_eq!(state.submissions[0].partial_signature.len(), 32);
+            let next = state.submissions[0].next_material.as_ref().unwrap();
+            assert!(
+                !next.v2_nonces.is_empty(),
+                "signing must replenish fresh V2 nonces"
+            );
+            assert!(!next.commitment_points.is_empty());
+            serde_json::to_value(&state.submissions[0]).unwrap()
+        };
+        agent
+            .poll_once()
+            .await
+            .expect("retry the identical signing request");
+        assert_eq!(
+            first,
+            serde_json::to_value(&node.state().submissions[1]).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn cooperative_close_uses_fresh_closing_nonce_after_both_commitment_lanes() {
+        let dir = tempfile::tempdir().unwrap();
+        let node = FakeNode::default();
+        let mut agent = Agent::open(
+            node.clone(),
+            AgentConfig {
+                store_dir: dir.path().to_path_buf(),
+                status_file: None,
+                lsp_node_id: lsp_node_id(),
+            },
+        )
+        .await
+        .unwrap();
+        agent.initialize().await.unwrap();
+        let (id, funding) = approve_pending(&mut agent).await;
+        let signer = agent
+            .open_channel(agent.binding(id).unwrap())
+            .await
+            .unwrap();
+        let mut commitment_nonces = Vec::new();
+        for for_remote in [true, false] {
+            let status = convert_tests::commitment_status(&signer, &funding, for_remote).await;
+            let ChannelSigningStatus::SignatureRequired { content, .. } = &status else {
+                panic!("missing commitment request")
+            };
+            commitment_nonces.push(content.v2.as_ref().unwrap().public_nonce.clone());
+            node.state().statuses.insert(id.into(), status);
+            agent.poll_once().await.expect("sign commitment lane");
+        }
+        agent
+            .wait_for_opening_commitment(id)
+            .await
+            .expect("verified local opening exit");
+        signer
+            .authorize_close(fiber_lsp_sdk::CloseAuthorization {
+                fee: 0,
+                local_fee_share: 0,
+                remote_fee_share: 0,
+            })
+            .await
+            .unwrap();
+        let status = convert_tests::closing_status(&signer, &funding).await;
+        let ChannelSigningStatus::SignatureRequired { content, .. } = &status else {
+            panic!("missing closing request")
+        };
+        assert_eq!(
+            content.slot.purpose,
+            fiber_json_types::NoncePurpose::Closing
+        );
+        let closing_nonce = content.v2.as_ref().unwrap().public_nonce.clone();
+        assert!(!commitment_nonces.contains(&closing_nonce));
+        let expected = fiber_lsp_sdk::json::musig2_from_rpc(content.clone()).unwrap();
+        let mut malicious = status.clone();
+        let ChannelSigningStatus::SignatureRequired { content, .. } = &mut malicious else {
+            unreachable!()
+        };
+        content.slot.purpose = fiber_json_types::NoncePurpose::Commitment;
+        node.state().statuses.insert(id.into(), malicious);
+        let before = fs::read(dir.path().join("snapshot.bin")).unwrap();
+        assert!(agent.poll_once().await.is_err());
+        assert_eq!(node.state().submissions.len(), 2);
+        assert_eq!(fs::read(dir.path().join("snapshot.bin")).unwrap(), before);
+        node.state().statuses.insert(id.into(), status);
+        agent.poll_once().await.expect("sign cooperative close");
         let state = node.state();
-        assert_eq!(state.submissions.len(), 1);
-        assert_eq!(state.submissions[0].request_id, JsonHash256([0x22; 32]));
-        assert_eq!(state.submissions[0].partial_signature.len(), 32);
-        assert!(state.submissions[0].next_material.is_some());
+        assert_eq!(state.submissions.len(), 3);
+        let submitted = &state.submissions[2];
+        assert_eq!(submitted.request_id, JsonHash256([0x24; 32]));
+        musig2::verify_partial(
+            &expected.key_agg_ctx,
+            musig2::PartialSignature::from_slice(&submitted.partial_signature).unwrap(),
+            &expected.agg_nonce,
+            signer.public_material().base_public_keys.funding_pubkey,
+            &expected.v2.unwrap().public_nonce,
+            expected.content.signing_message(),
+        )
+        .expect("SDK closing partial signature verifies against fresh allocation");
     }
 
     #[tokio::test]

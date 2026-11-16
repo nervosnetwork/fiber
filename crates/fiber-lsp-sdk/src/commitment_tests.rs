@@ -23,6 +23,27 @@ pub(crate) struct Fixture {
 }
 
 impl Fixture {
+    fn nonce_binding(
+        &self,
+        public_nonce: musig2::PubNonce,
+        owner: fiber_types::Pubkey,
+    ) -> fiber_types::V2NonceBinding {
+        let mut keys = [
+            self.signer
+                .public_material()
+                .base_public_keys
+                .tlc_base_key
+                .serialize(),
+            self.remote.tlc_base_key.pubkey().serialize(),
+        ];
+        keys.sort();
+        fiber_types::V2NonceBinding {
+            channel_id: blake2b_hash_with_salt(&keys.concat(), &[]).into(),
+            owner,
+            public_nonce,
+        }
+    }
+
     pub async fn new(udt: bool) -> Self {
         let store = MemoryStore::default();
         let root = RootSigner::create(RootKey::import([42; 32]).unwrap(), store.clone())
@@ -151,13 +172,8 @@ impl Fixture {
         version: u64,
         data: SettlementData,
     ) -> (ChannelSigningContent, CommitmentContext) {
-        self.request_with_features(
-            for_remote,
-            version,
-            data,
-            fiber_types::CommitmentContractFeatures::LEGACY,
-        )
-        .await
+        self.request_with_features(for_remote, version, data, fiber_types::ChannelFeatures::V2)
+            .await
     }
 
     pub async fn request_with_features(
@@ -165,7 +181,7 @@ impl Fixture {
         for_remote: bool,
         version: u64,
         data: SettlementData,
-        features: fiber_types::CommitmentContractFeatures,
+        features: fiber_types::ChannelFeatures,
     ) -> (ChannelSigningContent, CommitmentContext) {
         // The first real commitment follows funding collaboration and has version one.
         let version = version + 1;
@@ -187,12 +203,11 @@ impl Fixture {
         args.extend_from_slice(&settlement_witness_hash(
             &data,
             for_remote,
-            features,
             keys.tlc_base_key,
             self.remote.tlc_base_key.pubkey(),
         ));
         args.push(0);
-        if features.has_full_payment_hash() {
+        if true {
             args.push(features.bits());
         }
         let lock = self
@@ -232,7 +247,7 @@ impl Fixture {
             .unwrap()
             .public_nonce;
         let remote_nonce = musig2::SecNonce::build([7; 32]).build().public_nonce();
-        let agg_nonce = AggNonce::sum([nonce, remote_nonce.clone()]);
+        let agg_nonce = AggNonce::sum([nonce.clone(), remote_nonce.clone()]);
         let signable = Musig2SignableContent::CommitmentTransaction(tx);
         let partial = musig2::sign_partial(
             &ctx,
@@ -244,8 +259,16 @@ impl Fixture {
         .unwrap();
         (
             ChannelSigningContent::Musig2(Musig2SigningContent {
+                v2: Some(self.nonce_binding(
+                    nonce.clone(),
+                    if for_remote {
+                        self.remote.funding_key.pubkey()
+                    } else {
+                        keys.funding_pubkey
+                    },
+                )),
                 slot,
-                commitment_counter: Some(CommitmentCounter::Local),
+                commitment_counter: None,
                 key_agg_ctx: ctx,
                 agg_nonce,
                 content: signable,
@@ -271,13 +294,8 @@ impl Fixture {
     }
 
     pub async fn sign(&self, for_remote: bool, version: u64, data: SettlementData) {
-        self.sign_with_features(
-            for_remote,
-            version,
-            data,
-            fiber_types::CommitmentContractFeatures::LEGACY,
-        )
-        .await;
+        self.sign_with_features(for_remote, version, data, fiber_types::ChannelFeatures::V2)
+            .await;
     }
 
     pub async fn sign_with_features(
@@ -285,7 +303,7 @@ impl Fixture {
         for_remote: bool,
         version: u64,
         data: SettlementData,
-        features: fiber_types::CommitmentContractFeatures,
+        features: fiber_types::ChannelFeatures,
     ) {
         let (content, context) = self
             .request_with_features(for_remote, version, data, features)
@@ -1105,7 +1123,7 @@ impl Fixture {
             .public_nonce;
         let peer_nonce = musig2::SecNonce::build([55; 32]).build();
         let peer_public_nonce = peer_nonce.public_nonce();
-        let agg_nonce = AggNonce::sum([nonce, peer_public_nonce.clone()]);
+        let agg_nonce = AggNonce::sum([nonce.clone(), peer_public_nonce.clone()]);
         let content = Musig2SignableContent::Revocation {
             output: self
                 .funding
@@ -1146,12 +1164,9 @@ impl Fixture {
         .unwrap();
         (
             ChannelSigningContent::Musig2(Musig2SigningContent {
+                v2: Some(self.nonce_binding(nonce.clone(), if receiving { remote } else { local })),
                 slot,
-                commitment_counter: Some(if receiving {
-                    CommitmentCounter::Local
-                } else {
-                    CommitmentCounter::Remote
-                }),
+                commitment_counter: None,
                 key_agg_ctx,
                 agg_nonce,
                 content,
@@ -1481,7 +1496,6 @@ async fn onchain_claim_checks_live_input_witness_destination_fee_and_maturity() 
     let body = fiber_types::settlement_data_to_witness(
         &record.settlement.data,
         false,
-        fiber_types::CommitmentContractFeatures::LEGACY,
         record.settlement.local_settlement_key,
         record.settlement.remote_settlement_key,
     );
@@ -1490,6 +1504,7 @@ async fn onchain_claim_checks_live_input_witness_destination_fee_and_maturity() 
     let mut args = source.lock().args().raw_data()[..36].to_vec();
     args.extend_from_slice(&fiber_types::blake2b_hash_with_salt(&next, &[])[..20]);
     args.push(1);
+    args.push(fiber_types::ChannelFeatures::V2.bits());
     let remainder = source
         .clone()
         .as_builder()
@@ -1722,6 +1737,11 @@ async fn cooperative_close_checks_exact_allocations_and_local_fee_approval() {
         let ChannelSigningContent::Musig2(ref mut m) = content else {
             panic!()
         };
+        m.slot = NonceSlot {
+            purpose: NoncePurpose::Closing,
+            commitment_number: 0,
+        };
+        m.v2.as_mut().unwrap().owner = f.signer.public_material().base_public_keys.funding_pubkey;
         m.content = Musig2SignableContent::CooperativeCloseTransaction(tx.clone());
         {
             let before = f.store.snapshot().unwrap();
@@ -1888,16 +1908,16 @@ async fn onchain_inbound_tlc_requires_exact_preimage_key_and_residual_state() {
         let body = fiber_types::settlement_data_to_witness(
             &record.settlement.data,
             false,
-            fiber_types::CommitmentContractFeatures::LEGACY,
             record.settlement.local_settlement_key,
             record.settlement.remote_settlement_key,
         );
         let mut next = body.clone();
-        next.drain(1..86);
+        next.drain(1..98);
         next[0] = 0;
         let mut args = source.lock().args().raw_data()[..36].to_vec();
         args.extend_from_slice(&fiber_types::blake2b_hash_with_salt(&next, &[])[..20]);
         args.push(1);
+        args.push(fiber_types::ChannelFeatures::V2.bits());
         let remainder = source
             .clone()
             .as_builder()
@@ -2067,6 +2087,7 @@ async fn announcement_requires_approved_network_fields_and_correct_nonce() {
         peer_partial_signature: None,
     };
     let content = ChannelSigningContent::Musig2(Musig2SigningContent {
+        v2: Some(f.nonce_binding(local_nonce.clone(), local)),
         slot,
         commitment_counter: None,
         key_agg_ctx: ctx,
@@ -2258,10 +2279,7 @@ impl ChainVerifier for DescendantChain {
 
 #[tokio::test]
 async fn timeout_then_descendant_settlement_rechecks_time_lineage_and_residual() {
-    for features in [
-        fiber_types::CommitmentContractFeatures::LEGACY,
-        fiber_types::CommitmentContractFeatures::ONCHAIN_FULL_PAYMENT_HASH,
-    ] {
+    for features in [fiber_types::ChannelFeatures::V2] {
         let f = Fixture::new(false).await;
         f.signer.authorize_payment(f.terms(false)).await.unwrap();
         f.sign_with_features(false, 0, f.opening(), features).await;
@@ -2307,18 +2325,17 @@ async fn timeout_then_descendant_settlement_rechecks_time_lineage_and_residual()
         let body = fiber_types::settlement_data_to_witness(
             &record.settlement.data,
             false,
-            features,
             record.settlement.local_settlement_key,
             record.settlement.remote_settlement_key,
         );
         let mut next = body.clone();
-        next.drain(1..1 + 65 + features.payment_hash_len());
+        next.drain(1..1 + 65 + fiber_types::ChannelFeatures::PAYMENT_HASH_LEN);
         next[0] = 0;
         let residual = |body: &[u8], capacity: u64| {
             let mut args = source.lock().args().raw_data()[..36].to_vec();
             args.extend_from_slice(&blake2b_hash_with_salt(body, &[])[..20]);
             args.push(1);
-            if features.has_full_payment_hash() {
+            if true {
                 args.push(features.bits());
             }
             source
@@ -2584,7 +2601,7 @@ async fn signs_full_payment_hash_commitment_after_independent_validation() {
                 for_remote,
                 0,
                 fixture.opening(),
-                fiber_types::CommitmentContractFeatures::ONCHAIN_FULL_PAYMENT_HASH,
+                fiber_types::ChannelFeatures::V2,
             )
             .await;
         let prepared = fixture

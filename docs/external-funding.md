@@ -29,3 +29,16 @@ standard CCC signers, OmniLock witness preparation
 ([`prepareOmniLockWitness`](https://github.com/joii2020/fiber-wallet/blob/77decbbe17ef39f1e443015bae41e74e6dd3960d/apps/src/wallet/manager.ts#L60-L85)),
 and JoyID redirect signing
 ([`prepareJoyIdSignTx`](https://github.com/joii2020/fiber-wallet/blob/77decbbe17ef39f1e443015bae41e74e6dd3960d/apps/src/wallet/manager.ts#L477-L515)).
+
+## Timeouts, Cancellation, and Stuck Opening Recovery
+
+External-funding channel openings have two distinct lifecycle phases:
+
+1. **Before `submit_signed_funding_tx` is called**:
+   - Waiting for the external wallet to sign is bounded by `external_funding_timeout_seconds` (default: 5 minutes).
+   - You can also cancel the opening immediately by calling `abandon_channel`.
+
+2. **After `submit_signed_funding_tx` succeeds**:
+   - Once the signed funding transaction has been submitted, FNN intentionally **disables time-based funding timeouts** (`funding_timeout_seconds`) as well as manual `abandon_channel` and peer `TxAbort`. Because the signed funding inputs have been released, discarding local channel state while the funding transaction could still confirm on-chain would risk stranding funds without the pre-signed commitment exit transaction.
+   - **If the peer goes offline before the funding transaction is broadcast and you want to cancel the opening**: spend any of the wallet's funding input cells in another transaction (for example, a self-transfer in the external wallet). Once that conflicting transaction confirms on-chain and reaches FNN's tracing confirmation depth, FNN automatically detects that the funding input has been spent and aborts the pending channel (`FUNDING_ABORTED`).
+   - **If the funding transaction has already confirmed on-chain while the peer remains offline**: call `shutdown_channel` with `force: true` to broadcast the persisted initial commitment transaction and reclaim funds unilaterally.

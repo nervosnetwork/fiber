@@ -1474,6 +1474,54 @@ fn record_payment_fail_with_index_does_not_panic_on_empty_route() {
     assert!(!need_retry);
 }
 
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_final_amount_and_expiry_errors_penalize_last_channel() {
+    for error_code in [
+        TlcErrorCode::FinalIncorrectTlcAmount,
+        TlcErrorCode::FinalIncorrectExpiryDelta,
+    ] {
+        let node_a = gen_rand_fiber_public_key();
+        let node_b = gen_rand_fiber_public_key();
+        let node_c = gen_rand_fiber_public_key();
+        let channel_ab = gen_rand_channel_outpoint();
+        let channel_bc = gen_rand_channel_outpoint();
+        let route = vec![
+            SessionRouteNode {
+                pubkey: node_a,
+                amount: 1000,
+                channel_outpoint: channel_ab.clone(),
+            },
+            SessionRouteNode {
+                pubkey: node_b,
+                amount: 900,
+                channel_outpoint: channel_bc.clone(),
+            },
+            SessionRouteNode {
+                pubkey: node_c,
+                amount: 800,
+                channel_outpoint: OutPoint::default(),
+            },
+        ];
+
+        let mut result = InternalResult::default();
+        let need_retry = result.record_payment_fail_at_hop(&route, 2, TlcErr::new(error_code));
+
+        assert!(need_retry);
+        assert!(result.fail_node.is_none());
+        assert!(result.pairs.iter().any(|((outpoint, _), pair)| {
+            outpoint == &channel_bc && !pair.success && pair.amount == 0
+        }));
+        assert!(result
+            .pairs
+            .iter()
+            .all(|((outpoint, _), pair)| outpoint != &channel_bc || !pair.success));
+        assert!(result.pairs.iter().any(|((outpoint, _), pair)| {
+            outpoint == &channel_ab && pair.success && pair.amount == 1000
+        }));
+    }
+}
+
 #[test]
 fn record_payment_fail_with_index_does_not_panic_on_single_node_route() {
     let mut result = InternalResult::default();

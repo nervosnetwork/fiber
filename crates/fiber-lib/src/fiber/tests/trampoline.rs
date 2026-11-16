@@ -1,5 +1,8 @@
 #![cfg(not(target_arch = "wasm32"))]
-use crate::fiber::channel::{ChannelActorStateStore, ChannelCommand, ChannelCommandWithId};
+use crate::fiber::channel::{
+    ChannelActorMessage, ChannelActorStateStore, ChannelCommand, ChannelCommandWithId,
+    RemoveTlcCommand,
+};
 use crate::fiber::config::{
     DEFAULT_FINAL_TLC_EXPIRY_DELTA, DEFAULT_TLC_EXPIRY_DELTA, MIN_TLC_EXPIRY_DELTA,
 };
@@ -23,8 +26,9 @@ use crate::{
 use fiber_types::Hash256;
 use fiber_types::{
     AddTlcCommand, AppliedFlags, CommitmentNumbers, CurrentPaymentHopData, HashAlgorithm,
-    InboundTlcStatus, PaymentHopData, PeeledPaymentOnionPacket, PrevTlcInfo, RetryableTlcOperation,
-    TLCId, TlcErr, TlcErrorCode, TlcInfo, TlcStatus,
+    InboundTlcStatus, PaymentHopData, PeeledPaymentOnionPacket, PrevTlcInfo, RemoveTlcFulfill,
+    RemoveTlcReason, RetryableTlcOperation, TLCId, TlcErr, TlcErrPacket, TlcErrorCode, TlcInfo,
+    TlcStatus,
 };
 use ractor::{call, RpcReplyPort};
 use rand::Rng;
@@ -706,7 +710,7 @@ async fn test_trampoline_keysend_when_trampoline_use_default_fee() {
     let response_1 = res.unwrap();
     let payment_hash = response_1.payment_hash;
     debug!("Payment 1 response fee: {}", response_1.fee);
-    node_a.wait_until_success(payment_hash).await;
+    node_a.wait_until_payment_finished(payment_hash).await;
 
     // Verify balances after first payment (default fee calculation)
     let node_a_final_1 = node_a.get_local_balance_from_channel(channels[0]);
@@ -793,7 +797,7 @@ async fn test_trampoline_keysend_when_trampoline_use_default_fee() {
     let response_2 = res.unwrap();
     let payment_hash = response_2.payment_hash;
     debug!("Payment 2 response fee: {}", response_2.fee);
-    node_a.wait_until_success(payment_hash).await;
+    node_a.wait_until_payment_finished(payment_hash).await;
 
     // Verify balances after second payment (with max_fee_amount = 2000)
     let node_a_final_2 = node_a.get_local_balance_from_channel(channels[0]);
@@ -1290,7 +1294,7 @@ async fn test_trampoline_single_hop_long_public_path() {
     let response = res.unwrap();
     let payment_hash = response.payment_hash;
 
-    node_a.wait_until_success(payment_hash).await;
+    node_a.wait_until_payment_finished(payment_hash).await;
 
     // Capture balances after payment and calculate changes
     let balances_after = capture_balances(&all_nodes, &channels);
@@ -1398,7 +1402,7 @@ async fn test_trampoline_routing_four_hops_with_public_paths_between_trampolines
     let response = res.unwrap();
     let payment_hash = response.payment_hash;
 
-    node_a.wait_until_success(payment_hash).await;
+    node_a.wait_until_payment_finished(payment_hash).await;
 
     // Capture balances after payment and calculate changes
     let balances_after = capture_balances(&all_nodes, &channels);
@@ -1555,7 +1559,9 @@ async fn test_trampoline_forwarding_prefers_better_channel_private_vs_public() {
         .await;
     assert!(res.is_ok());
 
-    node_a.wait_until_success(res.unwrap().payment_hash).await;
+    node_a
+        .wait_until_payment_finished(res.unwrap().payment_hash)
+        .await;
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
     // Assert: the public channel was NOT used, and the private channel WAS used.
@@ -3826,7 +3832,7 @@ async fn test_trampoline_node_restart() {
 
     // A --(public)--> B --(private)--> C
     // Note: Use large amounts to ensure capacity.
-    let (nodes, _channels) = create_n_nodes_network_with_visibility(
+    let (nodes, channels) = create_n_nodes_network_with_visibility(
         &[
             ((0, 1), (MIN_RESERVED_CKB + 1000000, HUGE_CKB_AMOUNT), true),
             ((1, 2), (MIN_RESERVED_CKB + 1000000, HUGE_CKB_AMOUNT), false),
@@ -3836,6 +3842,8 @@ async fn test_trampoline_node_restart() {
     .await;
 
     let [node_a, mut node_b, node_c] = nodes.try_into().expect("3 nodes");
+    let upstream_balance = node_b.get_local_balance_from_channel(channels[0]);
+    let downstream_balance = node_b.get_local_balance_from_channel(channels[1]);
 
     // Wait until A learns B (public channel).
     wait_until_node_supports_trampoline_routing(&node_a, &node_b).await;
@@ -3892,10 +3900,40 @@ async fn test_trampoline_node_restart() {
 
     wait_for_received_tlc(&node_c, payment_hash).await;
     debug!("Node C received HTLC. Stopping Node B.");
+    let upstream_amount = node_b
+        .get_channel_actor_state(channels[0])
+        .tlc_state
+        .get(&TLCId::Received(0))
+        .expect("committed upstream TLC")
+        .amount;
 
     // Restart B
     node_b.restart().await;
     debug!("Node B restarted.");
+    let upstream_actor = node_b
+        .get_channel_actor(channels[0])
+        .await
+        .expect("restored channel actor");
+    ractor::call_t!(
+        upstream_actor,
+        |reply| ChannelActorMessage::Command(ChannelCommand::TestBarrier(reply)),
+        5000
+    )
+    .expect("recovery finishes before inspecting the upstream TLC");
+    let restored = node_b.get_channel_actor_state(channels[0]);
+    assert!(
+        restored.retryable_tlc_operations.is_empty(),
+        "recovery must not enqueue a failure for the trampoline-owned TLC"
+    );
+    assert!(
+        restored
+            .tlc_state
+            .get(&TLCId::Received(0))
+            .expect("upstream TLC remains pending")
+            .removed_reason
+            .is_none(),
+        "do not race a synthetic fail against the later legitimate fulfill"
+    );
 
     // Wait for channels to be ready/active again.
     // We can assume after connect_to, channel re-establishment kicks in.
@@ -3932,7 +3970,12 @@ async fn test_trampoline_node_restart() {
 
     debug!("Waiting for success on Node A...");
     // Wait for A to succeed.
-    node_a.wait_until_success(payment_hash).await;
+    node_a.wait_until_payment_finished(payment_hash).await;
+    wait_until_timeout(5000, || {
+        node_b.get_local_balance_from_channel(channels[0]) == upstream_balance + upstream_amount
+            && node_b.get_local_balance_from_channel(channels[1]) == downstream_balance - amount
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -4501,6 +4544,376 @@ async fn test_trampoline_routing_mpp_last_hop() {
 }
 
 #[tokio::test]
+async fn test_trampoline_partial_mpp_preimage_settles_upstream() {
+    init_tracing();
+
+    // A funds one incoming TLC at B; B must split it across two channels to C.
+    let (nodes, channels) = create_n_nodes_network_with_visibility(
+        &[
+            (
+                (0, 1),
+                (MIN_RESERVED_CKB + 10_000_000_000, MIN_RESERVED_CKB),
+                true,
+            ),
+            (
+                (1, 2),
+                (MIN_RESERVED_CKB + 1_000_000_000, MIN_RESERVED_CKB),
+                false,
+            ),
+            (
+                (1, 2),
+                (MIN_RESERVED_CKB + 1_000_000_000, MIN_RESERVED_CKB),
+                false,
+            ),
+        ],
+        3,
+    )
+    .await;
+    let [node_a, node_b, node_c] = nodes.try_into().expect("three nodes");
+    wait_until_node_supports_trampoline_routing(&node_a, &node_b).await;
+
+    let amount = 1_500_000_000_u128;
+    let preimage = gen_rand_sha256_hash();
+    let payment_hash: Hash256 = HashAlgorithm::Sha256.hash(preimage).into();
+    let invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(amount))
+        .payment_hash(payment_hash)
+        .hash_algorithm(HashAlgorithm::Sha256)
+        .allow_trampoline_routing(true)
+        .allow_mpp(true)
+        .payee_pub_key(node_c.get_public_key().into())
+        .description("partial MPP trampoline".to_string())
+        .payment_secret(gen_rand_sha256_hash())
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_c.private_key.0))
+        .expect("invoice");
+    // A hold invoice keeps both shards pending so the test can model a malicious C.
+    node_c.insert_invoice(invoice.clone(), None);
+
+    let a_before = node_a.get_local_balance_from_channel(channels[0]);
+    let b_before = channels
+        .iter()
+        .map(|id| node_b.get_local_balance_from_channel(*id))
+        .sum::<u128>();
+    let c_before = channels[1..]
+        .iter()
+        .map(|id| node_c.get_local_balance_from_channel(*id))
+        .sum::<u128>();
+
+    node_a
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            trampoline_hops: Some(vec![node_b.get_public_key()]),
+            max_parts: Some(2),
+            ..Default::default()
+        })
+        .await
+        .expect("send trampoline payment");
+
+    wait_until_timeout(30_000, || {
+        let held = node_c.store.get_payment_hold_tlcs(payment_hash);
+        held.len() == 2
+            && held.iter().all(|part| {
+                node_c
+                    .get_tlc(part.channel_id, TLCId::Received(part.tlc_id))
+                    .is_some_and(|tlc| {
+                        tlc.status == TlcStatus::Inbound(InboundTlcStatus::Committed)
+                    })
+            })
+    })
+    .await;
+    let held = node_c.store.get_payment_hold_tlcs(payment_hash);
+    assert_eq!(held.len(), 2);
+
+    // C violates MPP: fail one committed shard, then reveal the preimage on
+    // only the other. B may report a partial downstream failure, but A must pay.
+    let failed = &held[0];
+    let failed_tlc = node_c
+        .get_tlc(failed.channel_id, TLCId::Received(failed.tlc_id))
+        .expect("failed shard exists");
+    call!(node_c.network_actor, |rpc_reply| {
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: failed.channel_id,
+                command: ChannelCommand::RemoveTlc(
+                    RemoveTlcCommand {
+                        id: failed.tlc_id,
+                        reason: RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+                            TlcErr::new(TlcErrorCode::InvoiceCancelled),
+                            &failed_tlc.shared_secret,
+                        )),
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("C network actor alive")
+    .expect("fail one shard");
+
+    let fulfilled = &held[1];
+    call!(node_c.network_actor, |rpc_reply| {
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: fulfilled.channel_id,
+                command: ChannelCommand::RemoveTlc(
+                    RemoveTlcCommand {
+                        id: fulfilled.tlc_id,
+                        reason: RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+                            payment_preimage: preimage,
+                        }),
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("C network actor alive")
+    .expect("fulfill one shard");
+
+    wait_until_timeout(30_000, || {
+        node_a
+            .get_payment_session(payment_hash)
+            .is_some_and(|session| {
+                session.status == PaymentStatus::Success
+                    && node_a.get_local_balance_from_channel(channels[0]) < a_before
+            })
+    })
+    .await;
+    wait_until_timeout(30_000, || {
+        channels[1..]
+            .iter()
+            .map(|id| node_c.get_local_balance_from_channel(*id))
+            .sum::<u128>()
+            > c_before
+    })
+    .await;
+    let b_after = channels
+        .iter()
+        .map(|id| node_b.get_local_balance_from_channel(*id))
+        .sum::<u128>();
+    assert!(b_after >= b_before, "relay must not lose channel funds");
+}
+
+#[tokio::test]
+async fn test_trampoline_success_drains_remaining_failure() {
+    assert_trampoline_success_drains_remaining_tlc(false).await;
+}
+
+#[tokio::test]
+async fn test_trampoline_success_survives_restart() {
+    assert_trampoline_success_drains_remaining_tlc(true).await;
+}
+
+async fn assert_trampoline_success_drains_remaining_tlc(restart: bool) {
+    init_tracing();
+
+    // A funds one incoming TLC at B; B must split it across two channels to C.
+    let specifications = [
+        (
+            (0, 1),
+            (MIN_RESERVED_CKB + 10_000_000_000, MIN_RESERVED_CKB),
+            true,
+        ),
+        (
+            (1, 2),
+            (MIN_RESERVED_CKB + 1_000_000_000, MIN_RESERVED_CKB),
+            false,
+        ),
+        (
+            (1, 2),
+            (MIN_RESERVED_CKB + 1_000_000_000, MIN_RESERVED_CKB),
+            false,
+        ),
+    ];
+    let (nodes, channels) = create_n_nodes_network_with_visibility(&specifications, 3).await;
+    let [node_a, mut node_b, mut node_c] = nodes.try_into().expect("three nodes");
+    assert!(node_b.get_channel_actor_state(channels[0]).session.marker == 0x56320001);
+    wait_until_node_supports_trampoline_routing(&node_a, &node_b).await;
+
+    let amount = 1_500_000_000_u128;
+    let preimage = gen_rand_sha256_hash();
+    let payment_hash: Hash256 = HashAlgorithm::Sha256.hash(preimage).into();
+    let invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(amount))
+        .payment_hash(payment_hash)
+        .hash_algorithm(HashAlgorithm::Sha256)
+        .allow_trampoline_routing(true)
+        .allow_mpp(true)
+        .payee_pub_key(node_c.get_public_key().into())
+        .description("partial MPP trampoline".to_string())
+        .payment_secret(gen_rand_sha256_hash())
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_c.private_key.0))
+        .expect("invoice");
+    // A hold invoice keeps both shards pending so the test can model a malicious C.
+    node_c.insert_invoice(invoice.clone(), None);
+
+    let a_before = node_a.get_local_balance_from_channel(channels[0]);
+    let b_before = channels
+        .iter()
+        .map(|id| node_b.get_local_balance_from_channel(*id))
+        .sum::<u128>();
+    let c_before = channels[1..]
+        .iter()
+        .map(|id| node_c.get_local_balance_from_channel(*id))
+        .sum::<u128>();
+
+    node_a
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            trampoline_hops: Some(vec![node_b.get_public_key()]),
+            max_parts: Some(2),
+            ..Default::default()
+        })
+        .await
+        .expect("send trampoline payment");
+
+    wait_until_timeout(30_000, || {
+        let held = node_c.store.get_payment_hold_tlcs(payment_hash);
+        held.len() == 2
+            && held.iter().all(|part| {
+                node_c
+                    .get_tlc(part.channel_id, TLCId::Received(part.tlc_id))
+                    .is_some_and(|tlc| {
+                        tlc.status == TlcStatus::Inbound(InboundTlcStatus::Committed)
+                    })
+            })
+    })
+    .await;
+    let held = node_c.store.get_payment_hold_tlcs(payment_hash);
+    assert_eq!(held.len(), 2);
+    // Delay only the second channel's commitment exchange so its result remains outstanding.
+    node_c
+        .hold_next_fiber_messages(
+            node_b.get_public_key(),
+            held[0].channel_id,
+            crate::fiber::network::TestFiberMessageKind::CommitmentOrAck,
+            16,
+        )
+        .await;
+
+    // Learn the proof while another real outgoing TLC is still committed.
+    let fulfilled = &held[1];
+    call!(node_c.network_actor, |rpc_reply| {
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: fulfilled.channel_id,
+                command: ChannelCommand::RemoveTlc(
+                    RemoveTlcCommand {
+                        id: fulfilled.tlc_id,
+                        reason: RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+                            payment_preimage: preimage,
+                        }),
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("C network actor alive")
+    .expect("fulfill one shard");
+
+    wait_until_timeout(30_000, || {
+        node_a
+            .get_payment_session(payment_hash)
+            .is_some_and(|session| {
+                session.status == PaymentStatus::Success
+                    && node_a.get_local_balance_from_channel(channels[0]) < a_before
+            })
+    })
+    .await;
+    wait_until_timeout(30_000, || {
+        node_b
+            .get_payment_session(payment_hash)
+            .is_some_and(|session| {
+                session.status == PaymentStatus::Success
+                    && session.attempts().any(|attempt| attempt.is_success())
+                    && session.attempts().any(|attempt| attempt.is_inflight())
+            })
+    })
+    .await;
+    let attempts = node_b.store.get_attempts(payment_hash);
+    assert_eq!(attempts.len(), 2);
+    if restart {
+        node_b.stop().await;
+        node_c.discard_held_fiber_messages().await;
+        node_b.start().await;
+        assert_eq!(
+            node_b.get_payment_result(payment_hash).await.status,
+            PaymentStatus::Success
+        );
+    }
+
+    let actor_name = format!(
+        "Payment-{} Node({:?})",
+        payment_hash,
+        node_b.network_actor.get_name()
+    );
+    if !restart {
+        assert!(
+            ractor::registry::where_is(actor_name.clone()).is_some(),
+            "payment actor is retained"
+        );
+    }
+    if restart {
+        node_b.connect_to(&mut node_c).await;
+    } else {
+        node_c.wait_for_held_fiber_messages(1).await;
+        node_c.release_held_fiber_messages().await;
+    }
+
+    wait_until_timeout(30_000, || {
+        node_b
+            .get_payment_session(payment_hash)
+            .is_some_and(|session| {
+                session.status == PaymentStatus::Success
+                    && session.attempts().all(|attempt| attempt.status.is_final())
+            })
+    })
+    .await;
+    wait_until_timeout(5_000, || {
+        ractor::registry::where_is(actor_name.clone()).is_none()
+    })
+    .await;
+    let settled = node_b.store.get_attempts(payment_hash);
+    assert_eq!(
+        settled.len(),
+        attempts.len(),
+        "no new attempt after payment success"
+    );
+    assert!(settled.iter().all(|attempt| attempt.status.is_final()));
+    assert_eq!(
+        settled
+            .iter()
+            .filter(|attempt| attempt.is_success())
+            .count(),
+        1
+    );
+    for attempt in &settled {
+        assert_eq!(
+            attempt.tried_times,
+            attempts
+                .iter()
+                .find(|old| old.id == attempt.id)
+                .unwrap()
+                .tried_times
+        );
+    }
+    wait_until_timeout(30_000, || {
+        channels[1..]
+            .iter()
+            .map(|id| node_c.get_local_balance_from_channel(*id))
+            .sum::<u128>()
+            > c_before
+    })
+    .await;
+    let b_after = channels
+        .iter()
+        .map(|id| node_b.get_local_balance_from_channel(*id))
+        .sum::<u128>();
+    assert!(b_after >= b_before, "relay must not lose channel funds");
+}
+
+#[tokio::test]
 async fn test_trampoline_routing_invoice_not_allow_mpp_will_fail() {
     init_tracing();
 
@@ -4727,7 +5140,9 @@ async fn test_trampoline_routing_dry_run_basic() {
     assert!(actual_res.is_ok(), "Actual payment should succeed");
     let actual_payment_hash = actual_res.unwrap().payment_hash;
 
-    node_a.wait_until_success(actual_payment_hash).await;
+    node_a
+        .wait_until_payment_finished(actual_payment_hash)
+        .await;
 
     // Verify the actual payment was processed successfully
     let final_payment = node_a.get_payment_result(actual_payment_hash).await;
@@ -4860,7 +5275,9 @@ async fn test_trampoline_routing_dry_run_get_default_fee() {
     assert!(actual_res.is_ok(), "Actual payment should succeed");
     let actual_payment_hash = actual_res.unwrap().payment_hash;
 
-    node_a.wait_until_success(actual_payment_hash).await;
+    node_a
+        .wait_until_payment_finished(actual_payment_hash)
+        .await;
 
     // Verify the actual payment was processed successfully
     let final_payment = node_a.get_payment_result(actual_payment_hash).await;
@@ -5039,4 +5456,356 @@ async fn test_trampoline_routing_with_self_payment_should_fail() {
         "Expected error, got: {}",
         err_msg
     );
+}
+
+#[tokio::test]
+async fn test_trampoline_forward_marker_lifecycle() {
+    init_tracing();
+
+    // A --(public)--> T --(public)--> C; B is isolated.
+    // T must release the forward marker for both a successful forward to C
+    // and a failed forward to B.
+    let (nodes, channels) = create_n_nodes_network_with_params(
+        &[
+            (
+                (0, 1),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: HUGE_CKB_AMOUNT,
+                    node_b_funding_amount: HUGE_CKB_AMOUNT,
+                    ..Default::default()
+                },
+            ),
+            (
+                (1, 2),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: HUGE_CKB_AMOUNT,
+                    node_b_funding_amount: HUGE_CKB_AMOUNT,
+                    ..Default::default()
+                },
+            ),
+        ],
+        4,
+        None,
+    )
+    .await;
+    let channel_at = channels[0];
+    let [node_a, node_t, node_c, node_b] = nodes.try_into().expect("4 nodes");
+    wait_until_node_supports_trampoline_routing(&node_a, &node_t).await;
+
+    let (invoice_to_c, _) = node_c.gen_basic_invoice(1000);
+    let success = node_a
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice_to_c.to_string()),
+            max_fee_amount: Some(500),
+            trampoline_hops: Some(vec![node_t.get_public_key()]),
+            ..Default::default()
+        })
+        .await
+        .expect("send successful trampoline payment");
+    node_a.wait_until_success(success.payment_hash).await;
+
+    let (invoice_to_b, _) = node_b.gen_basic_invoice(1000);
+    let failure = node_a
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice_to_b.to_string()),
+            max_fee_amount: Some(1000),
+            trampoline_hops: Some(vec![node_t.get_public_key()]),
+            ..Default::default()
+        })
+        .await
+        .expect("send failing trampoline payment");
+    node_a.wait_until_failed(failure.payment_hash).await;
+
+    // The successful forward leaves the channel on fulfillment. Any failed
+    // TLC that has already been pruned must have released its marker too.
+    wait_until(|| {
+        node_t
+            .get_channel_actor_state(channel_at)
+            .tlc_state
+            .received_tlcs
+            .tlcs
+            .iter()
+            .all(|tlc| tlc.payment_hash != success.payment_hash)
+    })
+    .await;
+    let state = node_t.get_channel_actor_state(channel_at);
+    let stale: Vec<_> = state
+        .waiting_forward_tlc_tasks
+        .keys()
+        .filter(|tlc_id| state.tlc_state.get(tlc_id).is_none())
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "removed trampoline forwards must release markers: {stale:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_trampoline_fulfill_does_not_settle_forwarder_invoice() {
+    init_tracing();
+
+    // A --(public)--> B --(private)--> C; B is the trampoline hop.
+    let (nodes, channels) = create_n_nodes_network_with_visibility(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), true),
+            ((1, 2), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), false),
+        ],
+        3,
+    )
+    .await;
+    let channel_ab = channels[0];
+    let [node_a, node_b, node_c] = nodes.try_into().expect("3 nodes");
+    wait_until_node_supports_trampoline_routing(&node_a, &node_b).await;
+
+    // Negative control: a forwarded TLC must not settle B's own invoice.
+    let amount: u128 = 1000;
+    let preimage = gen_rand_sha256_hash();
+    let forwarded_invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(amount))
+        .payment_preimage(preimage)
+        .allow_trampoline_routing(true)
+        .payee_pub_key(node_c.get_public_key().into())
+        .expiry_time(Duration::from_secs(3600))
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_c.private_key.0))
+        .expect("build forwarded invoice");
+    node_c.insert_invoice(forwarded_invoice.clone(), None);
+    let forwarded_hash = *forwarded_invoice.payment_hash();
+
+    node_a
+        .send_payment(SendPaymentCommand {
+            invoice: Some(forwarded_invoice.to_string()),
+            max_fee_amount: Some(500),
+            trampoline_hops: Some(vec![node_b.get_public_key()]),
+            ..Default::default()
+        })
+        .await
+        .expect("send trampoline payment");
+    wait_until(|| node_c.store.get_payment_hold_tlcs(forwarded_hash).len() == 1).await;
+
+    let local_invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(amount))
+        .payment_hash(forwarded_hash)
+        .payee_pub_key(node_b.get_public_key().into())
+        .expiry_time(Duration::from_secs(3600))
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_b.private_key.0))
+        .expect("build local invoice");
+    node_b.insert_invoice(local_invoice, None);
+
+    node_c
+        .settle_invoice(&forwarded_hash, preimage)
+        .await
+        .expect("settle forwarded invoice");
+    node_a.wait_until_success(forwarded_hash).await;
+    wait_for_tlc_sync(&node_a, &node_b, channel_ab, 0).await;
+
+    assert_eq!(
+        node_b.get_invoice_status(&forwarded_hash),
+        Some(crate::invoice::CkbInvoiceStatus::Open),
+        "a forwarded TLC must not settle B's own invoice"
+    );
+    assert!(
+        node_b
+            .get_channel_actor_state(channel_ab)
+            .waiting_forward_tlc_tasks
+            .is_empty(),
+        "settled trampoline forward must drop its marker"
+    );
+
+    // Positive control: a direct final-hop payment still settles B's invoice.
+    let (direct_invoice, _) = node_b.gen_basic_invoice(1000);
+    let direct_hash = *direct_invoice.payment_hash();
+    let direct = node_a
+        .send_payment(SendPaymentCommand {
+            invoice: Some(direct_invoice.to_string()),
+            max_fee_amount: Some(500),
+            ..Default::default()
+        })
+        .await
+        .expect("send direct payment");
+    node_a.wait_until_success(direct.payment_hash).await;
+    assert_eq!(
+        node_b.get_invoice_status(&direct_hash),
+        Some(crate::invoice::CkbInvoiceStatus::Paid),
+        "a direct final-hop payment must still settle B's invoice"
+    );
+}
+
+/// Stores a hold invoice (no preimage) for `payment_hash` on `node`.
+fn insert_local_hold_invoice(
+    node: &NetworkNode,
+    payment_hash: Hash256,
+    amount: u128,
+    udt_type_script: Option<ckb_types::packed::Script>,
+    expiry: Duration,
+) {
+    let mut builder = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(amount))
+        .payment_hash(payment_hash)
+        .payee_pub_key(node.get_public_key().into())
+        .expiry_time(expiry);
+    if let Some(script) = udt_type_script {
+        builder = builder.udt_type_script(script);
+    }
+    let invoice = builder
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node.private_key.0))
+        .expect("build local invoice");
+    node.insert_invoice(invoice, None);
+}
+
+/// A --(public)--> B --(private)--> C, where C holds the forwarded TLC with a hold invoice and
+/// B stores its own invoice (set up by `insert_local_invoice`) for the same payment hash. B is
+/// only forwarding, so it must keep A's TLC until C resolves its TLC, whatever B's invoice
+/// says. Failing A's TLC early would make B pay C with nothing to claim from A.
+async fn assert_trampoline_forward_ignores_local_invoice(
+    hold_at_payee_for: Duration,
+    insert_local_invoice: impl FnOnce(&NetworkNode, Hash256, u128),
+) {
+    init_tracing();
+    let (nodes, channels) = create_n_nodes_network_with_visibility(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 1000000, HUGE_CKB_AMOUNT), true),
+            ((1, 2), (MIN_RESERVED_CKB + 1000000, HUGE_CKB_AMOUNT), false),
+        ],
+        3,
+    )
+    .await;
+    let [node_a, node_b, node_c] = nodes.try_into().expect("3 nodes");
+    wait_until_node_supports_trampoline_routing(&node_a, &node_b).await;
+
+    let amount: u128 = 10000;
+    let preimage = gen_rand_sha256_hash();
+    let invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(amount))
+        .payment_preimage(preimage)
+        .payee_pub_key(node_c.get_public_key().into())
+        .expiry_time(Duration::from_secs(3600))
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_c.private_key.0))
+        .expect("build invoice");
+    let payment_hash = *invoice.payment_hash();
+    // Without the preimage, C holds the TLC until it settles the invoice.
+    node_c.insert_invoice(invoice.clone(), None);
+
+    insert_local_invoice(&node_b, payment_hash, amount);
+    let local_invoice_status = node_b.get_invoice_status(&payment_hash);
+    let b_balance = || {
+        channels
+            .iter()
+            .map(|channel_id| node_b.get_local_balance_from_channel(*channel_id))
+            .sum::<u128>()
+    };
+    let b_balance_before = b_balance();
+
+    node_a
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            max_fee_amount: Some(5000),
+            trampoline_hops: Some(vec![node_b.get_public_key()]),
+            ..Default::default()
+        })
+        .await
+        .expect("send payment");
+
+    wait_until_timeout(20_000, || {
+        node_c
+            .store
+            .get_node_hold_tlcs()
+            .iter()
+            .any(|(hash, _)| *hash == payment_hash)
+    })
+    .await;
+    tokio::time::sleep(hold_at_payee_for).await;
+    let upstream_tlc_pending = node_b
+        .get_channel_actor_state(channels[0])
+        .tlc_state
+        .all_tlcs()
+        .any(|tlc| {
+            tlc.is_received() && tlc.payment_hash == payment_hash && tlc.removed_reason.is_none()
+        });
+    assert!(
+        upstream_tlc_pending,
+        "trampoline resolved the upstream TLC while its forwarded TLC is still held"
+    );
+
+    node_c
+        .settle_invoice(&payment_hash, preimage)
+        .await
+        .expect("C settles its invoice");
+    node_a.wait_until_payment_finished(payment_hash).await;
+    // B's balances move once both removals are committed.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while b_balance() < b_balance_before && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        b_balance() >= b_balance_before,
+        "trampoline paid downstream without being paid upstream: balance {} -> {}",
+        b_balance_before,
+        b_balance()
+    );
+    assert_eq!(
+        node_b.get_invoice_status(&payment_hash),
+        local_invoice_status,
+        "forwarding must not touch the trampoline's own invoice"
+    );
+}
+
+#[tokio::test]
+async fn test_trampoline_forward_ignores_cancelled_local_invoice() {
+    assert_trampoline_forward_ignores_local_invoice(
+        Duration::from_secs(2),
+        |node, payment_hash, amount| {
+            insert_local_hold_invoice(node, payment_hash, amount, None, Duration::from_secs(3600));
+            node.cancel_invoice(&payment_hash);
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_trampoline_forward_ignores_local_invoice_of_other_udt() {
+    assert_trampoline_forward_ignores_local_invoice(
+        Duration::from_secs(2),
+        |node, payment_hash, amount| {
+            insert_local_hold_invoice(
+                node,
+                payment_hash,
+                amount,
+                Some(ckb_types::packed::Script::default()),
+                Duration::from_secs(3600),
+            );
+        },
+    )
+    .await;
+}
+
+/// An open single-path invoice for more than the forwarded amount.
+#[tokio::test]
+async fn test_trampoline_forward_ignores_open_local_invoice_of_larger_amount() {
+    assert_trampoline_forward_ignores_local_invoice(
+        Duration::from_secs(2),
+        |node, payment_hash, amount| {
+            insert_local_hold_invoice(
+                node,
+                payment_hash,
+                amount * 100,
+                None,
+                Duration::from_secs(3600),
+            );
+        },
+    )
+    .await;
+}
+
+/// The local hold invoice expires, and with it the hold, while C still holds the forwarded TLC.
+#[tokio::test]
+async fn test_trampoline_forward_ignores_open_local_hold_invoice() {
+    assert_trampoline_forward_ignores_local_invoice(
+        Duration::from_secs(10),
+        |node, payment_hash, amount| {
+            insert_local_hold_invoice(node, payment_hash, amount, None, Duration::from_secs(8));
+        },
+    )
+    .await;
 }

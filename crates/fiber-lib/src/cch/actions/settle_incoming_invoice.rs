@@ -9,7 +9,7 @@ use crate::{
             ActionExecutor,
         },
         actor::CchState,
-        trackers::{CchTrackingEvent, LndConnectionInfo},
+        trackers::{CchTrackingEvent, InvoiceSource, LndConnectionInfo},
         CchFiberAgentRef, CchFiberSettleInvoiceError, CchMessage, CchOrderStore,
     },
     invoice::CkbInvoiceStatus,
@@ -41,6 +41,7 @@ impl ActionExecutor for SettleFiberIncomingInvoiceExecutor {
                 self.cch_actor_ref.send_message(CchMessage::TrackingEvent(
                     CchTrackingEvent::InvoiceChanged {
                         payment_hash,
+                        source: InvoiceSource::Fiber,
                         status: CkbInvoiceStatus::Paid,
                         failure_reason: None,
                     },
@@ -51,6 +52,7 @@ impl ActionExecutor for SettleFiberIncomingInvoiceExecutor {
                 self.cch_actor_ref.send_message(CchMessage::TrackingEvent(
                     CchTrackingEvent::InvoiceChanged {
                         payment_hash,
+                        source: InvoiceSource::Fiber,
                         status: CkbInvoiceStatus::Cancelled,
                         failure_reason: Some(format!(
                             "SettleFiberIncomingInvoiceExecutor permanent failure: {}",
@@ -104,6 +106,7 @@ impl ActionExecutor for SettleLightningIncomingInvoiceExecutor {
                     self.cch_actor_ref.send_message(CchMessage::TrackingEvent(
                         CchTrackingEvent::InvoiceChanged {
                             payment_hash: self.payment_hash,
+                            source: InvoiceSource::Lightning,
                             status: CkbInvoiceStatus::Cancelled,
                             failure_reason: Some(failure_reason),
                         },

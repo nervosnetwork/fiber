@@ -6,7 +6,7 @@ use ckb_types::{
     prelude::*,
 };
 use fiber_lsp_sdk::{ChainVerifier, SignerError, VerifiedCell};
-use fiber_types::{CommitmentContractFeatures, Hash256};
+use fiber_types::{ChannelFeatures, Hash256};
 use serde::de::DeserializeOwned;
 use serde_json::json;
 
@@ -171,7 +171,11 @@ impl DevChain {
                 .context("missing ancestor output")?;
             let args = output.lock.args.as_bytes();
             let previous_args = previous.lock.args.as_bytes();
-            CommitmentContractFeatures::from_lock_args(args).map_err(anyhow::Error::msg)?;
+            ensure!(
+                args.len() == ChannelFeatures::LOCK_ARGS_LEN,
+                "invalid V2 commitment args"
+            );
+            ChannelFeatures::from_bits(args[57]).map_err(anyhow::Error::msg)?;
             ensure!(
                 output.lock.code_hash == previous.lock.code_hash
                     && output.lock.hash_type == previous.lock.hash_type
@@ -458,7 +462,7 @@ mod tests {
         };
 
         let mut original_args = vec![0; 58];
-        original_args[57] = CommitmentContractFeatures::ONCHAIN_FULL_PAYMENT_HASH.bits();
+        original_args[57] = ChannelFeatures::V2.bits();
         let output = CellOutput::new_builder()
             .lock(
                 Script::new_builder()

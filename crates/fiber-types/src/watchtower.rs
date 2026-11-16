@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::channel::{CommitmentContractFeatures, TLCId};
+use crate::channel::{ChannelFeatures, TLCId};
 use crate::channel_signer::OnchainSigningContent;
 use crate::invoice::HashAlgorithm;
 use crate::serde_utils::{CompactSignatureAsBytes, EntityHex, SliceHex};
@@ -195,6 +195,76 @@ impl WatchChannelKeys {
     }
 }
 
+/// Encode a TLC using the channel's exact on-chain witness layout.
+pub fn settlement_tlc_witness(tlc: &SettlementTlc, for_remote: bool) -> Vec<u8> {
+    let mut bytes = vec![((tlc.hash_algorithm as u8) << 1) + u8::from(tlc.tlc_id.is_received())];
+    bytes.extend_from_slice(&tlc.payment_amount.to_le_bytes());
+    bytes.extend_from_slice(&tlc.payment_hash.as_ref()[..ChannelFeatures::PAYMENT_HASH_LEN]);
+    let local = tlc.local_pubkey();
+    let keys = if for_remote {
+        [tlc.remote_key, local]
+    } else {
+        [local, tlc.remote_key]
+    };
+    for key in keys {
+        bytes.extend_from_slice(&ckb_hash::blake2b_256(key.serialize())[..20]);
+    }
+    // CKB absolute timestamp since, in seconds.
+    bytes.extend_from_slice(&(0x4000000000000000u64 | (tlc.expiry / 1000)).to_le_bytes());
+    bytes
+}
+
+/// Encode the settlement snapshot committed by the commitment-lock args.
+pub fn settlement_data_witness(
+    data: &SettlementData,
+    for_remote: bool,
+    local: Pubkey,
+    remote: Pubkey,
+) -> Result<Vec<u8>, String> {
+    let len = u8::try_from(data.tlcs.len())
+        .map_err(|_| "TLC count exceeds witness encoding limit (max 255)")?;
+    let mut bytes = vec![len];
+    for tlc in &data.tlcs {
+        bytes.extend_from_slice(&settlement_tlc_witness(tlc, for_remote));
+    }
+    let sides = if for_remote {
+        [(remote, data.remote_amount), (local, data.local_amount)]
+    } else {
+        [(local, data.local_amount), (remote, data.remote_amount)]
+    };
+    for (key, amount) in sides {
+        bytes.extend_from_slice(&ckb_hash::blake2b_256(key.serialize())[..20]);
+        bytes.extend_from_slice(&amount.to_le_bytes());
+    }
+    Ok(bytes)
+}
+
+impl SettlementData {
+    /// Validate TLC signing metadata before persisting a settlement snapshot.
+    /// External channels must contain public-only keys and derivation indices.
+    pub fn validate_signing_keys(&self, external: bool) -> Result<(), String> {
+        for tlc in &self.tlcs {
+            if external && tlc.local_key.is_some() {
+                return Err(
+                    "external watch channels cannot contain local TLC private keys".to_owned(),
+                );
+            }
+            if let (Some(secret), Some(public)) = (&tlc.local_key, tlc.local_key_pubkey) {
+                if secret.pubkey() != public {
+                    return Err("local TLC public key does not match private key".to_owned());
+                }
+            }
+            if tlc.local_key.is_none() && tlc.local_key_pubkey.is_none() {
+                return Err("local TLC signing public key is missing".to_owned());
+            }
+            if external && tlc.local_key_commitment_number.is_none() {
+                return Err("external TLC signing derivation index is missing".to_owned());
+            }
+        }
+        Ok(())
+    }
+}
+
 /// The data of a channel that the watchtower is monitoring.
 #[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -228,7 +298,7 @@ pub struct ChannelData {
     pub revocation_data: Option<RevocationData>,
     /// The commitment-lock features used by this channel.
     #[serde(default)]
-    pub commitment_contract_features: CommitmentContractFeatures,
+    pub channel_features: ChannelFeatures,
 }
 
 /// Persistable watchtower signer sub-state for one watched channel.
@@ -310,6 +380,15 @@ impl ChannelData {
         &self,
         purpose: &crate::channel_signer::OnchainKeyPurpose,
     ) -> Result<Pubkey, String> {
+        self.expected_onchain_pubkey_with_settlements(purpose, &[])
+    }
+
+    /// Resolve a key including still-valid superseded remote snapshots.
+    pub fn expected_onchain_pubkey_with_settlements(
+        &self,
+        purpose: &crate::channel_signer::OnchainKeyPurpose,
+        additional: &[SettlementData],
+    ) -> Result<Pubkey, String> {
         match purpose {
             crate::channel_signer::OnchainKeyPurpose::Settlement => self
                 .settlement_key()
@@ -323,6 +402,7 @@ impl ChannelData {
                     .iter()
                     .chain(self.remote_settlement_data.tlcs.iter())
                     .chain(self.pending_remote_settlement_data.tlcs.iter())
+                    .chain(additional.iter().flat_map(|data| data.tlcs.iter()))
                     .filter(|tlc| tlc.local_key_commitment_number == Some(*commitment_number))
                 {
                     let pubkey = tlc
@@ -358,74 +438,36 @@ pub fn settlement_timestamp_since(expiry_ms: u64) -> u64 {
 }
 
 /// Build the witness bytes for a single TLC in a settlement transaction.
-pub fn settlement_tlc_to_witness(
-    tlc: &SettlementTlc,
-    for_remote: bool,
-    commitment_contract_features: CommitmentContractFeatures,
-) -> Vec<u8> {
-    let mut vec = Vec::new();
-    let offered_flag = if tlc.tlc_id.is_offered() { 0u8 } else { 1u8 };
-    vec.push(((tlc.hash_algorithm as u8) << 1) + offered_flag);
-    vec.extend_from_slice(&tlc.payment_amount.to_le_bytes());
-    vec.extend_from_slice(
-        &tlc.payment_hash.as_ref()[..commitment_contract_features.payment_hash_len()],
-    );
-    if for_remote {
-        vec.extend_from_slice(&blake160(&tlc.remote_key.serialize()));
-        vec.extend_from_slice(&blake160(&tlc.local_pubkey().serialize()));
-    } else {
-        vec.extend_from_slice(&blake160(&tlc.local_pubkey().serialize()));
-        vec.extend_from_slice(&blake160(&tlc.remote_key.serialize()));
-    }
-    vec.extend_from_slice(&settlement_timestamp_since(tlc.expiry).to_le_bytes());
-    vec
+pub fn settlement_tlc_to_witness(tlc: &SettlementTlc, for_remote: bool) -> Vec<u8> {
+    settlement_tlc_witness(tlc, for_remote)
 }
 
 /// Build the witness bytes hashed into a commitment transaction's lock args.
 pub fn settlement_data_to_witness(
     data: &SettlementData,
     for_remote: bool,
-    commitment_contract_features: CommitmentContractFeatures,
     local_settlement_key: Pubkey,
     remote_settlement_key: Pubkey,
 ) -> Vec<u8> {
-    let mut vec = Vec::new();
-    let len =
-        u8::try_from(data.tlcs.len()).expect("TLC count exceeds witness encoding limit (max 255)");
-    vec.push(len);
-    for tlc in &data.tlcs {
-        vec.extend_from_slice(&settlement_tlc_to_witness(
-            tlc,
-            for_remote,
-            commitment_contract_features,
-        ));
-    }
-    if for_remote {
-        vec.extend_from_slice(&blake160(&remote_settlement_key.serialize()));
-        vec.extend_from_slice(data.remote_amount.to_le_bytes().as_ref());
-        vec.extend_from_slice(&blake160(&local_settlement_key.serialize()));
-        vec.extend_from_slice(data.local_amount.to_le_bytes().as_ref());
-    } else {
-        vec.extend_from_slice(&blake160(&local_settlement_key.serialize()));
-        vec.extend_from_slice(data.local_amount.to_le_bytes().as_ref());
-        vec.extend_from_slice(&blake160(&remote_settlement_key.serialize()));
-        vec.extend_from_slice(data.remote_amount.to_le_bytes().as_ref());
-    }
-    vec
+    settlement_data_witness(
+        data,
+        for_remote,
+        local_settlement_key,
+        remote_settlement_key,
+    )
+    .expect("TLC count exceeds witness encoding limit (max 255)")
 }
 
 /// Hash of a settlement witness, as committed in CommitmentLock args `[36..56]`.
 pub fn settlement_witness_hash(
     data: &SettlementData,
     for_remote: bool,
-    commitment_contract_features: CommitmentContractFeatures,
     local_settlement_key: Pubkey,
     remote_settlement_key: Pubkey,
 ) -> [u8; 20] {
     blake160(&settlement_data_to_witness(
         data,
         for_remote,
-        commitment_contract_features,
         local_settlement_key,
         remote_settlement_key,
     ))
@@ -461,19 +503,13 @@ pub fn settlement_matches_commitment_lock_args(
     let Some(committed) = commitment_lock_settlement_hash(lock_args) else {
         return false;
     };
-    let commitment_contract_features = match lock_args.len() {
-        57 => CommitmentContractFeatures::LEGACY,
-        58 => match CommitmentContractFeatures::from_bits(lock_args[57]) {
-            Ok(features) => features,
-            Err(_) => return false,
-        },
-        _ => return false,
-    };
+    if lock_args.len() != 58 || ChannelFeatures::from_bits(lock_args[57]).is_err() {
+        return false;
+    }
     let matches_orientation = |flag| {
         settlement_witness_hash(
             settlement,
             flag,
-            commitment_contract_features,
             local_settlement_key,
             remote_settlement_key,
         ) == committed
@@ -540,16 +576,11 @@ mod tests {
 
     fn commitment_tx(data: &SettlementData, for_remote: bool) -> Transaction {
         let (local, remote) = keys();
-        let hash = settlement_witness_hash(
-            data,
-            for_remote,
-            CommitmentContractFeatures::LEGACY,
-            local,
-            remote,
-        );
+        let hash = settlement_witness_hash(data, for_remote, local, remote);
         let mut args = vec![0u8; 36];
         args.extend_from_slice(&hash);
         args.push(0x00);
+        args.push(ChannelFeatures::V2.bits());
         ckb_types::core::TransactionBuilder::default()
             .output(
                 CellOutput::new_builder()
@@ -583,6 +614,56 @@ mod tests {
             local,
             remote,
             Some(false)
+        ));
+    }
+
+    #[test]
+    fn only_v2_lock_layout_is_accepted() {
+        let (local, remote) = keys();
+        let data = settlement(15, [9; 32]);
+        let tx = commitment_tx(&data, true);
+        let output = tx.raw().outputs().get(0).unwrap();
+        let args = output.lock().args().raw_data();
+        assert_eq!(args.len(), ChannelFeatures::LOCK_ARGS_LEN);
+        assert!(!settlement_matches_commitment_lock_args(
+            &args[..57],
+            &data,
+            local,
+            remote,
+            None
+        ));
+        let mut unsupported = args.to_vec();
+        unsupported[57] = 0;
+        assert!(!settlement_matches_commitment_lock_args(
+            &unsupported,
+            &data,
+            local,
+            remote,
+            None
+        ));
+        unsupported[57] = 2;
+        assert!(!settlement_matches_commitment_lock_args(
+            &unsupported,
+            &data,
+            local,
+            remote,
+            None
+        ));
+    }
+
+    #[test]
+    fn full_payment_hash_is_committed() {
+        let (local, remote) = keys();
+        let committed = settlement(15, [9; 32]);
+        let mut changed = [9; 32];
+        changed[31] ^= 1;
+        let tx = commitment_tx(&committed, true);
+        assert!(!settlement_matches_commitment_tx(
+            &tx,
+            &settlement(15, changed),
+            local,
+            remote,
+            None
         ));
     }
 
@@ -664,7 +745,7 @@ mod key_material_tests {
             pending_remote_settlement_data: settlement_data(),
             local_settlement_data: settlement_data(),
             revocation_data: None,
-            commitment_contract_features: CommitmentContractFeatures::LEGACY,
+            channel_features: ChannelFeatures::V2,
         }
     }
 
@@ -722,6 +803,58 @@ mod key_material_tests {
             None,
             "a row with no key material has no settlement key"
         );
+    }
+
+    #[test]
+    fn external_settlement_rejects_secrets_and_missing_derivation_metadata() {
+        let mut data = settlement_data();
+        data.tlcs.push(SettlementTlc {
+            tlc_id: TLCId::Offered(1),
+            hash_algorithm: HashAlgorithm::CkbHash,
+            payment_amount: 1,
+            payment_hash: Hash256::from([8; 32]),
+            expiry: 1000,
+            local_key: None,
+            local_key_pubkey: Some(key(1).pubkey()),
+            local_key_commitment_number: Some(7),
+            remote_key: key(2).pubkey(),
+        });
+        assert!(data.validate_signing_keys(true).is_ok());
+        data.tlcs[0].local_key = Some(key(1));
+        assert!(data.validate_signing_keys(true).is_err());
+        data.tlcs[0].local_key = None;
+        data.tlcs[0].local_key_commitment_number = None;
+        assert!(data.validate_signing_keys(true).is_err());
+    }
+
+    #[test]
+    fn superseded_tlc_keys_remain_verifiable_without_settlement_key_fallback() {
+        let data = channel_data(None, Some(key(1).pubkey()));
+        let purpose = crate::channel_signer::OnchainKeyPurpose::Tlc {
+            commitment_number: 7,
+        };
+        assert!(data.expected_onchain_pubkey(&purpose).is_err());
+        let mut superseded = settlement_data();
+        superseded.tlcs.push(SettlementTlc {
+            tlc_id: TLCId::Offered(1),
+            hash_algorithm: HashAlgorithm::CkbHash,
+            payment_amount: 1,
+            payment_hash: Hash256::from([8; 32]),
+            expiry: 1000,
+            local_key: None,
+            local_key_pubkey: Some(key(5).pubkey()),
+            local_key_commitment_number: Some(7),
+            remote_key: key(2).pubkey(),
+        });
+        assert_eq!(
+            data.expected_onchain_pubkey_with_settlements(&purpose, &[superseded.clone()]),
+            Ok(key(5).pubkey())
+        );
+        let mut conflicting = superseded.clone();
+        conflicting.tlcs[0].local_key_pubkey = Some(key(6).pubkey());
+        assert!(data
+            .expected_onchain_pubkey_with_settlements(&purpose, &[superseded, conflicting])
+            .is_err());
     }
 
     #[test]

@@ -3846,7 +3846,7 @@ async fn payment_outcome_notification_allows_network_queries_before_settlement()
         .unwrap();
     node.network_actor
         .send_message(NetworkActorMessage::Fiber(FiberActorMessage::Event(
-            FiberActorEvent::PaymentActorStopped(payment_hash.into(), None),
+            FiberActorEvent::PaymentActorStopped(payment_hash.into(), service.get_id(), None),
         )))
         .unwrap();
     assert!(

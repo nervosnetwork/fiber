@@ -771,21 +771,23 @@ pub enum ChannelSigningTransition {
 /// Matches Fiber's native MuSig2 nonce contexts.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, Eq, PartialEq)]
 pub enum NoncePurpose {
-    /// Fiber's commitment nonce derivation.
+    /// Commitment transaction signing.
     Commitment,
-    /// Fiber's revocation nonce derivation.
+    /// Revocation signing.
     Revocation,
     /// The one-off public-channel announcement signature.
     ChannelAnnouncement,
+    /// Cooperative close signing, distinct from commitment signing.
+    Closing,
 }
 
-/// Unique deterministic MuSig2 nonce location within one channel signer.
+/// Semantic MuSig2 nonce slot; the fresh allocation is identified by `V2NonceBinding`.
 #[serde_as]
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, Eq, PartialEq)]
 pub struct NonceSlot {
     /// Signing domain for the nonce.
     pub purpose: NoncePurpose,
-    /// Commitment number for commitment/revocation slots; zero for announcement.
+    /// Owner's commitment number for commitment/revocation; zero for closing/announcement.
     #[serde_as(as = "U64Hex")]
     #[schemars(schema_with = "schema_as_uint_hex")]
     pub commitment_number: u64,
@@ -843,9 +845,11 @@ pub enum Musig2SignableContent {
 #[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct Musig2SigningContent {
+    /// Fresh V2 allocation identity. Required for external channel signing.
+    pub v2: Option<V2NonceBinding>,
     /// Domain-separated nonce slot.
     pub slot: NonceSlot,
-    /// Counter whose value was used for `slot`; absent for announcements.
+    /// Legacy counter selector; absent for owner-bound V2 signing.
     pub commitment_counter: Option<CommitmentCounter>,
     /// Ordered MuSig2 key aggregation context, encoded as `0x`-prefixed hex.
     #[serde_as(as = "SliceHex")]
@@ -857,6 +861,20 @@ pub struct Musig2SigningContent {
     pub agg_nonce: Vec<u8>,
     /// Plaintext object from which the signer computes the digest.
     pub content: Musig2SignableContent,
+}
+
+/// Public identity of a fresh V2 nonce whose secret remains in the signer.
+#[serde_as]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct V2NonceBinding {
+    /// Channel this allocation signs for.
+    pub channel_id: Hash256,
+    /// Commitment owner, not necessarily the signing participant.
+    pub owner: Pubkey,
+    /// Fresh signer-owned public nonce (66 bytes).
+    #[serde_as(as = "SliceHex")]
+    #[schemars(schema_with = "schema_as_hex_bytes")]
+    pub public_nonce: Vec<u8>,
 }
 
 /// One counterparty's public keys which do not change over the life of a channel.
@@ -873,6 +891,10 @@ pub struct ChannelBasePublicKeys {
 #[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ChannelOpenSignerMaterial {
+    /// Fresh SDK-owned public nonce pool; secret nonce seeds never leave the signer.
+    #[serde_as(as = "Vec<SliceHex>")]
+    #[schemars(with = "Vec<String>")]
+    pub v2_nonces: Vec<Vec<u8>>,
     /// Static funding and TLC public keys for this channel.
     pub base_public_keys: ChannelBasePublicKeys,
     /// Per-commitment point for commitment number 1.
@@ -883,11 +905,11 @@ pub struct ChannelOpenSignerMaterial {
     #[serde_as(as = "SliceHex")]
     #[schemars(schema_with = "schema_as_hex_bytes")]
     pub commitment_nonce: Vec<u8>,
-    /// Commitment public nonce published in `TxComplete`, encoded as `0x`-prefixed hex.
+    /// Additional fresh public nonce for the V2 pool, encoded as `0x`-prefixed hex.
     #[serde_as(as = "SliceHex")]
     #[schemars(schema_with = "schema_as_hex_bytes")]
     pub next_commitment_nonce: Vec<u8>,
-    /// Revocation public nonce published with `OpenChannel`, encoded as `0x`-prefixed hex.
+    /// Additional fresh public nonce for the V2 pool, encoded as `0x`-prefixed hex.
     #[serde_as(as = "SliceHex")]
     #[schemars(schema_with = "schema_as_hex_bytes")]
     pub revocation_nonce: Vec<u8>,
@@ -901,6 +923,16 @@ pub struct ChannelOpenSignerMaterial {
 #[serde_as]
 #[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
 pub struct NextChannelSignerMaterial {
+    /// Fresh SDK-owned public nonces replenishing the V2 pool.
+    #[serde(default)]
+    #[serde_as(as = "Vec<SliceHex>")]
+    #[schemars(with = "Vec<String>")]
+    pub v2_nonces: Vec<Vec<u8>>,
+    /// Explicit per-commitment point indices and public keys.
+    #[serde(default)]
+    #[serde_as(as = "Vec<(U64Hex, _)>")]
+    #[schemars(with = "Vec<(String, Pubkey)>")]
+    pub commitment_points: Vec<(u64, Pubkey)>,
     /// Next local per-commitment point the node will need.
     pub next_commitment_point: Option<Pubkey>,
     /// Next commitment public nonce, encoded as `0x`-prefixed hex.
@@ -1024,6 +1056,64 @@ pub enum SubmitWatchtowerSignatureResult {
 #[cfg(test)]
 mod opening_result_tests {
     use super::*;
+
+    #[test]
+    fn v2_followup_material_preserves_fresh_nonce_pool_and_point_indices() {
+        let material = NextChannelSignerMaterial {
+            v2_nonces: vec![vec![7; 66], vec![8; 66]],
+            commitment_points: vec![(42, Pubkey([2; 33]))],
+            ..Default::default()
+        };
+        let value = serde_json::to_value(&material).expect("serialize V2 material");
+        assert_eq!(value["v2_nonces"][0], format!("0x{}", "07".repeat(66)));
+        assert_eq!(value["commitment_points"][0][0], "0x2a");
+        let decoded: NextChannelSignerMaterial =
+            serde_json::from_value(value).expect("deserialize V2 material");
+        assert_eq!(decoded.v2_nonces, material.v2_nonces);
+        assert_eq!(decoded.commitment_points, material.commitment_points);
+    }
+
+    #[test]
+    fn opening_material_requires_v2_pool_without_old_lsp_fallback() {
+        let material = ChannelOpenSignerMaterial {
+            v2_nonces: vec![vec![7; 66]],
+            base_public_keys: ChannelBasePublicKeys {
+                funding_pubkey: Pubkey([2; 33]),
+                tlc_base_key: Pubkey([3; 33]),
+            },
+            first_commitment_point: Pubkey([2; 33]),
+            second_commitment_point: Pubkey([3; 33]),
+            commitment_nonce: vec![4; 66],
+            next_commitment_nonce: vec![5; 66],
+            revocation_nonce: vec![6; 66],
+            channel_announcement_nonce: None,
+        };
+        let mut value = serde_json::to_value(&material).expect("serialize opening material");
+        let decoded: ChannelOpenSignerMaterial =
+            serde_json::from_value(value.clone()).expect("deserialize V2 opening material");
+        assert_eq!(decoded.v2_nonces, material.v2_nonces);
+        value.as_object_mut().unwrap().remove("v2_nonces");
+        assert!(serde_json::from_value::<ChannelOpenSignerMaterial>(value).is_err());
+    }
+
+    #[test]
+    fn v2_nonce_binding_preserves_channel_owner_and_public_nonce() {
+        let binding = V2NonceBinding {
+            channel_id: Hash256([1; 32]),
+            owner: Pubkey([2; 33]),
+            public_nonce: vec![3; 66],
+        };
+        let encoded = serde_json::to_value(&binding).expect("serialize V2 binding");
+        assert_eq!(encoded["public_nonce"], format!("0x{}", "03".repeat(66)));
+        assert_eq!(
+            serde_json::from_value::<V2NonceBinding>(encoded).expect("deserialize V2 binding"),
+            binding
+        );
+        assert_eq!(
+            serde_json::to_value(NoncePurpose::Closing).expect("serialize closing domain"),
+            "Closing"
+        );
+    }
 
     #[test]
     fn ordinary_external_funding_result_omits_opening_context() {

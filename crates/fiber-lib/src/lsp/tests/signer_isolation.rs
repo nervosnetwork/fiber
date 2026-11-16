@@ -3,10 +3,7 @@ mod payment_preimage;
 use std::{sync::Arc, time::Duration};
 
 use biscuit_auth::{macros::biscuit, KeyPair};
-use ckb_types::{
-    packed::{Script, Transaction},
-    prelude::*,
-};
+use ckb_types::packed::{Script, Transaction};
 use fiber_json_types::{
     ChannelSigningStatus, ChannelSigningTransition, InvoiceResult, OpenChannelResult,
     SubscriptionEvent, SubscriptionTopic,
@@ -47,7 +44,6 @@ use crate::{
             to_rpc_channel_open_signer_material, GetChannelSigningStatusParams,
             GetChannelSigningStatusResult, OpenChannelWithExternalFundingParams,
             SubmitChannelSignatureParams, SubmitChannelSignatureResult,
-            SubmitSignedFundingTxParams, SubmitSignedFundingTxResult,
         },
         lsp::{
             LspServiceStatus, LspTenantParams, LspTenantRuntimeStatus, RegisterLspTenantParams,
@@ -109,14 +105,6 @@ async fn register_root_signer_tenant(
             }],
         )
         .await
-}
-
-fn mock_sign_external_funding_tx(unsigned_tx: &Transaction) -> Transaction {
-    unsigned_tx
-        .as_advanced_builder()
-        .set_witnesses(vec![ckb_types::packed::Bytes::default()])
-        .build()
-        .data()
 }
 
 struct TestLspFixture {
@@ -284,6 +272,7 @@ impl TestLspFixture {
 struct ExternalSignerClient {
     client: HttpClient,
     signer: ChannelSigner<MemoryStore>,
+    unsigned_funding_tx: Transaction,
 }
 
 impl ExternalSignerClient {
@@ -317,11 +306,21 @@ impl ExternalSignerClient {
 
     async fn finish_opening(&self, host: &NetworkNode, channel_id: Hash256) {
         tokio::time::timeout(Duration::from_secs(30), async {
+            let mut funding_submitted = false;
             while !host
                 .get_channel_actor_state_unchecked(channel_id)
                 .is_some_and(|state| matches!(state.state, ChannelState::ChannelReady))
             {
                 self.try_sign_pending(channel_id).await;
+                if !funding_submitted {
+                    funding_submitted = super::integration::submit_opening_funding_if_safe(
+                        &self.client,
+                        &self.signer,
+                        channel_id,
+                        &self.unsigned_funding_tx,
+                    )
+                    .await;
+                }
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
         })
@@ -415,21 +414,13 @@ async fn open_hosted_external_channel(
     .await;
     let channel_id: Hash256 = open.channel_id.into();
     let unsigned_tx: Transaction = open.unsigned_funding_tx.clone().into();
-    let signed_tx = mock_sign_external_funding_tx(&unsigned_tx);
-    let _: SubmitSignedFundingTxResult = tenant_client
-        .request(
-            "submit_signed_funding_tx",
-            rpc_params![SubmitSignedFundingTxParams {
-                channel_id: channel_id.into(),
-                signed_funding_tx: signed_tx.into(),
-            }],
-        )
-        .await
-        .expect("submit_signed_funding_tx over tenant RPC");
-
+    // Preserve the initial pending request for negative/isolation/replay tests.
+    // finish_opening releases wallet signatures only once both owner lanes and
+    // the signer's fully signed local recovery transaction are durable.
     let sdk = ExternalSignerClient {
         client: tenant_client.clone(),
         signer: channel_signer,
+        unsigned_funding_tx: unsigned_tx,
     };
     (channel_id, sdk)
 }
@@ -482,7 +473,7 @@ async fn tenant_watchtower_rpc_rejects_secrets_and_cross_tenant_signatures() {
     let channel_id = Hash256::from([0x77; 32]);
     let key = Privkey::from([10; 32]);
     let mut params = CreateWatchChannelParams {
-        commitment_contract_features: fiber_types::CommitmentContractFeatures::LEGACY.into(),
+        channel_features: fiber_types::ChannelFeatures::V2.into(),
         channel_id: channel_id.into(),
         funding_udt_type_script: None,
         local_settlement_key: Some(key.clone().into()),
@@ -934,7 +925,16 @@ async fn channel_signature_submission_rejects_invalid_input_and_is_idempotent() 
     let (channel_id, sdk) = open_hosted_external_channel(&fixture, &u1_client).await;
 
     let status = sdk.pending_status(channel_id).await;
-    let valid_submission = sdk.prepare_submission(channel_id, status).await;
+    let bound_nonce = match &status {
+        fiber_json_types::ChannelSigningStatus::SignatureRequired { content, .. } => content
+            .v2
+            .as_ref()
+            .expect("external request is owner-bound V2")
+            .public_nonce
+            .clone(),
+        _ => panic!("expected external V2 signing request"),
+    };
+    let valid_submission = sdk.prepare_submission(channel_id, status.clone()).await;
 
     // 1. Wrong request ID
     let mut wrong_req = valid_submission.clone();
@@ -960,103 +960,51 @@ async fn channel_signature_submission_rejects_invalid_input_and_is_idempotent() 
         "error must state signature is invalid, got {err}"
     );
 
-    // 3. Conflicting next material
+    // V2 uses explicit indexed points and fresh nonce allocations, not V1's
+    // counter-derived next commitment/revocation slots.
     let mut conflicting_mat = valid_submission.clone();
     conflicting_mat
         .next_material
         .as_mut()
-        .expect("submission has next material")
-        .next_commitment_point = Some(fixture.public_t.pubkey.into());
-    let err = sdk
-        .submit(conflicting_mat)
+        .unwrap()
+        .commitment_points
+        .push((1, fixture.public_t.pubkey.into()));
+    sdk.submit(conflicting_mat)
         .await
-        .expect_err("conflicting next material must fail");
-    assert!(
-        err.to_string()
-            .contains("conflicts with persisted material"),
-        "error must state conflicts with persisted material, got {err}"
-    );
+        .expect_err("a published point cannot be replaced");
 
-    // 3a. Missing next material when required by commitment progression
-    let mut missing_mat = valid_submission.clone();
-    missing_mat.next_material = None;
-    let err = sdk
-        .submit(missing_mat)
+    let mut duplicate_nonce = valid_submission.clone();
+    let material = duplicate_nonce.next_material.as_mut().unwrap();
+    let fresh_nonce = material.v2_nonces.first().expect("fresh V2 refill").clone();
+    material.v2_nonces.push(fresh_nonce);
+    sdk.submit(duplicate_nonce)
         .await
-        .expect_err("missing next material must fail");
-    assert!(
-        err.to_string().contains("must provide next_material"),
-        "error must state must provide next_material, got {err}"
-    );
+        .expect_err("duplicate fresh nonces must fail");
 
-    // 3b. Partial next material: missing commitment point
-    let mut missing_point = valid_submission.clone();
-    missing_point
+    let mut consumed_nonce = valid_submission.clone();
+    consumed_nonce
         .next_material
         .as_mut()
         .unwrap()
-        .next_commitment_point = None;
-    let err = sdk
-        .submit(missing_point)
+        .v2_nonces
+        .push(bound_nonce);
+    sdk.submit(consumed_nonce)
         .await
-        .expect_err("missing commitment point must fail");
-    assert!(
-        err.to_string().contains("missing next_commitment_point"),
-        "error must state missing next_commitment_point, got {err}"
-    );
+        .expect_err("a bound signing nonce cannot be republished");
 
-    // 3c. Partial next material: missing commitment nonce
-    let mut missing_c_nonce = valid_submission.clone();
-    missing_c_nonce
-        .next_material
-        .as_mut()
-        .unwrap()
-        .next_commitment_nonce = None;
-    let err = sdk
-        .submit(missing_c_nonce)
+    let mut conflicting_points = valid_submission.clone();
+    let material = conflicting_points.next_material.as_mut().unwrap();
+    material.commitment_points.extend([
+        (u64::MAX - 1, fixture.public_t.pubkey.into()),
+        (u64::MAX - 1, Privkey::from([22; 32]).pubkey().into()),
+    ]);
+    sdk.submit(conflicting_points)
         .await
-        .expect_err("missing commitment nonce must fail");
-    assert!(
-        err.to_string().contains("missing next_commitment_nonce"),
-        "error must state missing next_commitment_nonce, got {err}"
-    );
-
-    // 3d. Partial next material: missing revocation nonce
-    let mut missing_r_nonce = valid_submission.clone();
-    missing_r_nonce
-        .next_material
-        .as_mut()
-        .unwrap()
-        .next_revocation_nonce = None;
-    let err = sdk
-        .submit(missing_r_nonce)
-        .await
-        .expect_err("missing revocation nonce must fail");
-    assert!(
-        err.to_string().contains("missing next_revocation_nonce"),
-        "error must state missing next_revocation_nonce, got {err}"
-    );
-
-    // 3e. Nonce reuse: identical commitment and revocation nonce in same submission
-    let mut reused_in_submission = valid_submission.clone();
-    let c_nonce = reused_in_submission
-        .next_material
-        .as_ref()
-        .unwrap()
-        .next_commitment_nonce
-        .clone();
-    reused_in_submission
-        .next_material
-        .as_mut()
-        .unwrap()
-        .next_revocation_nonce = c_nonce;
-    let err = sdk
-        .submit(reused_in_submission)
-        .await
-        .expect_err("identical commitment and revocation nonces must fail");
-    assert!(
-        err.to_string().contains("must be distinct"),
-        "error must state nonces must be distinct, got {err}"
+        .expect_err("one refill cannot bind two points to an index");
+    assert_eq!(
+        serde_json::to_value(sdk.pending_status(channel_id).await).unwrap(),
+        serde_json::to_value(status).unwrap(),
+        "malformed refills cannot consume or mutate the pending request",
     );
 
     // 4. Valid submission succeeds
@@ -1418,7 +1366,7 @@ async fn tenant_watchtower_writes_stay_in_the_tenant_namespace() {
     let channel_id = Hash256::from([0x5a; 32]);
     let key = Privkey::from([11; 32]);
     let params = CreateWatchChannelParams {
-        commitment_contract_features: fiber_types::CommitmentContractFeatures::LEGACY.into(),
+        channel_features: fiber_types::ChannelFeatures::V2.into(),
         channel_id: channel_id.into(),
         funding_udt_type_script: None,
         local_settlement_key: None,

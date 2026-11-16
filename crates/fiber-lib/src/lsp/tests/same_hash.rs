@@ -599,7 +599,7 @@ async fn check_downstream_outcome_isolation(fulfill: bool) {
                     .get(&TLCId::Offered(id))
                     .unwrap()
                     .attempt_id,
-                reason,
+                reason.clone(),
                 None,
             ),
         ))
@@ -611,6 +611,77 @@ async fn check_downstream_outcome_isolation(fulfill: bool) {
             .is_some_and(|session| session.status.is_final())
     })
     .await;
+    if !fulfill {
+        let observed = ractor::call_t!(
+            public.network_actor,
+            |reply| NetworkActorMessage::new_command(FiberActorCommand::GetPayment(
+                delivery.request.hosted_session_key(),
+                reply
+            )),
+            5_000
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            observed.status,
+            PaymentStatus::Inflight,
+            "a failure receipt cannot publish final failure while channel-owned work is live"
+        );
+        assert_eq!(
+            network.nodes[1].get_payment_status(hash).await,
+            PaymentStatus::Inflight,
+            "the stopped service must not fail the buyer's upstream prematurely"
+        );
+
+        // The injected receipt exercises exact-session routing, but does not
+        // remove the real durable TLC. Finish that channel-owned work before
+        // expecting the safe GetPayment projection to expose final failure.
+        let received = buyer
+            .node
+            .get_channel_actor_state(buyer.private_channel_id)
+            .tlc_state
+            .received_tlcs
+            .tlcs
+            .iter()
+            .find(|tlc| tlc.payment_hash == hash)
+            .unwrap()
+            .clone();
+        let channel = buyer
+            .node
+            .get_channel_actor(buyer.private_channel_id)
+            .await
+            .unwrap();
+        ractor::call_t!(
+            channel,
+            |reply| crate::fiber::channel::ChannelActorMessage::Command(
+                crate::fiber::channel::ChannelCommand::RemoveTlc(
+                    crate::fiber::channel::RemoveTlcCommand {
+                        id: u64::from(received.tlc_id),
+                        reason
+                    },
+                    reply
+                )
+            ),
+            5_000
+        )
+        .unwrap()
+        .unwrap();
+        wait_until_async_timeout(|| async {
+            ractor::call_t!(
+                public.network_actor,
+                |reply| NetworkActorMessage::new_command(FiberActorCommand::GetPayment(
+                    delivery.request.hosted_session_key(),
+                    reply
+                )),
+                5_000
+            )
+            .unwrap()
+            .unwrap()
+            .status
+                == PaymentStatus::Failed
+        })
+        .await;
+    }
     let payment = ractor::call_t!(
         public.network_actor,
         |reply| NetworkActorMessage::new_command(FiberActorCommand::GetPayment(
@@ -1005,6 +1076,9 @@ async fn seller_pays_the_desk_hold(network: &LspTestNetwork, hold: &crate::invoi
             SendPaymentCommand {
                 invoice: Some(hold.to_string()),
                 max_fee_amount: Some(2_000_000),
+                // Allow V2 retry recommendations after a public-node restart;
+                // the default 0.5% rate would clamp this budget to 5_000.
+                max_fee_rate: Some(100),
                 trampoline_hops: Some(vec![public_t.pubkey]),
                 ..Default::default()
             },
@@ -1027,6 +1101,7 @@ async fn desk_pays_the_buyer(network: &LspTestNetwork, invoice: &crate::invoice:
         .send_payment(SendPaymentCommand {
             invoice: Some(invoice.to_string()),
             max_fee_amount: Some(2_000_000),
+            max_fee_rate: Some(100),
             trampoline_hops: Some(vec![network.nodes[0].pubkey]),
             ..Default::default()
         })

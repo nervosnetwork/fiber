@@ -369,9 +369,14 @@ external-signer channels use the restricted
   has no wallet to fund a channel from; that restriction is recorded in
   `TENANT_ROUTING_OPERATOR_METHODS`. External channel and watchtower requests are
   persisted, streamed through tenant-authenticated subscriptions, verified by the Node,
-  and resumed idempotently after submission.
+  and resumed idempotently after submission. Channels use V2 only: opening and
+  follow-up material supply fresh SDK-owned nonce pools, and every signature
+  binds its channel, commitment owner, number, purpose and allocated public
+  nonce. Cooperative close uses the distinct `Closing` nonce purpose. No local
+  secret fallback or compatibility with unreleased old LSP signer data is allowed.
 - The current remote signer transport provides pending-state recovery over
-  WebSocket subscriptions, without a durable historical event log. Production readiness still requires strict fail-closed nonce reuse,
+  WebSocket subscriptions, without a durable historical event log. Production
+  readiness still requires validating fail-closed V2 nonce replay handling,
   stronger signer-readiness/session fencing, and crash/race coverage around
   persisted signature receipts and channel continuation.
 - Trampoline/LSP metrics are intentionally outside this implementation.

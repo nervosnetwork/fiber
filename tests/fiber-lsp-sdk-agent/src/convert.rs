@@ -8,10 +8,10 @@ pub(crate) mod tests {
         prelude::*,
     };
     use fiber_lsp_sdk::{
-        ChannelSigner, CommitmentCounter, CommitmentParameters, Musig2SignableContent,
-        Musig2SigningContent, NoncePurpose, NonceSlot, SignerStore,
+        ChannelSigner, CommitmentParameters, Musig2SignableContent, Musig2SigningContent,
+        NoncePurpose, NonceSlot, SignerStore,
     };
-    use fiber_types::{CommitmentContractFeatures, InMemorySigner, SettlementData};
+    use fiber_types::{ChannelFeatures, InMemorySigner, SettlementData, V2NonceBinding};
     use musig2::{AggNonce, KeyAggContext, SecNonce};
 
     fn remote() -> InMemorySigner {
@@ -71,7 +71,7 @@ pub(crate) mod tests {
             remote_amount: 60_000_000_000,
             tlcs: vec![],
         };
-        let features = CommitmentContractFeatures::ONCHAIN_FULL_PAYMENT_HASH;
+        let features = ChannelFeatures::V2;
         let mut args =
             fiber_types::blake2b_hash_with_salt(&point.serialize_xonly(), &[])[..20].to_vec();
         args.extend_from_slice(&parameters().delay_epoch);
@@ -79,7 +79,6 @@ pub(crate) mod tests {
         args.extend_from_slice(&fiber_types::settlement_witness_hash(
             &data,
             for_remote,
-            features,
             keys.tlc_base_key,
             remote.tlc_base_key.pubkey(),
         ));
@@ -106,7 +105,24 @@ pub(crate) mod tests {
             purpose: NoncePurpose::Commitment,
             commitment_number: 1,
         };
-        let local_nonce = signer.get_musig2_nonce(slot).await.unwrap().public_nonce;
+        // Fixture the same public-pool handoff as a node: the SDK persists fresh
+        // secrets before returning material, then the node selects an allocation.
+        let material = signer.next_material(slot).await.unwrap();
+        let local_nonce = material.v2_nonces[0].clone();
+        let mut channel_keys = [
+            keys.tlc_base_key.serialize(),
+            remote.tlc_base_key.pubkey().serialize(),
+        ];
+        channel_keys.sort();
+        let binding = V2NonceBinding {
+            channel_id: fiber_types::blake2b_hash_with_salt(&channel_keys.concat(), &[]).into(),
+            owner: if for_remote {
+                remote.funding_key.pubkey()
+            } else {
+                keys.funding_pubkey
+            },
+            public_nonce: local_nonce.clone(),
+        };
         let peer = SecNonce::build([7; 32]).build();
         let peer_nonce = peer.public_nonce();
         let agg_nonce = AggNonce::sum([local_nonce, peer_nonce.clone()]);
@@ -120,7 +136,7 @@ pub(crate) mod tests {
         )
         .unwrap();
         fiber_json_types::ChannelSigningStatus::SignatureRequired {
-            request_id: fiber_json_types::Hash256([0x22; 32]),
+            request_id: fiber_json_types::Hash256([if for_remote { 0x22 } else { 0x23 }; 32]),
             transition: if for_remote {
                 fiber_json_types::ChannelSigningTransition::SendCommitmentSigned
             } else {
@@ -131,8 +147,9 @@ pub(crate) mod tests {
                 peer_partial_signature: (!for_remote).then(|| partial.serialize().to_vec()),
             },
             content: fiber_lsp_sdk::json::musig2_to_rpc(&Musig2SigningContent {
+                v2: Some(binding),
                 slot,
-                commitment_counter: Some(CommitmentCounter::Local),
+                commitment_counter: None,
                 key_agg_ctx: ctx,
                 agg_nonce,
                 content,
@@ -146,6 +163,108 @@ pub(crate) mod tests {
                 tlcs: vec![],
             }),
         }
+    }
+
+    pub(crate) async fn closing_status<S: SignerStore>(
+        signer: &ChannelSigner<S>,
+        funding: &Transaction,
+    ) -> fiber_json_types::ChannelSigningStatus {
+        let remote = remote();
+        let keys = signer.public_material().base_public_keys;
+        let mut funding_keys = [keys.funding_pubkey, remote.funding_key.pubkey()];
+        funding_keys.sort();
+        let ctx = KeyAggContext::new(funding_keys).unwrap();
+        let slot = NonceSlot {
+            purpose: NoncePurpose::Closing,
+            commitment_number: 0,
+        };
+        let public_nonce = signer.next_material(slot).await.unwrap().v2_nonces[0].clone();
+        let peer_nonce = SecNonce::build([8; 32]).build().public_nonce();
+        let agg_nonce = AggNonce::sum([public_nonce.clone(), peer_nonce.clone()]);
+        let mut channel_keys = [
+            keys.tlc_base_key.serialize(),
+            remote.tlc_base_key.pubkey().serialize(),
+        ];
+        channel_keys.sort();
+        let tx = TransactionBuilder::default()
+            .input(CellInput::new(OutPoint::new(funding.calc_tx_hash(), 0), 0))
+            .output(
+                CellOutput::new_builder()
+                    .capacity(40_000_000_000u64)
+                    .lock(bound_shutdown_script())
+                    .build(),
+            )
+            .output_data(ckb_types::packed::Bytes::default())
+            .output(
+                CellOutput::new_builder()
+                    .capacity(60_000_000_000u64)
+                    .lock(parameters().remote_shutdown_script)
+                    .build(),
+            )
+            .output_data(ckb_types::packed::Bytes::default())
+            .build()
+            .data();
+        fiber_json_types::ChannelSigningStatus::SignatureRequired {
+            request_id: fiber_json_types::Hash256([0x24; 32]),
+            transition: fiber_json_types::ChannelSigningTransition::SendClosingSigned,
+            content: fiber_lsp_sdk::json::musig2_to_rpc(&Musig2SigningContent {
+                v2: Some(V2NonceBinding {
+                    channel_id: fiber_types::blake2b_hash_with_salt(&channel_keys.concat(), &[])
+                        .into(),
+                    owner: keys.funding_pubkey,
+                    public_nonce,
+                }),
+                slot,
+                commitment_counter: None,
+                key_agg_ctx: ctx,
+                agg_nonce,
+                content: Musig2SignableContent::CooperativeCloseTransaction(tx),
+            }),
+            session_evidence: fiber_json_types::SigningSessionEvidence {
+                peer_public_nonce: peer_nonce.serialize().to_vec(),
+                peer_partial_signature: None,
+            },
+            settlement: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn fixture_commitment_lanes_use_distinct_fresh_owner_bound_nonces() {
+        let root = fiber_lsp_sdk::RootSigner::create(
+            fiber_lsp_sdk::RootKey::import([42; 32]).unwrap(),
+            fiber_lsp_sdk::MemoryStore::default(),
+        )
+        .await
+        .unwrap();
+        let signer = root.create_channel().await.unwrap();
+        let local = signer.public_material().base_public_keys.funding_pubkey;
+        let funding = Transaction::default();
+        let local_status = commitment_status(&signer, &funding, false).await;
+        let remote_status = commitment_status(&signer, &funding, true).await;
+        let fiber_json_types::ChannelSigningStatus::SignatureRequired {
+            content: local_content,
+            ..
+        } = local_status
+        else {
+            panic!("missing local request")
+        };
+        let fiber_json_types::ChannelSigningStatus::SignatureRequired {
+            content: remote_content,
+            ..
+        } = remote_status
+        else {
+            panic!("missing remote request")
+        };
+        let local_binding = local_content.v2.unwrap();
+        let remote_binding = remote_content.v2.unwrap();
+        assert_eq!(local_binding.channel_id, remote_binding.channel_id);
+        assert_eq!(local_binding.owner, local.into());
+        assert_eq!(remote_binding.owner, remote_binding_pubkey().into());
+        assert_ne!(local_binding.public_nonce, remote_binding.public_nonce);
+        assert_eq!(local_content.slot.commitment_number, 1);
+        assert_eq!(remote_content.slot.commitment_number, 1);
+        assert!(local_content.commitment_counter.is_none());
+        assert!(remote_content.commitment_counter.is_none());
     }
 
     pub(crate) struct Chain {
@@ -210,10 +329,6 @@ pub(crate) mod tests {
         let body = fiber_types::settlement_data_to_witness(
             &record.settlement.data,
             false,
-            fiber_types::CommitmentContractFeatures::from_lock_args(
-                &source.lock().args().raw_data(),
-            )
-            .unwrap(),
             record.settlement.local_settlement_key,
             record.settlement.remote_settlement_key,
         );

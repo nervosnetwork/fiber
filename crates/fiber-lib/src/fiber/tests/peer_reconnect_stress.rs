@@ -107,7 +107,7 @@ async fn measure_direct_keysend_tps(
         measurement.peak_cpu_percent = Some(cpu_percent_peak);
     }
 
-    assert_eq!(sender.get_inflight_payment_count().await, 0);
+    sender.wait_until_no_inflight_payments().await;
     measurement
 }
 

@@ -54,12 +54,18 @@ mod build_script {
             .get_or_init(|| Mutex::new(()))
             .lock()
             .expect("lock build script test");
-        let _env = TestEnvGuard::capture();
+        let env_guard = TestEnvGuard::capture();
 
         let out_dir = unique_temp_dir();
-        fs::create_dir_all(&out_dir).expect("create test OUT_DIR");
+        let migrations_dir = out_dir.join("src/migrations");
+        fs::create_dir_all(&migrations_dir).expect("create fixture migrations");
+        fs::write(
+            migrations_dir.join("mig_20990101_test.rs"),
+            "const MIGRATION_DB_VERSION: &str = \"20990101000000\";\n",
+        )
+        .expect("write fixture migration");
 
-        env::set_current_dir(env!("CARGO_MANIFEST_DIR")).expect("switch to package root");
+        env::set_current_dir(&out_dir).expect("switch to fixture root");
         env::set_var("OUT_DIR", &out_dir);
         env::set_var(
             "CARGO_MANIFEST_DIR",
@@ -74,6 +80,7 @@ mod build_script {
         assert!(generated.contains(r"C:\\agent\\_work\\1\\s\\crates\\fiber-store/src/migrations/"));
         assert!(!generated.contains(r"C:\agent\_work\1\s\crates\fiber-store/src/migrations/"));
 
+        drop(env_guard);
         fs::remove_dir_all(out_dir).expect("remove test OUT_DIR");
     }
 }

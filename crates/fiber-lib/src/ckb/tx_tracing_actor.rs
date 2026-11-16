@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use bitmask_enum::bitmask;
 use ckb_sdk::RpcError;
-use ckb_types::core::tx_pool::TxStatus;
+use ckb_types::{core::tx_pool::TxStatus, packed::OutPoint, prelude::*};
 use ractor::{concurrency::Duration, Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
 
 use crate::ckb::config::new_ckb_rpc_async_client;
@@ -11,6 +11,8 @@ use fiber_types::Hash256;
 use super::jsonrpc_types_convert::tx_status_from_json;
 
 const SYNTHETIC_REJECT_REASON: &str = "Transaction rejected when submitting";
+const FUNDING_INPUT_SPENT_REJECT_REASON: &str =
+    "Funding input spent by another committed transaction";
 
 /// CKB's `PoolRejectedRBF`: another transaction in the pool spends an input of this one.
 pub(crate) fn is_pool_conflict_code(code: i64) -> bool {
@@ -42,13 +44,27 @@ pub(crate) fn is_permanent_send_tx_error(err: &RpcError) -> bool {
 pub struct CkbTxTracingResult {
     pub tx_hash: Hash256,
     pub tx_status: TxStatus,
+    pub watched_input_spent: bool,
 }
 
 impl CkbTxTracingResult {
-    pub fn unknown(tx_hash: Hash256) -> Self {
+    pub fn new(tx_hash: Hash256, tx_status: TxStatus) -> Self {
         Self {
             tx_hash,
-            tx_status: TxStatus::Unknown,
+            tx_status,
+            watched_input_spent: false,
+        }
+    }
+
+    pub fn unknown(tx_hash: Hash256) -> Self {
+        Self::new(tx_hash, TxStatus::Unknown)
+    }
+
+    pub fn watched_input_spent(tx_hash: Hash256) -> Self {
+        Self {
+            tx_hash,
+            tx_status: TxStatus::Rejected(FUNDING_INPUT_SPENT_REJECT_REASON.to_string()),
+            watched_input_spent: true,
         }
     }
 }
@@ -74,6 +90,8 @@ pub enum CkbTxTracingMask {
     Committed = 4,
     Unknown = 8,
     Rejected = 16,
+    /// Matches only when a watched funding input has been spent by another committed transaction.
+    WatchedInputSpent = 32,
 }
 
 impl From<&TxStatus> for CkbTxTracingMask {
@@ -93,14 +111,17 @@ pub struct CkbTxTracer {
     pub tx_hash: Hash256,
     pub confirmations: u64,
     pub mask: CkbTxTracingMask,
+    pub watched_inputs: Vec<OutPoint>,
     pub callback: RpcReplyPort<CkbTxTracingResult>,
 }
 
 #[derive(Debug)]
 struct CkbTxTracersForTheSameTx {
     last_status: TxStatus,
+    last_watched_input_spent: bool,
     last_block: u64,
     tracers: Vec<CkbTxTracer>,
+    watched_inputs: Vec<OutPoint>,
     send_tx_error: Option<RpcError>,
 }
 
@@ -108,8 +129,10 @@ impl Default for CkbTxTracersForTheSameTx {
     fn default() -> Self {
         Self {
             last_status: TxStatus::Unknown,
+            last_watched_input_spent: false,
             last_block: 0,
             tracers: Default::default(),
+            watched_inputs: Default::default(),
             send_tx_error: None,
         }
     }
@@ -137,7 +160,7 @@ pub enum CkbTxTracingMessage {
 }
 
 impl CkbTxTracingMessage {
-    fn run_tracers() -> Self {
+    pub(crate) fn run_tracers() -> Self {
         Self::Internal(InternalMessage::RunTracers)
     }
 
@@ -189,7 +212,7 @@ impl Actor for CkbTxTracingActor {
 struct TracingTask {
     actor: ActorRef<CkbTxTracingMessage>,
     rpc_url: String,
-    tx_hashes: Vec<Hash256>,
+    targets: Vec<(Hash256, Vec<OutPoint>)>,
 }
 
 impl CkbTxTracingState {
@@ -200,12 +223,17 @@ impl CkbTxTracingState {
     ) -> Result<(), ActorProcessingErr> {
         let tx_hash = tracer.tx_hash;
         let tx_tracers = self.tracers.entry(tx_hash).or_default();
+        for input in &tracer.watched_inputs {
+            if !tx_tracers.watched_inputs.contains(input) {
+                tx_tracers.watched_inputs.push(input.clone());
+            }
+        }
         tx_tracers.tracers.push(tracer);
 
-        if tx_tracers.tracers.len() == 1 {
-            // If there's no existing tracer for the tx, trigger the tracing task now
-            self.run_tracers(myself, Some(vec![tx_hash])).await?
-        }
+        // Trigger an immediate poll so the newly registered tracer (which may have
+        // different `mask`, `confirmations`, or `watched_inputs` than existing ones)
+        // does not have to wait for the next `polling_interval` tick.
+        self.run_tracers(myself, Some(vec![tx_hash])).await?;
 
         Ok(())
     }
@@ -223,12 +251,26 @@ impl CkbTxTracingState {
         myself: ActorRef<CkbTxTracingMessage>,
         tx_hashes: Option<Vec<Hash256>>,
     ) -> Result<(), ActorProcessingErr> {
-        let tx_hashes = tx_hashes.unwrap_or_else(|| self.tracers.keys().cloned().collect());
-        if !tx_hashes.is_empty() {
+        let targets: Vec<(Hash256, Vec<OutPoint>)> = match tx_hashes {
+            Some(tx_hashes) => tx_hashes
+                .into_iter()
+                .filter_map(|tx_hash| {
+                    self.tracers
+                        .get(&tx_hash)
+                        .map(|entry| (tx_hash, entry.watched_inputs.clone()))
+                })
+                .collect(),
+            None => self
+                .tracers
+                .iter()
+                .map(|(tx_hash, entry)| (*tx_hash, entry.watched_inputs.clone()))
+                .collect(),
+        };
+        if !targets.is_empty() {
             let task = TracingTask {
                 actor: myself,
                 rpc_url: self.rpc_url.clone(),
-                tx_hashes,
+                targets,
             };
             task.spawn();
         }
@@ -270,21 +312,26 @@ impl CkbTxTracingState {
             tx_tracers.send_tx_error = None;
         }
 
-        let synthesized_rejection = matches!(polled_status, TxStatus::Unknown)
+        let synthesized_rejection = !result.watched_input_spent
+            && matches!(polled_status, TxStatus::Unknown)
             && tx_tracers
                 .send_tx_error
                 .as_ref()
                 .is_some_and(is_permanent_send_tx_error);
 
-        let tx_status = if synthesized_rejection {
-            TxStatus::Rejected(SYNTHETIC_REJECT_REASON.to_string())
+        let (tx_status, watched_input_spent) = if synthesized_rejection {
+            (
+                TxStatus::Rejected(SYNTHETIC_REJECT_REASON.to_string()),
+                false,
+            )
         } else {
-            polled_status.clone()
+            (polled_status.clone(), result.watched_input_spent)
         };
 
         let effective_result = CkbTxTracingResult {
             tx_hash: result.tx_hash,
             tx_status: tx_status.clone(),
+            watched_input_spent,
         };
 
         if let Some(tip_block_number) = tip_block_number {
@@ -295,13 +342,17 @@ impl CkbTxTracingState {
                 }
                 _ => {
                     // Otherwise, use tip block number when first entered this status
-                    if tx_tracers.last_block == 0 || tx_status != tx_tracers.last_status {
+                    if tx_tracers.last_block == 0
+                        || tx_status != tx_tracers.last_status
+                        || watched_input_spent != tx_tracers.last_watched_input_spent
+                    {
                         tx_tracers.last_block = tip_block_number
                     }
                 }
             }
         }
         tx_tracers.last_status = tx_status.clone();
+        tx_tracers.last_watched_input_spent = watched_input_spent;
 
         let last_block = tx_tracers.last_block;
         let has_enough_confirmations = |tracer: &CkbTxTracer| {
@@ -315,7 +366,13 @@ impl CkbTxTracingState {
         // Leave only tracers not fired
         for i in (0..tx_tracers.tracers.len()).rev() {
             let tracer = &tx_tracers.tracers[i];
-            if tracer.mask.contains((&tx_status).into()) && has_enough_confirmations(tracer) {
+            let matches_mask = if watched_input_spent {
+                tracer.mask.contains(CkbTxTracingMask::Rejected)
+                    || tracer.mask.contains(CkbTxTracingMask::WatchedInputSpent)
+            } else {
+                tracer.mask.contains((&tx_status).into())
+            };
+            if matches_mask && has_enough_confirmations(tracer) {
                 let tracer = tx_tracers.tracers.swap_remove(i);
                 // ignore the error if the receiver is dropped
                 let _ = tracer.callback.send(effective_result.clone());
@@ -329,6 +386,12 @@ impl CkbTxTracingState {
 
         Ok(())
     }
+}
+
+enum WatchedInputStatus {
+    NotSpent,
+    SpentByOtherCommittedTx,
+    TracedTxStatusChanged(TxStatus),
 }
 
 impl TracingTask {
@@ -346,15 +409,43 @@ impl TracingTask {
         let ckb_client = new_ckb_rpc_async_client(&self.rpc_url);
         let tip_block_number: u64 = ckb_client.get_tip_block_number().await?.into();
 
-        for tx_hash in self.tx_hashes {
+        for (tx_hash, watched_inputs) in self.targets {
             match ckb_client.get_transaction(tx_hash.into()).await {
                 Ok(response_opt) => {
-                    let result = response_opt
-                        .map(|response| CkbTxTracingResult {
-                            tx_hash,
-                            tx_status: tx_status_from_json(response.tx_status),
+                    let mut result = response_opt
+                        .map(|response| {
+                            CkbTxTracingResult::new(
+                                tx_hash,
+                                tx_status_from_json(response.tx_status),
+                            )
                         })
                         .unwrap_or_else(|| CkbTxTracingResult::unknown(tx_hash));
+
+                    if matches!(result.tx_status, TxStatus::Unknown | TxStatus::Rejected(_))
+                        && !watched_inputs.is_empty()
+                    {
+                        match Self::check_watched_inputs_spent_by_other_tx(
+                            &ckb_client,
+                            tx_hash,
+                            &watched_inputs,
+                        )
+                        .await
+                        {
+                            Ok(WatchedInputStatus::SpentByOtherCommittedTx) => {
+                                result = CkbTxTracingResult::watched_input_spent(tx_hash);
+                            }
+                            Ok(WatchedInputStatus::TracedTxStatusChanged(new_status)) => {
+                                result = CkbTxTracingResult::new(tx_hash, new_status);
+                            }
+                            Ok(WatchedInputStatus::NotSpent) => {}
+                            Err(_) => {
+                                // Skip reporting this poll so transient RPC failures do not
+                                // reset `last_status` / `last_block` confirmation progress.
+                                continue;
+                            }
+                        }
+                    }
+
                     let _ = self
                         .actor
                         .send_message(CkbTxTracingMessage::report_tracing_result(
@@ -369,5 +460,85 @@ impl TracingTask {
         }
 
         Ok(())
+    }
+
+    async fn check_watched_inputs_spent_by_other_tx(
+        ckb_client: &ckb_sdk::CkbRpcAsyncClient,
+        tx_hash: Hash256,
+        watched_inputs: &[OutPoint],
+    ) -> Result<WatchedInputStatus, RpcError> {
+        let mut transient_err: Option<RpcError> = None;
+        for input in watched_inputs {
+            let live_cell = match ckb_client.get_live_cell(input.clone().into(), false).await {
+                Ok(cell) => cell,
+                Err(err) => {
+                    tracing::warn!(
+                        "Failed to query live cell {:?} for traced tx {}: {:?}",
+                        input,
+                        tx_hash,
+                        err
+                    );
+                    transient_err.get_or_insert(err);
+                    continue;
+                }
+            };
+            if live_cell.cell.is_some() || live_cell.status == "live" {
+                continue;
+            }
+
+            // Confirm the parent transaction creating this input is actually committed
+            // on-chain (rather than still unconfirmed or rolled back), so a missing live
+            // cell proves it was consumed by a committed transaction.
+            let prev_tx_hash: ckb_types::H256 = input.tx_hash().unpack();
+            let prev_committed = match ckb_client.get_transaction(prev_tx_hash).await {
+                Ok(Some(prev_tx)) => {
+                    matches!(
+                        tx_status_from_json(prev_tx.tx_status),
+                        TxStatus::Committed(..)
+                    )
+                }
+                Ok(None) => false,
+                Err(err) => {
+                    tracing::warn!(
+                        "Failed to query input parent tx {:x} for traced tx {}: {:?}",
+                        input.tx_hash(),
+                        tx_hash,
+                        err
+                    );
+                    transient_err.get_or_insert(err);
+                    continue;
+                }
+            };
+            if !prev_committed {
+                continue;
+            }
+
+            // Re-check the traced transaction itself to avoid racing with the funding
+            // transaction being the very transaction that just consumed `input`.
+            match ckb_client.get_transaction(tx_hash.into()).await {
+                Ok(Some(response)) => {
+                    let rechecked_status = tx_status_from_json(response.tx_status);
+                    if !matches!(rechecked_status, TxStatus::Unknown | TxStatus::Rejected(_)) {
+                        return Ok(WatchedInputStatus::TracedTxStatusChanged(rechecked_status));
+                    }
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    tracing::warn!(
+                        "Failed to re-verify traced tx {} after observing spent input {:?}: {:?}",
+                        tx_hash,
+                        input,
+                        err
+                    );
+                    return Err(err);
+                }
+            }
+
+            return Ok(WatchedInputStatus::SpentByOtherCommittedTx);
+        }
+        if let Some(err) = transient_err {
+            return Err(err);
+        }
+        Ok(WatchedInputStatus::NotSpent)
     }
 }

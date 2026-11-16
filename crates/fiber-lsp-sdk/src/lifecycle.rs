@@ -109,7 +109,7 @@ pub(crate) fn validate_session(
     parameters: &CommitmentParameters,
     signer: &InMemorySigner,
 ) -> Result<(), SignerError> {
-    use crate::{CommitmentCounter, NoncePurpose};
+    use crate::NoncePurpose;
     let ChannelSigningContent::Musig2(m) = content else {
         return Err(invalid("expected MuSig2 session"));
     };
@@ -126,7 +126,7 @@ pub(crate) fn validate_session(
             (
                 keys,
                 NoncePurpose::Commitment,
-                Some(CommitmentCounter::Local),
+                None,
                 transition == ChannelSigningTransition::CompleteReceivedCommitment,
             )
         }
@@ -143,11 +143,7 @@ pub(crate) fn validate_session(
                     [remote, local]
                 },
                 NoncePurpose::Revocation,
-                Some(if receiving {
-                    CommitmentCounter::Local
-                } else {
-                    CommitmentCounter::Remote
-                }),
+                None,
                 receiving,
             )
         }
@@ -160,12 +156,7 @@ pub(crate) fn validate_session(
             }
             let mut keys = [local, remote];
             keys.sort();
-            (
-                keys,
-                NoncePurpose::Commitment,
-                Some(CommitmentCounter::Local),
-                false,
-            )
+            (keys, NoncePurpose::Closing, None, false)
         }
         ChannelSigningTransition::SignChannelAnnouncement => {
             if !matches!(m.content, Musig2SignableContent::ChannelAnnouncement(_))
@@ -185,7 +176,26 @@ pub(crate) fn validate_session(
     {
         return Err(invalid("incorrect signing keys, nonce purpose or counter"));
     }
-    let nonce = crate::signer::derive_nonce(signer, m.slot).public_nonce();
+    let allocation =
+        m.v2.as_ref()
+            .ok_or_else(|| invalid("missing fresh V2 allocation"))?;
+    let owner = match transition {
+        ChannelSigningTransition::SendCommitmentSigned
+        | ChannelSigningTransition::CompleteReceivedRevokeAndAck => remote,
+        _ => local,
+    };
+    let mut tlc_keys = [
+        signer.tlc_base_key.pubkey().serialize(),
+        parameters.remote_settlement_key.serialize(),
+    ];
+    tlc_keys.sort();
+    let channel_id = fiber_types::blake2b_hash_with_salt(&tlc_keys.concat(), &[]);
+    if allocation.owner != owner || allocation.channel_id.as_ref() != channel_id {
+        return Err(invalid(
+            "V2 allocation channel or commitment owner mismatch",
+        ));
+    }
+    let nonce = allocation.public_nonce.clone();
     if AggNonce::sum([nonce, evidence.peer_public_nonce.clone()]) != m.agg_nonce {
         return Err(invalid("aggregate nonce does not match participant nonces"));
     }
@@ -241,12 +251,18 @@ impl LifecycleState {
             version: review.version,
             tx_hash: tx.calc_tx_hash().into(),
         };
-        if let Some(old) = self.commitments.iter().find(|r| r.reference == reference) {
+        if let Some(old) = self.commitments.iter().find(|r| {
+            r.reference == reference
+                && r.content.content_hash(&r.content.canonical_bytes()).ok()
+                    == content.content_hash(&content.canonical_bytes()).ok()
+        }) {
             if old.session != context.session {
                 return Err(invalid("retry changed participant evidence"));
             }
             return Ok(());
         }
+        // A fresh allocation may sign the exact same transaction after nonce rotation.
+        // Keep older usable witnesses; never replace recovery evidence with a new proposal.
         self.commitments.push(RecoveryRecord {
             reference,
             transaction: tx.clone(),

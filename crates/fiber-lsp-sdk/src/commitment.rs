@@ -163,6 +163,7 @@ struct TrackedTlc {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Lane {
     version: u64,
+    signing_message: [u8; 32],
     content_hash: [u8; 32],
     nonce_counter: u64,
     local_amount: u128,
@@ -329,12 +330,22 @@ impl CommitmentState {
         let Musig2SignableContent::CommitmentTransaction(tx) = &musig.content else {
             return Err(invalid("expected commitment transaction"));
         };
-        // Both channel commitment signing transitions currently use the local nonce counter.
-        if musig.commitment_counter != Some(crate::CommitmentCounter::Local) {
-            return Err(invalid("incorrect commitment nonce counter"));
+        let allocation = musig
+            .v2
+            .as_ref()
+            .ok_or_else(|| invalid("missing V2 allocation"))?;
+        if allocation.owner
+            != if for_remote {
+                self.parameters.remote_funding_key
+            } else {
+                signer.funding_key.pubkey()
+            }
+            || musig.commitment_counter.is_some()
+        {
+            return Err(invalid("incorrect V2 commitment owner"));
         }
         let version = self.validate_transaction(tx, binding, signer, for_remote)?;
-        if for_remote && version != musig.slot.commitment_number {
+        if version != musig.slot.commitment_number {
             return Err(invalid(
                 "commitment version disagrees with local nonce counter",
             ));
@@ -403,7 +414,8 @@ impl CommitmentState {
         let previous = self.lanes[index].as_ref();
         let previous_local = previous.map_or(self.parameters.local_amount, |p| p.local_amount);
         if let Some(previous) = previous {
-            if version == previous.version && content_hash == previous.content_hash {
+            if version == previous.version && content.signing_message() == previous.signing_message
+            {
                 if previous.tlcs != tlcs
                     || previous.local_amount != snapshot.data.local_amount
                     || previous.remote_amount != snapshot.data.remote_amount
@@ -536,6 +548,7 @@ impl CommitmentState {
         self.lanes[index] = Some(Lane {
             version,
             content_hash,
+            signing_message: content.signing_message(),
             nonce_counter: musig.slot.commitment_number,
             local_amount: local,
             remote_amount: remote,
@@ -603,7 +616,7 @@ impl CommitmentState {
         let expected = &self.parameters.commitment_lock;
         if lock.code_hash() != expected.code_hash()
             || lock.hash_type() != expected.hash_type()
-            || fiber_types::CommitmentContractFeatures::from_lock_args(&args).is_err()
+            || fiber_types::ChannelFeatures::from_lock_args(&args).is_err()
             || args[56] != 0
         {
             return Err(invalid(

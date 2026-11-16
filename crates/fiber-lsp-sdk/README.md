@@ -41,6 +41,12 @@ approval or bind RPC. The transport calls the standard
 `open_channel_with_external_funding` method with the tenant token; tenant
 responses include the required `opening_context`, which the SDK validates.
 
+For external channel signing this response is a frozen proposal, not permission
+to sign or broadcast wallet inputs. Bind it first, drive the initial channel
+signing requests, and require an independently verified local recovery record
+with a complete commitment signature before releasing the wallet signature.
+The test agent's `/open-channel` endpoint enforces this ordering.
+
 A session can bind multiple channels. Allocate a fresh pending channel signer
 with `allocate_pending_channel` for each additional opening and supply that
 signer's public material. Retry an interrupted opening with its original intent;
@@ -65,6 +71,29 @@ The wallet's RPC transport uses the tenant Biscuit returned by
 methods. It calls `new_invoice`; the Node adds Public T's trampoline hint and
 registers the hosted invoice using the LSP service's buffer policy. It calls the
 standard `send_payment` method for outbound payments.
+
+## V2-only nonce ownership
+
+Only the V2 channel protocol is supported. Unreleased hosted-LSP signer data
+from older prototypes is not compatible: use a new signer store and channel;
+never restore a V1 wire path or derive a nonce from a commitment number alone.
+
+Opening material includes `v2_nonces`, a pool of fresh SDK-generated public
+nonces. Follow-up material replenishes that pool and supplies indexed
+`commitment_points`. Persist the secret seeds in the SDK store before exposing
+public material. The node stores public allocations only; external channels
+never fall back to node-held funding/TLC keys or secret nonces.
+
+Every signing request carries `content.v2`, binding the channel ID, commitment
+owner and exact allocated public nonce, in addition to the slot's number and
+purpose. The signer verifies the binding, key order, aggregate nonce and peer
+partial signature against the persisted request before signing. Commitment,
+revocation, announcement and cooperative close (`Closing`) use separate nonce
+domains. An exact retry may return its durable receipt; a changed signing
+context for an allocated nonce must fail closed, including after restart.
+Pool exhaustion also fails closed: do not recycle a nonce or synthesize local
+secret material to continue. Keep follow-up material available while driving
+signing requests; availability while a signer is offline is not guaranteed.
 
 ## Client-side verification flow
 
@@ -104,8 +133,9 @@ Untrusted LSP request --------> Decode + bind to local channel
        |                      |                       |
        +----------------------+-----------------------+
                               |
-             Verify nonce purpose, counter, participants,
-             aggregate nonce and required peer partial
+             Verify V2 channel + owner + fresh public nonce,
+             purpose, number, participants, aggregate nonce
+             and required peer partial
                               |
                      Validated PreparedSigning
                               |

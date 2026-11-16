@@ -86,15 +86,17 @@ impl WatchtowerSigner {
     /// Request an on-chain signature, optionally overriding the unlock key
     /// (e.g. a derived TLC key for the current commitment).
     ///
-    /// When `unlock_key` is `Some`, signs immediately regardless of whether
-    /// this entry is [`Self::Local`] or [`Self::External`] (the settle path
-    /// may already have derived a TLC key). When `unlock_key` is `None`,
-    /// returns [`WatchtowerSignOutcome::AwaitingExternal`].
+    /// Local channels may supply a derived TLC key. External channels must
+    /// never sign using host-held key material, including an accidentally
+    /// supplied TLC key.
     pub fn request_onchain_with_key(
         &self,
         content: OnchainSigningContent,
         unlock_key: Option<Privkey>,
     ) -> Result<WatchtowerSignOutcome, String> {
+        if matches!(self, Self::External) && unlock_key.is_some() {
+            return Err("external watch channels cannot use a host-held signing key".to_owned());
+        }
         if let Some(key) = unlock_key {
             let signature = sign_onchain_request(&key, &content)?;
             return Ok(WatchtowerSignOutcome::Ready(signature));
@@ -177,6 +179,17 @@ mod tests {
         verify_onchain_signature(&pubkey, &content, &signature).expect("verify ok");
         let wrong = Privkey::from(&[100u8; 32]).pubkey();
         assert!(verify_onchain_signature(&wrong, &content, &signature).is_err());
+    }
+
+    #[test]
+    fn external_request_rejects_local_key_fallback() {
+        let content = OnchainSigningContent {
+            key_purpose: OnchainKeyPurpose::Settlement,
+            transaction: TransactionBuilder::default().build().data(),
+        };
+        assert!(WatchtowerSigner::external()
+            .request_onchain_with_key(content, Some(Privkey::from(&[99; 32])))
+            .is_err());
     }
 
     #[test]

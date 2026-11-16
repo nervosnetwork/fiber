@@ -13,10 +13,8 @@ pub use fiber_json_types::RpcContext;
 use fiber_types::{NodeId, Pubkey, SettlementKey, WatchChannelKeys};
 
 #[cfg(feature = "watchtower")]
-fn validate_commitment_contract_features(
-    bits: u8,
-) -> Result<fiber_types::CommitmentContractFeatures, ErrorObjectOwned> {
-    fiber_types::CommitmentContractFeatures::from_bits(bits).map_err(rpc_error)
+fn validate_channel_features(bits: u8) -> Result<fiber_types::ChannelFeatures, ErrorObjectOwned> {
+    fiber_types::ChannelFeatures::from_bits(bits).map_err(rpc_error)
 }
 
 pub use fiber_json_types::{
@@ -32,10 +30,11 @@ mod commitment_feature_tests {
 
     #[test]
     fn create_watch_channel_rejects_unknown_features() {
-        assert!(validate_commitment_contract_features(2).is_err());
+        assert!(validate_channel_features(0).is_err());
+        assert!(validate_channel_features(2).is_err());
         assert_eq!(
-            validate_commitment_contract_features(1).unwrap(),
-            fiber_types::CommitmentContractFeatures::ONCHAIN_FULL_PAYMENT_HASH
+            validate_channel_features(1).unwrap(),
+            fiber_types::ChannelFeatures::V2
         );
     }
 }
@@ -218,6 +217,21 @@ fn authorized_watchtower_node_id(ctx: &RpcContext) -> Result<NodeId, ErrorObject
 }
 
 #[cfg(feature = "watchtower")]
+fn validate_update_signing_keys<S: WatchtowerStore>(
+    store: &S,
+    node_id: &NodeId,
+    channel_id: &fiber_types::Hash256,
+    settlement: &fiber_types::SettlementData,
+) -> Result<(), ErrorObjectOwned> {
+    if let Some(channel) = store.get_watch_channel(node_id, channel_id) {
+        settlement
+            .validate_signing_keys(channel.local_settlement_key.is_none())
+            .map_err(rpc_error)?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "watchtower")]
 #[async_trait::async_trait]
 impl<S> WatchtowerRpcServer for WatchtowerRpcServerImpl<S>
 where
@@ -259,17 +273,19 @@ where
         let remote_settlement_key = Pubkey::try_from(params.remote_settlement_key).rpc_err()?;
         let local_funding_pubkey = Pubkey::try_from(params.local_funding_pubkey).rpc_err()?;
         let remote_funding_pubkey = Pubkey::try_from(params.remote_funding_pubkey).rpc_err()?;
-        let commitment_contract_features =
-            validate_commitment_contract_features(params.commitment_contract_features.0)?;
+        validate_channel_features(params.channel_features.0)?;
         // Move fields out of params last, after all borrows of params are done.
         let funding_udt_type_script = params.funding_udt_type_script;
         let settlement_data: fiber_types::SettlementData = params
             .settlement_data
             .try_into()
             .map_err(|e: String| rpc_error(e))?;
+        settlement_data
+            .validate_signing_keys(local_settlement.is_external())
+            .map_err(rpc_error)?;
         let signing_scope = self.signing_events.watchtower(&node_id);
         let signing_update = signing_scope.prepare_created(channel_id);
-        self.store.insert_watch_channel_with_features(
+        self.store.insert_watch_channel(
             node_id,
             channel_id,
             funding_udt_type_script.map(Into::into),
@@ -280,7 +296,6 @@ where
                 remote_funding: remote_funding_pubkey,
             },
             settlement_data,
-            commitment_contract_features,
         );
         signing_update.publish();
         Ok(())
@@ -316,6 +331,7 @@ where
             .settlement_data
             .try_into()
             .map_err(|e: String| rpc_error(e))?;
+        validate_update_signing_keys(&self.store, &node_id, &channel_id, &settlement_data)?;
         self.store
             .update_revocation(node_id, channel_id, revocation_data, settlement_data);
         Ok(())
@@ -332,6 +348,7 @@ where
             .settlement_data
             .try_into()
             .map_err(|e: String| rpc_error(e))?;
+        validate_update_signing_keys(&self.store, &node_id, &channel_id, &settlement_data)?;
         self.store
             .update_pending_remote_settlement(node_id, channel_id, settlement_data);
         Ok(())
@@ -348,6 +365,7 @@ where
             .settlement_data
             .try_into()
             .map_err(|e: String| rpc_error(e))?;
+        validate_update_signing_keys(&self.store, &node_id, &channel_id, &settlement_data)?;
         self.store
             .update_local_settlement(node_id, channel_id, settlement_data);
         Ok(())
@@ -463,8 +481,11 @@ where
                         "signature request id not found in pending requests",
                     ));
                 };
+                let superseded = self
+                    .store
+                    .get_superseded_remote_settlements(&node_id, &channel_id);
                 let expected_pubkey = channel
-                    .expected_onchain_pubkey(&content.key_purpose)
+                    .expected_onchain_pubkey_with_settlements(&content.key_purpose, &superseded)
                     .map_err(rpc_error)?;
                 crate::watchtower::WatchtowerSigner::apply_submitted(
                     &expected_pubkey,
