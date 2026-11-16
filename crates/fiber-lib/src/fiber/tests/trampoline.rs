@@ -6,9 +6,10 @@ use crate::fiber::channel::{
 use crate::fiber::config::{
     DEFAULT_FINAL_TLC_EXPIRY_DELTA, DEFAULT_TLC_EXPIRY_DELTA, MIN_TLC_EXPIRY_DELTA,
 };
+use crate::fiber::delivery::TrampolineForwardingRequest;
 use crate::fiber::graph::*;
 use crate::fiber::network::{
-    DebugEvent, NetworkActorCommand, NetworkActorMessage, SendOnionPacketCommand,
+    DebugEvent, FiberActorCommand, NetworkActorMessage, SendOnionPacketCommand,
 };
 use crate::fiber::payment::SendPaymentCommand;
 use crate::fiber::types::{TrampolineHopPayload, TrampolineOnionPacket};
@@ -26,7 +27,8 @@ use fiber_types::Hash256;
 use fiber_types::{
     AddTlcCommand, AppliedFlags, CommitmentNumbers, CurrentPaymentHopData, HashAlgorithm,
     InboundTlcStatus, PaymentHopData, PeeledPaymentOnionPacket, PrevTlcInfo, RemoveTlcFulfill,
-    RemoveTlcReason, TLCId, TlcErr, TlcErrPacket, TlcErrorCode, TlcInfo, TlcStatus,
+    RemoveTlcReason, RetryableTlcOperation, TLCId, TlcErr, TlcErrPacket, TlcErrorCode, TlcInfo,
+    TlcStatus,
 };
 use ractor::{call, RpcReplyPort};
 use rand::Rng;
@@ -34,6 +36,61 @@ use secp256k1::SECP256K1;
 use std::time::Duration;
 use tokio::sync::oneshot;
 use tracing::{debug, error};
+
+async fn set_test_trampoline_settlement_paused(node: &NetworkNode, paused: bool) {
+    call!(node.network_actor, |reply| {
+        NetworkActorMessage::new_command(FiberActorCommand::SetTestTrampolineSettlementPaused(
+            paused, reply,
+        ))
+    })
+    .expect("network actor alive");
+}
+
+#[test]
+fn test_trampoline_forwarding_request_preserves_dispatch_context() {
+    let payment_hash = gen_rand_sha256_hash();
+    let next_node_id = gen_rand_fiber_public_key();
+    let previous_tlc =
+        PrevTlcInfo::new_with_shared_secret(gen_rand_sha256_hash(), 42, 100, [7u8; 32]);
+    let remaining_trampoline_onion = vec![1, 2, 3];
+    let max_outgoing_tlc_expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
+
+    let payment_data = TrampolineForwardingRequest {
+        payment_hash,
+        next_node_id,
+        amount_to_forward: 1_000,
+        hash_algorithm: HashAlgorithm::Sha256,
+        build_max_fee_amount: 100,
+        tlc_expiry_delta: DEFAULT_FINAL_TLC_EXPIRY_DELTA,
+        tlc_expiry_limit: DEFAULT_FINAL_TLC_EXPIRY_DELTA,
+        max_parts: Some(2),
+        udt_type_script: None,
+        remaining_trampoline_onion: remaining_trampoline_onion.clone(),
+        previous_tlc,
+        max_outgoing_tlc_expiry,
+    }
+    .into_send_payment_data()
+    .expect("valid trampoline forwarding request");
+
+    assert_eq!(payment_data.payment_hash, payment_hash);
+    assert_eq!(payment_data.target_pubkey, next_node_id);
+    assert_eq!(payment_data.amount, 1_000);
+    assert_eq!(payment_data.max_fee_amount, Some(100));
+    assert_eq!(payment_data.max_parts, Some(2));
+    assert!(payment_data.allow_mpp);
+
+    let context = payment_data.trampoline_context.expect("trampoline context");
+    assert_eq!(
+        context.remaining_trampoline_onion,
+        remaining_trampoline_onion
+    );
+    assert_eq!(context.previous_tlcs, vec![previous_tlc]);
+    assert_eq!(context.hash_algorithm, HashAlgorithm::Sha256);
+    assert_eq!(
+        context.max_outgoing_tlc_expiry,
+        Some(max_outgoing_tlc_expiry)
+    );
+}
 
 async fn send_manual_trampoline_final_keysend_tlc(
     node_a: &NetworkNode,
@@ -89,11 +146,12 @@ async fn send_manual_trampoline_final_keysend_tlc(
     .expect("create payment onion packet");
 
     call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::AddTlc(
                     AddTlcCommand {
+                        upstream_tlc_key: None,
                         amount: actual_amount,
                         payment_hash,
                         attempt_id: None,
@@ -2045,6 +2103,7 @@ async fn test_trampoline_forwarding_rejects_missing_previous_tlc() {
     current_hop.set_trampoline_onion(trampoline_onion_bytes);
 
     let command = SendOnionPacketCommand {
+        upstream_tlc_key: None,
         peeled_onion_packet: PeeledPaymentOnionPacket {
             current: current_hop,
             next: None,
@@ -2056,7 +2115,7 @@ async fn test_trampoline_forwarding_rejects_missing_previous_tlc() {
     };
 
     let (tx, rx) = tokio::sync::oneshot::channel();
-    let msg = NetworkActorMessage::Command(NetworkActorCommand::SendPaymentOnionPacket(
+    let msg = NetworkActorMessage::new_command(FiberActorCommand::SendPaymentOnionPacket(
         command,
         RpcReplyPort::from(tx),
     ));
@@ -2207,8 +2266,9 @@ async fn test_trampoline_forwarding_fee_insufficient_manual_packet() {
     };
 
     let (sender, receiver) = oneshot::channel();
-    let command = NetworkActorCommand::SendPaymentOnionPacket(
+    let command = FiberActorCommand::SendPaymentOnionPacket(
         SendOnionPacketCommand {
+            upstream_tlc_key: None,
             peeled_onion_packet: peeled_packet,
             previous_tlc: Some(PrevTlcInfo {
                 prev_channel_id: channel_ab,
@@ -2224,7 +2284,7 @@ async fn test_trampoline_forwarding_fee_insufficient_manual_packet() {
 
     node_b
         .network_actor
-        .send_message(NetworkActorMessage::Command(command))
+        .send_message(NetworkActorMessage::new_command(command))
         .expect("send command");
 
     // 3. Assert Error
@@ -2307,8 +2367,9 @@ async fn test_trampoline_forwarding_fee_insufficient_equal_amount() {
     };
 
     let (sender, receiver) = oneshot::channel();
-    let command = NetworkActorCommand::SendPaymentOnionPacket(
+    let command = FiberActorCommand::SendPaymentOnionPacket(
         SendOnionPacketCommand {
+            upstream_tlc_key: None,
             peeled_onion_packet: peeled_packet,
             previous_tlc: Some(PrevTlcInfo {
                 prev_channel_id: channel_ab,
@@ -2324,7 +2385,7 @@ async fn test_trampoline_forwarding_fee_insufficient_equal_amount() {
 
     node_b
         .network_actor
-        .send_message(NetworkActorMessage::Command(command))
+        .send_message(NetworkActorMessage::new_command(command))
         .expect("send command");
 
     let res = receiver.await.expect("recv result");
@@ -2366,6 +2427,7 @@ async fn test_trampoline_forwarding_rejects_outgoing_expiry_beyond_upstream_budg
 
     let mut node_b_state = node_b.get_channel_actor_state(channel_ab);
     node_b_state.tlc_state.add_received_tlc(TlcInfo {
+        upstream_tlc_key: None,
         status: TlcStatus::Inbound(InboundTlcStatus::Committed),
         tlc_id: TLCId::Received(1),
         amount: incoming_amount,
@@ -2431,8 +2493,9 @@ async fn test_trampoline_forwarding_rejects_outgoing_expiry_beyond_upstream_budg
     };
 
     let (sender, receiver) = oneshot::channel();
-    let command = NetworkActorCommand::SendPaymentOnionPacket(
+    let command = FiberActorCommand::SendPaymentOnionPacket(
         SendOnionPacketCommand {
+            upstream_tlc_key: None,
             peeled_onion_packet: peeled_packet,
             previous_tlc: Some(PrevTlcInfo::new_with_shared_secret(
                 channel_ab,
@@ -2448,7 +2511,7 @@ async fn test_trampoline_forwarding_rejects_outgoing_expiry_beyond_upstream_budg
 
     node_b
         .network_actor
-        .send_message(NetworkActorMessage::Command(command))
+        .send_message(NetworkActorMessage::new_command(command))
         .expect("send command");
 
     let res = receiver.await.expect("recv result");
@@ -2476,6 +2539,7 @@ async fn send_manual_trampoline_forward(
 
     let mut node_b_state = node_b.get_channel_actor_state(channel_ab);
     node_b_state.tlc_state.add_received_tlc(TlcInfo {
+        upstream_tlc_key: None,
         status: TlcStatus::Inbound(InboundTlcStatus::Committed),
         tlc_id: TLCId::Received(1),
         amount: incoming_amount,
@@ -2533,8 +2597,9 @@ async fn send_manual_trampoline_forward(
     current_hop_data.set_trampoline_onion(trampoline_onion_bytes);
 
     let (sender, receiver) = oneshot::channel();
-    let command = NetworkActorCommand::SendPaymentOnionPacket(
+    let command = FiberActorCommand::SendPaymentOnionPacket(
         SendOnionPacketCommand {
+            upstream_tlc_key: None,
             peeled_onion_packet: PeeledPaymentOnionPacket {
                 current: current_hop_data,
                 shared_secret: [0u8; 32],
@@ -2554,7 +2619,7 @@ async fn send_manual_trampoline_forward(
 
     node_b
         .network_actor
-        .send_message(NetworkActorMessage::Command(command))
+        .send_message(NetworkActorMessage::new_command(command))
         .expect("send command");
 
     receiver.await.expect("recv result")
@@ -2682,11 +2747,12 @@ async fn test_trampoline_final_rejects_expiry_below_inner_delta() {
     .expect("create payment onion");
 
     let message = |rpc_reply| -> NetworkActorMessage {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::AddTlc(
                     AddTlcCommand {
+                        upstream_tlc_key: None,
                         amount,
                         payment_hash,
                         attempt_id: None,
@@ -3363,6 +3429,172 @@ async fn test_trampoline_routing_no_path_found() {
 }
 
 #[tokio::test]
+async fn test_trampoline_buffered_dispatch_missing_channel_leaves_upstream_pending() {
+    init_tracing();
+    let params = ChannelParameters {
+        public: true,
+        node_a_funding_amount: HUGE_CKB_AMOUNT,
+        node_b_funding_amount: HUGE_CKB_AMOUNT,
+        ..Default::default()
+    };
+    let (nodes, _) = create_n_nodes_network_with_params(&[((0, 1), params)], 3, None).await;
+    let [payer, trampoline, recipient] = nodes.try_into().expect("3 nodes");
+    wait_until_node_supports_trampoline_routing(&payer, &trampoline).await;
+    set_test_trampoline_settlement_paused(&trampoline, true).await;
+    let (invoice, _) = recipient.gen_basic_invoice(1_000);
+    let payment_hash = payer
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            max_fee_amount: Some(1_000),
+            trampoline_hops: Some(vec![trampoline.get_public_key()]),
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .payment_hash;
+    wait_until_async_timeout(|| async {
+        trampoline
+            .store
+            .get_payment_session(payment_hash)
+            .is_some_and(|session| session.status == PaymentStatus::Failed)
+            && trampoline.get_inflight_payment_count().await == 0
+    })
+    .await;
+    assert_eq!(
+        payer.get_payment_result(payment_hash).await.status,
+        PaymentStatus::Inflight,
+        "errors after session creation must use the existing settlement lifecycle"
+    );
+    let mut existing = trampoline.store.get_payment_session(payment_hash).unwrap();
+    let data = &existing.request;
+    let context = data.trampoline_context.as_ref().unwrap();
+    let request = TrampolineForwardingRequest {
+        payment_hash,
+        next_node_id: data.target_pubkey,
+        amount_to_forward: data.amount,
+        hash_algorithm: context.hash_algorithm,
+        build_max_fee_amount: data.max_fee_amount.unwrap(),
+        tlc_expiry_delta: data.final_tlc_expiry_delta,
+        tlc_expiry_limit: data.tlc_expiry_limit,
+        max_parts: data.max_parts,
+        udt_type_script: data.udt_type_script.clone(),
+        remaining_trampoline_onion: context.remaining_trampoline_onion.clone(),
+        previous_tlc: context.previous_tlcs[0],
+        max_outgoing_tlc_expiry: context.max_outgoing_tlc_expiry.unwrap(),
+    };
+    // Model a different execution of this hash. A missing hosted channel must
+    // reject dispatch without touching this unrelated session or failing upstream.
+    existing.status = PaymentStatus::Success;
+    existing
+        .request
+        .trampoline_context
+        .as_mut()
+        .unwrap()
+        .previous_tlcs[0]
+        .prev_tlc_id += 1;
+    trampoline.store.insert_payment_session(existing);
+    let result = call!(trampoline.network_actor, |reply| {
+        NetworkActorMessage::new_command(FiberActorCommand::DispatchBufferedTrampoline {
+            request,
+            reply,
+        })
+    })
+    .unwrap();
+    assert!(matches!(
+        result,
+        Err(crate::fiber::delivery::DeliveryDispatchError::Temporary { .. })
+    ));
+    assert!(
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            payer.wait_until_failed(payment_hash)
+        )
+        .await
+        .is_err(),
+        "buffered rejection must leave upstream failure/retry to the LSP caller"
+    );
+    assert_eq!(
+        payer.get_payment_result(payment_hash).await.status,
+        PaymentStatus::Inflight
+    );
+    assert_eq!(
+        trampoline
+            .store
+            .get_payment_session(payment_hash)
+            .unwrap()
+            .status,
+        PaymentStatus::Success
+    );
+}
+
+#[tokio::test]
+async fn test_trampoline_same_trampoline_second_payer_same_invoice() {
+    init_tracing();
+    // A(0) -> T(1) -> C(3), B(2) -> T(1): both payers share a payment-session store at T.
+    let params = || ChannelParameters {
+        public: true,
+        node_a_funding_amount: HUGE_CKB_AMOUNT,
+        node_b_funding_amount: HUGE_CKB_AMOUNT,
+        ..Default::default()
+    };
+    let (nodes, _) = create_n_nodes_network_with_params(
+        &[((0, 1), params()), ((2, 1), params()), ((1, 3), params())],
+        4,
+        None,
+    )
+    .await;
+    let [node_a, node_t, node_b, node_c] = nodes.try_into().expect("4 nodes");
+    wait_until_node_supports_trampoline_routing(&node_a, &node_t).await;
+    wait_until_node_supports_trampoline_routing(&node_b, &node_t).await;
+    let amount = 1_000;
+    let (invoice, _) = node_c.gen_basic_invoice(amount);
+    let command = |invoice: String| SendPaymentCommand {
+        invoice: Some(invoice),
+        max_fee_amount: Some(amount),
+        trampoline_hops: Some(vec![node_t.get_public_key()]),
+        ..Default::default()
+    };
+    let first = node_a
+        .send_payment(command(invoice.to_string()))
+        .await
+        .expect("first payer starts");
+    node_a.wait_until_success(first.payment_hash).await;
+
+    let second = node_b
+        .send_payment(command(invoice.to_string()))
+        .await
+        .expect("second payer starts");
+    let failed = tokio::time::timeout(
+        Duration::from_secs(15),
+        node_b.wait_until_failed(second.payment_hash),
+    )
+    .await;
+    assert!(
+        failed.is_ok(),
+        "second payment must fail promptly, current status: {:?}",
+        node_b.get_payment_result(second.payment_hash).await.status
+    );
+    assert_eq!(
+        node_b
+            .get_payment_result(second.payment_hash)
+            .await
+            .failed_error_code,
+        Some(TlcErrorCode::IncorrectOrUnknownPaymentDetails)
+    );
+    assert_eq!(
+        node_t.get_payment_result(first.payment_hash).await.status,
+        PaymentStatus::Success,
+        "rejecting a duplicate must preserve the original successful payment"
+    );
+    let (fresh, _) = node_c.gen_basic_invoice(amount);
+    let retry = node_b
+        .send_payment(command(fresh.to_string()))
+        .await
+        .expect("duplicate rejection must not disable the trampoline route");
+    node_b.wait_until_success(retry.payment_hash).await;
+}
+
+#[tokio::test]
 async fn test_trampoline_routing_race_same_invoice() {
     init_tracing();
 
@@ -3731,8 +3963,8 @@ async fn test_trampoline_node_restart() {
     // Trigger C to settle.
     node_c
         .network_actor
-        .send_message(NetworkActorMessage::Command(
-            NetworkActorCommand::SettleReceivedHoldTlcSet(payment_hash),
+        .send_message(NetworkActorMessage::new_command(
+            FiberActorCommand::SettleReceivedHoldTlcSet(payment_hash),
         ))
         .expect("Failed to send settle command");
 
@@ -3744,6 +3976,315 @@ async fn test_trampoline_node_restart() {
             && node_b.get_local_balance_from_channel(channels[1]) == downstream_balance - amount
     })
     .await;
+}
+
+#[tokio::test]
+async fn test_trampoline_success_settlement_recovers_after_restart() {
+    init_tracing();
+
+    let (nodes, _) = create_n_nodes_network_with_visibility(
+        &[
+            (
+                (0, 1),
+                (MIN_RESERVED_CKB + 1_000_000, HUGE_CKB_AMOUNT),
+                true,
+            ),
+            (
+                (1, 2),
+                (MIN_RESERVED_CKB + 1_000_000, HUGE_CKB_AMOUNT),
+                false,
+            ),
+        ],
+        3,
+    )
+    .await;
+    let [mut node_a, mut node_t, mut node_c] = nodes.try_into().expect("3 nodes");
+    wait_until_node_supports_trampoline_routing(&node_a, &node_t).await;
+    set_test_trampoline_settlement_paused(&node_t, true).await;
+
+    let (invoice, _) = node_c.gen_basic_invoice(10_000);
+    let payment_hash = node_a
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            max_fee_amount: Some(5_000),
+            trampoline_hops: Some(vec![node_t.get_public_key()]),
+            ..Default::default()
+        })
+        .await
+        .expect("start trampoline payment")
+        .payment_hash;
+
+    wait_until_async_timeout(|| async {
+        node_t
+            .store
+            .get_payment_session(payment_hash)
+            .is_some_and(|session| session.status == PaymentStatus::Success)
+    })
+    .await;
+    assert_eq!(
+        node_a
+            .store
+            .get_payment_session(payment_hash)
+            .expect("payer payment session")
+            .status,
+        PaymentStatus::Inflight
+    );
+    let previous_tlc = *node_t
+        .store
+        .get_payment_session(payment_hash)
+        .expect("trampoline payment session")
+        .request
+        .trampoline_context
+        .as_ref()
+        .and_then(|context| context.previous_tlcs.first())
+        .expect("upstream trampoline TLC");
+    assert!(node_t
+        .store
+        .get_channel_actor_state(&previous_tlc.prev_channel_id)
+        .and_then(|state| {
+            state
+                .tlc_state
+                .get(&TLCId::Received(previous_tlc.prev_tlc_id))
+                .cloned()
+        })
+        .is_some_and(|tlc| tlc.removed_reason.is_none()));
+
+    node_t.restart().await;
+    node_a.connect_to(&mut node_t).await;
+    node_c.connect_to(&mut node_t).await;
+    wait_until_async_timeout(|| async {
+        node_t
+            .store
+            .get_channel_states(None)
+            .iter()
+            .filter(|(_, _, state)| matches!(state, crate::fiber::ChannelState::ChannelReady))
+            .count()
+            == 2
+    })
+    .await;
+    node_a.wait_until_success(payment_hash).await;
+    wait_until_async_timeout(|| async {
+        node_t
+            .store
+            .get_channel_actor_state(&previous_tlc.prev_channel_id)
+            .and_then(|state| {
+                state
+                    .tlc_state
+                    .get(&TLCId::Received(previous_tlc.prev_tlc_id))
+                    .cloned()
+            })
+            .is_none_or(|tlc| tlc.removed_reason.is_some())
+    })
+    .await;
+
+    // A second restart re-discovers the final session, but the settled upstream TLC is skipped.
+    node_t.restart().await;
+    node_a.connect_to(&mut node_t).await;
+    node_c.connect_to(&mut node_t).await;
+    wait_until_async_timeout(|| async {
+        node_t
+            .store
+            .get_channel_states(None)
+            .iter()
+            .filter(|(_, _, state)| matches!(state, crate::fiber::ChannelState::ChannelReady))
+            .count()
+            == 2
+    })
+    .await;
+    let upstream_state = node_t
+        .store
+        .get_channel_actor_state(&previous_tlc.prev_channel_id)
+        .expect("upstream channel state");
+    assert!(!upstream_state
+        .retryable_tlc_operations
+        .iter()
+        .any(|operation| matches!(
+            operation,
+            RetryableTlcOperation::RemoveTlc(TLCId::Received(tlc_id), _)
+                if *tlc_id == previous_tlc.prev_tlc_id
+        )));
+    node_a.wait_until_success(payment_hash).await;
+}
+
+#[tokio::test]
+async fn test_trampoline_failure_settlement_recovers_after_restart() {
+    init_tracing();
+
+    let channels = vec![(
+        (0, 1),
+        ChannelParameters {
+            public: true,
+            node_a_funding_amount: HUGE_CKB_AMOUNT,
+            node_b_funding_amount: HUGE_CKB_AMOUNT,
+            ..Default::default()
+        },
+    )];
+    let (nodes, _) = create_n_nodes_network_with_params(&channels, 3, None).await;
+    let [mut node_a, mut node_t, node_b] = nodes.try_into().expect("3 nodes");
+    wait_until_node_supports_trampoline_routing(&node_a, &node_t).await;
+    set_test_trampoline_settlement_paused(&node_t, true).await;
+
+    let (invoice, _) = node_b.gen_basic_invoice(10_000);
+    let payment_hash = node_a
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            max_fee_amount: Some(5_000),
+            trampoline_hops: Some(vec![node_t.get_public_key()]),
+            ..Default::default()
+        })
+        .await
+        .expect("start trampoline payment")
+        .payment_hash;
+
+    wait_until_async_timeout(|| async {
+        node_t
+            .store
+            .get_payment_session(payment_hash)
+            .is_some_and(|session| session.status == PaymentStatus::Failed)
+    })
+    .await;
+    assert_eq!(
+        node_a
+            .store
+            .get_payment_session(payment_hash)
+            .expect("payer payment session")
+            .status,
+        PaymentStatus::Inflight
+    );
+
+    node_t.restart().await;
+    node_a.connect_to(&mut node_t).await;
+    wait_until_async_timeout(|| async {
+        node_t
+            .store
+            .get_channel_states(None)
+            .iter()
+            .filter(|(_, _, state)| matches!(state, crate::fiber::ChannelState::ChannelReady))
+            .count()
+            == 1
+    })
+    .await;
+    node_a.wait_until_failed(payment_hash).await;
+}
+
+#[tokio::test]
+async fn test_buffered_trampoline_failure_uses_request_not_same_hash_session() {
+    init_tracing();
+
+    let channels = vec![(
+        (0, 1),
+        ChannelParameters {
+            public: true,
+            node_a_funding_amount: HUGE_CKB_AMOUNT,
+            node_b_funding_amount: HUGE_CKB_AMOUNT,
+            ..Default::default()
+        },
+    )];
+    let (nodes, _) = create_n_nodes_network_with_params(&channels, 3, None).await;
+    let [node_a, node_t, node_b] = nodes.try_into().expect("3 nodes");
+    wait_until_node_supports_trampoline_routing(&node_a, &node_t).await;
+    set_test_trampoline_settlement_paused(&node_t, true).await;
+
+    let (invoice, _) = node_b.gen_basic_invoice(10_000);
+    let payment_hash = node_a
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            max_fee_amount: Some(5_000),
+            trampoline_hops: Some(vec![node_t.get_public_key()]),
+            ..Default::default()
+        })
+        .await
+        .expect("start trampoline payment")
+        .payment_hash;
+
+    wait_until_async_timeout(|| async {
+        node_t
+            .store
+            .get_payment_session(payment_hash)
+            .is_some_and(|session| session.status == PaymentStatus::Failed)
+    })
+    .await;
+    assert_eq!(
+        node_a
+            .store
+            .get_payment_session(payment_hash)
+            .expect("payer payment session")
+            .status,
+        PaymentStatus::Inflight
+    );
+
+    let session = node_t.store.get_payment_session(payment_hash).unwrap();
+    let data = &session.request;
+    let context = data.trampoline_context.as_ref().unwrap();
+    let request = TrampolineForwardingRequest {
+        payment_hash,
+        next_node_id: data.target_pubkey,
+        amount_to_forward: data.amount,
+        hash_algorithm: context.hash_algorithm,
+        build_max_fee_amount: data.max_fee_amount.unwrap_or_default(),
+        tlc_expiry_delta: data.final_tlc_expiry_delta,
+        tlc_expiry_limit: data.tlc_expiry_limit,
+        max_parts: data.max_parts,
+        udt_type_script: data.udt_type_script.clone(),
+        remaining_trampoline_onion: context.remaining_trampoline_onion.clone(),
+        previous_tlc: context.previous_tlcs[0],
+        max_outgoing_tlc_expiry: context.max_outgoing_tlc_expiry.unwrap(),
+    };
+
+    // Even a corrupt same-hash session must not supply the hosted execution's
+    // upstream identity or shared secret. Only the delivery request is authoritative.
+    let mut invalid_session = session.clone();
+    invalid_session
+        .request
+        .trampoline_context
+        .as_mut()
+        .unwrap()
+        .previous_tlcs[0]
+        .shared_secret = None;
+    node_t.store.insert_payment_session(invalid_session);
+    let mut invalid_request = request.clone();
+    invalid_request.previous_tlc.shared_secret = None;
+    let result = call!(node_t.network_actor, |reply| {
+        NetworkActorMessage::new_command(FiberActorCommand::FailBufferedTrampoline {
+            request: invalid_request,
+            reason: "buffer deadline expired".to_string(),
+            error_code: TlcErrorCode::PermanentNodeFailure,
+            reply,
+        })
+    })
+    .unwrap();
+    assert!(
+        result.is_err(),
+        "must propagate upstream settlement failure"
+    );
+    assert_eq!(
+        node_a
+            .store
+            .get_payment_session(payment_hash)
+            .unwrap()
+            .status,
+        PaymentStatus::Inflight
+    );
+    let unrelated =
+        bincode::serialize(&node_t.store.get_payment_session(payment_hash).unwrap()).unwrap();
+
+    for _ in 0..2 {
+        assert!(call!(node_t.network_actor, |reply| {
+            NetworkActorMessage::new_command(FiberActorCommand::FailBufferedTrampoline {
+                request: request.clone(),
+                reason: "buffer deadline expired".to_string(),
+                error_code: TlcErrorCode::PermanentNodeFailure,
+                reply,
+            })
+        })
+        .unwrap()
+        .unwrap());
+        node_a.wait_until_failed(payment_hash).await;
+    }
+    assert_eq!(
+        bincode::serialize(&node_t.store.get_payment_session(payment_hash).unwrap()).unwrap(),
+        unrelated
+    );
 }
 
 #[tokio::test]
@@ -3813,6 +4354,7 @@ async fn test_trampoline_forward_invalid_onion_payload_missing_context() {
     };
 
     let command = SendOnionPacketCommand {
+        upstream_tlc_key: None,
         peeled_onion_packet: peeled_onion,
         previous_tlc: Some(prev_tlc),
         payment_hash,
@@ -3823,7 +4365,7 @@ async fn test_trampoline_forward_invalid_onion_payload_missing_context() {
     let (tx, rx) = tokio::sync::oneshot::channel();
     let port = ractor::RpcReplyPort::from(tx);
     let msg =
-        NetworkActorMessage::Command(NetworkActorCommand::SendPaymentOnionPacket(command, port));
+        NetworkActorMessage::new_command(FiberActorCommand::SendPaymentOnionPacket(command, port));
 
     node.network_actor.send_message(msg).expect("send message");
 
@@ -3903,6 +4445,7 @@ async fn test_trampoline_forward_invalid_amount_in_onion_packet() {
     };
 
     let command = SendOnionPacketCommand {
+        upstream_tlc_key: None,
         peeled_onion_packet: peeled_onion,
         previous_tlc: Some(prev_tlc),
         payment_hash,
@@ -3913,7 +4456,7 @@ async fn test_trampoline_forward_invalid_amount_in_onion_packet() {
     let (tx, rx) = tokio::sync::oneshot::channel();
     let port = ractor::RpcReplyPort::from(tx);
     let msg =
-        NetworkActorMessage::Command(NetworkActorCommand::SendPaymentOnionPacket(command, port));
+        NetworkActorMessage::new_command(FiberActorCommand::SendPaymentOnionPacket(command, port));
 
     node.network_actor.send_message(msg).expect("send message");
 
@@ -4088,7 +4631,7 @@ async fn test_trampoline_partial_mpp_preimage_settles_upstream() {
         .get_tlc(failed.channel_id, TLCId::Received(failed.tlc_id))
         .expect("failed shard exists");
     call!(node_c.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: failed.channel_id,
                 command: ChannelCommand::RemoveTlc(
@@ -4109,7 +4652,7 @@ async fn test_trampoline_partial_mpp_preimage_settles_upstream() {
 
     let fulfilled = &held[1];
     call!(node_c.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: fulfilled.channel_id,
                 command: ChannelCommand::RemoveTlc(
@@ -4251,7 +4794,7 @@ async fn assert_trampoline_success_drains_remaining_tlc(restart: bool) {
     // Learn the proof while another real outgoing TLC is still committed.
     let fulfilled = &held[1];
     call!(node_c.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: fulfilled.channel_id,
                 command: ChannelCommand::RemoveTlc(

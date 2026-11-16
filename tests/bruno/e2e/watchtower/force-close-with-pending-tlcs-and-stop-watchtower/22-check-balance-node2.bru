@@ -36,5 +36,22 @@ script:pre-request {
 }
 
 assert {
-  Number(BigInt(bru.getVar("NODE2_BALANCE")) - BigInt(res.body.result.capacity)): lt 35000005000
+  res.body.error: isUndefined
+  res.body.result.capacity: isDefined
+}
+
+script:post-response {
+  const delta = BigInt(bru.getVar("NODE2_BALANCE")) - BigInt(res.body.result.capacity);
+  // With its watch stopped, Node2 has not reclaimed its channel funding.
+  // This lower bound also detects an accidentally running second watchtower.
+  if (delta >= BigInt(35000000000) && delta < BigInt(35000005000)) {
+    bru.setVar("SETTLEMENT_DEADLINE", null);
+    return;
+  }
+  if (Date.now() < Number(bru.getVar("SETTLEMENT_DEADLINE"))) {
+    console.log(`waiting for Node2 final balance, balance delta=${delta}`);
+    bru.setNextRequest("generate a few blocks for final settlement tx1 to be committed");
+    return;
+  }
+  throw new Error(`Node2 balance delta=${delta} is outside expected range [35000000000, 35000005000)`);
 }

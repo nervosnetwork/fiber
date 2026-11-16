@@ -16,15 +16,26 @@ pub(crate) fn new_session(
     key: &Privkey,
     remote_nonce: Option<PubNonce>,
 ) -> ChannelSessionV2 {
-    ChannelSessionV2 {
-        marker: SESSION_MARKER,
-        own: allocate_nonce(
+    new_public_session(
+        allocate_nonce(
             channel_id,
             key.pubkey(),
             INITIAL_COMMITMENT_NUMBER + 1,
             NoncePurposeV2::Commitment,
             key,
         ),
+        remote_nonce,
+    )
+}
+
+/// Construct a public-only session without any host-side channel secret.
+pub(crate) fn new_public_session(
+    own: SigningNonceV2,
+    remote_nonce: Option<PubNonce>,
+) -> ChannelSessionV2 {
+    ChannelSessionV2 {
+        marker: SESSION_MARKER,
+        own,
         own_retired: Vec::new(),
         bootstrap_remote_nonce: remote_nonce.clone(),
         remote_ready: None,

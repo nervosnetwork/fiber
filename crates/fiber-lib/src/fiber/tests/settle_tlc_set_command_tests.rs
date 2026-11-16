@@ -17,9 +17,9 @@ use crate::time::SystemTime;
 use ckb_types::packed::{OutPoint, Script};
 use fiber_sphinx::OnionErrorPacket;
 use fiber_types::{
-    AppliedFlags, ChannelActorData, ChannelBasePublicKeys, ChannelState, ChannelTlcInfo,
-    CommitmentNumbers, InMemorySigner, PaymentCustomRecords, ShutdownSettlementRecord, TLCId,
-    TlcInfo, TlcState, TlcStatus,
+    AppliedFlags, ChannelActorData, ChannelState, ChannelTlcInfo, CommitmentNumbers,
+    InMemorySigner, PaymentCustomRecords, ShutdownSettlementRecord, TLCId, TlcInfo, TlcState,
+    TlcStatus,
 };
 use fiber_types::{ChannelConstraints, InboundTlcStatus};
 use fiber_types::{HashAlgorithm, RemoveTlcFulfill, TlcErr, TlcErrorCode};
@@ -366,6 +366,7 @@ pub(crate) fn create_test_channel_state_with_tlc(
     total_amount: Option<u128>,
 ) -> ChannelActorState {
     let tlc_info = TlcInfo {
+        upstream_tlc_key: None,
         status: TlcStatus::Inbound(InboundTlcStatus::Committed),
         tlc_id: TLCId::Received(tlc_id),
         amount,
@@ -393,8 +394,10 @@ pub(crate) fn create_test_channel_state_with_tlc(
     let signer = InMemorySigner::generate_from_seed(&seed);
 
     ChannelActorState {
+        channel_signer: crate::fiber::channel_signer::ChannelSigner::local(signer.clone()),
         core: ChannelActorData {
             state: ChannelState::ChannelReady,
+            signing_context: Default::default(),
             public_channel_info: None,
             local_tlc_info: ChannelTlcInfo::default(),
             remote_tlc_info: None,
@@ -414,11 +417,8 @@ pub(crate) fn create_test_channel_state_with_tlc(
             commitment_delay_epoch: 0,
             funding_fee_rate: 0,
             session: crate::fiber::session::new_session(channel_id, &signer.funding_key, None),
-            signer,
-            local_channel_public_keys: ChannelBasePublicKeys {
-                funding_pubkey: gen_rand_fiber_public_key(),
-                tlc_base_key: gen_rand_fiber_public_key(),
-            },
+            local_channel_public_keys: signer.get_base_public_keys(),
+            signer: Some(signer),
             commitment_numbers: CommitmentNumbers::default(),
             local_constraints: ChannelConstraints::default(),
             remote_constraints: ChannelConstraints::default(),
@@ -457,6 +457,7 @@ pub(crate) fn create_test_channel_state_with_tlc(
         funding_abort_detail: None,
         private_key: None,
         needs_backup: false,
+        pending_messages: Default::default(),
     }
 }
 

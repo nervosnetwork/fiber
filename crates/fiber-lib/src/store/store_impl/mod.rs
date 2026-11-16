@@ -1,7 +1,9 @@
 #[cfg(feature = "watchtower")]
 use ckb_types::packed::Script;
 
+use crate::fiber_types::{PaymentSessionKey, UpstreamTlcKey};
 use crate::store::store_trait::{FiberStore, PrefixIterOptions};
+use crate::store::NodeNamespace;
 use fiber_store::backend::{BatchWriter, StorageBackend, TakeWhileFn};
 use fiber_store::iterator::{IteratorDirection, KVPair};
 use fiber_store::StoreError;
@@ -43,7 +45,7 @@ use fiber_types::{
 #[cfg(not(target_arch = "wasm32"))]
 use fiber_types::{CchOrder, CchReceiveBtcOrderCreation, CchSendBtcOrderCreation};
 #[cfg(feature = "watchtower")]
-use fiber_types::{NodeId, Privkey, RevocationData};
+use fiber_types::{NodeId, RevocationData, WatchChannelKeys, WatchtowerSignerState};
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -62,6 +64,7 @@ use tracing::warn;
 #[derive(Clone)]
 pub struct Store {
     inner: fiber_store::Store,
+    namespace: Option<NodeNamespace>,
     watcher: Option<Arc<dyn Fn(StoreChange) + Send + Sync>>,
     #[cfg(feature = "watchtower")]
     watchtower_write_locks: Arc<parking_lot::Mutex<HashMap<NodeId, Arc<parking_lot::Mutex<()>>>>>,
@@ -90,12 +93,49 @@ impl std::fmt::Debug for Store {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Store")
             .field("inner", &self.inner)
+            .field("namespace", &self.namespace)
             .field("watcher", &self.watcher.as_ref().map(|_| "..."))
             .finish()
     }
 }
 
 impl Store {
+    /// Create a logical node store backed by this store's physical database.
+    pub fn namespaced(&self, namespace: NodeNamespace) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            namespace: Some(namespace),
+            // Watchers observe one logical node's state changes. Inheriting
+            // Public T's watcher would expose hosted tenant invoices and
+            // payments to Public T consumers such as CCH.
+            watcher: None,
+            #[cfg(feature = "watchtower")]
+            watchtower_write_locks: self.watchtower_write_locks.clone(),
+            #[cfg(feature = "watchtower")]
+            onchain_tlc_settlement_write_lock: self.onchain_tlc_settlement_write_lock.clone(),
+        }
+    }
+
+    /// Initialize or migrate this logical store to the current Fiber schema.
+    ///
+    /// A namespaced store owns its own migration version key, so migrations
+    /// scan only that node's logical keyspace.
+    pub fn ensure_current_schema(&self) -> Result<(), String> {
+        run_auto_migrate(self, Box::new(|_| true), Box::new(|_| {}))
+    }
+
+    fn namespace_prefix(&self) -> Option<Vec<u8>> {
+        self.namespace.as_ref().map(NodeNamespace::key_prefix)
+    }
+
+    fn physical_key(&self, key: &[u8]) -> Vec<u8> {
+        let Some(mut physical_key) = self.namespace_prefix() else {
+            return key.to_vec();
+        };
+        physical_key.extend_from_slice(key);
+        physical_key
+    }
+
     fn restore_payment_session(&self, session: PaymentSession) -> PaymentSession {
         session.init_attempts(self)
     }
@@ -132,7 +172,7 @@ impl Store {
                         .is_some_and(|outpoint| {
                             let key = KeyValue::AttemptChannelIndex((
                                 outpoint.clone(),
-                                attempt.payment_hash,
+                                attempt.session_key(),
                                 attempt.id,
                             ))
                             .key();
@@ -186,25 +226,79 @@ impl Store {
             .or_insert_with(|| Arc::new(parking_lot::Mutex::new(())))
             .clone()
     }
+
+    #[cfg(feature = "watchtower")]
+    fn local_watchtower_node_id(&self, channel_id: &Hash256) -> Option<NodeId> {
+        // Hosted channel state is namespaced, but its host watchtower keeps
+        // snapshots and settlement proofs in the root store. Resolve ownership
+        // from this namespace before reading those shared rows.
+        if self.namespace.is_some() {
+            let state = self.get_channel_actor_state(channel_id)?;
+            Some(NodeId::from_bytes(
+                state.get_local_pubkey().serialize().to_vec(),
+            ))
+        } else {
+            Some(NodeId::local())
+        }
+    }
+}
+
+/// A write batch that applies one node namespace to every physical key.
+pub struct StoreBatch {
+    inner: fiber_store::Batch,
+    namespace_prefix: Option<Vec<u8>>,
+}
+
+impl StoreBatch {
+    fn physical_key(&self, key: &[u8]) -> Vec<u8> {
+        let Some(namespace_prefix) = &self.namespace_prefix else {
+            return key.to_vec();
+        };
+        let mut physical_key = Vec::with_capacity(namespace_prefix.len() + key.len());
+        physical_key.extend_from_slice(namespace_prefix);
+        physical_key.extend_from_slice(key);
+        physical_key
+    }
+}
+
+impl BatchWriter for StoreBatch {
+    fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, key: K, value: V) {
+        self.inner.put(self.physical_key(key.as_ref()), value)
+    }
+
+    fn delete<K: AsRef<[u8]>>(&mut self, key: K) {
+        self.inner.delete(self.physical_key(key.as_ref()))
+    }
+
+    fn commit(self) {
+        self.inner.commit()
+    }
 }
 
 impl StorageBackend for Store {
-    type Batch = <fiber_store::Store as StorageBackend>::Batch;
+    type Batch = StoreBatch;
+
+    fn sync_writes(&self) -> bool {
+        self.inner.sync_writes()
+    }
 
     fn get<K: AsRef<[u8]>>(&self, key: K) -> Option<Vec<u8>> {
-        self.inner.get(key)
+        self.inner.get(self.physical_key(key.as_ref()))
     }
 
     fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&self, key: K, value: V) {
-        self.inner.put(key, value)
+        self.inner.put(self.physical_key(key.as_ref()), value)
     }
 
     fn delete<K: AsRef<[u8]>>(&self, key: K) {
-        self.inner.delete(key)
+        self.inner.delete(self.physical_key(key.as_ref()))
     }
 
     fn batch(&self) -> Self::Batch {
-        self.inner.batch()
+        StoreBatch {
+            inner: self.inner.batch(),
+            namespace_prefix: self.namespace_prefix(),
+        }
     }
 
     fn collect_iterator(
@@ -214,8 +308,31 @@ impl StorageBackend for Store {
         take_while_fn: TakeWhileFn,
         limit: usize,
     ) -> Vec<KVPair> {
+        let Some(namespace_prefix) = self.namespace_prefix() else {
+            return self
+                .inner
+                .collect_iterator(start, direction, take_while_fn, limit);
+        };
+        let mut physical_start = namespace_prefix.clone();
+        physical_start.extend_from_slice(&start);
+        let physical_namespace_prefix = namespace_prefix.clone();
         self.inner
-            .collect_iterator(start, direction, take_while_fn, limit)
+            .collect_iterator(
+                physical_start,
+                direction,
+                Box::new(move |physical_key| {
+                    physical_key
+                        .strip_prefix(physical_namespace_prefix.as_slice())
+                        .is_some_and(&take_while_fn)
+                }),
+                limit,
+            )
+            .into_iter()
+            .filter_map(|mut kv| {
+                kv.key = kv.key.strip_prefix(namespace_prefix.as_slice())?.to_vec();
+                Some(kv)
+            })
+            .collect()
     }
 
     fn backup(&self, path: &Path) -> Result<(), StoreError> {
@@ -294,12 +411,25 @@ pub(crate) fn open_store_with_migrations<P: AsRef<Path>>(
         .map_err(|e| e.to_string())?;
     Ok(Store {
         inner: db,
+        namespace: None,
         watcher: None,
         #[cfg(feature = "watchtower")]
         watchtower_write_locks: Arc::new(parking_lot::Mutex::new(HashMap::new())),
         #[cfg(feature = "watchtower")]
         onchain_tlc_settlement_write_lock: Arc::new(parking_lot::Mutex::new(())),
     })
+}
+
+fn run_auto_migrate<S: StorageBackend>(
+    db: &S,
+    confirm_fn: MigrateConfirmFn,
+    progress_fn: MigrateProgressFn,
+) -> Result<(), String> {
+    let mut migrate = DbMigrate::new();
+    fiber_store::migrations::register_all_migrations(&mut migrate);
+    migrate
+        .auto_migrate(db, confirm_fn, progress_fn)
+        .map_err(|e| e.to_string())
 }
 
 pub fn check_validate<P: AsRef<Path>>(path: P) -> Result<(), String> {
@@ -321,6 +451,7 @@ pub fn check_validate<P: AsRef<Path>>(path: P) -> Result<(), String> {
     }
     let store = Store {
         inner: db,
+        namespace: None,
         watcher: None,
         #[cfg(feature = "watchtower")]
         watchtower_write_locks: Arc::new(parking_lot::Mutex::new(HashMap::new())),
@@ -497,14 +628,14 @@ pub enum KeyValue {
     #[cfg(feature = "watchtower")]
     // Index of NodeId -> Preimage PaymentHash, which allows we query preimages of a node
     WatchtowerNodePaymentHash(NodeId, Hash256),
-    PaymentSession(Hash256, PaymentSession),
+    PaymentSession(PaymentSessionKey, PaymentSession),
     PaymentHistoryTimedResult((OutPoint, Direction), TimedResult),
     PaymentCustomRecord(Hash256, PaymentCustomRecords),
     NetworkActorState(Pubkey, PersistentNetworkActorState),
-    Attempt((Hash256, u64), Attempt),
+    Attempt((PaymentSessionKey, u64), Attempt),
     // Index for attempts by first hop channel outpoint
     // Key: (channel_outpoint, payment_hash, attempt_id), Value: ()
-    AttemptChannelIndex((OutPoint, Hash256, u64)),
+    AttemptChannelIndex((OutPoint, PaymentSessionKey, u64)),
     HoldTlc((Hash256, Hash256, u64), u64),
     #[cfg(not(target_arch = "wasm32"))]
     CchOrder(Hash256, CchOrder),
@@ -606,19 +737,21 @@ impl StoreKeyValue for KeyValue {
             KeyValue::OutPointChannelId(outpoint, _) => {
                 [&[CHANNEL_OUTPOINT_CHANNEL_ID_PREFIX], outpoint.as_slice()].concat()
             }
-            KeyValue::PaymentSession(payment_hash, _) => {
-                [&[PAYMENT_SESSION_PREFIX], payment_hash.as_ref()].concat()
-            }
+            KeyValue::PaymentSession(payment_hash, _) => [
+                &[PAYMENT_SESSION_PREFIX],
+                payment_hash.storage_bytes().as_slice(),
+            ]
+            .concat(),
             KeyValue::Attempt((payment_hash, attempt_id), _) => [
                 &[ATTEMPT_PREFIX],
-                payment_hash.as_ref(),
+                payment_hash.storage_bytes().as_slice(),
                 &attempt_id.to_le_bytes(),
             ]
             .concat(),
             KeyValue::AttemptChannelIndex((channel_outpoint, payment_hash, attempt_id)) => [
                 &[ATTEMPT_CHANNEL_INDEX_PREFIX],
                 channel_outpoint.as_slice(),
-                payment_hash.as_ref(),
+                payment_hash.storage_bytes().as_slice(),
                 &attempt_id.to_le_bytes(),
             ]
             .concat(),
@@ -1033,19 +1166,48 @@ impl NetworkActorStateStore for Store {
 }
 
 impl ChannelActorStateStore for Store {
+    #[cfg(not(target_arch = "wasm32"))]
+    fn is_internal_channel(&self, peer: &Pubkey) -> Result<bool, String> {
+        // Only Public T owns hosted peers. Tenant stores must retain their own
+        // timeout policy and must not resolve peers through the host's registry.
+        if self.namespace.is_some() {
+            return Ok(false);
+        }
+        #[cfg(feature = "lsp")]
+        {
+            return crate::lsp::TenantRegistry::new(self.namespaced(NodeNamespace::lsp_metadata()))
+                .find_by_tenant_pubkey(peer)
+                .map(|tenant| tenant.is_some());
+        }
+        #[cfg(not(feature = "lsp"))]
+        {
+            let _ = peer;
+            Ok(false)
+        }
+    }
+
     fn has_trampoline_payment_for_tlc(
         &self,
         payment_hash: Hash256,
         channel_id: Hash256,
         tlc_id: u64,
     ) -> bool {
-        self.get_payment_session(payment_hash)
-            .and_then(|session| session.request.trampoline_context)
-            .is_some_and(|context| {
-                context.previous_tlcs.iter().any(|previous| {
-                    previous.prev_channel_id == channel_id && previous.prev_tlc_id == tlc_id
+        let scoped = PaymentSessionKey {
+            payment_hash,
+            upstream_tlc_key: Some(UpstreamTlcKey {
+                incoming_channel_id: channel_id,
+                incoming_tlc_id: tlc_id,
+            }),
+        };
+        [payment_hash.into(), scoped].into_iter().any(|key| {
+            self.get_payment_session(key)
+                .and_then(|session| session.request.trampoline_context)
+                .is_some_and(|context| {
+                    context.previous_tlcs.iter().any(|previous| {
+                        previous.prev_channel_id == channel_id && previous.prev_tlc_id == tlc_id
+                    })
                 })
-            })
+        })
     }
 
     fn get_channel_actor_state(&self, id: &Hash256) -> Option<ChannelActorState> {
@@ -1053,7 +1215,8 @@ impl ChannelActorStateStore for Store {
         self.get(key).map(|v| deserialize_channel_state(v.as_ref()))
     }
 
-    fn insert_channel_actor_state(&self, state: ChannelActorState) {
+    fn insert_channel_actor_state(&self, mut state: ChannelActorState) {
+        state.clear_local_signer_material();
         let mut batch = self.batch();
 
         let kv = KeyValue::PubkeyChannelId((state.get_remote_pubkey(), state.id), state.state);
@@ -1067,7 +1230,8 @@ impl ChannelActorStateStore for Store {
         batch.commit();
     }
 
-    fn move_channel_actor_state(&self, old_id: &Hash256, state: ChannelActorState) {
+    fn move_channel_actor_state(&self, old_id: &Hash256, mut state: ChannelActorState) {
+        state.clear_local_signer_material();
         if old_id == &state.id {
             self.insert_channel_actor_state(state);
             return;
@@ -1249,6 +1413,17 @@ impl ChannelActorStateStore for Store {
     ) -> Option<OnChainTlcSettlement> {
         #[cfg(feature = "watchtower")]
         {
+            if self.namespace.is_some() {
+                let node_id = self.local_watchtower_node_id(channel_id)?;
+                // Legacy proofs have no node identity and cannot establish
+                // tenant ownership. Hosted tenants only consume exact proofs
+                // from the host watchtower, never another namespace's fallback.
+                let key = Self::tlc_on_chain_settled_key(&node_id, channel_id, tlc_id);
+                return self
+                    .inner
+                    .get(key)
+                    .map(|value| deserialize_from(value.as_ref(), "OnChainTlcSettlement"));
+            }
             WatchtowerStore::get_onchain_tlc_settlement(
                 self,
                 &NodeId::local(),
@@ -1290,13 +1465,16 @@ impl ChannelActorStateStore for Store {
 
     #[cfg(feature = "watchtower")]
     fn get_local_watch_channel(&self, channel_id: &Hash256) -> Option<ChannelData> {
+        let node_id = self.local_watchtower_node_id(channel_id)?;
         let key = [
             &[WATCHTOWER_CHANNEL_PREFIX],
-            NodeId::local().as_ref(),
+            node_id.as_ref(),
             channel_id.as_ref(),
         ]
         .concat();
-        self.get(&key).map(|v| deserialize_from(&v, "ChannelData"))
+        self.inner
+            .get(&key)
+            .map(|v| deserialize_from(&v, "ChannelData"))
     }
 
     #[cfg(not(feature = "watchtower"))]
@@ -1306,11 +1484,61 @@ impl ChannelActorStateStore for Store {
 
     #[cfg(feature = "watchtower")]
     fn get_local_superseded_remote_settlements(&self, channel_id: &Hash256) -> Vec<SettlementData> {
-        self.get_superseded_remote_settlements(&NodeId::local(), channel_id)
+        let Some(node_id) = self.local_watchtower_node_id(channel_id) else {
+            return Vec::new();
+        };
+        let key = [
+            &[WATCHTOWER_SUPERSEDED_SETTLEMENT_PREFIX],
+            node_id.as_ref(),
+            channel_id.as_ref(),
+        ]
+        .concat();
+        self.inner
+            .get(&key)
+            .map(|value| deserialize_from(&value, "WATCHTOWER_SUPERSEDED_SETTLEMENT_PREFIX"))
+            .unwrap_or_default()
     }
 }
 
+fn tenant_channel_opening_key(channel_id: &Hash256) -> Vec<u8> {
+    let mut key = Vec::with_capacity(1 + channel_id.as_ref().len());
+    key.push(TENANT_CHANNEL_OPENING_PREFIX);
+    key.extend_from_slice(channel_id.as_ref());
+    key
+}
+
 impl ChannelOpenRecordStore for Store {
+    // Use a tenant-namespaced Store: get() prefixes the key and reads only that tenant's record.
+    fn get_tenant_channel_opening(
+        &self,
+        channel_id: &Hash256,
+    ) -> Option<crate::fiber::channel::TenantChannelOpening> {
+        self.get(tenant_channel_opening_key(channel_id))
+            .map(|bytes| serde_json::from_slice(&bytes).expect("valid persisted tenant opening"))
+    }
+
+    fn list_tenant_channel_openings(&self) -> Vec<crate::fiber::channel::TenantChannelOpening> {
+        self.collect_by_prefix(&[TENANT_CHANNEL_OPENING_PREFIX])
+            .into_iter()
+            .map(|pair| {
+                serde_json::from_slice(&pair.value).expect("valid persisted tenant opening")
+            })
+            .collect()
+    }
+
+    // put()/delete() prefix the key with this Store's tenant namespace; each
+    // opening has its own channel-id key.
+    fn put_tenant_channel_opening(&self, opening: crate::fiber::channel::TenantChannelOpening) {
+        self.put(
+            tenant_channel_opening_key(&opening.channel_id),
+            serde_json::to_vec(&opening).expect("serializable tenant opening"),
+        );
+    }
+
+    fn delete_tenant_channel_opening(&self, channel_id: &Hash256) {
+        self.delete(tenant_channel_opening_key(channel_id));
+    }
+
     fn get_channel_open_records(&self) -> Vec<ChannelOpenRecord> {
         let prefix = [CHANNEL_OPEN_RECORD_PREFIX];
         self.collect_by_prefix(&prefix)
@@ -1466,15 +1694,31 @@ impl PreimageStore for Store {
 }
 
 impl NetworkGraphStateStore for Store {
-    fn get_payment_session(&self, payment_hash: Hash256) -> Option<PaymentSession> {
-        let prefix = [&[PAYMENT_SESSION_PREFIX], payment_hash.as_ref()].concat();
+    fn get_payment_session(
+        &self,
+        session_key: impl Into<PaymentSessionKey>,
+    ) -> Option<PaymentSession> {
+        let session_key = session_key.into();
+        let prefix = [
+            &[PAYMENT_SESSION_PREFIX],
+            session_key.storage_bytes().as_slice(),
+        ]
+        .concat();
         self.get(prefix)
             .map(|v| deserialize_from(v.as_ref(), "PaymentSession"))
             .map(|session: PaymentSession| self.restore_payment_session(session))
     }
 
-    fn get_persisted_payment_status(&self, payment_hash: Hash256) -> Option<PaymentStatus> {
-        let key = [&[PAYMENT_SESSION_PREFIX], payment_hash.as_ref()].concat();
+    fn get_persisted_payment_status(
+        &self,
+        session_key: impl Into<PaymentSessionKey>,
+    ) -> Option<PaymentStatus> {
+        let session_key = session_key.into();
+        let key = [
+            &[PAYMENT_SESSION_PREFIX],
+            session_key.storage_bytes().as_slice(),
+        ]
+        .concat();
         self.get(key)
             .map(|v| deserialize_from::<PaymentSession>(v.as_ref(), "PaymentSession").status)
     }
@@ -1498,16 +1742,29 @@ impl NetworkGraphStateStore for Store {
             .collect()
     }
 
-    fn reconcile_attempts_channel_index(&self) -> HashSet<Hash256> {
+    fn reconcile_attempts_channel_index(&self) -> HashSet<PaymentSessionKey> {
         // Enumerate only recovery keys, never the payment/attempt tables. Group by
         // payment so completion checks load its attempts and channel work once.
-        let mut indexed = HashMap::<Hash256, Vec<(Vec<u8>, u64)>>::new();
+        let mut indexed = HashMap::<PaymentSessionKey, Vec<(Vec<u8>, u64)>>::new();
         for (key, _) in self.prefix_iterator([ATTEMPT_CHANNEL_INDEX_PREFIX]) {
-            if key.len() != 77 {
+            if !matches!(key.len(), 77 | 117) {
                 continue;
             }
-            let hash = Hash256::from(<[u8; 32]>::try_from(&key[37..69]).expect("index hash"));
-            let id = u64::from_le_bytes(key[69..77].try_into().expect("index attempt id"));
+            let session_end = key.len() - 8;
+            let hash = PaymentSessionKey {
+                payment_hash: Hash256::from(
+                    <[u8; 32]>::try_from(&key[37..69]).expect("index hash"),
+                ),
+                upstream_tlc_key: (session_end == 109).then(|| UpstreamTlcKey {
+                    incoming_channel_id: Hash256::from(
+                        <[u8; 32]>::try_from(&key[69..101]).expect("index upstream channel"),
+                    ),
+                    incoming_tlc_id: u64::from_le_bytes(
+                        key[101..109].try_into().expect("index upstream TLC"),
+                    ),
+                }),
+            };
+            let id = u64::from_le_bytes(key[session_end..].try_into().expect("index attempt id"));
             indexed.entry(hash).or_default().push((key.to_vec(), id));
         }
         let mut hashes = HashSet::new();
@@ -1583,6 +1840,9 @@ impl NetworkGraphStateStore for Store {
 
         iter.filter_map(|(_key, value)| {
             let session: PaymentSession = deserialize_from(&value, "PaymentSession");
+            if session.request.upstream_tlc_key.is_some() {
+                return None;
+            }
             self.filter_payment_session(session, status)
         })
         .take(limit)
@@ -1591,15 +1851,24 @@ impl NetworkGraphStateStore for Store {
 
     fn insert_payment_session(&self, session: PaymentSession) {
         let payment_hash = session.payment_hash();
+        let is_public = session.request.upstream_tlc_key.is_none();
         let mut batch = self.batch();
-        let kv = KeyValue::PaymentSession(payment_hash, session);
+        let kv = KeyValue::PaymentSession(session.session_key(), session);
         batch.put(kv.key(), kv.value());
         batch.commit();
-        self.publish_payment_result(payment_hash);
+        if is_public {
+            self.publish_payment_result(payment_hash);
+        }
     }
 
-    fn publish_payment_result(&self, payment_hash: Hash256) {
-        let Some(mut session) = self.get_payment_session(payment_hash) else {
+    fn publish_payment_result(&self, session_key: impl Into<PaymentSessionKey>) {
+        let session_key = session_key.into();
+        // Public subscriptions are hash addressed, never disclose hosted execution outcomes.
+        if session_key.upstream_tlc_key.is_some() {
+            return;
+        }
+        let payment_hash = session_key.payment_hash;
+        let Some(mut session) = self.get_payment_session(session_key) else {
             return;
         };
         session.status = session.effective_status(self);
@@ -1611,10 +1880,15 @@ impl NetworkGraphStateStore for Store {
         });
     }
 
-    fn get_attempt(&self, payment_hash: Hash256, attempt_id: u64) -> Option<Attempt> {
+    fn get_attempt(
+        &self,
+        session_key: impl Into<PaymentSessionKey>,
+        attempt_id: u64,
+    ) -> Option<Attempt> {
+        let session_key = session_key.into();
         let key = [
             &[ATTEMPT_PREFIX],
-            payment_hash.as_ref(),
+            session_key.storage_bytes().as_slice(),
             &attempt_id.to_le_bytes(),
         ]
         .concat();
@@ -1626,7 +1900,7 @@ impl NetworkGraphStateStore for Store {
         assert_ne!(attempt.id, 0, "Attempt ID should not be zero");
 
         let first_hop_outpoint = attempt.first_hop_channel_outpoint().cloned();
-        let previous = self.get_attempt(attempt.payment_hash, attempt.id);
+        let previous = self.get_attempt(attempt.session_key(), attempt.id);
         let previous_outpoint = previous
             .as_ref()
             .and_then(|a| a.first_hop_channel_outpoint());
@@ -1634,7 +1908,7 @@ impl NetworkGraphStateStore for Store {
         let mut batch = self.batch();
 
         // Update the main attempt record
-        let kv = KeyValue::Attempt((attempt.payment_hash, attempt.id), attempt.clone());
+        let kv = KeyValue::Attempt((attempt.session_key(), attempt.id), attempt.clone());
         batch.put(kv.key(), kv.value());
 
         // Route changes and their wake-up index must become durable together.
@@ -1644,7 +1918,7 @@ impl NetworkGraphStateStore for Store {
                 batch.delete(
                     KeyValue::AttemptChannelIndex((
                         outpoint.clone(),
-                        attempt.payment_hash,
+                        attempt.session_key(),
                         attempt.id,
                     ))
                     .key(),
@@ -1652,131 +1926,84 @@ impl NetworkGraphStateStore for Store {
             }
             if let Some(outpoint) = first_hop_outpoint {
                 let kv =
-                    KeyValue::AttemptChannelIndex((outpoint, attempt.payment_hash, attempt.id));
+                    KeyValue::AttemptChannelIndex((outpoint, attempt.session_key(), attempt.id));
                 batch.put(kv.key(), kv.value());
             }
         }
 
         batch.commit();
-        self.notify(StoreChange::PutAttempt {
-            payment_hash: attempt.payment_hash,
-            attempt_status: attempt.status,
-        });
+        if attempt.upstream_tlc_key.is_none() {
+            self.notify(StoreChange::PutAttempt {
+                payment_hash: attempt.payment_hash,
+                attempt_status: attempt.status,
+            });
+        }
     }
 
-    fn get_attempts(&self, payment_hash: Hash256) -> Vec<Attempt> {
-        let prefix = [&[ATTEMPT_PREFIX], payment_hash.as_ref()].concat();
+    fn get_attempts(&self, session_key: impl Into<PaymentSessionKey>) -> Vec<Attempt> {
+        let session_key = session_key.into();
+        let prefix = [&[ATTEMPT_PREFIX], session_key.storage_bytes().as_slice()].concat();
         self.collect_by_prefix(&prefix)
             .into_iter()
-            .map(|kv| deserialize_from(kv.value.as_ref(), "Attempt"))
+            .map(|kv| deserialize_from::<Attempt>(kv.value.as_ref(), "Attempt"))
+            // A hash-only prefix also matches hosted executions. All callers,
+            // including cleanup, must select the complete execution identity.
+            .filter(|attempt| attempt.session_key() == session_key)
             .collect()
     }
 
-    fn delete_attempts(&self, payment_hash: Hash256) {
-        let prefix = [&[ATTEMPT_PREFIX], payment_hash.as_ref()].concat();
+    fn delete_attempts(&self, session_key: impl Into<PaymentSessionKey>) {
+        let session_key = session_key.into();
         let mut batch = self.batch();
 
-        // Get attempts to find their channel index entries
-        let attempts: Vec<_> = self
-            .collect_by_prefix(&prefix)
-            .into_iter()
-            .map(|kv| {
-                (
-                    kv.key,
-                    deserialize_from::<Attempt>(kv.value.as_ref(), "Attempt"),
-                )
-            })
-            .collect();
-
         // Delete both main records and channel index entries
-        for (key, attempt) in attempts {
-            batch.delete(key);
+        for attempt in self.get_attempts(session_key) {
             if let Some(outpoint) = attempt.first_hop_channel_outpoint() {
-                let index_key = [
-                    &[ATTEMPT_CHANNEL_INDEX_PREFIX],
-                    outpoint.as_slice(),
-                    attempt.payment_hash.as_ref(),
-                    &attempt.id.to_le_bytes(),
-                ]
-                .concat();
-                batch.delete(index_key);
+                let index =
+                    KeyValue::AttemptChannelIndex((outpoint.clone(), session_key, attempt.id));
+                batch.delete(index.key());
             }
+            batch.delete(KeyValue::Attempt((session_key, attempt.id), attempt).key());
         }
 
         batch.commit();
     }
 
-    fn delete_unsettled_attempts(&self, payment_hash: Hash256) {
-        let prefix = [&[ATTEMPT_PREFIX], payment_hash.as_ref()].concat();
+    fn delete_unsettled_attempts(&self, session_key: impl Into<PaymentSessionKey>) {
+        let session_key = session_key.into();
         let mut batch = self.batch();
-
-        // Get attempts to find their channel index entries
-        let attempts: Vec<_> = self
-            .collect_by_prefix(&prefix)
-            .into_iter()
-            .map(|kv| {
-                (
-                    kv.key,
-                    deserialize_from::<Attempt>(kv.value.as_ref(), "Attempt"),
-                )
-            })
-            .collect();
-
-        for (key, attempt) in attempts {
-            // Settled attempts record value that was already delivered. Deleting them
-            // makes a retried payment session re-dispatch the full amount and can
-            // overpay, so only clean up attempts that did not settle.
+        for attempt in self.get_attempts(session_key) {
+            // Retain delivered value so retrying cannot overpay the recipient.
             if attempt.is_success() {
                 continue;
             }
-            batch.delete(key);
             if let Some(outpoint) = attempt.first_hop_channel_outpoint() {
-                let index_key = [
-                    &[ATTEMPT_CHANNEL_INDEX_PREFIX],
-                    outpoint.as_slice(),
-                    attempt.payment_hash.as_ref(),
-                    &attempt.id.to_le_bytes(),
-                ]
-                .concat();
-                batch.delete(index_key);
+                batch.delete(
+                    KeyValue::AttemptChannelIndex((outpoint.clone(), session_key, attempt.id))
+                        .key(),
+                );
             }
+            batch.delete(KeyValue::Attempt((session_key, attempt.id), attempt).key());
         }
-
         batch.commit();
     }
 
-    fn clear_attempts_channel_index(&self, payment_hash: Hash256) {
-        let prefix = [&[ATTEMPT_PREFIX], payment_hash.as_ref()].concat();
-        let mut batch = self.batch();
-
-        // Get attempts to find their channel index entries
-        let attempts: Vec<Attempt> = self
-            .collect_by_prefix(&prefix)
-            .into_iter()
-            .map(|kv| deserialize_from(kv.value.as_ref(), "Attempt"))
-            .collect();
-
+    fn clear_attempts_channel_index(&self, session_key: impl Into<PaymentSessionKey>) {
+        let session_key = session_key.into();
         let finished = self
-            .get_payment_session(payment_hash)
+            .get_payment_session(session_key)
             .is_some_and(|session| {
                 session.status.is_final() && !session.has_pending_payment_work(self)
             });
         if !finished {
-            // These keys also recover a stopped dispatcher after its final
-            // channel acknowledgement but before publishing final failure.
             return;
         }
-        // Release issued and unissued attempts only after payment completion.
-        for attempt in attempts {
+        let mut batch = self.batch();
+        for attempt in self.get_attempts(session_key) {
             if let Some(outpoint) = attempt.first_hop_channel_outpoint() {
-                let index_key = [
-                    &[ATTEMPT_CHANNEL_INDEX_PREFIX],
-                    outpoint.as_slice(),
-                    attempt.payment_hash.as_ref(),
-                    &attempt.id.to_le_bytes(),
-                ]
-                .concat();
-                batch.delete(index_key);
+                let index =
+                    KeyValue::AttemptChannelIndex((outpoint.clone(), session_key, attempt.id));
+                batch.delete(index.key());
             }
         }
 
@@ -1792,8 +2019,8 @@ impl NetworkGraphStateStore for Store {
         self.collect_by_prefix(&prefix)
             .into_iter()
             .filter_map(|kv| {
-                // Key format: [PREFIX, channel_outpoint(36 bytes), payment_hash(32 bytes), attempt_id(8 bytes)]
-                // Extract payment_hash and attempt_id from key
+                // [PREFIX, outpoint(36), payment_hash(32), optional upstream TLC(40), attempt_id(8)]
+                // The upstream TLC is incoming_channel_id(32) + incoming_tlc_id(8).
                 let key_slice: &[u8] = &kv.key;
                 let outpoint_len = channel_outpoint.as_slice().len();
                 let prefix_and_outpoint_len = 1 + outpoint_len;
@@ -1804,7 +2031,7 @@ impl NetworkGraphStateStore for Store {
 
                 let payment_hash_start = prefix_and_outpoint_len;
                 let payment_hash_end = payment_hash_start + 32;
-                let attempt_id_start = payment_hash_end;
+                let attempt_id_start = key_slice.len() - 8;
                 let attempt_id_end = attempt_id_start + 8;
 
                 let payment_hash: Hash256 = (&key_slice[payment_hash_start..payment_hash_end])
@@ -1816,7 +2043,27 @@ impl NetworkGraphStateStore for Store {
                         .ok()?,
                 );
 
-                let attempt = self.get_attempt(payment_hash, attempt_id)?;
+                let upstream_tlc_key = match attempt_id_start - payment_hash_end {
+                    0 => None,
+                    40 => Some(UpstreamTlcKey {
+                        incoming_channel_id: key_slice[payment_hash_end..payment_hash_end + 32]
+                            .try_into()
+                            .ok()?,
+                        incoming_tlc_id: u64::from_le_bytes(
+                            key_slice[payment_hash_end + 32..attempt_id_start]
+                                .try_into()
+                                .ok()?,
+                        ),
+                    }),
+                    _ => return None,
+                };
+                let attempt = self.get_attempt(
+                    PaymentSessionKey {
+                        payment_hash,
+                        upstream_tlc_key,
+                    },
+                    attempt_id,
+                )?;
                 match attempt.status {
                     AttemptStatus::Retrying => Some(attempt),
                     AttemptStatus::Created
@@ -1872,6 +2119,10 @@ impl NetworkGraphStateStore for Store {
 
 #[cfg(feature = "watchtower")]
 impl WatchtowerStore for Store {
+    fn get_watch_channels_for_node(&self, node_id: &NodeId) -> Vec<ChannelData> {
+        self.watch_channels_for_node(node_id)
+    }
+
     fn get_watch_channels_with_nodes(&self) -> Vec<(NodeId, ChannelData)> {
         let prefix = vec![WATCHTOWER_CHANNEL_PREFIX];
         self.collect_by_prefix(&prefix)
@@ -1889,11 +2140,27 @@ impl WatchtowerStore for Store {
         node_id: NodeId,
         channel_id: Hash256,
         funding_udt_type_script: Option<Script>,
-        local_settlement_key: Privkey,
-        remote_settlement_key: Pubkey,
-        local_funding_pubkey: Pubkey,
-        remote_funding_pubkey: Pubkey,
+        keys: WatchChannelKeys,
         settlement_data: SettlementData,
+    ) {
+        self.insert_watch_channel_with_features(
+            node_id,
+            channel_id,
+            funding_udt_type_script,
+            keys,
+            settlement_data,
+            ChannelFeatures::V2,
+        );
+    }
+
+    fn insert_watch_channel_with_features(
+        &self,
+        node_id: NodeId,
+        channel_id: Hash256,
+        funding_udt_type_script: Option<Script>,
+        keys: WatchChannelKeys,
+        settlement_data: SettlementData,
+        channel_features: ChannelFeatures,
     ) {
         let lock = self.watchtower_write_lock(&node_id);
         let _guard = lock.lock();
@@ -1904,32 +2171,54 @@ impl WatchtowerStore for Store {
         ]
         .concat();
         // Registration is at-least-once across channel actor crashes. Never reset
-        // an already monitored channel's usable settlement/revocation snapshots.
+        // an already monitored channel's usable settlement/revocation or signer state.
         if self.get(&key).is_some() {
             return;
         }
+        let external = keys.local_settlement.is_external();
+        if let Err(error) = settlement_data.validate_signing_keys(external) {
+            tracing::error!(%channel_id, %error, "invalid watch channel signing keys");
+            return;
+        }
+        let (local_settlement_key, local_settlement_key_pubkey) = keys.local_settlement.to_parts();
         let value = serialize_to_vec(
             &ChannelData {
                 channel_id,
                 funding_udt_type_script,
                 local_settlement_key,
-                remote_settlement_key,
-                local_funding_pubkey,
-                remote_funding_pubkey,
+                local_settlement_key_pubkey,
+                remote_settlement_key: keys.remote_settlement,
+                local_funding_pubkey: keys.local_funding,
+                remote_funding_pubkey: keys.remote_funding,
                 pending_remote_settlement_data: settlement_data.clone(),
                 remote_settlement_data: settlement_data.clone(),
                 local_settlement_data: settlement_data.clone(),
                 revocation_data: None,
-                channel_features: ChannelFeatures::V2,
+                channel_features,
             },
             "ChannelData",
         );
+        let signer_state = if external {
+            WatchtowerSignerState::External(fiber_types::WatchtowerExternalSignerState::default())
+        } else {
+            WatchtowerSignerState::Internal
+        };
+        let signer_key = [
+            &[WATCHTOWER_SIGNER_PREFIX],
+            node_id.as_ref(),
+            channel_id.as_ref(),
+        ]
+        .concat();
         let mut batch = self.batch();
         batch.put(key, value);
+        batch.put(
+            signer_key,
+            serialize_to_vec(&signer_state, "WatchtowerSignerState"),
+        );
         batch.commit();
     }
 
-    fn remove_watch_channel(&self, node_id: NodeId, channel_id: Hash256) {
+    fn remove_watch_channel(&self, node_id: NodeId, channel_id: Hash256) -> bool {
         // Only allow removing watchtower monitoring for closed channels.
         // Prevents accidental or malicious disabling of active channel protection.
         // Skipped in test builds to allow e2e tests to simulate stopping the watchtower.
@@ -1940,7 +2229,7 @@ impl WatchtowerStore for Store {
                     "Refusing to remove watchtower for live channel {} (state: {:?})",
                     channel_id, state.state
                 );
-                return;
+                return false;
             }
         }
         let key = [
@@ -1960,6 +2249,14 @@ impl WatchtowerStore for Store {
         self.delete(key);
         self.delete(
             [
+                &[WATCHTOWER_SIGNER_PREFIX],
+                node_id.as_ref(),
+                channel_id.as_ref(),
+            ]
+            .concat(),
+        );
+        self.delete(
+            [
                 &[WATCHTOWER_SUPERSEDED_SETTLEMENT_PREFIX],
                 node_id.as_ref(),
                 channel_id.as_ref(),
@@ -1971,6 +2268,7 @@ impl WatchtowerStore for Store {
             WatchtowerPreimageCleanupTarget::ExactSet(&payment_hashes),
             || {},
         );
+        true
     }
 
     fn update_revocation(
@@ -1992,6 +2290,12 @@ impl WatchtowerStore for Store {
             .get(key)
             .map(|v| deserialize_from::<ChannelData>(v.as_ref(), "ChannelData"))
         {
+            if let Err(error) = remote_settlement_data
+                .validate_signing_keys(channel_data.local_settlement_key.is_none())
+            {
+                tracing::error!(%channel_id, %error, "invalid remote settlement signing keys");
+                return;
+            }
             // Recovery replays exact durable snapshots. An older queued delivery
             // must not replace a newer revocation (or its settlement snapshot).
             if channel_data
@@ -2007,6 +2311,12 @@ impl WatchtowerStore for Store {
             let kv = KeyValue::WatchtowerChannel(node_id, channel_id, channel_data);
             batch.put(kv.key(), kv.value());
             batch.commit();
+        } else {
+            tracing::warn!(
+                node_id = %node_id,
+                channel_id = %channel_id,
+                "update_revocation ignored: watch channel row does not exist"
+            );
         }
     }
 
@@ -2034,6 +2344,12 @@ impl WatchtowerStore for Store {
             .get(key)
             .map(|v| deserialize_from::<ChannelData>(v.as_ref(), "ChannelData"))
         {
+            if let Err(error) = pending_remote_settlement_data
+                .validate_signing_keys(channel_data.local_settlement_key.is_none())
+            {
+                tracing::error!(%channel_id, %error, "invalid pending settlement signing keys");
+                return;
+            }
             // A replay of a snapshot we already hold must not rotate anything.
             if pending_remote_settlement_data == channel_data.pending_remote_settlement_data
                 || pending_remote_settlement_data == channel_data.remote_settlement_data
@@ -2109,6 +2425,12 @@ impl WatchtowerStore for Store {
             .get(key)
             .map(|v| deserialize_from::<ChannelData>(v.as_ref(), "ChannelData"))
         {
+            if let Err(error) = local_settlement_data
+                .validate_signing_keys(channel_data.local_settlement_key.is_none())
+            {
+                tracing::error!(%channel_id, %error, "invalid local settlement signing keys");
+                return;
+            }
             channel_data.local_settlement_data = local_settlement_data;
             let mut batch = self.batch();
             let kv = KeyValue::WatchtowerChannel(node_id, channel_id, channel_data);
@@ -2138,6 +2460,78 @@ impl WatchtowerStore for Store {
     fn get_watch_preimage(&self, node_id: &NodeId, payment_hash: &Hash256) -> Option<Hash256> {
         self.get(Self::watchtower_preimage_key(node_id, payment_hash))
             .map(|v| deserialize_from(v.as_ref(), "Preimage"))
+    }
+
+    fn get_watch_channel(&self, node_id: &NodeId, channel_id: &Hash256) -> Option<ChannelData> {
+        let key = [
+            &[WATCHTOWER_CHANNEL_PREFIX],
+            node_id.as_ref(),
+            channel_id.as_ref(),
+        ]
+        .concat();
+        self.get(key)
+            .map(|v| deserialize_from(v.as_ref(), "ChannelData"))
+    }
+
+    fn get_watchtower_signer(
+        &self,
+        node_id: &NodeId,
+        channel_id: &Hash256,
+    ) -> WatchtowerSignerState {
+        let key = [
+            &[WATCHTOWER_SIGNER_PREFIX],
+            node_id.as_ref(),
+            channel_id.as_ref(),
+        ]
+        .concat();
+        self.get(key)
+            .map(|v| deserialize_from(v.as_ref(), "WatchtowerSignerState"))
+            .unwrap_or(WatchtowerSignerState::Internal)
+    }
+
+    fn put_watchtower_signer(
+        &self,
+        node_id: &NodeId,
+        channel_id: &Hash256,
+        state: WatchtowerSignerState,
+    ) {
+        let lock = self.watchtower_write_lock(node_id);
+        let _guard = lock.lock();
+        let key = [
+            &[WATCHTOWER_SIGNER_PREFIX],
+            node_id.as_ref(),
+            channel_id.as_ref(),
+        ]
+        .concat();
+        let mut batch = self.batch();
+        batch.put(key, serialize_to_vec(&state, "WatchtowerSignerState"));
+        batch.commit();
+    }
+
+    fn update_watchtower_signer<R, E>(
+        &self,
+        node_id: &NodeId,
+        channel_id: &Hash256,
+        update: impl FnOnce(&mut WatchtowerSignerState) -> Result<R, E>,
+    ) -> Result<R, E> {
+        let lock = self.watchtower_write_lock(node_id);
+        let _guard = lock.lock();
+        let mut state = self.get_watchtower_signer(node_id, channel_id);
+        let original = state.clone();
+        let result = update(&mut state)?;
+        if state != original {
+            // Write directly: put_watchtower_signer would acquire this lock again.
+            let key = [
+                &[WATCHTOWER_SIGNER_PREFIX],
+                node_id.as_ref(),
+                channel_id.as_ref(),
+            ]
+            .concat();
+            let mut batch = self.batch();
+            batch.put(key, serialize_to_vec(&state, "WatchtowerSignerState"));
+            batch.commit();
+        }
+        Ok(result)
     }
 
     fn insert_onchain_tlc_settlement(

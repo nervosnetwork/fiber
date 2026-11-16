@@ -1,0 +1,32 @@
+meta {
+  name: safely release preimage to Watchtower
+  type: http
+  seq: 18
+}
+
+post {
+  url: {{LSP_SDK_AGENT_URL}}/authorize
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {"type":"ReleasePreimage","channel_id":"placeholder","payment_hash":"placeholder","preimage":"placeholder","target":"Watchtower"}
+}
+
+script:pre-request {
+  const body = req.getBody();
+  body.channel_id = bru.getVar("REMOTE_CHANNEL_ID");
+  body.payment_hash = bru.getVar("LSP_INCOMING_PAYMENT_HASH");
+  body.preimage = bru.getVar("LSP_INCOMING_PREIMAGE");
+  req.setBody(body);
+}
+
+assert {
+  res.status: eq 200
+  res.body.result.authorized: eq true
+}

@@ -26,13 +26,18 @@ pub(super) fn released_v2(
         commitment_fee_rate: channel.commitment_fee_rate,
         commitment_delay_epoch: channel.commitment_delay_epoch,
         funding_fee_rate: channel.funding_fee_rate,
-        signer: decode_as_new(channel.signer).unwrap(),
+        signer: decode_as_new(channel.signer.expect("released channel has a local signer"))
+            .unwrap(),
         local_channel_public_keys: decode_as_new(channel.local_channel_public_keys).unwrap(),
         commitment_numbers: decode_as_new(channel.commitment_numbers).unwrap(),
         local_constraints: decode_as_new(channel.local_constraints).unwrap(),
         remote_constraints: decode_as_new(channel.remote_constraints).unwrap(),
-        tlc_state: decode_as_new(channel.tlc_state).unwrap(),
-        retryable_tlc_operations: decode_as_new(channel.retryable_tlc_operations).unwrap(),
+        tlc_state: serde_json::from_value(serde_json::to_value(channel.tlc_state).unwrap())
+            .unwrap(),
+        retryable_tlc_operations: serde_json::from_value(
+            serde_json::to_value(channel.retryable_tlc_operations).unwrap(),
+        )
+        .unwrap(),
         waiting_forward_tlc_tasks: decode_as_new(channel.waiting_forward_tlc_tasks).unwrap(),
         remote_shutdown_script: channel.remote_shutdown_script,
         local_shutdown_script: channel.local_shutdown_script,

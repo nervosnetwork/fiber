@@ -27,6 +27,11 @@ impl ChannelActorState {
             .expect("ChannelActorData samples should not be empty");
 
         ChannelActorState {
+            channel_signer: crate::fiber::channel_signer::ChannelSigner::restore(
+                core.signer.as_ref(),
+                &core.local_channel_public_keys,
+            )
+            .unwrap(),
             core,
             waiting_peer_response: None,
             reestablish_timer: None,
@@ -40,6 +45,7 @@ impl ChannelActorState {
             funding_abort_detail: None,
             private_key: None,
             needs_backup: false,
+            pending_messages: Default::default(),
             pending_remove_effects_v2: 0,
             pending_payment_notifications: Default::default(),
             replayed_tlc_updates_v2: 0,

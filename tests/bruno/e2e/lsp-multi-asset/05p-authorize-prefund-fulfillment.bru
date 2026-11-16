@@ -1,0 +1,37 @@
+meta {
+  name: authorize prefund fulfillment
+  type: http
+  seq: 5.94
+}
+
+post {
+  url: {{LSP_SDK_AGENT_URL}}/authorize
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {"type":"Fulfillment","channel_id":"placeholder","payment_hash":"placeholder","preimage":"placeholder"}
+}
+
+script:pre-request {
+  const body = req.getBody();
+  body.channel_id = bru.getVar("PREFUND_CHANNEL_ID");
+  body.payment_hash = bru.getVar("PREFUND_PAYMENT_HASH");
+  body.preimage = bru.getVar("PREFUND_PREIMAGE");
+  req.setBody(body);
+}
+
+assert {
+  res.status: eq 200
+  res.body.result.authorized: eq true
+}
+
+script:post-response {
+  if (!res.body.result?.authorized) throw new Error(JSON.stringify(res.body));
+  bru.setNextRequest("settle prefund invoice");
+}

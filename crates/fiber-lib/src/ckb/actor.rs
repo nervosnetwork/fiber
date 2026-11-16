@@ -72,6 +72,7 @@ pub enum CkbChainMessage {
         funding_cell_lock_script: packed::Script,
         funding_udt_type_script: Option<packed::Script>,
         funding_source_lock_script: Option<packed::Script>,
+        allow_peer_funding_source_lock: bool,
         funding_fee_rate: u64,
         reply: RpcReplyPort<Result<(), FundingError>>,
     },
@@ -168,6 +169,7 @@ impl Actor for CkbChainActor {
                     request.script.clone(),
                     request.udt_type_script.clone(),
                     None,
+                    false,
                 );
                 let result = match state.config.funding_tx_shell_builder_as_deref() {
                     None => {
@@ -214,6 +216,7 @@ impl Actor for CkbChainActor {
                     funding_source_lock_script_cell_deps,
                     funding_cell_lock_script,
                     funding_udt_type_script: request.udt_type_script.clone(),
+                    allow_peer_funding_source_lock: false,
                 };
                 let result = funding_tx
                     .build_unsigned_for_external_funding(
@@ -238,6 +241,7 @@ impl Actor for CkbChainActor {
                 funding_cell_lock_script,
                 funding_udt_type_script,
                 funding_source_lock_script,
+                allow_peer_funding_source_lock,
                 funding_fee_rate,
                 reply,
             } => {
@@ -254,6 +258,7 @@ impl Actor for CkbChainActor {
                     funding_cell_lock_script,
                     funding_udt_type_script,
                     funding_source_lock_script,
+                    allow_peer_funding_source_lock,
                 );
                 let result = funding_tx
                     .update_for_peer(remote_tx.into_view(), context, funding_fee_rate)
@@ -416,6 +421,7 @@ impl CkbChainState {
         funding_cell_lock_script: packed::Script,
         funding_udt_type_script: Option<packed::Script>,
         funding_source_lock_script: Option<packed::Script>,
+        allow_peer_funding_source_lock: bool,
     ) -> FundingContext {
         FundingContext {
             rpc_url: self.config.rpc_url.clone(),
@@ -424,6 +430,7 @@ impl CkbChainState {
             funding_source_lock_script_cell_deps: Vec::new(),
             funding_cell_lock_script,
             funding_udt_type_script,
+            allow_peer_funding_source_lock,
         }
     }
 }

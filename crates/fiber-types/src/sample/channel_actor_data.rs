@@ -78,7 +78,7 @@ fn sample_v2(seed: u64) -> ChannelActorData {
         commitment_fee_rate: 0,
         commitment_delay_epoch: 0,
         funding_fee_rate: 0,
-        signer,
+        signer: Some(signer),
         local_channel_public_keys,
         commitment_numbers: CommitmentNumbers::default(),
         local_constraints: ChannelConstraints::default(),
@@ -110,6 +110,7 @@ fn sample_v2(seed: u64) -> ChannelActorData {
         last_was_revoke: false,
         external_funding: None,
         channel_features: Default::default(),
+        signing_context: Default::default(),
         session,
         created_at: SystemTime::UNIX_EPOCH,
     }

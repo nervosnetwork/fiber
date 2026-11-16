@@ -38,6 +38,9 @@ The current rules for each RPC methods:
 rule("send_btc", r#"allow if write("cch");"#); 
 rule("receive_btc", r#"allow if write("cch");"#);
 rule("get_cch_order", r#"allow if read("cch");"#); 
+// subscriptions
+rule("subscribe", r#"allow if write("subscriptions");"#);
+rule("unsubscribe", r#"allow if write("subscriptions");"#);
 // channels 
 rule("open_channel", r#"allow if write("channels");"#); 
 rule("accept_channel", r#"allow if write("channels");"#); 
@@ -111,9 +114,31 @@ rule(
     allow if right({channel_id}, "watchtower"); 
     "#, 
 ); 
-rule("create_preimage", r#"allow if write("watchtower");"#); 
+rule("create_preimage", r#"allow if write("watchtower");"#);
 rule("remove_preimage", r#"allow if write("watchtower");"#); 
+rule(
+    "get_watchtower_signing_status",
+    r#"
+    allow if read("watchtower");
+    allow if write("watchtower");
+    allow if read("channels");
+    "#,
+);
+rule(
+    "submit_watchtower_signature",
+    r#"
+    allow if write("watchtower");
+    allow if write("channels");
+    "#,
+);
 ```
+
+Subscriptions also check the selected topic's read permission before accepting the
+subscription and fix its tenant/node scope for its lifetime. Updates do not recheck
+credentials; token expiry does not terminate an established subscription. New
+subscribe/unsubscribe requests still require valid credentials. The subscription
+capability does not grant access to channel or watchtower data by itself. See the
+[RPC subscription reference](../crates/fiber-lib/src/rpc/README.md#subscription).
 
 ## 3. How to Configure Biscuit Auth in Fiber
 
@@ -178,6 +203,38 @@ fiber-bin
 ```
 
 If `biscuit_public_key` is not set, the RPC server will not require authentication. For security, Fiber will refuse to start on a public IP address if authentication is not enabled.
+
+### c. Configure Hosted LSP Token Issuance
+
+Enabling the LSP service requires a matching Biscuit key pair so Fiber can issue
+tenant tokens. Without LSP, do not set `biscuit_private_key_path` — the issuance
+RPC is not mounted and the private key is unused. Store the private key in a
+file readable only by the Fiber service account, then configure its path:
+
+```yaml
+rpc:
+  biscuit_public_key: "ed25519/17b172749be74276f0ed35a5d0685752684a3c5722114bba447a2f301136db79"
+  biscuit_private_key_path: "/path/to/biscuit-private-key"
+```
+
+The file contains the prefixed private key string emitted by `biscuit keypair`:
+
+```plain text
+ed25519-private/89d6c88919e5ca326fbb8d1cbef406df08c0620575376651d53008762dc81f45
+```
+
+The private key must match `biscuit_public_key`; Fiber rejects mismatched keys at
+startup. Keep this file secret because it is an RPC authorization root key. The
+registration response returns the tenant token only on first creation. Repeating
+the idempotent registration does not mint another bearer token.
+
+The issued token carries a trusted `tenant("<tenant_id>")` authority fact and
+read/write capabilities for the tenant's channel, invoice, payment, and
+watchtower data plane. RPC middleware additionally applies a tenant method
+allowlist. Standard `new_invoice` and `send_payment` calls use the authority
+fact to select the tenant actor and Store namespace; callers do not pass a
+`tenant_id` parameter. LSP lifecycle and delivery administration remain under
+separate `read("lsp")` or `write("lsp")` operator credentials.
 
 ## 4. How to Sign an Auth Token
 

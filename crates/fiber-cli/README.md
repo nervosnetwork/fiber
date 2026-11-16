@@ -197,6 +197,8 @@ fnn-cli cch get_cch_order --payment-hash 0xabc...
 | `update_local_settlement` | Update local settlement data |
 | `create_preimage` | Store a preimage |
 | `remove_preimage` | Remove a stored preimage |
+| `get_watchtower_signing_status` | Read an external watchtower signing request |
+| `submit_watchtower_signature` | Submit a settlement or TLC signature |
 
 ### dev — Development/debug commands
 

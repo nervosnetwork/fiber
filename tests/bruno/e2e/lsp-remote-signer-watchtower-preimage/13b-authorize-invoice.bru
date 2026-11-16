@@ -1,0 +1,37 @@
+meta {
+  name: authorize wallet-owned incoming invoice
+  type: http
+  seq: 13.5
+}
+
+post {
+  url: {{LSP_SDK_AGENT_URL}}/authorize
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {"type":"Invoice","channel_id":"placeholder","preimage":"0x2222222222222222222222222222222222222222222222222222222222222222",
+   "terms":{"payment_hash":"0x09dfb3a3fa5af1b3359b6256945af43e31be9f86f3d1b45779cebc09dc609138","hash_algorithm":"ckb_hash","inbound":true,"amount":1000000,"expires_at_ms":0,"min_tlc_expiry_delta_ms":86400000,"max_tlc_expiry_ms":0}}
+}
+
+script:pre-request {
+  const body = req.getBody();
+  body.channel_id = bru.getVar("REMOTE_CHANNEL_ID");
+  const now = Date.now();
+  body.terms.expires_at_ms = now + 3600000;
+  // Match the explicit seven-day payer limit, plus the one-hour invoice window.
+  body.terms.max_tlc_expiry_ms = now + 7 * 86400000 + 3600000;
+  req.setBody(body);
+  bru.setVar("LSP_INCOMING_PAYMENT_HASH", body.terms.payment_hash);
+  bru.setVar("LSP_INCOMING_PREIMAGE", body.preimage);
+}
+
+assert {
+  res.status: eq 200
+  res.body.result.authorized: eq true
+}
