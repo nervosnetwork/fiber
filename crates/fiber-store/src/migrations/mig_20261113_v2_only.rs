@@ -3,14 +3,17 @@ use std::collections::HashSet;
 
 use bincode::Options;
 use ckb_types::{packed::OutPoint, prelude::*};
-use fiber_types::channel_v2_validation::validate_channel_v2;
+use fiber_types::channel_v2_validation::{
+    decode_and_validate_channel_actor_data_parts, validate_channel_v2,
+};
 use fiber_types::schema::{
-    ARCHIVED_V1_PREFIX, CHANNEL_ACTOR_STATE_PREFIX, CHANNEL_OPEN_RECORD_PREFIX,
+    ARCHIVED_V1_PREFIX, CHANNEL_ACTOR_STATE_PREFIX, CHANNEL_IMMUTABLE_STATE_PREFIX,
+    CHANNEL_OPEN_RECORD_PREFIX,
     CHANNEL_OUTPOINT_CHANNEL_ID_PREFIX, CHANNEL_SHUTDOWN_SETTLEMENT_PREFIX,
     PUBKEY_CHANNEL_ID_PREFIX, WATCHTOWER_CHANNEL_PREFIX, WATCHTOWER_SUPERSEDED_SETTLEMENT_PREFIX,
 };
 use fiber_types::{
-    ChannelActorData, ChannelData, ChannelFeatures, ChannelOpenRecord, ChannelSessionV2,
+    ChannelActorData, ChannelData, ChannelFeatures, ChannelOpenRecord, ChannelSessionV2, Hash256,
 };
 use fiber_types_0100::schema::PENDING_COMMIT_DIFF_PREFIX;
 use fiber_types_0100::{
@@ -160,6 +163,19 @@ fn legacy_closed(channel: &OldChannelActorData) -> bool {
         && channel.waiting_forward_tlc_tasks.is_empty()
 }
 
+fn immutable_key(key: &[u8]) -> Result<Vec<u8>, String> {
+    let id = key.get(1..).ok_or_else(|| format!("Invalid channel key {key:?}"))?;
+    Ok([&[CHANNEL_IMMUTABLE_STATE_PREFIX], id].concat())
+}
+
+fn stored_channel_id(key: &[u8]) -> Result<Hash256, String> {
+    let bytes: [u8; 32] = key
+        .get(1..)
+        .and_then(|bytes| bytes.try_into().ok())
+        .ok_or_else(|| format!("Invalid channel key {key:?}"))?;
+    Ok(bytes.into())
+}
+
 fn actor_key(channel_id: &impl AsRef<[u8]>) -> Vec<u8> {
     [&[CHANNEL_ACTOR_STATE_PREFIX], channel_id.as_ref()].concat()
 }
@@ -175,7 +191,16 @@ fn archived_or_closed_channel(
 ) -> Result<Option<Box<OldChannelActorData>>, String> {
     let key = actor_key(channel_id);
     let record = if let Some(value) = store.get(&key) {
-        channel_record(&value, version)?
+        match store.get(&immutable_key(&key)?) {
+            Some(immutable) => ChannelRecord::Current(Box::new(
+                decode_and_validate_channel_actor_data_parts(
+                    &stored_channel_id(&key)?,
+                    &value,
+                    &immutable,
+                )?,
+            )),
+            None => channel_record(&value, version)?,
+        }
     } else if let Some(value) = store.get(&archive_key(&key)) {
         let (channel, session) = released_channel(&value)?;
         if session.is_some() {
@@ -245,17 +270,36 @@ fn scan(store: &dyn MigrationStore, apply: bool) -> Result<(), String> {
         }
     };
     for (key, value) in store.iter_prefix(&[CHANNEL_ACTOR_STATE_PREFIX]) {
+        let immutable_key = immutable_key(&key)?;
+        if let Some(immutable) = store.get(&immutable_key) {
+            // Already split: both blocks must still validate, so a rerun is a no-op.
+            let id = stored_channel_id(&key)?;
+            decode_and_validate_channel_actor_data_parts(&id, &value, &immutable)
+                .map_err(|error| format!("Invalid split channel record {id}: {error}"))?;
+            continue;
+        }
         let record = channel_record(&value, version)
             .map_err(|error| format!("Invalid channel record; database preserved: {error}"))?;
         match record {
             ChannelRecord::Current(channel) => {
                 check_id(&key, &channel.id)?;
                 if apply {
-                    let current =
-                        bincode::serialize(&channel).map_err(|error| error.to_string())?;
-                    if current != value {
-                        store.put(&key, &current);
-                    }
+                    // The fixed fields move to their own record, written in the same batch.
+                    let (immutable, mutable) = channel.into_parts();
+                    store.write_batch(
+                        &[
+                            (
+                                immutable_key,
+                                bincode::serialize(&immutable)
+                                    .map_err(|error| error.to_string())?,
+                            ),
+                            (
+                                key,
+                                bincode::serialize(&mutable).map_err(|error| error.to_string())?,
+                            ),
+                        ],
+                        &[],
+                    );
                 }
             }
             ChannelRecord::Legacy(channel) => {

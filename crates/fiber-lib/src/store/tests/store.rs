@@ -1538,7 +1538,7 @@ fn test_closed_onchain_settlement_state_round_trips() {
     state.pending_remove_effects_v2 = 1;
     let (store, _dir) = generate_store();
 
-    store.insert_channel_actor_state(state.clone());
+    store.insert_channel_actor_state_for_test(state.clone());
 
     let restored = store
         .get_channel_actor_state(&state.id)
@@ -1661,7 +1661,7 @@ fn test_channel_ready_retry_index_handles_created_attempt_channel_ownership() {
         removed_confirmed_at: None,
         applied_flags: AppliedFlags::empty(),
     });
-    store.insert_channel_actor_state(channel_state.clone());
+    store.insert_channel_actor_state_for_test(channel_state.clone());
     assert!(
         store
             .get_pending_attempts_by_channel_outpoint(&first_hop_outpoint)
@@ -1678,7 +1678,7 @@ fn test_channel_ready_retry_index_handles_created_attempt_channel_ownership() {
     terminal_tlc.status = TlcStatus::Outbound(OutboundTlcStatus::RemoveAckConfirmed);
     terminal_tlc.applied_flags |= AppliedFlags::REMOVE;
     terminal_tlc.removed_confirmed_at = Some(1);
-    store.insert_channel_actor_state(channel_state.clone());
+    store.insert_channel_actor_state_for_test(channel_state.clone());
     let orphan_created_attempts =
         store.get_pending_attempts_by_channel_outpoint(&first_hop_outpoint);
     assert_eq!(
@@ -1702,7 +1702,7 @@ fn test_channel_ready_retry_index_handles_created_attempt_channel_ownership() {
             is_trampoline_hop: false,
             previous_tlc: None,
         }));
-    store.insert_channel_actor_state(channel_state);
+    store.insert_channel_actor_state_for_test(channel_state);
     assert!(
         store
             .get_pending_attempts_by_channel_outpoint(&first_hop_outpoint)
@@ -1899,13 +1899,13 @@ fn test_review_rerouted_attempt_index_recovery() {
             is_trampoline_hop: false,
             previous_tlc: None,
         }));
-    store.insert_channel_actor_state(channel.clone());
+    store.insert_channel_actor_state_for_test(channel.clone());
     store.delete(key(&channel_outpoint));
     store.put(key(&a), []);
     store.reconcile_attempts_channel_index();
     assert!(store.get(key(&channel_outpoint)).is_some());
     channel.retryable_tlc_operations.clear();
-    store.insert_channel_actor_state(channel);
+    store.insert_channel_actor_state_for_test(channel);
     // Include an additional historical alias: cleanup must delete actual keys.
     store.put(key(&a), []);
     store.reconcile_attempts_channel_index();
@@ -1999,6 +1999,59 @@ fn test_payment_status_queries_skip_attempts_for_mismatched_terminal_sessions() 
     }
 }
 
+#[test]
+fn test_established_channel_rewrites_only_the_mutable_record() {
+    use fiber_types::schema::{CHANNEL_ACTOR_STATE_PREFIX, CHANNEL_IMMUTABLE_STATE_PREFIX};
+    let (store, _dir) = generate_store();
+    let channel = sample_channel_actor_state(ChannelState::ChannelReady, None);
+    store.insert_channel_actor_state_for_test(channel.clone());
+
+    let immutable_key = [&[CHANNEL_IMMUTABLE_STATE_PREFIX], channel.id.as_ref()].concat();
+    let mutable_key = [&[CHANNEL_ACTOR_STATE_PREFIX], channel.id.as_ref()].concat();
+    let immutable = store.get(immutable_key.clone()).expect("immutable record");
+    let mutable = store.get(mutable_key.clone()).expect("mutable record");
+
+    // A message-time change must not touch the immutable record.
+    let mut updated = channel.clone();
+    updated.to_local_amount += 1;
+    store.insert_channel_actor_state(updated.clone());
+    assert_eq!(store.get(immutable_key).unwrap(), immutable);
+    assert_ne!(store.get(mutable_key).unwrap(), mutable);
+    let restored = store.get_channel_actor_state(&channel.id).unwrap();
+    assert_eq!(restored.to_local_amount, updated.to_local_amount);
+}
+
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "immutable fields changed")]
+fn test_established_channel_rejects_late_immutable_change() {
+    let (store, _dir) = generate_store();
+    let channel = sample_channel_actor_state(ChannelState::ChannelReady, None);
+    store.insert_channel_actor_state_for_test(channel.clone());
+    let mut changed = channel;
+    changed.commitment_fee_rate += 1;
+    // The normal write path must reject a late change to a fixed field.
+    store.insert_channel_actor_state(changed);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_open_channel_phase_updates_the_immutable_record() {
+    use fiber_types::schema::CHANNEL_IMMUTABLE_STATE_PREFIX;
+    let (store, _dir) = generate_store();
+    let mut channel = sample_channel_actor_state(ChannelState::ChannelReady, None);
+    channel.state = ChannelState::AwaitingChannelReady(AwaitingChannelReadyFlags::empty());
+    store.insert_channel_actor_state(channel.clone());
+    let immutable_key = [&[CHANNEL_IMMUTABLE_STATE_PREFIX], channel.id.as_ref()].concat();
+    let opening = store.get(immutable_key.clone()).expect("immutable record");
+    // Still opening: the immutable record is refreshed with the new static value.
+    channel.commitment_fee_rate += 1;
+    store.insert_channel_actor_state(channel.clone());
+    assert_ne!(store.get(immutable_key.clone()).unwrap(), opening);
+    let restored = store.get_channel_actor_state(&channel.id).unwrap();
+    assert_eq!(restored.commitment_fee_rate, channel.commitment_fee_rate);
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn test_payment_list_skips_unneeded_channel_reads() {
@@ -2007,7 +2060,7 @@ fn test_payment_list_skips_unneeded_channel_reads() {
         let (store, _dir) = generate_store();
         let channel = sample_channel_actor_state(ChannelState::ChannelReady, None);
         let outpoint = channel.must_get_funding_transaction_outpoint();
-        store.insert_channel_actor_state(channel.clone());
+        store.insert_channel_actor_state_for_test(channel.clone());
         let mut originals = Vec::new();
         for tag in 1u8..=32 {
             let hash = Hash256::from([tag; 32]);
@@ -2153,7 +2206,7 @@ async fn test_payment_list_index_gate_does_not_change_settlement_status() {
             is_trampoline_hop: false,
             previous_tlc: None,
         }));
-    store.insert_channel_actor_state(channel);
+    store.insert_channel_actor_state_for_test(channel);
     let session_key = [&[PAYMENT_SESSION_PREFIX], hash.as_ref()].concat();
     let attempt_key = [&[ATTEMPT_PREFIX], hash.as_ref(), &1u64.to_le_bytes()].concat();
     let before = (store.get(&session_key), store.get(&attempt_key));
@@ -2331,7 +2384,7 @@ fn test_review_settled_legacy_timeout_is_not_pending() {
         )),
     );
     channel.state = ChannelState::Closed(CloseFlags::UNCOOPERATIVE_LOCAL);
-    store.insert_channel_actor_state(channel.clone());
+    store.insert_channel_actor_state_for_test(channel.clone());
     let session = store.get_payment_session(hash).unwrap();
     let original = bincode::serialize(&channel.core).unwrap();
     assert!(
@@ -2363,7 +2416,7 @@ fn test_review_settled_legacy_timeout_is_not_pending() {
             is_trampoline_hop: false,
             previous_tlc: None,
         }));
-    store.insert_channel_actor_state(channel.clone());
+    store.insert_channel_actor_state_for_test(channel.clone());
     assert!(
         session.has_outstanding_channel_work(&store),
         "a pending Add is still owned even when a historical TLC has finished"
@@ -2373,7 +2426,7 @@ fn test_review_settled_legacy_timeout_is_not_pending() {
     channel.state = ChannelState::Closed(
         CloseFlags::UNCOOPERATIVE_LOCAL | CloseFlags::WAITING_ONCHAIN_SETTLEMENT,
     );
-    store.insert_channel_actor_state(channel.clone());
+    store.insert_channel_actor_state_for_test(channel.clone());
     assert_eq!(
         session.effective_status(&store),
         PaymentStatus::Inflight,
@@ -2387,7 +2440,7 @@ fn test_review_settled_legacy_timeout_is_not_pending() {
         .removed_reason = Some(RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
         payment_preimage: preimage,
     }));
-    store.insert_channel_actor_state(channel.clone());
+    store.insert_channel_actor_state_for_test(channel.clone());
     assert!(
         session.has_outstanding_channel_work(&store),
         "an unobserved fulfillment must still wake the payer"
@@ -2408,12 +2461,12 @@ fn test_review_settled_legacy_timeout_is_not_pending() {
     channel.state = ChannelState::Closed(
         CloseFlags::UNCOOPERATIVE_LOCAL | CloseFlags::WAITING_ONCHAIN_SETTLEMENT,
     );
-    store.insert_channel_actor_state(channel.clone());
+    store.insert_channel_actor_state_for_test(channel.clone());
     assert!(session.has_pending_payment_work(&store));
     channel.state = ChannelState::Closed(CloseFlags::UNCOOPERATIVE_LOCAL);
     attempt.preimage = Some(gen_rand_sha256_hash());
     store.insert_attempt(attempt);
-    store.insert_channel_actor_state(channel);
+    store.insert_channel_actor_state_for_test(channel);
     assert!(
         store
             .get_payment_session(hash)

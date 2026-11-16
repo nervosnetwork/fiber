@@ -693,7 +693,9 @@ async fn test_v2_remove_effects_wait_for_message_tail_even_after_partial_lookup_
             state.increment_next_offered_tlc_id();
         }
         let actor = ChannelActor::new(a.pubkey, b.pubkey, network.clone(), MockStore::new(), None);
-        actor.store.insert_channel_actor_state(state.clone());
+        actor
+            .store
+            .insert_channel_actor_state_for_test(state.clone());
         actor.store.channel_state_writes.set(0);
         for tlc in state.tlc_state.offered_tlcs.tlcs.iter() {
             if let Some(fiber_types::RemoveTlcReason::RemoveTlcFulfill(fulfill)) =
@@ -1285,7 +1287,7 @@ async fn test_closed_local_add_waits_for_durable_payment_receipt() {
     // Crash after the payment commit/receipt but before source retirement.
     let mut restored = a.get_channel_actor_state(id);
     restored.retryable_tlc_operations = pending;
-    a.store.insert_channel_actor_state(restored);
+    a.store.insert_channel_actor_state_for_test(restored);
     a.start().await;
     crate::tests::test_utils::wait_until_timeout(5000, || {
         a.get_channel_actor_state(id)
@@ -1394,7 +1396,7 @@ async fn test_closed_local_add_receipt_checks_identity_and_deduplicates_retry() 
     .await
     .unwrap();
     source.state = ChannelState::Closed(fiber_types::CloseFlags::COOPERATIVE);
-    a.store.insert_channel_actor_state(source);
+    a.store.insert_channel_actor_state_for_test(source);
     for wrong_field in 0..3 {
         let mut invalid = command.clone();
         match wrong_field {
@@ -1609,7 +1611,7 @@ async fn test_v2_first_payment_recovers_when_peer_missed_opening_ready() {
     session.remote_number = 1;
     session.remote_nonce = session.bootstrap_remote_nonce.clone();
     opening.validate_session().unwrap();
-    b.store.insert_channel_actor_state(opening);
+    b.store.insert_channel_actor_state_for_test(opening);
     a.start().await;
     b.start().await;
     a.connect_to(&mut b).await;
@@ -1650,7 +1652,8 @@ async fn test_forward_recovery_recognizes_fulfilled_outbox_owner() {
         .waiting_forward_tlc_tasks
         .insert(source_id, [7; 32]);
     upstream.network = Some(network.clone());
-    a.store.insert_channel_actor_state(upstream.clone());
+    a.store
+        .insert_channel_actor_state_for_test(upstream.clone());
     let mut command = retry_batch_add(92, 1000);
     command.payment_hash = hash;
     let mut tlc = downstream.create_outbounding_tlc(&command);
@@ -1671,7 +1674,8 @@ async fn test_forward_recovery_recognizes_fulfilled_outbox_owner() {
             downstream.state = ChannelState::Closed(fiber_types::CloseFlags::COOPERATIVE);
         }
         downstream.validate_session().unwrap();
-        a.store.insert_channel_actor_state(downstream.clone());
+        a.store
+            .insert_channel_actor_state_for_test(downstream.clone());
         let mut upstream = pending.clone();
         actor.recover_pending_forward_tlcs(&myself, &mut upstream);
         assert_eq!(
@@ -1827,7 +1831,7 @@ async fn test_v2_waiting_close_confirmation_keeps_chain_watch_actor() {
                 .push_back(RetryableTlcOperation::AddTlc(retry_batch_add(94, 1000)));
         }
         pending.validate_session().unwrap();
-        a.store.insert_channel_actor_state(pending);
+        a.store.insert_channel_actor_state_for_test(pending);
         captured.lock().unwrap().clear();
         let actor = ChannelActor::new(a.pubkey, b.pubkey, network.clone(), a.store.clone(), None);
         let (myself, handle) = Actor::spawn(
@@ -1912,7 +1916,7 @@ async fn test_v2_outbox_receipt_finishes_deferred_chain_settlement() {
     );
     a.store.insert_preimage(hash, preimage);
     state.validate_session().unwrap();
-    a.store.insert_channel_actor_state(state);
+    a.store.insert_channel_actor_state_for_test(state);
     let captured = Arc::new(Mutex::new(Vec::new()));
     let (network, task) = Actor::spawn(None, CaptureNetwork, captured).await.unwrap();
     let actor = ChannelActor::new(a.pubkey, b.pubkey, network.clone(), a.store.clone(), None);
@@ -2015,7 +2019,7 @@ async fn test_v2_closed_outbox_replays_on_restart_and_stops_after_receipt() {
             .push((tlc.clone(), Some(attempt.tried_times)));
         let balances = (source.to_local_amount, source.to_remote_amount);
         source.validate_session().unwrap();
-        a.store.insert_channel_actor_state(source);
+        a.store.insert_channel_actor_state_for_test(source);
         let mut session = a.store.get_payment_session(hash).unwrap();
         session.status = fiber_types::PaymentStatus::Inflight;
         a.store.insert_payment_session(session);
@@ -2312,7 +2316,9 @@ async fn test_v2_ready_replay_uses_committed_bootstrap_nonce() {
         if prior_reconnect_event {
             state.on_peer_reconnected();
         }
-        actor.store.insert_channel_actor_state(state.clone());
+        actor
+            .store
+            .insert_channel_actor_state_for_test(state.clone());
         actor.store.channel_state_writes.set(0);
         let before = bincode::serialize(&state.core).unwrap();
         let old_nonce = state.session.own.public_nonce.clone();
@@ -2386,8 +2392,12 @@ async fn test_pending_forward_recovery_only_saves_changed_ownership() {
         MockStore::new(),
         None,
     );
-    actor.store.insert_channel_actor_state(incoming.clone());
-    actor.store.insert_channel_actor_state(outgoing.clone());
+    actor
+        .store
+        .insert_channel_actor_state_for_test(incoming.clone());
+    actor
+        .store
+        .insert_channel_actor_state_for_test(outgoing.clone());
     actor.store.channel_state_writes.set(0);
     let before = bincode::serialize(&incoming.core).unwrap();
     let (myself, handle) = Actor::spawn(None, NoopChannelActor, ()).await.unwrap();
@@ -2453,7 +2463,9 @@ async fn test_v2_receipt_only_saves_early_before_preimage_cleanup() {
         }
         let store = MockStore::new().with_preimage(add.payment_hash, preimage);
         let actor = ChannelActor::new(a.pubkey, b.pubkey, network.clone(), store, None);
-        actor.store.insert_channel_actor_state(state.clone());
+        actor
+            .store
+            .insert_channel_actor_state_for_test(state.clone());
         actor.store.channel_state_writes.set(0);
         actor
             .handle_event(
@@ -2615,7 +2627,8 @@ async fn test_closed_v2_retry_queue_hands_off_adds_and_keeps_chain_obligations()
             .push_back(RetryableTlcOperation::AddTlc(command));
     }
     upstream.tlc_state.received_tlcs.next_tlc_id = 3;
-    a.store.insert_channel_actor_state(upstream.clone());
+    a.store
+        .insert_channel_actor_state_for_test(upstream.clone());
     let accepted = Arc::new(AtomicUsize::new(0));
     let retried = Arc::new(AtomicUsize::new(0));
     let (sink, sink_task) = Actor::spawn(None, NoopChannelActor, ()).await.unwrap();
@@ -2859,7 +2872,8 @@ async fn test_closed_forward_handoff_survives_timeout_and_watch_chain_restart() 
     upstream
         .waiting_forward_tlc_tasks
         .insert(fiber_types::TLCId::Received(0), [7; 32]);
-    a.store.insert_channel_actor_state(upstream.clone());
+    a.store
+        .insert_channel_actor_state_for_test(upstream.clone());
     state
         .retryable_tlc_operations
         .push_back(RetryableTlcOperation::AddTlc(command));
@@ -3011,8 +3025,9 @@ async fn test_closed_forward_queue_preserves_another_durable_owner() {
                 .retryable_tlc_operations
                 .push_back(RetryableTlcOperation::AddTlc(command.clone()));
         }
-        a.store.insert_channel_actor_state(upstream.clone());
-        a.store.insert_channel_actor_state(owner);
+        a.store
+            .insert_channel_actor_state_for_test(upstream.clone());
+        a.store.insert_channel_actor_state_for_test(owner);
         state
             .retryable_tlc_operations
             .push_back(RetryableTlcOperation::AddTlc(command));
@@ -3132,6 +3147,9 @@ async fn test_v2_remote_commitment_points_survive_asymmetric_rounds_and_restore(
         state.local_constraints.max_tlc_number_in_flight = 1;
         state.remote_constraints.max_tlc_number_in_flight = 1;
     }
+    // Constraints are fixed after opening: store the injected values explicitly.
+    a.store.insert_channel_actor_state_for_test(local.clone());
+    b.store.insert_channel_actor_state_for_test(remote.clone());
     let (network, task) = Actor::spawn(None, CaptureNetwork, Arc::new(Mutex::new(Vec::new())))
         .await
         .unwrap();
@@ -3226,8 +3244,8 @@ async fn test_v2_remote_commitment_points_survive_asymmetric_rounds_and_restore(
                 received.status,
                 fiber_types::TlcStatus::Inbound(fiber_types::InboundTlcStatus::Committed)
             );
-            let signed = local.latest_commitment_transaction().clone().unwrap();
-            a.store.insert_channel_actor_state(local.clone());
+            let signed = local.latest_commitment_transaction().unwrap();
+            a.store.insert_channel_actor_state_for_test(local.clone());
             local = a.store.get_channel_actor_state(&id).unwrap();
             local.validate_session().unwrap();
             assert_eq!(
@@ -3386,7 +3404,7 @@ async fn test_forward_add_rejects_unbacked_or_already_forwarded_upstream() {
             _ => {}
         }
         if case != "missing_channel" && case != "same_channel_queued_remove" {
-            a.store.insert_channel_actor_state(upstream);
+            a.store.insert_channel_actor_state_for_test(upstream);
         }
         captured.lock().unwrap().clear();
         let offered_before = state.tlc_state.offered_tlcs.tlcs.len();
@@ -3469,7 +3487,7 @@ async fn test_v2_stale_snapshot_reproduces_tlc_conflict_invalid_cs_and_ack_timeo
     let (myself, handle) = Actor::spawn(None, NoopChannelActor, ()).await.unwrap();
     actor.register_retryable_tlc_add(&myself, &mut sender, retry_batch_add(11, 1));
     actor.register_retryable_tlc_add(&myself, &mut sender, retry_batch_add(12, 1));
-    a.store.insert_channel_actor_state(sender.clone());
+    a.store.insert_channel_actor_state_for_test(sender.clone());
     let mut stale = a.store.get_channel_actor_state(&id).unwrap();
     actor
         .apply_retryable_tlc_operations(&myself, &mut sender, false)
@@ -3494,10 +3512,10 @@ async fn test_v2_stale_snapshot_reproduces_tlc_conflict_invalid_cs_and_ack_timeo
         1765
     );
     assert_eq!(receiver.tlc_state.received_tlcs.next_tlc_id, 1765);
-    b.store.insert_channel_actor_state(receiver);
+    b.store.insert_channel_actor_state_for_test(receiver);
     // Inject the old shutdown helper's read/write interleaving after a newer batch commit.
     stale.mark_reestablishing_offline();
-    a.store.insert_channel_actor_state(stale);
+    a.store.insert_channel_actor_state_for_test(stale);
     let mut restored = a.store.get_channel_actor_state(&id).unwrap();
     let mut receiver = b.store.get_channel_actor_state(&id).unwrap();
     restored.network = Some(network.clone());
@@ -3598,7 +3616,7 @@ async fn test_v2_updates_wait_for_commit_before_becoming_peer_visible() {
         .unwrap();
     sender.network = Some(network.clone());
     receiver.network = Some(network.clone());
-    a.store.insert_channel_actor_state(sender.clone());
+    a.store.insert_channel_actor_state_for_test(sender.clone());
     let actor = ChannelActor::new(a.pubkey, b.pubkey, network.clone(), a.store.clone(), None);
     let peer = ChannelActor::new(b.pubkey, a.pubkey, network.clone(), b.store.clone(), None);
     let (myself, handle) = Actor::spawn(None, NoopChannelActor, ()).await.unwrap();
@@ -3734,7 +3752,9 @@ async fn test_v2_force_closing_removal_is_committed_and_published_without_cs() {
         state.state = ChannelState::ShuttingDown(
             fiber_types::ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION,
         );
-        actor.store.insert_channel_actor_state(state.clone());
+        actor
+            .store
+            .insert_channel_actor_state_for_test(state.clone());
         actor.store.channel_state_writes.set(0);
         let old_outgoing = state.session.outgoing.as_ref().unwrap().request.clone();
         let balances = (state.to_local_amount, state.to_remote_amount);
@@ -4039,6 +4059,8 @@ async fn test_v2_retry_queue_checks_limits_and_reports_results() {
             state.to_remote_amount += state.to_local_amount - 5000;
             state.to_local_amount = 5000;
         }
+        // Constraints are fixed after opening: store the injected values explicitly.
+        a.store.insert_channel_actor_state_for_test(state.clone());
         let mut expired = retry_batch_add(0, 1000);
         expired.expiry = 0;
         for command in [
@@ -4219,10 +4241,15 @@ async fn test_v2_storage_codec_defers_corrupt_intent_to_preflight_and_restore() 
     // intent. Reading them must not panic before the owning boundary checks it.
     channel.session.own.seed[0] ^= 1;
     let encoded = bincode::serialize(&channel.core).unwrap();
+    let stored_mutable = {
+        let (_, mutable) = channel.core.clone().into_parts();
+        bincode::serialize(&mutable).unwrap()
+    };
     let path = tempfile::tempdir().unwrap();
     let store = crate::store::open_store(path.path()).unwrap();
-    store.insert_channel_actor_state(channel);
+    store.insert_channel_actor_state_for_test(channel);
     let key = [&[0], id.as_ref()].concat();
+    let immutable_key = [&[1], id.as_ref()].concat();
     let restored = store.get_channel_actor_state(&id).unwrap();
     assert_eq!(bincode::serialize(&restored.core).unwrap(), encoded);
     assert_eq!(store.get_all_channel_states().len(), 1);
@@ -4262,7 +4289,8 @@ async fn test_v2_storage_codec_defers_corrupt_intent_to_preflight_and_restore() 
         captured.lock().unwrap().is_empty(),
         "restore must not send or sign"
     );
-    assert_eq!(store.get(&key).unwrap(), encoded);
+    assert_eq!(store.get(&key).unwrap(), stored_mutable);
+    assert!(store.get(&immutable_key).is_some());
     assert_eq!(
         store
             .get(fiber_store::migration::MIGRATION_VERSION_KEY)
@@ -4288,7 +4316,7 @@ async fn test_v2_actual_backup_rollback_quarantines_matching_malicious_peer() {
     let backup = root.path().join("backup");
     {
         let store = crate::store::open_store(&db).unwrap();
-        store.insert_channel_actor_state(local.clone());
+        store.insert_channel_actor_state_for_test(local.clone());
         store.backup(&backup).unwrap();
         let (request, _) = peer.prepare_outgoing_v2(false).unwrap();
         consumed_funding_nonce = request.funding_nonce.clone();
@@ -4317,7 +4345,7 @@ async fn test_v2_actual_backup_rollback_quarantines_matching_malicious_peer() {
         peer.stage_ack_v2(&ack.clone().unwrap()).unwrap();
         peer.accept_ack_v2(&myself, &ack.unwrap(), false).unwrap();
         assert!(peer.session.revocation_effect.is_some());
-        store.insert_channel_actor_state(local);
+        store.insert_channel_actor_state_for_test(local);
     }
     crate::store::restore::restore(
         &backup,
@@ -4445,7 +4473,7 @@ async fn test_v2_restart_resets_ack_and_close_peer_waits() {
             state.session.closing.as_mut().unwrap().peer_wait_started_at = 0;
         }
         assert!(state.peer_does_not_reply_ack_in_time());
-        a.store.insert_channel_actor_state(state);
+        a.store.insert_channel_actor_state_for_test(state);
 
         let started = crate::now_timestamp_as_millis_u64();
         let mut restored = actor
@@ -4946,7 +4974,7 @@ async fn assert_offline_close_restart_rearms(closing: bool, expectation: Restart
     let intent = bincode::serialize(&retained.session.closing).unwrap();
     // Store the original intent after stopping so handler-end persistence
     // cannot overwrite the expired durable deadline. No old actor/timer survives.
-    a.store.insert_channel_actor_state(retained);
+    a.store.insert_channel_actor_state_for_test(retained);
     let restarted_at = crate::now_timestamp_as_millis_u64();
     a.start().await;
     if matches!(expectation, RestartCloseExpectation::Publish) {
@@ -5103,7 +5131,7 @@ async fn assert_shutdown_draining_ack_watchdog(restart: bool) {
         b.stop().await;
         a.stop().await;
         retained.reestablishing = true;
-        a.store.insert_channel_actor_state(retained);
+        a.store.insert_channel_actor_state_for_test(retained);
         let restarted_at = crate::now_timestamp_as_millis_u64();
         a.start().await;
         let restored = a.get_channel_actor_state(id);
@@ -5344,16 +5372,21 @@ async fn test_v2_close_after_update_crash_replay_conflicts_and_db_validation() {
     // Actual complete current codec is reopened through migration preflight,
     // including closed records; epoch alone is never evidence.
     let path = tempfile::tempdir().unwrap();
-    let key = [&[0], id.as_ref()].concat();
+    let mutable_key = [&[0], id.as_ref()].concat();
+    let immutable_key = [&[1], id.as_ref()].concat();
     sa.core.state = ChannelState::Closed(fiber_types::CloseFlags::COOPERATIVE);
     let good = bincode::serialize(&sa.core).unwrap();
+    let (immutable, mutable) = sa.core.clone().into_parts();
+    let immutable = bincode::serialize(&immutable).unwrap();
+    let mutable = bincode::serialize(&mutable).unwrap();
     {
         let store = fiber_store::Store::open_db(path.path()).unwrap();
         store.put(
             fiber_store::migration::MIGRATION_VERSION_KEY,
             fiber_store::migration::LATEST_DB_VERSION,
         );
-        store.put(&key, &good);
+        store.put(&immutable_key, &immutable);
+        store.put(&mutable_key, &mutable);
     }
     {
         let store = crate::store::open_store(path.path()).expect("genuine V2 database reopens");
@@ -5363,17 +5396,20 @@ async fn test_v2_close_after_update_crash_replay_conflicts_and_db_validation() {
         assert_eq!(bincode::serialize(&restored.core).unwrap(), good);
         assert_eq!(store.get_all_channel_states().len(), 1);
     }
-    for bytes in [good[..good.len() - 1].to_vec(), [&good[..], &[0]].concat()] {
+    for bytes in [
+        mutable[..mutable.len() - 1].to_vec(),
+        [&mutable[..], &[0]].concat(),
+    ] {
         {
             let store = fiber_store::Store::open_db(path.path()).unwrap();
-            store.put(&key, &bytes);
+            store.put(&mutable_key, &bytes);
         }
         assert!(
             crate::store::open_store(path.path()).is_err(),
             "exact current schema required"
         );
         let store = fiber_store::Store::open_db(path.path()).unwrap();
-        assert_eq!(store.get(&key).unwrap(), bytes);
+        assert_eq!(store.get(&mutable_key).unwrap(), bytes);
     }
     for mutation in 0..9 {
         let mut bad = sa.core.clone();
@@ -5417,14 +5453,15 @@ async fn test_v2_close_after_update_crash_replay_conflicts_and_db_validation() {
                 incoming.transaction = tx.clone();
             }
         }
-        let encoded = bincode::serialize(&bad).unwrap();
+        let (_, mutable) = bad.clone().into_parts();
+        let encoded = bincode::serialize(&mutable).unwrap();
         {
             let store = fiber_store::Store::open_db(path.path()).unwrap();
-            store.put(&key, &encoded);
+            store.put(&mutable_key, &encoded);
         }
         assert!(crate::store::open_store(path.path()).is_err());
         let store = fiber_store::Store::open_db(path.path()).unwrap();
-        assert_eq!(store.get(&key).unwrap(), encoded);
+        assert_eq!(store.get(&mutable_key).unwrap(), encoded);
         assert_eq!(
             store
                 .get(fiber_store::migration::MIGRATION_VERSION_KEY)
@@ -5822,7 +5859,7 @@ async fn test_v2_recovery_payer_receipt_repairs_partial_store_and_drains_outbox(
         .session
         .remove_effects
         .push((tlc, Some(attempt.tried_times)));
-    a.store.insert_channel_actor_state(source);
+    a.store.insert_channel_actor_state_for_test(source);
     a.start().await;
     b.start().await;
     a.connect_to(&mut b).await;
@@ -5888,7 +5925,7 @@ async fn test_v2_onchain_relay_confirmation_drops_matching_remove_effect() {
         forwarding_tlc: None,
     };
     state.session.remove_effects.push((tlc, None));
-    a.store.insert_channel_actor_state(state.clone());
+    a.store.insert_channel_actor_state_for_test(state.clone());
 
     actor
         .handle_event(
@@ -5935,8 +5972,8 @@ async fn test_v2_recovery_persist_before_send_and_accept_before_notify() {
     sender.stage_ack_v2(&ack).unwrap();
     let (revocation, _) = sender.accept_ack_v2(&myself, &ack, false).unwrap().unwrap();
     // Simulate loss of all notifications after the durable acceptance boundary.
-    a.store.insert_channel_actor_state(sender);
-    b.store.insert_channel_actor_state(owner);
+    a.store.insert_channel_actor_state_for_test(sender);
+    b.store.insert_channel_actor_state_for_test(owner);
     a.start().await;
     b.start().await;
     a.connect_to(&mut b).await;
@@ -5968,8 +6005,8 @@ async fn test_v2_recovery_crash_after_accept_before_raa_send() {
     let original_ack: fiber_types::PackedRevokeAndAckV2 = ack.unwrap().into();
     let own = owner.session.own.public_nonce.clone();
     // Only the RAA is missing. Neither peer has a reverse CS obligation.
-    a.store.insert_channel_actor_state(sender);
-    b.store.insert_channel_actor_state(owner);
+    a.store.insert_channel_actor_state_for_test(sender);
+    b.store.insert_channel_actor_state_for_test(owner);
     a.start().await;
     b.start().await;
     a.connect_to(&mut b).await;
@@ -6137,7 +6174,7 @@ async fn test_v2_committed_batch_recovers_every_publication_cut_without_id_reuse
                 _ => panic!("unexpected original batch message"),
             }
         }
-        b.store.insert_channel_actor_state(receiver);
+        b.store.insert_channel_actor_state_for_test(receiver);
         let mut sender = a.store.get_channel_actor_state(&id).unwrap();
         let mut receiver = b.store.get_channel_actor_state(&id).unwrap();
         assert_eq!(sender.tlc_state.offered_tlcs.next_tlc_id, 1765);
@@ -6147,8 +6184,9 @@ async fn test_v2_committed_batch_recovers_every_publication_cut_without_id_reuse
             state.mark_reestablishing_offline();
             state.on_peer_reconnected();
         }
-        a.store.insert_channel_actor_state(sender.clone());
-        b.store.insert_channel_actor_state(receiver.clone());
+        a.store.insert_channel_actor_state_for_test(sender.clone());
+        b.store
+            .insert_channel_actor_state_for_test(receiver.clone());
         capture_barrier(&network, id).await;
         let handshakes = take_wire_messages(&captured);
         assert_eq!(handshakes.len(), 2);
@@ -6385,7 +6423,7 @@ async fn test_v2_recovery_crash_with_unsent_cs() {
     let (request, _) = sender.prepare_outgoing_v2(false).unwrap();
     sender.tlc_state.waiting_ack = true;
     let original = sender.session.outgoing.clone().unwrap();
-    a.store.insert_channel_actor_state(sender);
+    a.store.insert_channel_actor_state_for_test(sender);
     a.start().await;
     b.start().await;
     a.connect_to(&mut b).await;
@@ -6446,8 +6484,8 @@ async fn test_v2_recovery_resumes_staged_incoming_and_ack() {
             owner.tlc_state.update_for_commitment_signed();
             sender.stage_ack_v2(&ack.unwrap()).unwrap();
         }
-        a.store.insert_channel_actor_state(sender);
-        b.store.insert_channel_actor_state(owner);
+        a.store.insert_channel_actor_state_for_test(sender);
+        b.store.insert_channel_actor_state_for_test(owner);
         a.start().await;
         b.start().await;
         a.connect_to(&mut b).await;

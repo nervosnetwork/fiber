@@ -73,16 +73,21 @@ pub fn now_timestamp_as_millis_u64() -> u64 {
 ///
 /// This function is used to deserialize values stored in the node's RocksDB.
 /// External applications can use this to read and parse store data directly.
+/// A channel is stored as two records (`CHANNEL_ACTOR_STATE_PREFIX` holds
+/// [`ChannelMutableData`], `CHANNEL_IMMUTABLE_STATE_PREFIX` holds
+/// [`ChannelImmutableData`]); merge them with `ChannelActorData::from_parts`.
 /// Channel actor data uses the exact, structurally checked V2 decoder. Stored values are owned so this dispatch can use their actual type.
 ///
 /// # Example
 ///
 /// ```ignore
-/// use fiber_types::{schema, ChannelActorData, deserialize};
+/// use fiber_types::{schema, ChannelActorData, ChannelImmutableData, ChannelMutableData, deserialize};
 ///
-/// let key = [&[schema::CHANNEL_ACTOR_STATE_PREFIX], channel_id.as_ref()].concat();
-/// let value = db.get(&key)?;
-/// let state: ChannelActorData = deserialize(&value)?;
+/// let mutable_key = [&[schema::CHANNEL_ACTOR_STATE_PREFIX], channel_id.as_ref()].concat();
+/// let immutable_key = [&[schema::CHANNEL_IMMUTABLE_STATE_PREFIX], channel_id.as_ref()].concat();
+/// let mutable: ChannelMutableData = deserialize(&db.get(&mutable_key)?)?;
+/// let immutable: ChannelImmutableData = deserialize(&db.get(&immutable_key)?)?;
+/// let state: ChannelActorData = ChannelActorData::from_parts(immutable, mutable);
 /// ```
 pub fn deserialize<T: serde::de::DeserializeOwned + 'static>(
     bytes: &[u8],

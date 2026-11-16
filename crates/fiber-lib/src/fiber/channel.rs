@@ -12028,7 +12028,7 @@ mod tests {
             state
                 .retryable_tlc_operations
                 .push_back(RetryableTlcOperation::AddTlc(command.clone()));
-            store.insert_channel_actor_state(state.clone());
+            store.insert_channel_actor_state_for_test(state.clone());
             let actor = ChannelActor::new(
                 state.local_pubkey,
                 state.remote_pubkey,
@@ -12084,6 +12084,8 @@ mod tests {
         tlc.attempt_id = Some(1);
         let hash = tlc.payment_hash;
         state.tlc_state.add_offered_tlc(tlc);
+        // Synthetic established channel: seed the fixed-field record it would have.
+        store.insert_channel_actor_state_for_test(state.clone());
         let actor = ChannelActor::new(
             state.local_pubkey,
             state.remote_pubkey,
