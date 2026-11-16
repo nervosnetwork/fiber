@@ -2129,24 +2129,22 @@ where
                         TlcErr::new(error_code),
                         &tlc.shared_secret,
                     ));
-                    // Manually added TLCs have no payer state to persist.
-                    let Some(id) = attempt_id else {
+                    // A missing payer record cannot accept this chain outcome. Acknowledge it
+                    // so CheckChannels stops selecting the same TLC.
+                    let acknowledge = |reason: RemoveTlcReason| {
                         myself.send_message(NetworkActorMessage::new_command(
                             NetworkActorCommand::OnChainTlcRemoveCompleted {
                                 downstream_channel_id: channel_id,
                                 downstream_tlc_id: tlc_id,
                                 payment_hash,
-                                reason: remove_tlc_reason,
+                                reason,
                                 completion: OnChainTlcRemoveCompletion::Payer,
                             },
-                        ))?;
-                        return Ok(());
+                        ))
                     };
-                    let Some(attempt) = self.store.get_attempt(payment_hash, id) else {
-                        warn!(
-                            "Will retry excluded payer TLC {:?}: payment attempt missing",
-                            tlc_id
-                        );
+                    // Manually added TLCs have no payer state to persist.
+                    let Some(id) = attempt_id else {
+                        acknowledge(remove_tlc_reason)?;
                         return Ok(());
                     };
                     let Some(channel_outpoint) = channel.get_funding_transaction_outpoint() else {
@@ -2156,6 +2154,22 @@ where
                         );
                         return Ok(());
                     };
+                    let Some(attempt) = self.store.get_attempt(payment_hash, id) else {
+                        warn!(
+                            "Acknowledging on-chain payer TLC {:?}: payment attempt is gone",
+                            tlc_id
+                        );
+                        acknowledge(remove_tlc_reason)?;
+                        return Ok(());
+                    };
+                    if self.store.get_payment_session(payment_hash).is_none() {
+                        warn!(
+                            "Acknowledging on-chain payer TLC {:?}: payment session is gone",
+                            tlc_id
+                        );
+                        acknowledge(remove_tlc_reason)?;
+                        return Ok(());
+                    }
                     local_error = Some(TlcErr::new_channel_fail(
                         error_code,
                         channel.get_local_pubkey(),

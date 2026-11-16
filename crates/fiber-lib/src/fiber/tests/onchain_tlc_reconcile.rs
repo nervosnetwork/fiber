@@ -3887,6 +3887,252 @@ async fn test_excluded_local_announced_relays_failure_before_finalization() {
         .await;
 }
 
+#[cfg(feature = "watchtower")]
+#[derive(Clone, Copy)]
+enum TimeoutPayerAttempt {
+    InflightHere,
+    ReusedInflight,
+    ReusedSuccess,
+    RetryingElsewhere,
+    Missing,
+}
+
+#[tokio::test]
+#[cfg(feature = "watchtower")]
+async fn test_onchain_timeout_fails_inflight_payer_attempt() {
+    assert_timeout_payer_reconciliation(false, TimeoutPayerAttempt::InflightHere).await;
+}
+
+#[tokio::test]
+#[cfg(feature = "watchtower")]
+async fn test_onchain_timeout_does_not_fail_reused_inflight_attempt() {
+    for live_actor in [false, true] {
+        assert_timeout_payer_reconciliation(live_actor, TimeoutPayerAttempt::ReusedInflight).await;
+    }
+}
+
+#[tokio::test]
+#[cfg(feature = "watchtower")]
+async fn test_onchain_timeout_does_not_fail_reused_success() {
+    assert_timeout_payer_reconciliation(false, TimeoutPayerAttempt::ReusedSuccess).await;
+}
+
+#[tokio::test]
+#[cfg(feature = "watchtower")]
+async fn test_onchain_timeout_does_not_fail_retrying_attempt() {
+    assert_timeout_payer_reconciliation(false, TimeoutPayerAttempt::RetryingElsewhere).await;
+}
+
+#[tokio::test]
+#[cfg(feature = "watchtower")]
+async fn test_onchain_timeout_completes_when_attempt_is_gone() {
+    assert_timeout_payer_reconciliation(false, TimeoutPayerAttempt::Missing).await;
+}
+
+#[cfg(feature = "watchtower")]
+async fn assert_timeout_payer_reconciliation(live_actor: bool, kind: TimeoutPayerAttempt) {
+    use crate::fiber::graph::NetworkGraphStateStore;
+    use fiber_types::{AttemptStatus, PaymentHopData, PaymentSession, PaymentStatus};
+
+    let mut node = NetworkNode::new().await;
+    let channel_id = gen_rand_sha256_hash();
+    let payment_hash = gen_rand_sha256_hash();
+    let mut state = empty_channel_state(channel_id);
+    state.state = ChannelState::Closed(
+        CloseFlags::UNCOOPERATIVE_LOCAL | CloseFlags::WAITING_ONCHAIN_SETTLEMENT,
+    );
+    state.shutdown_transaction_hash = Some(gen_rand_sha256_hash().into());
+    state.funding_tx = Some(
+        TransactionBuilder::default()
+            .output(
+                CellOutput::new_builder()
+                    .capacity(100_000_000_000u64)
+                    .build(),
+            )
+            .output_data(ckb_types::packed::Bytes::default())
+            .build()
+            .data(),
+    );
+    let mut tlc = tlc_info(
+        TLCId::Offered(0),
+        TlcStatus::Outbound(OutboundTlcStatus::Committed),
+        payment_hash,
+        HashAlgorithm::CkbHash,
+    );
+    tlc.attempt_id = Some(1);
+    tlc.expiry = 10;
+    let mut settlement_tlc = settlement_tlc_for(&tlc);
+    settlement_tlc.tlc_id = tlc.tlc_id.flip();
+    state.tlc_state.add_offered_tlc(tlc);
+    let old_outpoint = state.get_funding_transaction_outpoint().unwrap();
+    node.store.insert_onchain_tlc_settlement(
+        &NodeId::local(),
+        &channel_id,
+        TLCId::Offered(0),
+        OnChainTlcSettlement {
+            payment_hash,
+            hash_algorithm: HashAlgorithm::CkbHash,
+            preimage: None,
+            tx_hash: gen_rand_sha256_hash(),
+            tlc_index: 0,
+        },
+    );
+    node.store.store_shutdown_settlement_record(
+        &channel_id,
+        &ShutdownSettlementRecord {
+            shutdown_tx_hash: state.shutdown_transaction_hash.clone().unwrap(),
+            for_remote: false,
+            commitment_number: 1,
+            settlement_data: SettlementData {
+                local_amount: 1000,
+                remote_amount: 1000,
+                tlcs: vec![settlement_tlc],
+            },
+        },
+    );
+    node.store.insert_channel_actor_state(state.clone());
+
+    let source = state.get_local_pubkey();
+    let target = gen_rand_fiber_public_key();
+    if !matches!(kind, TimeoutPayerAttempt::Missing) {
+        let mut session = PaymentSession {
+            request: crate::fiber::payment::SendPaymentDataBuilder::new(target, 1000, payment_hash)
+                .max_fee_amount(Some(100))
+                .build()
+                .unwrap(),
+            status: PaymentStatus::Inflight,
+            last_error: None,
+            last_error_code: None,
+            try_limit: 1,
+            created_at: 0,
+            last_updated_at: 0,
+            cached_attempts: vec![],
+        };
+        let first_hop = if matches!(kind, TimeoutPayerAttempt::InflightHere) {
+            old_outpoint.clone()
+        } else {
+            ckb_types::packed::OutPoint::new(gen_rand_sha256_hash().into(), 0)
+        };
+        let mut attempt = session.new_attempt(
+            1,
+            source,
+            target,
+            vec![
+                PaymentHopData {
+                    amount: 1000,
+                    next_hop: Some(target),
+                    funding_tx_hash: first_hop.tx_hash().into(),
+                    ..Default::default()
+                },
+                PaymentHopData {
+                    amount: 1000,
+                    ..Default::default()
+                },
+            ],
+        );
+        // Exhausted budget so a real timeout becomes Failed rather than Retrying.
+        attempt.try_limit = 1;
+        attempt.tried_times = 2;
+        match kind {
+            TimeoutPayerAttempt::InflightHere | TimeoutPayerAttempt::ReusedInflight => {
+                attempt.set_inflight_status();
+            }
+            TimeoutPayerAttempt::ReusedSuccess => {
+                attempt.set_success_status();
+                attempt.preimage = Some(gen_rand_sha256_hash());
+                session.set_success_status();
+            }
+            TimeoutPayerAttempt::RetryingElsewhere => {
+                attempt.status = AttemptStatus::Retrying;
+                session.status = PaymentStatus::Inflight;
+            }
+            TimeoutPayerAttempt::Missing => {}
+        }
+        session.append_attempt(attempt.clone());
+        node.store.insert_payment_session(session);
+        node.store.insert_attempt(attempt);
+    }
+
+    if live_actor {
+        let key = Privkey::from([11; 32]);
+        let (actor, _handle) = Actor::spawn(
+            None,
+            ChannelActor::new(
+                key.pubkey(),
+                target,
+                node.network_actor.clone(),
+                node.store.clone(),
+                None,
+            ),
+            ChannelInitializationParameter {
+                operation: ChannelInitializationOperation::RestoreOfflineChannel(channel_id),
+                ephemeral_config: Default::default(),
+                private_key: key,
+            },
+        )
+        .await
+        .unwrap();
+        ractor::call!(
+            node.network_actor,
+            |reply| NetworkActorMessage::new_command(NetworkActorCommand::InstallTestChannelActor(
+                channel_id, actor, reply
+            ))
+        )
+        .unwrap();
+    }
+
+    node.network_actor
+        .send_message(NetworkActorMessage::new_event(
+            NetworkActorEvent::ChannelSettlementCompleted(channel_id),
+        ))
+        .unwrap();
+    wait_for_settlement_completion(&node, channel_id).await;
+
+    let finished = node.store.get_channel_actor_state(&channel_id).unwrap();
+    let removed = finished.tlc_state.get(&TLCId::Offered(0)).unwrap();
+    assert!(
+        removed.applied_flags.contains(AppliedFlags::REMOVE),
+        "timed-out payer TLC must be acknowledged so the channel can finish"
+    );
+    assert!(
+        matches!(
+            removed.removed_reason,
+            Some(RemoveTlcReason::RemoveTlcFail(_))
+        ),
+        "timed-out payer TLC must record the chain failure"
+    );
+
+    if let Some(attempt) = node.store.get_attempt(payment_hash, 1) {
+        let expected = match kind {
+            TimeoutPayerAttempt::InflightHere => AttemptStatus::Failed,
+            TimeoutPayerAttempt::ReusedInflight => AttemptStatus::Inflight,
+            TimeoutPayerAttempt::ReusedSuccess => AttemptStatus::Success,
+            TimeoutPayerAttempt::RetryingElsewhere => AttemptStatus::Retrying,
+            TimeoutPayerAttempt::Missing => AttemptStatus::Created,
+        };
+        assert_eq!(attempt.status, expected);
+        if matches!(kind, TimeoutPayerAttempt::ReusedSuccess) {
+            assert!(attempt.preimage.is_some());
+        }
+        let updated_at = attempt.last_updated_at;
+        node.network_actor
+            .send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::CheckChannels,
+            ))
+            .unwrap();
+        node.node_info().await;
+        let again = node.store.get_attempt(payment_hash, 1).unwrap();
+        assert_eq!(again.status, expected);
+        assert_eq!(
+            again.last_updated_at, updated_at,
+            "a later CheckChannels must not rewrite the attempt"
+        );
+    } else {
+        assert!(matches!(kind, TimeoutPayerAttempt::Missing));
+    }
+    node.stop().await;
+}
+
 #[tokio::test]
 async fn test_local_force_close_excluded_tlc_relays_failure_before_finalization() {
     assert_excluded_tlc_relays_failure_before_finalization(CloseFlags::UNCOOPERATIVE_LOCAL, true)
