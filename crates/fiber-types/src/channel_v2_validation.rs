@@ -8,7 +8,7 @@ use musig2::{
 };
 
 use crate::{
-    ChannelActorData, NoncePurposeV2, Privkey, Pubkey, RevocationContextV2, SigningNonceV2,
+    ChannelActorData, Hash256, NoncePurposeV2, Privkey, Pubkey, RevocationContextV2, SigningNonceV2,
 };
 
 /// Decode an exact persisted V2 channel and check its session marker.
@@ -49,12 +49,32 @@ pub fn canonical_funding_witness(key: [u8; 32], signature: musig2::CompactSignat
 
 /// Regenerate only the nonce allocated by this durable record, never a new session.
 pub fn secret_nonce_v2(record: &SigningNonceV2, key: &Privkey) -> SecNonce {
-    SecNonceBuilder::new(record.seed)
+    secret_nonce_v2_parts(
+        record.seed,
+        record.channel_id,
+        record.owner,
+        record.number,
+        record.purpose,
+        key,
+    )
+}
+
+/// Derive a signing nonce from its persisted fields, so a caller that is about to build the
+/// record can compute the public nonce once instead of deriving it twice.
+pub fn secret_nonce_v2_parts(
+    seed: [u8; 32],
+    channel_id: Hash256,
+    owner: Pubkey,
+    number: u64,
+    purpose: NoncePurposeV2,
+    key: &Privkey,
+) -> SecNonce {
+    SecNonceBuilder::new(seed)
         .with_seckey(key)
-        .with_extra_input(&record.channel_id)
-        .with_extra_input(&record.owner.serialize())
-        .with_extra_input(&record.number.to_be_bytes())
-        .with_extra_input(&[match record.purpose {
+        .with_extra_input(&channel_id)
+        .with_extra_input(&owner.serialize())
+        .with_extra_input(&number.to_be_bytes())
+        .with_extra_input(&[match purpose {
             NoncePurposeV2::Commitment => 0,
             NoncePurposeV2::Revocation => 1,
             NoncePurposeV2::Closing => 2,

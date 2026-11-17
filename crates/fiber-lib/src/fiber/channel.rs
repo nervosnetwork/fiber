@@ -109,7 +109,7 @@ mod session_tests;
 
 use std::{
     fmt::{self, Debug, Display},
-    sync::Arc,
+    sync::{Arc, OnceLock},
 };
 use strum::AsRefStr;
 use tentacle::secio::PeerId;
@@ -5465,6 +5465,13 @@ pub struct ChannelActorState {
     // at the end of the current message processing loop.
     #[doc = "skip_store"]
     pub needs_backup: bool,
+
+    /// musig2 key aggregation contexts, built once per key order. They only depend on the two
+    /// funding pubkeys, which never change after the channel opens.
+    #[doc = "skip_store"]
+    pub musig2_agg_context_local_first: OnceLock<Arc<KeyAggContext>>,
+    #[doc = "skip_store"]
+    pub musig2_agg_context_remote_first: OnceLock<Arc<KeyAggContext>>,
 }
 
 fn is_empty_or_placeholder_witness(witness: &Bytes) -> bool {
@@ -5538,6 +5545,8 @@ impl From<ChannelActorData> for ChannelActorState {
             pending_remove_effects_v2: 0,
             pending_payment_notifications: Default::default(),
             replayed_tlc_updates_v2: 0,
+            musig2_agg_context_local_first: OnceLock::new(),
+            musig2_agg_context_remote_first: OnceLock::new(),
         };
         state.hydrate_external_funding_runtime();
         state
@@ -6684,6 +6693,8 @@ impl ChannelActorState {
             funding_abort_detail: None,
             private_key: Some(private_key),
             needs_backup: true,
+            musig2_agg_context_local_first: Default::default(),
+            musig2_agg_context_remote_first: Default::default(),
             pending_remove_effects_v2: 0,
             pending_payment_notifications: Default::default(),
             replayed_tlc_updates_v2: 0,
@@ -6780,6 +6791,8 @@ impl ChannelActorState {
             funding_abort_detail: None,
             private_key: Some(private_key),
             needs_backup: true,
+            musig2_agg_context_local_first: Default::default(),
+            musig2_agg_context_remote_first: Default::default(),
             pending_remove_effects_v2: 0,
             pending_payment_notifications: Default::default(),
             replayed_tlc_updates_v2: 0,
@@ -7631,11 +7644,30 @@ impl ChannelActorState {
         }
     }
 
-    pub fn get_deterministic_musig2_agg_context(&self) -> KeyAggContext {
-        let local_pubkey = self.get_local_channel_public_keys().funding_pubkey;
-        let remote_pubkey = self.get_remote_channel_public_keys().funding_pubkey;
-        let keys = self.order_things_for_musig2(local_pubkey, remote_pubkey);
-        KeyAggContext::new(keys).expect("Valid pubkeys")
+    pub fn get_deterministic_musig2_agg_context(&self) -> Arc<KeyAggContext> {
+        self.musig2_agg_context(self.should_local_go_first_in_musig2())
+    }
+
+    /// Key aggregation context for one of the two key orders, built once and cached.
+    ///
+    /// The context only depends on the two funding pubkeys and their order, so it stays valid
+    /// for the whole lifetime of the channel.
+    fn musig2_agg_context(&self, local_first: bool) -> Arc<KeyAggContext> {
+        let cached = if local_first {
+            &self.musig2_agg_context_local_first
+        } else {
+            &self.musig2_agg_context_remote_first
+        };
+        Arc::clone(cached.get_or_init(|| {
+            let local_pubkey = self.get_local_channel_public_keys().funding_pubkey;
+            let remote_pubkey = self.get_remote_channel_public_keys().funding_pubkey;
+            let keys = if local_first {
+                [local_pubkey, remote_pubkey]
+            } else {
+                [remote_pubkey, local_pubkey]
+            };
+            Arc::new(KeyAggContext::new(keys).expect("Valid pubkeys"))
+        }))
     }
 
     pub fn get_channel_announcement_musig2_secnonce(&self) -> SecNonce {
@@ -9100,15 +9132,8 @@ impl ChannelActorState {
         }
     }
 
-    fn get_musig2_agg_context(&self, for_remote: bool) -> KeyAggContext {
-        let local_pubkey = self.get_local_channel_public_keys().funding_pubkey;
-        let remote_pubkey = self.get_remote_channel_public_keys().funding_pubkey;
-        let pubkeys = if for_remote {
-            [local_pubkey, remote_pubkey]
-        } else {
-            [remote_pubkey, local_pubkey]
-        };
-        KeyAggContext::new(pubkeys).expect("Valid pubkeys")
+    fn get_musig2_agg_context(&self, for_remote: bool) -> Arc<KeyAggContext> {
+        self.musig2_agg_context(for_remote)
     }
 
     // This is used to verify transactions which consume the funding cell.
@@ -12128,6 +12153,53 @@ mod tests {
         assert!(resumed_expired.expired(reconnect + online * 10));
     }
 
+    #[test]
+    fn test_musig2_agg_context_is_cached_per_key_order() {
+        let state =
+            channel_state_with_limits(ChannelConstraints::default(), ChannelConstraints::default());
+        let local = state.get_local_channel_public_keys().funding_pubkey;
+        let remote = state.get_remote_channel_public_keys().funding_pubkey;
+
+        let local_first = state.get_musig2_agg_context(true);
+        let local_first_again = state.get_musig2_agg_context(true);
+        assert!(Arc::ptr_eq(&local_first, &local_first_again), "cached");
+
+        let remote_first = state.get_musig2_agg_context(false);
+        assert!(
+            !Arc::ptr_eq(&local_first, &remote_first),
+            "one per key order"
+        );
+
+        // The cache must not change the aggregated key for either order.
+        assert_eq!(
+            local_first.aggregated_pubkey::<Pubkey>(),
+            KeyAggContext::new([local, remote])
+                .unwrap()
+                .aggregated_pubkey::<Pubkey>()
+        );
+        assert_eq!(
+            remote_first.aggregated_pubkey::<Pubkey>(),
+            KeyAggContext::new([remote, local])
+                .unwrap()
+                .aggregated_pubkey::<Pubkey>()
+        );
+
+        // The deterministic helper reuses whichever cached order matches its ordering.
+        let deterministic = state.get_deterministic_musig2_agg_context();
+        assert_eq!(
+            deterministic.aggregated_pubkey::<Pubkey>(),
+            KeyAggContext::new(state.order_things_for_musig2(local, remote))
+                .unwrap()
+                .aggregated_pubkey::<Pubkey>()
+        );
+        let expected = if state.should_local_go_first_in_musig2() {
+            local_first
+        } else {
+            remote_first
+        };
+        assert!(Arc::ptr_eq(&deterministic, &expected));
+    }
+
     fn channel_state_with_limits(
         local_constraints: ChannelConstraints,
         remote_constraints: ChannelConstraints,
@@ -12196,6 +12268,8 @@ mod tests {
             funding_abort_detail: None,
             private_key: None,
             needs_backup: false,
+            musig2_agg_context_local_first: Default::default(),
+            musig2_agg_context_remote_first: Default::default(),
             pending_remove_effects_v2: 0,
             pending_payment_notifications: Default::default(),
             replayed_tlc_updates_v2: 0,

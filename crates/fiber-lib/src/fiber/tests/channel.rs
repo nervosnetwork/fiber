@@ -13816,6 +13816,8 @@ mod udt_funding_cell_capacity {
             private_key: None,
             funding_abort_detail: None,
             needs_backup: false,
+            musig2_agg_context_local_first: Default::default(),
+            musig2_agg_context_remote_first: Default::default(),
         }
     }
 
