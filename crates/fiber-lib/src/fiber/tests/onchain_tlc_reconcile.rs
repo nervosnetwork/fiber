@@ -3916,6 +3916,9 @@ async fn assert_timeout_payer_reconciliation(live_actor: bool, kind: TimeoutPaye
     let mut settlement_tlc = settlement_tlc_for(&tlc);
     settlement_tlc.tlc_id = tlc.tlc_id.flip();
     state.tlc_state.add_offered_tlc(tlc);
+    state
+        .sign_test_bootstrap_v2()
+        .expect("genuine V2 bootstrap history for the restore path");
     let old_outpoint = state.get_funding_transaction_outpoint().unwrap();
     node.store.insert_onchain_tlc_settlement(
         &NodeId::local(),
