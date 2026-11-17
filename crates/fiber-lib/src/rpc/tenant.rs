@@ -45,8 +45,9 @@ use crate::fiber_types::{Pubkey, TenantId};
 use crate::rpc::biscuit::{extract_optional_node_id, extract_tenant_id};
 #[cfg(feature = "lsp")]
 use crate::rpc::middleware::RpcAuthorization;
+use crate::rpc::utils::rpc_error;
 #[cfg(feature = "lsp")]
-use crate::rpc::utils::{rpc_error, RpcResultExt};
+use crate::rpc::utils::RpcResultExt;
 use crate::store::Store;
 use crate::FiberConfig;
 
@@ -264,13 +265,18 @@ pub(crate) fn is_tenant_allowed_method(method: &str) -> bool {
     scope_of(method) == Some(RpcMethodScope::TenantScoped)
 }
 
-/// Reject tenant-scoped tokens that try to call a method outside the allowlist.
+/// Reject tenant tokens when hosting is unavailable or the method is outside the allowlist.
 ///
 /// Operator tokens without an authority `tenant(...)` fact are unchanged.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn enforce_tenant_method_allowlist(method: &str, token: &Biscuit) -> anyhow::Result<()> {
-    if extract_tenant_id(token)?.is_some() && !is_tenant_allowed_method(method) {
-        bail!("tenant token is not allowed to call {method}");
+    if extract_tenant_id(token)?.is_some() {
+        if !cfg!(feature = "lsp") {
+            bail!("tenant token cannot call {method} without LSP support");
+        }
+        if !is_tenant_allowed_method(method) {
+            bail!("tenant token is not allowed to call {method}");
+        }
     }
     Ok(())
 }
@@ -293,9 +299,12 @@ pub(crate) async fn resolve_tenant_rpc_context(
 /// Without the `lsp` feature no tenant backend can exist.
 #[cfg(not(feature = "lsp"))]
 pub(crate) async fn resolve_tenant_rpc_context(
-    _extensions: &Extensions,
+    extensions: &Extensions,
     _lsp_actor: &LspActorHandle,
 ) -> Result<Option<HostedTenantRpcContext>, ErrorObjectOwned> {
+    if extensions.get::<AuthenticatedTenant>().is_some() {
+        return Err(rpc_error("hosted LSP service is not enabled"));
+    }
     Ok(None)
 }
 
@@ -346,10 +355,13 @@ pub(crate) async fn resolve_tenant_query_rpc_context(
 /// Without the `lsp` feature no tenant backend can exist.
 #[cfg(not(feature = "lsp"))]
 pub(crate) async fn resolve_tenant_query_rpc_context(
-    _extensions: &Extensions,
+    extensions: &Extensions,
     _lsp_actor: &LspActorHandle,
-    _requested_tenant: Option<&str>,
+    requested_tenant: Option<&str>,
 ) -> Result<Option<HostedTenantRpcContext>, ErrorObjectOwned> {
+    if extensions.get::<AuthenticatedTenant>().is_some() || requested_tenant.is_some() {
+        return Err(rpc_error("hosted LSP service is not enabled"));
+    }
     Ok(None)
 }
 
@@ -390,7 +402,6 @@ mod tests {
     use std::sync::Arc;
 
     use biscuit_auth::{macros::biscuit, KeyPair};
-    #[cfg(feature = "lsp")]
     use jsonrpsee::Extensions;
 
     use super::*;
@@ -657,7 +668,11 @@ mod tests {
         let operator = biscuit!(r#"write("channels");"#).build(&root).unwrap();
 
         for method in TENANT_SCOPED_METHODS {
-            enforce_tenant_method_allowlist(method, &tenant).unwrap();
+            assert_eq!(
+                enforce_tenant_method_allowlist(method, &tenant).is_ok(),
+                cfg!(feature = "lsp"),
+                "tenant access to {method} must require LSP support"
+            );
         }
         for method in OPERATOR_ONLY_METHODS {
             assert!(!is_tenant_allowed_method(method));
@@ -671,6 +686,61 @@ mod tests {
         // e2e suite reaches it with the operator token.
         assert!(!is_tenant_allowed_method("submit_commitment_transaction"));
         assert!(enforce_tenant_method_allowlist("submit_commitment_transaction", &tenant).is_err());
+    }
+
+    #[cfg(not(feature = "lsp"))]
+    #[test]
+    fn tenant_token_cannot_call_public_rpc_without_lsp() {
+        let root = KeyPair::new();
+        let tenant = biscuit!(r#"tenant("u1"); write("payments"); read("invoices");"#)
+            .build(&root)
+            .unwrap();
+        let operator = biscuit!(r#"write("payments"); read("invoices");"#)
+            .build(&root)
+            .unwrap();
+        let auth = BiscuitAuth::from_pubkey(root.public().to_string()).unwrap();
+        let tenant_token = tenant.to_base64().unwrap();
+
+        for method in ["send_payment", "get_invoice"] {
+            assert!(auth.check_permission(method, &tenant_token).is_ok());
+            assert!(
+                enforce_tenant_method_allowlist(method, &tenant).is_err(),
+                "tenant token must not reach the public {method} handler"
+            );
+            enforce_tenant_method_allowlist(method, &operator).unwrap();
+        }
+    }
+
+    #[cfg(not(feature = "lsp"))]
+    #[tokio::test]
+    async fn tenant_backend_resolution_fails_closed_without_lsp() {
+        let mut tenant_extensions = Extensions::new();
+        tenant_extensions.insert(AuthenticatedTenant(TenantId::new("u1").unwrap()));
+
+        assert!(resolve_tenant_rpc_context(&tenant_extensions, &None)
+            .await
+            .is_err());
+        assert!(
+            resolve_tenant_query_rpc_context(&tenant_extensions, &None, None)
+                .await
+                .is_err()
+        );
+        assert!(
+            resolve_tenant_query_rpc_context(&Extensions::new(), &None, Some("u1"))
+                .await
+                .is_err()
+        );
+
+        assert!(resolve_tenant_rpc_context(&Extensions::new(), &None)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(
+            resolve_tenant_query_rpc_context(&Extensions::new(), &None, None)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
