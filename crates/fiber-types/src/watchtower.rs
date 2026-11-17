@@ -221,6 +221,7 @@ pub fn settlement_data_witness(
     local: Pubkey,
     remote: Pubkey,
 ) -> Result<Vec<u8>, String> {
+    data.validate_signing_keys(false)?;
     let len = u8::try_from(data.tlcs.len())
         .map_err(|_| "TLC count exceeds witness encoding limit (max 255)")?;
     let mut bytes = vec![len];
@@ -240,9 +241,12 @@ pub fn settlement_data_witness(
 }
 
 impl SettlementData {
-    /// Validate TLC signing metadata before persisting a settlement snapshot.
+    /// Validate witness bounds and TLC signing metadata before persisting a snapshot.
     /// External channels must contain public-only keys and derivation indices.
     pub fn validate_signing_keys(&self, external: bool) -> Result<(), String> {
+        if self.tlcs.len() > usize::from(u8::MAX) {
+            return Err("TLC count exceeds witness encoding limit (max 255)".to_owned());
+        }
         for tlc in &self.tlcs {
             if external && tlc.local_key.is_some() {
                 return Err(
@@ -507,12 +511,13 @@ pub fn settlement_matches_commitment_lock_args(
         return false;
     }
     let matches_orientation = |flag| {
-        settlement_witness_hash(
+        settlement_data_witness(
             settlement,
             flag,
             local_settlement_key,
             remote_settlement_key,
-        ) == committed
+        )
+        .is_ok_and(|witness| blake160(&witness) == committed)
     };
     match for_remote {
         Some(flag) => matches_orientation(flag),
@@ -825,6 +830,38 @@ mod key_material_tests {
         data.tlcs[0].local_key = None;
         data.tlcs[0].local_key_commitment_number = None;
         assert!(data.validate_signing_keys(true).is_err());
+    }
+
+    #[test]
+    fn settlement_snapshot_rejects_unencodable_tlc_count() {
+        let mut data = settlement_data();
+        let entry = SettlementTlc {
+            tlc_id: TLCId::Offered(1),
+            hash_algorithm: HashAlgorithm::CkbHash,
+            payment_amount: 1,
+            payment_hash: Hash256::from([8; 32]),
+            expiry: 1000,
+            local_key: None,
+            local_key_pubkey: Some(key(1).pubkey()),
+            local_key_commitment_number: Some(7),
+            remote_key: key(2).pubkey(),
+        };
+        data.tlcs = vec![entry; 255];
+        let (local, remote) = (key(1).pubkey(), key(2).pubkey());
+        assert!(data.validate_signing_keys(true).is_ok());
+        assert!(settlement_data_witness(&data, false, local, remote).is_ok());
+        data.tlcs.push(data.tlcs[0].clone());
+        assert!(data
+            .validate_signing_keys(true)
+            .unwrap_err()
+            .contains("max 255"));
+        assert!(settlement_data_witness(&data, false, local, remote).is_err());
+        // A malformed persisted snapshot must be a mismatch, not a panic.
+        let mut args = [0; 58];
+        args[57] = ChannelFeatures::V2.bits();
+        assert!(!settlement_matches_commitment_lock_args(
+            &args, &data, local, remote, None,
+        ));
     }
 
     #[test]

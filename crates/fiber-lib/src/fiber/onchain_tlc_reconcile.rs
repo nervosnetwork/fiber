@@ -4,13 +4,13 @@
 //! a settlement proof for an exact local TLC id and full 32-byte payment hash.
 
 use crate::fiber::channel::{
-    settlement_data_to_witness, settlement_tlc_to_witness, tlc_expiry_delay, ChannelActorState,
-    ChannelActorStateStore,
+    settlement_tlc_to_witness, tlc_expiry_delay, ChannelActorState, ChannelActorStateStore,
 };
 use ckb_hash::blake2b_256;
 use ckb_sdk::util::blake160;
 use ckb_types::core::EpochNumberWithFraction;
 use ckb_types::packed::Script;
+use fiber_types::watchtower::settlement_data_witness;
 use fiber_types::{
     AppliedFlags, ChannelData, ChannelFeatures, ChannelState, CloseFlags, Hash256, HashAlgorithm,
     InboundTlcStatus, OutboundTlcStatus, Pubkey, RemoveTlcFulfill, RemoveTlcReason, SettlementData,
@@ -162,12 +162,20 @@ pub fn verify_and_select_settlement_data_with_superseded<'a>(
         &local_candidates
     };
     for &settlement_data in candidates {
-        let settlement_witness = settlement_data_to_witness(
+        // A bad persisted candidate must not abort the shared watchtower scan,
+        // nor hide a later valid pending/superseded snapshot for this channel.
+        let settlement_witness = match settlement_data_witness(
             settlement_data,
             parsed.for_remote,
             channel_data.local_settlement_pubkey(),
             channel_data.remote_settlement_key,
-        );
+        ) {
+            Ok(witness) => witness,
+            Err(error) => {
+                warn!(channel_id = %channel_data.channel_id, %error, "Skipping invalid settlement snapshot");
+                continue;
+            }
+        };
         if blake160(&settlement_witness).as_ref() == parsed.witness_hash {
             return Some((parsed.for_remote, parsed.commitment_number, settlement_data));
         }

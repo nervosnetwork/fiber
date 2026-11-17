@@ -2194,6 +2194,60 @@ fn test_verify_and_select_settlement_data_preceding_and_pending() {
 }
 
 #[test]
+fn test_invalid_persisted_candidate_does_not_hide_valid_remote_snapshot() {
+    let local = Privkey::from([1u8; 32]);
+    let remote = Privkey::from([2u8; 32]);
+    let local_settlement = Privkey::from([3u8; 32]);
+    let remote_settlement = Privkey::from([4u8; 32]).pubkey();
+    let valid = SettlementData {
+        local_amount: 1000,
+        remote_amount: 2000,
+        tlcs: vec![],
+    };
+    let mut invalid = valid.clone();
+    invalid.tlcs = vec![
+        SettlementTlc {
+            tlc_id: TLCId::Offered(1),
+            hash_algorithm: HashAlgorithm::CkbHash,
+            payment_amount: 1,
+            payment_hash: Hash256::from([9; 32]),
+            expiry: 1000,
+            local_key: Some(local_settlement.clone()),
+            local_key_pubkey: None,
+            local_key_commitment_number: None,
+            remote_key: remote_settlement,
+        };
+        256
+    ];
+    let channel = ChannelData {
+        channel_id: gen_rand_sha256_hash(),
+        funding_udt_type_script: None,
+        local_settlement_key: Some(local_settlement.clone()),
+        local_settlement_key_pubkey: None,
+        remote_settlement_key: remote_settlement,
+        local_funding_pubkey: local.pubkey(),
+        remote_funding_pubkey: remote.pubkey(),
+        remote_settlement_data: invalid,
+        pending_remote_settlement_data: valid.clone(),
+        local_settlement_data: valid.clone(),
+        revocation_data: None,
+        channel_features: ChannelFeatures::V2,
+    };
+    let lock = create_test_commitment_lock_with_keys(
+        &local,
+        &remote,
+        &local_settlement,
+        remote_settlement,
+        &valid,
+        true,
+        1,
+    );
+    let (_, _, selected) = verify_and_select_settlement_data(&channel, &lock)
+        .expect("valid candidate after malformed persisted candidate remains selectable");
+    assert_eq!(selected, &valid);
+}
+
+#[test]
 #[cfg(feature = "watchtower")]
 fn test_store_pending_settlement_replay_keeps_unrevoked_witness() {
     let temp_dir = tempfile::tempdir().unwrap();

@@ -223,6 +223,11 @@ fn validate_update_signing_keys<S: WatchtowerStore>(
     channel_id: &fiber_types::Hash256,
     settlement: &fiber_types::SettlementData,
 ) -> Result<(), ErrorObjectOwned> {
+    if settlement.tlcs.len() > usize::from(u8::MAX) {
+        return Err(rpc_error(
+            "TLC count exceeds witness encoding limit (max 255)",
+        ));
+    }
     if let Some(channel) = store.get_watch_channel(node_id, channel_id) {
         settlement
             .validate_signing_keys(channel.local_settlement_key.is_none())
@@ -538,6 +543,10 @@ pub(crate) fn to_rpc_watchtower_signing_status(
         }
     }
 }
+
+#[cfg(all(test, feature = "watchtower"))]
+#[path = "watchtower/tests.rs"]
+mod snapshot_tests;
 
 #[cfg(all(test, feature = "watchtower"))]
 mod tests {
