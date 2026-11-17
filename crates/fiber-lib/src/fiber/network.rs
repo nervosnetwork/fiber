@@ -1761,7 +1761,17 @@ where
                                 tlc_fee_proportional_millionths: None,
                                 tlc_expiry_delta: None,
                             };
-                            state.create_inbound_channel(accept_channel).await?;
+                            match state.create_inbound_channel(accept_channel).await {
+                                Ok(_) => {}
+                                Err(err @ ProcessingChannelError::InvalidParameter(_)) => {
+                                    warn!(
+                                        "Failed to auto-accept channel {:?} from peer {:?}: {}",
+                                        temp_channel_id, peer_pubkey_for_logging, err
+                                    );
+                                    debug_event!(myself, "ChannelAutoAcceptFailed");
+                                }
+                                Err(err) => return Err(err.into()),
+                            }
                         } else {
                             // Log warning when auto-accept fails
                             state.log_receiver_auto_accept_failure(
@@ -6515,6 +6525,22 @@ where
             tlc_expiry_delta,
         } = accept_channel;
 
+        let selected_tlc_expiry_delta = tlc_expiry_delta.unwrap_or(self.tlc_expiry_delta);
+        let pending_open = self
+            .to_be_accepted_channels
+            .map
+            .get(&temp_channel_id)
+            .ok_or_else(|| {
+                ProcessingChannelError::InvalidParameter(format!(
+                    "No channel with temp id {:?} found",
+                    temp_channel_id
+                ))
+            })?;
+        check_tlc_delta_with_epochs(
+            selected_tlc_expiry_delta,
+            pending_open.1.open_channel.commitment_delay_epoch,
+        )?;
+
         let (remote_pubkey, pending_open) = self
             .to_be_accepted_channels
             .remove(&temp_channel_id)
@@ -6557,7 +6583,7 @@ where
                     reserved_ckb_amount,
                     tlc_info: ChannelTlcInfo::new(
                         min_tlc_value.unwrap_or(self.tlc_min_value),
-                        tlc_expiry_delta.unwrap_or(self.tlc_expiry_delta),
+                        selected_tlc_expiry_delta,
                         tlc_fee_proportional_millionths
                             .unwrap_or(self.tlc_fee_proportional_millionths),
                         now_timestamp_as_millis_u64(),
