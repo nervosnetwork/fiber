@@ -140,6 +140,26 @@ subscribe/unsubscribe requests still require valid credentials. The subscription
 capability does not grant access to channel or watchtower data by itself. See the
 [RPC subscription reference](../crates/fiber-lib/src/rpc/README.md#subscription).
 
+Hosted tenant tokens include an authority-block expiry check. Configure their
+lifetime with `lsp.token_ttl_secs`, `--lsp-token-ttl-secs` or `LSP_TOKEN_TTL_SECS`;
+the default is 2592000 seconds (30 days), and zero or overflowing values are
+rejected. New tokens use the current policy; already issued tokens keep their
+signed expiry. Registration returns the matching exclusive `expires_at_ms`
+timestamp as hexadecimal Unix milliseconds.
+
+The hosting provider calls `lsp_register_tenant` with an operator credential for
+both registration and renewal. The client supplies a fresh RootSigner proof,
+bound to the LSP node identity, request ID and signing time. The provider's
+operator credential stays on the provider backend; an expired tenant token does
+not prevent the provider from requesting a replacement. Ordinary tenant tokens
+cannot call the registration RPC. The existing proof time window and durable
+replay protection apply to every registration request.
+
+The SDK exposes token replacement and expiry-window checks. Applications request
+new credentials through their hosting provider, persist the updated session and
+update transport credentials. Previously issued tokens keep their own expiry,
+and established WebSocket subscriptions are not terminated by token expiry.
+
 ## 3. How to Configure Biscuit Auth in Fiber
 
 Enabling Biscuit authentication on a Fiber node is a two-step process: first, you generate a cryptographic key pair, and second, you provide the public key to the Fiber server. This public key is used to verify the signatures of incoming Biscuit tokens, and its presence in the configuration automatically activates the authentication middleware.

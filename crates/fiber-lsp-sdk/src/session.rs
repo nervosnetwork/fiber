@@ -21,11 +21,18 @@ use crate::{
     SigningDecision, SigningPolicy,
 };
 
+#[cfg(test)]
+#[path = "token_tests.rs"]
+mod token_tests;
+
 /// Persistable hosted-session map. The caller owns file or IndexedDB I/O.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HostedSessionState {
     /// Tenant Biscuit after a successful registration.
     pub tenant_token: Option<String>,
+    /// Exclusive expiry of `tenant_token`, in Unix milliseconds.
+    #[serde(default)]
+    pub token_expires_at_ms: Option<u64>,
     /// Fiber `channel_id` → local signer key id.
     pub bindings: HashMap<Hash256, ChannelKeyId>,
     /// At most one unallocated channel key waiting for `open_tenant_channel`.
@@ -176,7 +183,8 @@ impl<S: SignerStore> HostedSession<S> {
     }
 
     /// Build a registration or credential refresh request for a client-generated request.
-    /// The caller sends it through the registration RPC in either case.
+    /// The application sends this proof to its hosting provider, which calls
+    /// `lsp_register_tenant` with operator credentials for registration or renewal.
     pub fn begin_registration(
         &self,
         trusted_lsp_node_id: fiber_types::Pubkey,
@@ -209,8 +217,37 @@ impl<S: SignerStore> HostedSession<S> {
                 "LSP returned an unexpected tenant id".to_string(),
             ));
         }
-        self.state.tenant_token = Some(result.access_token);
+        self.replace_token(result.access_token, result.expires_at_ms)
+    }
+
+    /// Replace credentials received from the hosting provider, preserving all signer
+    /// and channel state. Invalid input leaves the previous credentials intact.
+    /// The caller persists `state()` using its existing storage adapter and updates
+    /// credential-bound transports after a successful replacement.
+    pub fn replace_token(&mut self, token: String, expires_at_ms: u64) -> Result<(), SessionError> {
+        if token.is_empty() || expires_at_ms == 0 {
+            return Err(SessionError::Invalid(
+                "invalid tenant token or expiry".to_string(),
+            ));
+        }
+        self.state.tenant_token = Some(token);
+        self.state.token_expires_at_ms = Some(expires_at_ms);
         Ok(())
+    }
+
+    /// Check whether credentials expire within the caller's advance window, in milliseconds.
+    /// Expired, missing or incomplete credentials also return true. The caller supplies
+    /// Unix milliseconds; this method performs no I/O and does not request a new token.
+    pub fn is_token_near_expiry(&self, now_ms: u64, advance_ms: u64) -> bool {
+        match (
+            self.state.tenant_token.as_deref(),
+            self.state.token_expires_at_ms,
+        ) {
+            (Some(token), Some(expires)) if !token.is_empty() => {
+                expires <= now_ms.saturating_add(advance_ms)
+            }
+            _ => true,
+        }
     }
 
     /// Allocate or reopen the single pending channel key bundle.
@@ -826,6 +863,7 @@ mod tests {
                     runtime_status: LspTenantRuntimeStatus::Cold,
                 },
                 access_token: "token".to_string(),
+                expires_at_ms: 3_601_000,
             })
             .expect("finish");
         assert_eq!(session.tenant_token(), Some("token"));

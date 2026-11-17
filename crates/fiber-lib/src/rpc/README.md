@@ -900,6 +900,7 @@ Returns a summary of the hosted LSP service.
 #### Method `lsp_register_tenant`
 
 Registers a hosted tenant or refreshes its token without starting its Fiber runtime.
+ The hosting provider calls this with an operator token and the client's proof.
  The RootSigner signs a v2 payload binding the LSP identity, a fresh client-generated
  request ID, and `signed_at` in Unix milliseconds. Proofs may be at most five minutes
  old or thirty seconds in the future. A request ID is consumed durably and cannot
@@ -916,6 +917,7 @@ Registers a hosted tenant or refreshes its token without starting its Fiber runt
 
 * `tenant` - <em>[LspTenantStatus](#type-lsptenantstatus)</em>, Persistent and runtime status of the registered tenant.
 * `access_token` - <em>`String`</em>, Newly issued tenant access token.
+* `expires_at_ms` - <em>`u64`</em>, Exclusive token expiry in Unix milliseconds, matching its Biscuit check.
 
 ---
 

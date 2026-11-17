@@ -13,10 +13,17 @@ pub const DEFAULT_MAX_ACTIVE_TENANTS: usize = 64;
 pub const DEFAULT_MAX_PENDING_DELIVERIES: usize = 1_024;
 /// Default per-tenant bound for non-final hosted deliveries.
 pub const DEFAULT_MAX_PENDING_DELIVERIES_PER_TENANT: usize = 64;
+/// Default lifetime of a hosted tenant access token: thirty days.
+pub const DEFAULT_LSP_TOKEN_TTL_SECS: u64 = 30 * 24 * 60 * 60;
 
 /// Configuration for the multi-tenant LSP service hosted by a Fiber node.
 #[derive(ClapSerde, Debug, Clone)]
 pub struct LspConfig {
+    /// Lifetime of newly issued tenant access tokens, in seconds. Must be positive.
+    #[default(DEFAULT_LSP_TOKEN_TTL_SECS)]
+    #[arg(name = "LSP_TOKEN_TTL_SECS", long = "lsp-token-ttl-secs", env)]
+    pub token_ttl_secs: u64,
+
     /// Base directory for tenant-local runtime files such as signing keys.
     /// LSP database state is stored in namespaces of the Fiber store.
     #[arg(
@@ -81,6 +88,18 @@ impl LspConfig {
 
     /// Validate limits that protect the process-wide hosted service.
     pub fn validate(&self) -> Result<(), String> {
+        if self.token_ttl_secs == 0
+            || self
+                .token_ttl_secs
+                .checked_mul(1_000)
+                .and_then(|ttl| crate::now_timestamp_as_millis_u64().checked_add(ttl))
+                .is_none()
+        {
+            return Err(
+                "LSP token_ttl_secs must be positive and fit a Unix millisecond timestamp"
+                    .to_string(),
+            );
+        }
         if self.max_active_tenants == 0 {
             return Err("LSP max_active_tenants must be greater than zero".to_string());
         }

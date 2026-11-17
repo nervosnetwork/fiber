@@ -62,6 +62,8 @@ pub struct HostedTenantRegistration {
     pub created: bool,
     /// Tenant Biscuit issued for this newly created tenant.
     pub access_token: String,
+    /// Exclusive token expiry in Unix milliseconds.
+    pub expires_at_ms: u64,
 }
 
 /// Cold stores resolved from an authenticated tenant without activating its runtime.
@@ -221,13 +223,20 @@ impl LspServiceState {
     fn issue_tenant_token(
         &self,
         record: &crate::lsp::HostedTenantRecord,
-    ) -> Result<String, String> {
-        self.token_issuer
+    ) -> Result<(String, u64), String> {
+        let expires_at_ms = (crate::now_timestamp_as_millis_u64() / 1_000)
+            .checked_add(self.config.token_ttl_secs)
+            .and_then(|seconds| seconds.checked_mul(1_000))
+            .ok_or_else(|| "tenant token expiry overflow".to_string())?;
+        let access_token = self
+            .token_issuer
             .issue_tenant_token(
                 &record.tenant_id,
                 &tenant_watchtower_node_id(&record.tenant_pubkey),
+                expires_at_ms / 1_000,
             )
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        Ok((access_token, expires_at_ms))
     }
 
     fn schedule_delivery_deadline(
@@ -462,11 +471,12 @@ impl Actor for LspService {
                             true,
                         )
                     };
-                    let access_token = state.issue_tenant_token(&record)?;
+                    let (access_token, expires_at_ms) = state.issue_tenant_token(&record)?;
                     Ok(HostedTenantRegistration {
                         status: state.tenant_status(record),
                         created,
                         access_token,
+                        expires_at_ms,
                     })
                 })();
                 let _ = reply.send(result);

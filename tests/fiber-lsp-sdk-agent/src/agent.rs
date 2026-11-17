@@ -47,6 +47,7 @@ impl SessionFile<'_> {
         let persisted = PersistedAgent {
             opening_request: state.opening_request.clone(),
             tenant_token: state.tenant_token.clone(),
+            token_expires_at_ms: state.token_expires_at_ms,
             bindings: state
                 .bindings
                 .iter()
@@ -195,6 +196,8 @@ const AGENT_STATE_FILE: &str = "agent.json";
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 struct PersistedAgent {
     tenant_token: Option<String>,
+    #[serde(default)]
+    token_expires_at_ms: Option<u64>,
     bindings: HashMap<String, String>,
     pending_channel_key_id: Option<String>,
     opening_request: Option<Vec<u8>>,
@@ -336,6 +339,7 @@ impl<R: FiberRpc, S: SignerStore> Agent<R, S> {
             .with_policy(SigningPolicy::Manual)
             .with_state(HostedSessionState {
                 tenant_token: persisted.tenant_token,
+                token_expires_at_ms: persisted.token_expires_at_ms,
                 bindings,
                 pending,
                 opening_request: persisted.opening_request,
@@ -1183,6 +1187,7 @@ mod tests {
                     runtime_status: LspTenantRuntimeStatus::Active,
                 },
                 access_token: "tenant-token".to_string(),
+                expires_at_ms: now_ms() + 30 * 24 * 60 * 60 * 1_000,
             })
         }
 

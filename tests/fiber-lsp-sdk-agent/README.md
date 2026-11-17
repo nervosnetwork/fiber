@@ -8,6 +8,10 @@ Pass the trusted LSP public node ID with `--lsp-node-id` (or
 `FIBER_LSP_SDK_AGENT_LSP_NODE_ID`). Registration signs a fresh client request ID
 and the current Unix time in milliseconds, then calls `lsp_register_tenant`
 once. The node ID comes from fixture configuration, not a registration response.
+The fixture agent also performs the hosting provider's role for registration,
+using its test-only operator token. Production applications send the proof to
+their provider backend, which keeps operator credentials outside the user SDK.
+The SDK only exposes explicit token replacement and expiry-window checks.
 
 Before servicing a channel, the local fixture driver must:
 

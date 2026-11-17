@@ -26,6 +26,7 @@ trait LspRpc {
     async fn lsp_get_status(&self) -> Result<LspServiceStatus, ErrorObjectOwned>;
 
     /// Registers a hosted tenant or refreshes its token without starting its Fiber runtime.
+    /// The hosting provider calls this with an operator token and the client's proof.
     /// The RootSigner signs a v2 payload binding the LSP identity, a fresh client-generated
     /// request ID, and `signed_at` in Unix milliseconds. Proofs may be at most five minutes
     /// old or thirty seconds in the future. A request ID is consumed durably and cannot
@@ -114,6 +115,7 @@ impl LspRpcServer for LspRpcServerImpl {
         Ok(RegisterLspTenantResult {
             tenant: registration.status.into(),
             access_token: registration.access_token,
+            expires_at_ms: registration.expires_at_ms,
         })
     }
 

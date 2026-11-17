@@ -83,12 +83,17 @@ pub struct LspTenantChannel {
 }
 
 /// Result of registering a hosted tenant.
+#[serde_as]
 #[derive(Clone, Deserialize, JsonSchema, Serialize)]
 pub struct RegisterLspTenantResult {
     /// Persistent and runtime status of the registered tenant.
     pub tenant: LspTenantStatus,
     /// Newly issued tenant access token.
     pub access_token: String,
+    /// Exclusive token expiry in Unix milliseconds, matching its Biscuit check.
+    #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub expires_at_ms: u64,
 }
 
 /// Result of listing hosted tenants.

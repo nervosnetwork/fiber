@@ -363,7 +363,11 @@ mod tests {
         .unwrap();
         let node_id = NodeId::from_bytes(vec![1, 2, 3]);
         let token = issuer
-            .issue_tenant_token(&TenantId::new("u1".to_string()).unwrap(), &node_id)
+            .issue_tenant_token(
+                &TenantId::new("u1".to_string()).unwrap(),
+                &node_id,
+                crate::now_timestamp_as_millis_u64() / 1_000 + 3_600,
+            )
             .unwrap();
         let auth = BiscuitAuth::from_pubkey(root.public().to_string()).unwrap();
 

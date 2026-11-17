@@ -52,11 +52,33 @@ with `allocate_pending_channel` for each additional opening and supply that
 signer's public material. Retry an interrupted opening with its original intent;
 changing amount or asset while reusing the same signer is rejected before RPC.
 
-For registration or credential refresh, call `HostedSession::begin_registration`
-with the trusted LSP node ID, a fresh random 32-byte request ID and the current
-Unix time in milliseconds, then send the returned parameters to
-`lsp_register_tenant`. Store its result with `finish_registration`. A consumed
-request cannot be retried; generate a fresh proof after a lost response.
+For registration, call `HostedSession::begin_registration` with the trusted LSP
+node ID, a fresh random 32-byte request ID and the current Unix time in
+milliseconds. Send the proof to the hosting provider. The provider holds the
+operator credential and calls Fiber's existing `lsp_register_tenant` RPC, then
+returns the result to the application. Store that result with
+`finish_registration` and persist `state()` using the existing storage adapter.
+A consumed request cannot be retried; generate a fresh proof after a lost response.
+
+Tenant tokens expire after the node's configured `lsp.token_ttl_secs` (default
+2592000 seconds, or 30 days). Registration returns `expires_at_ms` as hexadecimal
+Unix milliseconds; the SDK saves this beside the token in the session state.
+
+The application checks `session.is_token_near_expiry(now_ms, advance_ms)` with
+its chosen advance window, for example 24 hours for a 30-day token. Expired,
+missing or incomplete credentials also return true. The method only reads the
+saved metadata and performs no I/O.
+
+After obtaining a replacement from the hosting provider, call
+`session.replace_token(token, expires_at_ms)`. This updates only the token and
+expiry, retaining channel bindings, pending opening state and signer keys.
+Empty tokens or zero expiry are rejected without changing the current state.
+The application owns persistence, renewal requests and scheduling; the SDK does
+not request replacement credentials or start background tasks. Persist the
+updated `state()` using the existing storage adapter and update transport
+credentials. Reconnect credential-bound WebSockets when convenient. Older tokens
+remain valid until their own expiry; expiry does not terminate an established
+subscription.
 
 RPC clients can subscribe to `channel_signing` and `watchtower_signing` over
 WebSocket, or query `get_channel_signing_status` and

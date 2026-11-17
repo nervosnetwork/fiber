@@ -3,7 +3,7 @@ use std::{path::Path, str::FromStr, sync::Arc};
 use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use biscuit_auth::{
-    builder::{Fact, Term},
+    builder::{Check, Fact, Term},
     Biscuit, KeyPair, PrivateKey, PublicKey,
 };
 
@@ -56,9 +56,18 @@ impl BiscuitTokenIssuer {
     }
 
     /// Build an unpadded base64url tenant token, suitable for HTTP and browser WebSockets.
+    /// `expires_at_secs` is an exclusive Unix timestamp enforced by an authority check.
     /// This is the only token-minting implementation.
-    pub fn issue_tenant_token(&self, tenant_id: &TenantId, node_id: &NodeId) -> Result<String> {
+    pub fn issue_tenant_token(
+        &self,
+        tenant_id: &TenantId,
+        node_id: &NodeId,
+        expires_at_secs: u64,
+    ) -> Result<String> {
+        let mut expiration = Check::try_from("check if time($now), $now < {expires_at}")?;
+        expiration.set("expires_at", Term::Date(expires_at_secs))?;
         let mut builder = Biscuit::builder()
+            .check(expiration)?
             .fact(Fact::new(
                 "tenant".to_string(),
                 &[Term::Str(tenant_id.as_str().to_string())],

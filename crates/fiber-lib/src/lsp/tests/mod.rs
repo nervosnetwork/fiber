@@ -43,6 +43,8 @@ mod integration;
 mod query_rpc;
 #[cfg(not(target_arch = "wasm32"))]
 mod signer_isolation;
+#[cfg(not(target_arch = "wasm32"))]
+mod token;
 
 fn test_token_issuer() -> BiscuitTokenIssuer {
     let root = biscuit_auth::KeyPair::new();
@@ -57,6 +59,7 @@ fn lsp_config(base_dir: PathBuf) -> LspConfig {
     LspConfig {
         base_dir: Some(base_dir),
         max_active_tenants: 64,
+        token_ttl_secs: crate::lsp_config::DEFAULT_LSP_TOKEN_TTL_SECS,
         max_buffer_duration_ms: MAX_LSP_BUFFER_DURATION_MS,
         max_pending_deliveries: 1_024,
         max_pending_deliveries_per_tenant: 64,
@@ -1910,6 +1913,7 @@ async fn authenticated_registration_issues_tenant_token_through_issuer() {
         fresh_registration_request_id(),
         crate::now_timestamp_as_millis_u64(),
     );
+    let before_issued_ms = crate::now_timestamp_as_millis_u64() / 1_000 * 1_000;
     let issued = ractor::call!(service, |reply| {
         LspServiceMessage::RegisterAuthenticatedTenant {
             signature: sign_tenant_registry_payload(&root_signer_key, &payload),
@@ -1919,6 +1923,10 @@ async fn authenticated_registration_issues_tenant_token_through_issuer() {
     })
     .unwrap()
     .unwrap();
+    let ttl_ms = crate::lsp_config::DEFAULT_LSP_TOKEN_TTL_SECS * 1_000;
+    assert!((before_issued_ms + ttl_ms
+        ..=crate::now_timestamp_as_millis_u64() / 1_000 * 1_000 + ttl_ms)
+        .contains(&issued.expires_at_ms));
     let token = issued.access_token;
     assert!(
         !token.contains('='),
