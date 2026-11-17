@@ -1381,6 +1381,18 @@ async fn preimage_release_requires_recoverable_inbound_tlc_and_fresh_time() {
         );
     }
     f.sign(false, 1, f.incoming(false)).await;
+    // Both commitment lanes now contain the incoming TLC, but the peer can still
+    // publish its prior no-TLC state until its revocation is complete.
+    {
+        let before = f.store.snapshot().unwrap();
+        let error = f
+            .signer
+            .authorize_preimage_release(hash, [9; 32].into(), 100, &TestChain::funding(&f))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("peer commitment"), "{error}");
+        assert_eq!(f.store.snapshot().unwrap(), before);
+    }
     {
         let before = f.store.snapshot().unwrap();
         assert!(f
@@ -1407,6 +1419,76 @@ async fn preimage_release_requires_recoverable_inbound_tlc_and_fresh_time() {
             "rejection changed persistent state"
         );
     }
+    let (content, context) = f.revocation(true, 1).await;
+    let prepared = f
+        .signer
+        .prepare_revocation(content, context, 100)
+        .await
+        .unwrap();
+    // Reviewing an ACK is not enough; the punishment signature must be complete.
+    {
+        let before = f.store.snapshot().unwrap();
+        assert!(f
+            .signer
+            .authorize_preimage_release(hash, [9; 32].into(), 100, &TestChain::funding(&f))
+            .await
+            .is_err());
+        assert_eq!(f.store.snapshot().unwrap(), before);
+    }
+    f.signer.sign_revocation(prepared, 100).await.unwrap();
+    let reference = f
+        .signer
+        .authorize_preimage_release(hash, [9; 32].into(), 100, &TestChain::funding(&f))
+        .await
+        .unwrap();
+    assert!(!reference.for_remote);
+    assert_eq!(reference.version, 2);
+}
+
+#[tokio::test]
+async fn preimage_release_rejects_missing_peer_commitment_without_mutation() {
+    let f = Fixture::new(false).await;
+    let hash = f.terms(true).payment_hash;
+    f.signer
+        .authorize_invoice(f.terms(true), [9; 32].into())
+        .await
+        .unwrap();
+    f.sign(false, 0, f.opening()).await;
+    f.sign(false, 1, f.incoming(false)).await;
+
+    let before = f.store.snapshot().unwrap();
+    let error = f
+        .signer
+        .authorize_preimage_release(hash, [9; 32].into(), 100, &TestChain::funding(&f))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("peer commitment"), "{error}");
+    assert_eq!(f.store.snapshot().unwrap(), before);
+}
+
+#[tokio::test]
+async fn preimage_release_allows_newer_unrevoked_peer_state_with_same_tlc() {
+    let f = Fixture::new(false).await;
+    let hash = f.terms(true).payment_hash;
+    f.signer
+        .authorize_invoice(f.terms(true), [9; 32].into())
+        .await
+        .unwrap();
+    f.sign(false, 0, f.opening()).await;
+    f.sign(true, 0, f.opening()).await;
+    f.sign(true, 1, f.incoming(true)).await;
+    f.sign(false, 1, f.incoming(false)).await;
+    let (content, context) = f.revocation(true, 1).await;
+    let prepared = f
+        .signer
+        .prepare_revocation(content, context, 100)
+        .await
+        .unwrap();
+    f.signer.sign_revocation(prepared, 100).await.unwrap();
+
+    // The peer's version 2 remains usable while version 3 is being negotiated.
+    // Both contain the same inbound TLC, so waiting for another revocation is unnecessary.
+    f.sign(true, 2, f.incoming(true)).await;
     let reference = f
         .signer
         .authorize_preimage_release(hash, [9; 32].into(), 100, &TestChain::funding(&f))
@@ -1885,7 +1967,23 @@ async fn onchain_inbound_tlc_requires_exact_preimage_key_and_residual_state() {
             .unwrap();
         f.sign(false, 0, f.opening()).await;
         f.sign(false, 1, f.incoming(false)).await;
-        let record = f.signer.recovery_records().await.unwrap().pop().unwrap();
+        f.sign(true, 0, f.opening()).await;
+        f.sign(true, 1, f.incoming(true)).await;
+        let (content, context) = f.revocation(true, 1).await;
+        let prepared = f
+            .signer
+            .prepare_revocation(content, context, 100)
+            .await
+            .unwrap();
+        f.signer.sign_revocation(prepared, 100).await.unwrap();
+        let record = f
+            .signer
+            .recovery_records()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|r| !r.reference.for_remote && r.reference.version == 2)
+            .unwrap();
         let source = record.transaction.raw().outputs().get(0).unwrap();
         let outpoint = OutPoint::new(record.transaction.calc_tx_hash(), 0);
         let mut chain = TestChain {

@@ -796,6 +796,25 @@ impl CommitmentState {
         Ok(())
     }
 
+    fn unrevoked_peer_commitments(&self) -> impl Iterator<Item = &crate::RecoveryRecord> + '_ {
+        self.lifecycle.commitments.iter().filter(|record| {
+            record.reference.for_remote
+                && !self.lifecycle.revocations.iter().any(|revocation| {
+                    revocation.context.revoked == record.reference && revocation.signature.is_some()
+                })
+        })
+    }
+
+    fn peer_commitment_contains_tlc(peer: &crate::RecoveryRecord, tlc: &SettlementTlc) -> bool {
+        peer.settlement.data.tlcs.iter().any(|peer_tlc| {
+            peer_tlc.tlc_id == tlc.tlc_id.flip()
+                && peer_tlc.payment_hash == tlc.payment_hash
+                && peer_tlc.payment_amount == tlc.payment_amount
+                && peer_tlc.hash_algorithm == tlc.hash_algorithm
+                && peer_tlc.expiry == tlc.expiry
+        })
+    }
+
     pub(crate) fn release_preimage(
         &mut self,
         hash: Hash256,
@@ -847,9 +866,20 @@ impl CommitmentState {
         if (tlc.expiry / 1000) * 1000 <= deadline {
             return Err(invalid("preimage release recovery window expired"));
         }
-        // A prior remote state without this incoming TLC cannot confiscate our own funds:
-        // receipt is protected by our complete local commitment. Do not require an ack
-        // whose protocol delivery may itself depend on fulfillment.
+        // The peer can publish any unrevoked commitment for which it has our partial
+        // signature. Every such state must contain this TLC before we reveal its preimage.
+        let unrevoked_peer_commitments: Vec<_> = self.unrevoked_peer_commitments().collect();
+        if unrevoked_peer_commitments.is_empty() {
+            return Err(invalid("no peer commitment protects invoice"));
+        }
+        if unrevoked_peer_commitments
+            .iter()
+            .any(|peer| !Self::peer_commitment_contains_tlc(peer, tlc))
+        {
+            return Err(invalid(
+                "unrevoked peer commitment does not protect invoice",
+            ));
+        }
         let reference = record.reference.clone();
         if !self.lifecycle.released.contains(&hash) {
             self.lifecycle.released.push(hash);
