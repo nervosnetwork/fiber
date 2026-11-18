@@ -210,6 +210,8 @@ fn test_local_watch_channel_resolves_hosted_tenant_namespace() {
                 remote_amount: 100,
                 tlcs: vec![],
             },
+            fiber_types::ChannelFeatures::V2,
+            None,
         );
     };
     // Watchtower rows live in the host's physical keyspace. The channel id alone
@@ -622,6 +624,8 @@ fn test_store_watchtower() {
             remote_funding: remote_funding_pubkey,
         },
         settlement_data.clone(),
+        fiber_types::ChannelFeatures::V2,
+        None,
     );
     assert_eq!(
         store.get_watch_channels(),
@@ -638,6 +642,7 @@ fn test_store_watchtower() {
             pending_remote_settlement_data: settlement_data.clone(),
             remote_settlement_data: settlement_data.clone(),
             channel_features: Default::default(),
+            payout_lock_script: None,
         }]
     );
 
@@ -669,6 +674,7 @@ fn test_store_watchtower() {
             pending_remote_settlement_data: settlement_data.clone(),
             remote_settlement_data: settlement_data,
             channel_features: Default::default(),
+            payout_lock_script: None,
         }]
     );
 
@@ -720,6 +726,8 @@ fn test_store_watchtower() {
             remote_amount: 200,
             tlcs: vec![],
         },
+        fiber_types::ChannelFeatures::V2,
+        None,
     );
     assert_eq!(store.get_watch_channels().pop().unwrap(), stored);
 
@@ -762,6 +770,8 @@ fn test_store_external_watch_channel_contains_no_private_keys() {
             remote_funding: Privkey::from(&[4; 32]).pubkey(),
         },
         settlement_data,
+        fiber_types::ChannelFeatures::V2,
+        None,
     );
 
     let channel = store
@@ -855,6 +865,8 @@ fn test_store_watchtower_v2_registration_round_trip() {
             remote_funding: Privkey::from(&[4; 32]).pubkey(),
         },
         settlement_data,
+        fiber_types::ChannelFeatures::V2,
+        None,
     );
 
     assert_eq!(
@@ -980,6 +992,8 @@ fn test_store_watchtower_preimage_gc_waits_for_watched_tlc() {
             remote_funding: remote_funding_pubkey,
         },
         settlement_data,
+        fiber_types::ChannelFeatures::V2,
+        None,
     );
     store.insert_watch_preimage(node_id.clone(), payment_hash, preimage);
 
@@ -1055,6 +1069,8 @@ fn test_store_watchtower_preimage_gc_waits_for_same_hash_sibling_tlc() {
             remote_funding: remote_funding_pubkey,
         },
         settlement_data,
+        fiber_types::ChannelFeatures::V2,
+        None,
     );
     store.insert_watch_preimage(node_id.clone(), payment_hash, preimage);
 
@@ -1118,6 +1134,8 @@ fn test_store_watchtower_preimage_gc_isolated_between_tenants() {
                 remote_funding: Privkey::from(&[4; 32]).pubkey(),
             },
             settlement_data.clone(),
+            fiber_types::ChannelFeatures::V2,
+            None,
         );
         store.insert_watch_preimage(node_id.clone(), payment_hash, preimage);
     }
@@ -1183,6 +1201,8 @@ fn test_store_watchtower_preimage_gc_ignores_ambiguous_legacy_settlement() {
             remote_funding: Privkey::from(&[4; 32]).pubkey(),
         },
         settlement_data,
+        fiber_types::ChannelFeatures::V2,
+        None,
     );
     store.insert_watch_preimage(node_id.clone(), payment_hash, preimage);
 
@@ -1788,6 +1808,8 @@ fn test_store_watchtower_with_wrong_node_id() {
             remote_funding: remote_funding_pubkey,
         },
         settlement_data.clone(),
+        fiber_types::ChannelFeatures::V2,
+        None,
     );
     let expected_value = vec![ChannelData {
         channel_id,
@@ -1802,6 +1824,7 @@ fn test_store_watchtower_with_wrong_node_id() {
         pending_remote_settlement_data: settlement_data.clone(),
         remote_settlement_data: settlement_data.clone(),
         channel_features: Default::default(),
+        payout_lock_script: None,
     }];
     assert_eq!(store.get_watch_channels(), expected_value);
 

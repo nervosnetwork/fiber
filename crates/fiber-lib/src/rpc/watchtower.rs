@@ -281,6 +281,7 @@ where
         validate_channel_features(params.channel_features.0)?;
         // Move fields out of params last, after all borrows of params are done.
         let funding_udt_type_script = params.funding_udt_type_script;
+        let payout_lock_script = params.payout_lock_script;
         let settlement_data: fiber_types::SettlementData = params
             .settlement_data
             .try_into()
@@ -301,6 +302,8 @@ where
                 remote_funding: remote_funding_pubkey,
             },
             settlement_data,
+            fiber_types::ChannelFeatures::V2,
+            payout_lock_script.map(Into::into),
         );
         signing_update.publish();
         Ok(())

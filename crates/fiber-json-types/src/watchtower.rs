@@ -140,6 +140,10 @@ pub struct CreateWatchChannelParams {
     pub settlement_data: SettlementData,
     /// Required channel feature bitmap as hex. Only "0x1" (V2 with full payment hashes) is supported.
     pub channel_features: ChannelFeatures,
+    /// Optional lock script that receives settled funds. When omitted, settled funds
+    /// are sent to the watchtower fee provider lock script.
+    #[serde(default)]
+    pub payout_lock_script: Option<Script>,
 }
 
 /// Parameters for removing a watch channel.

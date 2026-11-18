@@ -1373,7 +1373,7 @@ impl<S: SignerStore> ChannelSigner<S> {
             .map_err(store_error)
     }
 
-    async fn load_binding(&self) -> Result<Option<ChannelBinding>, SignerError> {
+    pub(crate) async fn load_binding(&self) -> Result<Option<ChannelBinding>, SignerError> {
         let encoded = self
             .store
             .get(&channel_store_key(self.channel_key_id))

@@ -166,6 +166,8 @@ fn insert_watch_channel_with_pending_tlc(
             remote_funding: remote_funding_pubkey,
         },
         settlement_data,
+        fiber_types::ChannelFeatures::V2,
+        None,
     );
 }
 

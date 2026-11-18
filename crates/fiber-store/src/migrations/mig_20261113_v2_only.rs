@@ -103,6 +103,7 @@ fn convert_watch_channel(old: OldChannelData) -> Result<ChannelData, String> {
         local_settlement_data: convert_settlement(old.local_settlement_data)?,
         revocation_data: decode_as_new(old.revocation_data)?,
         channel_features: ChannelFeatures::V2,
+        payout_lock_script: None,
     })
 }
 

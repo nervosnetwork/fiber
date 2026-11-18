@@ -42,6 +42,7 @@ async fn tenant_watch_channel_rejects_oversized_snapshot_without_writing() {
         remote_funding_pubkey: Privkey::from([6; 32]).pubkey().into(),
         settlement_data: snapshot(count).into(),
         channel_features: Default::default(),
+        payout_lock_script: None,
     };
     // Exercise JSON decoding/conversion as well as the tenant RPC handler.
     let wire = serde_json::to_string(&params(256)).unwrap();

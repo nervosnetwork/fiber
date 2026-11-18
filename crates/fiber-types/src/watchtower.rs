@@ -303,6 +303,11 @@ pub struct ChannelData {
     /// The commitment-lock features used by this channel.
     #[serde(default)]
     pub channel_features: ChannelFeatures,
+    /// Optional lock script that receives settled funds for this channel.
+    /// Falls back to the watchtower fee provider lock script when omitted.
+    #[serde(default)]
+    #[serde_as(as = "Option<EntityHex>")]
+    pub payout_lock_script: Option<Script>,
 }
 
 /// Persistable watchtower signer sub-state for one watched channel.
@@ -751,6 +756,7 @@ mod key_material_tests {
             local_settlement_data: settlement_data(),
             revocation_data: None,
             channel_features: ChannelFeatures::V2,
+            payout_lock_script: None,
         }
     }
 

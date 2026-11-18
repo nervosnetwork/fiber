@@ -344,7 +344,7 @@ async fn subscription_cannot_be_cancelled_from_another_connection_and_http_is_re
 #[tokio::test]
 async fn subscription_watchtower_uses_the_authorized_node_even_for_shared_channel_ids() {
     use crate::watchtower::WatchtowerStore;
-    use fiber_types::{NodeId, Privkey, SettlementData};
+    use fiber_types::{ChannelFeatures, NodeId, Privkey, SettlementData};
 
     let fixture = Fixture::new(true, true, true).await;
     let alice = NodeId::from_bytes(vec![2; 33]);
@@ -366,6 +366,8 @@ async fn subscription_watchtower_uses_the_authorized_node_even_for_shared_channe
                 remote_amount: 200,
                 tlcs: vec![],
             },
+            ChannelFeatures::V2,
+            None,
         );
     }
     // The query RPC also permits read("channels") for watchtower signing status.

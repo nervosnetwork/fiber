@@ -479,6 +479,17 @@ impl<S: SignerStore> HostedSession<S> {
             .ok_or(SessionError::ChannelNotInDirectory)?;
         let signer = self.root.open_channel(key_id).await?;
         let keys = signer.public_material().base_public_keys;
+        let payout_lock_script = signer
+            .load_binding()
+            .await?
+            .map(|binding| {
+                ckb_types::core::ScriptHashType::try_from(binding.local_shutdown_script.hash_type())
+                    .map(|_| ckb_jsonrpc_types::Script::from(binding.local_shutdown_script))
+                    .map_err(|error| {
+                        SessionError::Invalid(format!("invalid local_shutdown_script: {error}"))
+                    })
+            })
+            .transpose()?;
         Ok(CreateWatchChannelParams {
             channel_id: channel_id.into(),
             funding_udt_type_script,
@@ -489,6 +500,7 @@ impl<S: SignerStore> HostedSession<S> {
             remote_funding_pubkey: remote_funding_pubkey.into(),
             settlement_data,
             channel_features: commitment_contract_features.into(),
+            payout_lock_script,
         })
     }
 
@@ -1069,6 +1081,7 @@ mod tests {
             .expect("watch params");
         assert!(params.local_settlement_key.is_none());
         assert!(params.local_settlement_key_pubkey.is_some());
+        assert!(params.payout_lock_script.is_some());
         assert_eq!(params.channel_id, channel_id.into());
     }
 }

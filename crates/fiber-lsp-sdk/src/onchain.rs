@@ -45,9 +45,15 @@ pub trait ChainVerifier: Sync {
 pub struct OnchainSpendAuthorization {
     /// Exact previously verified commitment from which the spend descends.
     pub source: crate::CommitmentReference,
-    /// Wallet-approved withdrawal/change destination.
+    /// Wallet-approved withdrawal/change destination for settled channel funds.
     #[serde_as(as = "fiber_types::EntityHex")]
     pub destination: Script,
+    /// Optional lock script for plain-CKB fee inputs and fee change when an external
+    /// fee sponsor (such as a watchtower operator) funds transaction fees separately.
+    /// Defaults to `destination` when omitted.
+    #[serde(default)]
+    #[serde_as(as = "Option<fiber_types::EntityHex>")]
+    pub fee_sponsor_lock: Option<Script>,
     /// Exact total CKB fee, including any auxiliary inputs.
     pub fee: u64,
     /// Exact auxiliary inputs, in transaction order. They must be plain CKB cells.
@@ -238,7 +244,13 @@ pub(crate) async fn validate<C: ChainVerifier>(
     } else if first.since() != 0u64.pack() {
         return Err(invalid("unexpected descendant since"));
     }
+    let sponsor_lock = authorization
+        .fee_sponsor_lock
+        .as_ref()
+        .unwrap_or(&authorization.destination);
+    let separate_sponsor = sponsor_lock != &authorization.destination;
     let mut total_capacity: u64 = source.output.capacity().unpack();
+    let mut sponsor_input_capacity: u64 = 0;
     for (input, approved) in inputs.iter().skip(1).zip(&authorization.additional_inputs) {
         if input.previous_output() != *approved
             || *approved == first.previous_output()
@@ -254,12 +266,15 @@ pub(crate) async fn validate<C: ChainVerifier>(
         let cell = chain.live_cell(approved).await?;
         if cell.output.type_().to_opt().is_some()
             || !cell.data.is_empty()
-            || cell.output.lock() != authorization.destination
+            || cell.output.lock() != *sponsor_lock
         {
             return Err(invalid("fee input is not approved plain CKB"));
         }
         let capacity: u64 = cell.output.capacity().unpack();
         total_capacity = total_capacity
+            .checked_add(capacity)
+            .ok_or_else(|| invalid("capacity overflow"))?;
+        sponsor_input_capacity = sponsor_input_capacity
             .checked_add(capacity)
             .ok_or_else(|| invalid("capacity overflow"))?;
     }
@@ -326,6 +341,8 @@ pub(crate) async fn validate<C: ChainVerifier>(
     let mut destination_tokens = 0u128;
     let mut output_capacity = 0u64;
     let mut destinations = 0;
+    let mut sponsor_outputs = 0;
+    let mut sponsor_change_capacity = 0u64;
     for (i, output) in raw.outputs().into_iter().enumerate() {
         let data = raw
             .outputs_data()
@@ -340,26 +357,37 @@ pub(crate) async fn validate<C: ChainVerifier>(
             remainder_seen = true;
             continue;
         }
-        if output.lock() != authorization.destination {
+        if output.lock() == authorization.destination {
+            destinations += 1;
+            if udt && output.type_() == source.output.type_() {
+                destination_tokens = destination_tokens
+                    .checked_add(u128::from_le_bytes(
+                        data.as_ref()
+                            .try_into()
+                            .map_err(|_| invalid("invalid payout data"))?,
+                    ))
+                    .ok_or_else(|| invalid("token overflow"))?;
+            } else if output.type_().to_opt().is_some() || !data.is_empty() {
+                return Err(invalid("unexpected output asset"));
+            }
+        } else if separate_sponsor && output.lock() == *sponsor_lock {
+            if output.type_().to_opt().is_some() || !data.is_empty() {
+                return Err(invalid("unexpected sponsor change asset"));
+            }
+            sponsor_outputs += 1;
+            sponsor_change_capacity = sponsor_change_capacity
+                .checked_add(capacity)
+                .ok_or_else(|| invalid("sponsor change capacity overflow"))?;
+        } else {
             return Err(invalid("unapproved on-chain destination"));
-        }
-        destinations += 1;
-        if udt && output.type_() == source.output.type_() {
-            destination_tokens = destination_tokens
-                .checked_add(u128::from_le_bytes(
-                    data.as_ref()
-                        .try_into()
-                        .map_err(|_| invalid("invalid payout data"))?,
-                ))
-                .ok_or_else(|| invalid("token overflow"))?;
-        } else if output.type_().to_opt().is_some() || !data.is_empty() {
-            return Err(invalid("unexpected output asset"));
         }
     }
     if !remainder_seen
         || destinations == 0
         || destinations > 2
+        || sponsor_outputs > 1
         || total_capacity.checked_sub(output_capacity) != Some(authorization.fee)
+        || sponsor_change_capacity > sponsor_input_capacity.saturating_sub(authorization.fee)
         || (udt && destination_tokens != payout)
     {
         return Err(invalid(

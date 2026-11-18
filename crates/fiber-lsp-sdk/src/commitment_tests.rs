@@ -1622,6 +1622,7 @@ async fn onchain_claim_checks_live_input_witness_destination_fee_and_maturity() 
     let terms = OnchainSpendAuthorization {
         source: record.reference,
         destination,
+        fee_sponsor_lock: None,
         fee: 5,
         additional_inputs: vec![],
         cell_deps: vec![],
@@ -2082,6 +2083,7 @@ async fn onchain_inbound_tlc_requires_exact_preimage_key_and_residual_state() {
         let terms = OnchainSpendAuthorization {
             source: record.reference,
             destination,
+            fee_sponsor_lock: None,
             fee: 5,
             additional_inputs: if udt { vec![auxiliary] } else { vec![] },
             cell_deps: vec![],
@@ -2477,6 +2479,7 @@ async fn timeout_then_descendant_settlement_rechecks_time_lineage_and_residual()
         let mut terms = OnchainSpendAuthorization {
             source: record.reference,
             destination: destination.clone(),
+            fee_sponsor_lock: None,
             fee: 5,
             additional_inputs: vec![auxiliary],
             cell_deps: vec![],
@@ -2708,5 +2711,345 @@ async fn signs_full_payment_hash_commitment_after_independent_validation() {
             .await
             .unwrap();
         fixture.signer.sign_commitment(prepared, 100).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn prepare_and_sign_onchain_accepts_separate_fee_sponsor_and_rejects_oversized_sponsor_change(
+) {
+    for udt in [false, true] {
+        let f = Fixture::new(udt).await;
+        f.signer
+            .authorize_invoice(f.terms(true), [9; 32].into())
+            .await
+            .unwrap();
+        f.sign(false, 0, f.opening()).await;
+        f.sign(false, 1, f.incoming(false)).await;
+        f.sign(true, 0, f.opening()).await;
+        f.sign(true, 1, f.incoming(true)).await;
+        let (content, context) = f.revocation(true, 1).await;
+        let prepared = f
+            .signer
+            .prepare_revocation(content, context, 100)
+            .await
+            .unwrap();
+        f.signer.sign_revocation(prepared, 100).await.unwrap();
+        let record = f
+            .signer
+            .recovery_records()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|r| !r.reference.for_remote && r.reference.version == 2)
+            .unwrap();
+        let source = record.transaction.raw().outputs().get(0).unwrap();
+        let outpoint = OutPoint::new(record.transaction.calc_tx_hash(), 0);
+        let mut chain = TestChain {
+            outpoint: outpoint.clone(),
+            cell: VerifiedCell {
+                output: source.clone(),
+                data: record
+                    .transaction
+                    .raw()
+                    .outputs_data()
+                    .get(0)
+                    .unwrap()
+                    .raw_data()
+                    .to_vec(),
+            },
+            now: 100,
+            mature: true,
+            extras: vec![],
+        };
+        let body = fiber_types::settlement_data_to_witness(
+            &record.settlement.data,
+            false,
+            record.settlement.local_settlement_key,
+            record.settlement.remote_settlement_key,
+        );
+        let mut next = body.clone();
+        next.drain(1..98);
+        next[0] = 0;
+        let mut args = source.lock().args().raw_data()[..36].to_vec();
+        args.extend_from_slice(&fiber_types::blake2b_hash_with_salt(&next, &[])[..20]);
+        args.push(1);
+        args.push(fiber_types::ChannelFeatures::V2.bits());
+        let remainder = source
+            .clone()
+            .as_builder()
+            .capacity(if udt { 990u64 } else { 940u64 })
+            .lock(source.lock().as_builder().args(args.pack()).build())
+            .build();
+        let destination = Script::new_builder().args([42u8].pack()).build();
+        let sponsor_lock = Script::new_builder().args([77u8].pack()).build();
+        let auxiliary = OutPoint::new([88u8; 32].pack(), 0);
+        chain.extras.push((
+            auxiliary.clone(),
+            VerifiedCell {
+                output: CellOutput::new_builder()
+                    .capacity(200u64)
+                    .lock(sponsor_lock.clone())
+                    .build(),
+                data: vec![],
+            },
+        ));
+
+        let mut witness = vec![16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0, 1];
+        witness.extend_from_slice(&body);
+        witness.extend_from_slice(&[0, 1]);
+        witness.extend_from_slice(&[0; 65]);
+        witness.extend_from_slice(&[9; 32]);
+        let payout_output = CellOutput::new_builder()
+            .capacity(if udt { 95u64 } else { 50u64 })
+            .type_(source.type_())
+            .lock(destination.clone())
+            .build();
+        let payout_data = if udt {
+            50u128.to_le_bytes().to_vec().pack()
+        } else {
+            ckb_types::packed::Bytes::default()
+        };
+        let sponsor_change_capacity = if udt { 100u64 } else { 195u64 };
+        let sponsor_change = CellOutput::new_builder()
+            .capacity(sponsor_change_capacity)
+            .lock(sponsor_lock.clone())
+            .build();
+        let remainder_data = if udt {
+            950u128.to_le_bytes().to_vec().pack()
+        } else {
+            ckb_types::packed::Bytes::default()
+        };
+        let tx = TransactionBuilder::default()
+            .input(CellInput::new(
+                outpoint,
+                u64::from_le_bytes(f.parameters.delay_epoch),
+            ))
+            .input(CellInput::new(auxiliary.clone(), 0))
+            .output(remainder.clone())
+            .output_data(remainder_data.clone())
+            .output(payout_output.clone())
+            .output_data(payout_data.clone())
+            .output(sponsor_change.clone())
+            .output_data(ckb_types::packed::Bytes::default())
+            .witness(witness.pack())
+            .build()
+            .data();
+        let terms = OnchainSpendAuthorization {
+            source: record.reference,
+            destination: destination.clone(),
+            fee_sponsor_lock: Some(sponsor_lock.clone()),
+            fee: 5,
+            additional_inputs: vec![auxiliary.clone()],
+            cell_deps: vec![],
+        };
+        let content = OnchainSigningContent {
+            key_purpose: OnchainKeyPurpose::Tlc {
+                commitment_number: 1,
+            },
+            transaction: tx.clone(),
+        };
+        let prepared = f
+            .signer
+            .prepare_onchain(content, terms.clone(), &chain)
+            .await
+            .expect("dual-lock settlement prepares cleanly");
+        f.signer
+            .sign_onchain(prepared, &chain)
+            .await
+            .expect("dual-lock settlement signs cleanly");
+
+        // Attack 0: siphon commitment CKB into sponsor change (> sponsor_in - fee) while
+        // keeping total conservation valid.
+        if !udt {
+            let stolen_tx = tx
+                .clone()
+                .into_view()
+                .as_advanced_builder()
+                .set_outputs(vec![
+                    remainder.clone(),
+                    payout_output.clone().as_builder().capacity(49u64).build(),
+                    sponsor_change
+                        .clone()
+                        .as_builder()
+                        .capacity(sponsor_change_capacity + 1)
+                        .build(),
+                ])
+                .build()
+                .data();
+            assert!(
+                f.signer
+                    .prepare_onchain(
+                        OnchainSigningContent {
+                            key_purpose: OnchainKeyPurpose::Tlc {
+                                commitment_number: 1,
+                            },
+                            transaction: stolen_tx,
+                        },
+                        terms.clone(),
+                        &chain
+                    )
+                    .await
+                    .is_err(),
+                "oversized sponsor change must be rejected for CKB"
+            );
+        } else {
+            // In a final UDT settlement (unlock 0xfe), commitment CKB belongs to destination;
+            // inflating sponsor change above sponsor_in - fee still conserves tx capacity,
+            // so the sponsor bound must reject it.
+            f.signer
+                .authorize_fulfillment(f.terms(true).payment_hash, [9; 32].into())
+                .await
+                .unwrap();
+            let final_data = fiber_types::SettlementData {
+                local_amount: 450,
+                remote_amount: 550,
+                tlcs: vec![],
+            };
+            f.sign(false, 2, final_data.clone()).await;
+            f.sign(true, 2, final_data).await;
+            let (rev_content, rev_ctx) = f.revocation(true, 2).await;
+            let rev_prepared = f
+                .signer
+                .prepare_revocation(rev_content, rev_ctx, 100)
+                .await
+                .unwrap();
+            f.signer.sign_revocation(rev_prepared, 100).await.unwrap();
+            let final_record = f
+                .signer
+                .recovery_records()
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|r| !r.reference.for_remote && r.reference.version == 3)
+                .unwrap();
+            let final_source = final_record.transaction.raw().outputs().get(0).unwrap();
+            let final_outpoint = OutPoint::new(final_record.transaction.calc_tx_hash(), 0);
+            let final_chain = TestChain {
+                outpoint: final_outpoint.clone(),
+                cell: VerifiedCell {
+                    output: final_source.clone(),
+                    data: final_record
+                        .transaction
+                        .raw()
+                        .outputs_data()
+                        .get(0)
+                        .unwrap()
+                        .raw_data()
+                        .to_vec(),
+                },
+                now: 100,
+                mature: true,
+                extras: chain.extras.clone(),
+            };
+            let final_body = fiber_types::settlement_data_to_witness(
+                &final_record.settlement.data,
+                false,
+                final_record.settlement.local_settlement_key,
+                final_record.settlement.remote_settlement_key,
+            );
+            let mut final_witness = vec![16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0, 1];
+            final_witness.extend_from_slice(&final_body);
+            final_witness.extend_from_slice(&[0xfe, 0]);
+            final_witness.extend_from_slice(&[0; 65]);
+            let final_stolen_tx = TransactionBuilder::default()
+                .input(CellInput::new(
+                    final_outpoint,
+                    u64::from_le_bytes(f.parameters.delay_epoch),
+                ))
+                .input(CellInput::new(auxiliary.clone(), 0))
+                .output(payout_output.clone().as_builder().capacity(95u64).build())
+                .output_data(1000u128.to_le_bytes().to_vec().pack())
+                .output(
+                    sponsor_change
+                        .clone()
+                        .as_builder()
+                        .capacity(1090u64)
+                        .build(),
+                )
+                .output_data(ckb_types::packed::Bytes::default())
+                .witness(final_witness.pack())
+                .build()
+                .data();
+            let final_terms = OnchainSpendAuthorization {
+                source: final_record.reference,
+                destination: destination.clone(),
+                fee_sponsor_lock: Some(sponsor_lock.clone()),
+                fee: 5,
+                additional_inputs: vec![auxiliary.clone()],
+                cell_deps: vec![],
+            };
+            assert!(
+                f.signer
+                    .prepare_onchain(
+                        OnchainSigningContent {
+                            key_purpose: OnchainKeyPurpose::Settlement,
+                            transaction: final_stolen_tx,
+                        },
+                        final_terms,
+                        &final_chain
+                    )
+                    .await
+                    .is_err(),
+                "oversized sponsor change must be rejected for final UDT settlement"
+            );
+        }
+
+        // Attack 1: sponsor change carries non-empty data.
+        let data_sponsor_tx = tx
+            .clone()
+            .into_view()
+            .as_advanced_builder()
+            .set_outputs_data(vec![
+                remainder_data.clone(),
+                payout_data.clone(),
+                [1u8].as_slice().pack(),
+            ])
+            .build()
+            .data();
+        assert!(f
+            .signer
+            .prepare_onchain(
+                OnchainSigningContent {
+                    key_purpose: OnchainKeyPurpose::Tlc {
+                        commitment_number: 1,
+                    },
+                    transaction: data_sponsor_tx,
+                },
+                terms.clone(),
+                &chain
+            )
+            .await
+            .is_err());
+
+        // Attack 2: zero destination outputs (all payout diverted to sponsor).
+        let no_dest_tx = tx
+            .clone()
+            .into_view()
+            .as_advanced_builder()
+            .set_outputs(vec![
+                remainder.clone(),
+                sponsor_change
+                    .clone()
+                    .as_builder()
+                    .capacity(if udt { 195u64 } else { 245u64 })
+                    .build(),
+            ])
+            .set_outputs_data(vec![remainder_data, ckb_types::packed::Bytes::default()])
+            .build()
+            .data();
+        assert!(f
+            .signer
+            .prepare_onchain(
+                OnchainSigningContent {
+                    key_purpose: OnchainKeyPurpose::Tlc {
+                        commitment_number: 1,
+                    },
+                    transaction: no_dest_tx,
+                },
+                terms,
+                &chain
+            )
+            .await
+            .is_err());
     }
 }

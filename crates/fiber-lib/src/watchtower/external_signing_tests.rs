@@ -127,7 +127,7 @@ impl Fixture {
             tlcs: vec![earlier, tlc],
         };
         let channel_id = Hash256::from([9; 32]);
-        store.insert_watch_channel_with_features(
+        store.insert_watch_channel(
             node_id.clone(),
             channel_id,
             None,
@@ -143,6 +143,7 @@ impl Fixture {
             },
             settlement,
             features,
+            None,
         );
         store.insert_watch_preimage(
             node_id.clone(),
@@ -1047,5 +1048,91 @@ fn external_full_hash_tlc_signature_survives_later_scan() {
                 assert_applied_signature(&tx, &content, &fixture.tlc_key);
             }
         }
+    }
+}
+
+#[test]
+fn external_ckb_and_udt_settlement_uses_separate_payout_and_fee_sponsor_locks() {
+    let tenant_payout_lock = get_script_by_contract(Contract::Secp256k1Lock, &[0xaa; 20]);
+    let fee_signer = LocalSigner::new(secp256k1::SecretKey::from_slice(&[21; 32]).expect("key"));
+    let sponsor_lock = get_script_by_contract(Contract::Secp256k1Lock, fee_signer.pubkey_hash());
+    assert_ne!(tenant_payout_lock, sponsor_lock);
+
+    for is_udt in [false, true] {
+        let mut fixture = Fixture::with_features(false, false, false, false, ChannelFeatures::V2);
+        let udt_script = is_udt.then(|| {
+            Script::new_builder()
+                .code_hash(Byte32::from([0x77; 32]))
+                .args([0x01u8; 32].as_slice().pack())
+                .build()
+        });
+        fixture
+            .store
+            .remove_watch_channel(fixture.node_id.clone(), fixture.channel.channel_id);
+        fixture.store.insert_watch_channel(
+            fixture.node_id.clone(),
+            fixture.channel.channel_id,
+            udt_script.clone(),
+            WatchChannelKeys {
+                local_settlement: SettlementKey::external(fixture.base_key.pubkey()),
+                remote_settlement: fixture.channel.remote_settlement_key,
+                local_funding: fixture.channel.local_funding_pubkey,
+                remote_funding: fixture.channel.remote_funding_pubkey,
+            },
+            fixture.channel.local_settlement_data.clone(),
+            ChannelFeatures::V2,
+            Some(tenant_payout_lock.clone()),
+        );
+        fixture.channel = fixture
+            .store
+            .get_watch_channel(&fixture.node_id, &fixture.channel.channel_id)
+            .expect("updated watch channel");
+        assert_eq!(
+            fixture.channel.payout_lock_script.as_ref(),
+            Some(&tenant_payout_lock)
+        );
+        if let Some(udt) = udt_script.clone() {
+            let mut output: CellOutput = fixture.cell.output.clone().into();
+            output = output
+                .as_builder()
+                .type_(Some(udt).pack())
+                .capacity(20_000_000_000u64)
+                .build();
+            fixture.cell.output = output.into();
+            fixture.cell.output_data = Some(ckb_jsonrpc_types::JsonBytes::from_vec(
+                240_000_000_000u128.to_le_bytes().to_vec(),
+            ));
+        }
+
+        assert!(fixture.build_at(200_000).unwrap().is_none());
+        let (_id, content) = fixture.pending();
+        let outputs: Vec<_> = content.transaction.raw().outputs().into_iter().collect();
+        let outputs_data: Vec<_> = content
+            .transaction
+            .raw()
+            .outputs_data()
+            .into_iter()
+            .collect();
+        assert_eq!(outputs.len(), 3, "is_udt={is_udt}");
+        // Output 0: remaining commitment output.
+        // Output 1: tenant settlement payout locked to payout_lock_script.
+        assert_eq!(outputs[1].lock(), tenant_payout_lock);
+        if is_udt {
+            assert_eq!(outputs[1].type_().to_opt(), udt_script);
+            assert_eq!(
+                outputs_data[1].raw_data().as_ref(),
+                20_000_000_000u128.to_le_bytes()
+            );
+        } else {
+            let cap: u64 = outputs[1].capacity().unpack();
+            assert_eq!(cap, 20_000_000_000u64);
+            assert!(outputs[1].type_().to_opt().is_none());
+        }
+        // Output 2: plain CKB fee sponsor change locked to fee_provider_lock_script.
+        assert_eq!(outputs[2].lock(), sponsor_lock);
+        assert!(outputs[2].type_().to_opt().is_none());
+        assert!(outputs_data[2].raw_data().is_empty());
+        let sponsor_change: u64 = outputs[2].capacity().unpack();
+        assert!(sponsor_change < 100_000_000_000u64);
     }
 }

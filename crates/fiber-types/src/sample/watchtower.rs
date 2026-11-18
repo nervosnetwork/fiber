@@ -37,6 +37,7 @@ impl StoreSample for ChannelData {
                 },
                 revocation_data: None,
                 channel_features: Default::default(),
+                payout_lock_script: None,
             },
             // Channel with TLCs and revocation data
             ChannelData {
@@ -74,6 +75,7 @@ impl StoreSample for ChannelData {
                 },
                 revocation_data: None, // Skip RevocationData with CompactSignature for simplicity
                 channel_features: Default::default(),
+                payout_lock_script: Some(ckb_types::packed::Script::default()),
             },
         ]
     }

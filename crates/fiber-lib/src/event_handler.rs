@@ -60,6 +60,7 @@ pub async fn forward_event_to_client<T: WatchtowerRpcClient + Sync>(
                     remote_funding_pubkey: keys.remote_funding.into(),
                     settlement_data: settlement_data.into(),
                     channel_features: channel_features.into(),
+                    payout_lock_script: None,
                 })
                 .await
                 .map_err(|e| format!("Failed to create watch channel: {e}"))?;
@@ -169,13 +170,14 @@ pub fn forward_event_to_watchtower_store<S: crate::watchtower::WatchtowerStore>(
         ) => {
             let signing_scope = events.watchtower(&node_id);
             let signing_update = signing_scope.prepare_created(channel_id);
-            store.insert_watch_channel_with_features(
+            store.insert_watch_channel(
                 node_id,
                 channel_id,
                 funding_udt_type_script,
                 keys,
                 settlement_data,
                 commitment_contract_features,
+                None,
             );
             signing_update.publish();
         }

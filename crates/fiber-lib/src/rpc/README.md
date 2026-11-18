@@ -1584,6 +1584,8 @@ Create a new watched channel.
 * `remote_funding_pubkey` - <em>[Pubkey](#type-pubkey)</em>, The remote party's funding public key (hex without 0x prefix)
 * `settlement_data` - <em>[SettlementData](#type-settlementdata)</em>, Settlement data
 * `channel_features` - <em>[ChannelFeatures](#type-channelfeatures)</em>, Required channel feature bitmap as hex. Only "0x1" (V2 with full payment hashes) is supported.
+* `payout_lock_script` - <em>`Option<Script>`</em>, Optional lock script that receives settled funds. When omitted, settled funds
+ are sent to the watchtower fee provider lock script.
 
 ##### Returns
 

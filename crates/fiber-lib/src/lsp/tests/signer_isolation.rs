@@ -486,6 +486,7 @@ async fn tenant_watchtower_rpc_rejects_secrets_and_cross_tenant_signatures() {
             remote_amount: 1000,
             tlcs: vec![],
         },
+        payout_lock_script: None,
     };
     let err = owner
         .request::<(), _>("create_watch_channel", rpc_params![params.clone()])
@@ -1379,6 +1380,7 @@ async fn tenant_watchtower_writes_stay_in_the_tenant_namespace() {
             remote_amount: 1000,
             tlcs: vec![],
         },
+        payout_lock_script: None,
     };
     owner
         .request::<(), _>("create_watch_channel", rpc_params![params.clone()])

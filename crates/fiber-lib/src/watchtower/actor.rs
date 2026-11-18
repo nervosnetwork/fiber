@@ -182,13 +182,14 @@ where
             ) => {
                 let signing_scope = self.signing_events.watchtower(&NodeId::local());
                 let signing_update = signing_scope.prepare_created(channel_id);
-                self.store.insert_watch_channel_with_features(
+                self.store.insert_watch_channel(
                     NodeId::local(),
                     channel_id,
                     funding_udt_type_script,
                     keys,
                     settlement_data,
                     channel_features,
+                    None,
                 );
                 signing_update.publish();
             }
@@ -1510,6 +1511,11 @@ fn build_settlement_tx<S: WatchtowerStore>(
 
     let fee_provider_lock_script =
         get_script_by_contract(Contract::Secp256k1Lock, signer.pubkey_hash());
+    let payout_lock_script = channel_data
+        .payout_lock_script
+        .clone()
+        .unwrap_or_else(|| fee_provider_lock_script.clone());
+    let separate_fee_sponsor = payout_lock_script != fee_provider_lock_script;
     let change_output = CellOutput::new_builder()
         .lock(fee_provider_lock_script.clone())
         .build();
@@ -1934,6 +1940,8 @@ fn build_settlement_tx<S: WatchtowerStore>(
             unlock_amount = capacity as u128;
         }
         let new_capacity = (capacity as u128).saturating_sub(unlock_amount) as u64;
+        let payout_capacity =
+            checked_sub_u64(capacity, new_capacity, "settlement payout capacity")?;
         let new_commitment_output = cell_output
             .clone()
             .as_builder()
@@ -1947,8 +1955,8 @@ fn build_settlement_tx<S: WatchtowerStore>(
             .capacity(new_capacity)
             .build();
         let settlement_output = CellOutput::new_builder()
-            .lock(fee_provider_lock_script.clone())
-            .capacity(unlock_amount as u64)
+            .lock(payout_lock_script.clone())
+            .capacity(payout_capacity)
             .build();
 
         let witness_for_commitment_cell: Vec<u8> = [
@@ -1991,6 +1999,11 @@ fn build_settlement_tx<S: WatchtowerStore>(
         tx_builder = tx_builder
             .output(settlement_output.clone())
             .output_data(Bytes::default());
+        if separate_fee_sponsor {
+            tx_builder = tx_builder
+                .output(change_output.clone())
+                .output_data(Bytes::default());
+        }
         tx_builder = build_settlement_transaction(
             tx_builder,
             witness_for_commitment_cell,
@@ -2010,21 +2023,38 @@ fn build_settlement_tx<S: WatchtowerStore>(
                 ))
             })?
             .as_u64();
-        let required_capacity = checked_add_u64(
-            new_capacity,
-            settlement_output_occupied_capacity,
-            "settlement required capacity",
-        )
-        .and_then(|amount| checked_add_u64(amount, fee, "settlement required capacity"))?;
-        let min_total_capacity = if capacity > required_capacity {
-            checked_sub_u64(
+        if separate_fee_sponsor && payout_capacity < settlement_output_occupied_capacity {
+            return Err(Box::new(RpcError::Other(anyhow!(
+                "settlement payout capacity {} is smaller than occupied capacity {}",
+                payout_capacity,
+                settlement_output_occupied_capacity
+            ))));
+        }
+        let change_output_occupied_capacity = change_output
+            .occupied_capacity(Capacity::shannons(0))
+            .map_err(|err| {
+                ArithmeticError::new(format!(
+                    "change output occupied capacity calculation failed: {}",
+                    err
+                ))
+            })?
+            .as_u64();
+        let min_outputs_plus_change = if separate_fee_sponsor {
+            checked_add_u64(
                 capacity,
-                required_capacity,
-                "settlement fee provider capacity",
+                change_output_occupied_capacity,
+                "settlement required capacity",
             )?
         } else {
-            0
+            checked_add_u64(
+                new_capacity,
+                settlement_output_occupied_capacity,
+                "settlement required capacity",
+            )?
         };
+        let required_capacity =
+            checked_add_u64(min_outputs_plus_change, fee, "settlement required capacity")?;
+        let min_total_capacity = required_capacity.saturating_sub(capacity);
         let mut query = CellQueryOptions::new_lock(fee_provider_lock_script);
         query.script_search_mode = Some(SearchMode::Exact);
         query.secondary_script_len_range = Some(ValueRangeOption::new_exact(0));
@@ -2053,30 +2083,45 @@ fn build_settlement_tx<S: WatchtowerStore>(
                         ArithmeticError::new("transaction size does not fit into u64".to_string())
                     })?;
             let fee = fee_calculator.fee(tx_size);
-            let required_capacity = checked_add_u64(
-                new_capacity,
-                settlement_output_occupied_capacity,
-                "settlement required capacity",
-            )
-            .and_then(|amount| checked_add_u64(amount, fee, "settlement required capacity"))?;
+            let required_capacity =
+                checked_add_u64(min_outputs_plus_change, fee, "settlement required capacity")?;
             if inputs_capacity >= required_capacity {
-                let adjusted_settlement_output = change_output
-                    .as_builder()
-                    .capacity(
-                        checked_sub_u64(
-                            inputs_capacity,
-                            new_capacity,
-                            "settlement output capacity",
-                        )
-                        .and_then(|amount| {
-                            checked_sub_u64(amount, fee, "settlement output capacity")
-                        })?,
-                    )
-                    .build();
-                let outputs = if two_parties_all_settled {
-                    vec![adjusted_settlement_output]
+                let outputs = if separate_fee_sponsor {
+                    let change_capacity =
+                        checked_sub_u64(inputs_capacity, capacity, "settlement change capacity")
+                            .and_then(|amount| {
+                                checked_sub_u64(amount, fee, "settlement change capacity")
+                            })?;
+                    let final_change_output =
+                        change_output.as_builder().capacity(change_capacity).build();
+                    if two_parties_all_settled {
+                        vec![settlement_output, final_change_output]
+                    } else {
+                        vec![
+                            new_commitment_output,
+                            settlement_output,
+                            final_change_output,
+                        ]
+                    }
                 } else {
-                    vec![new_commitment_output, adjusted_settlement_output]
+                    let adjusted_settlement_output = change_output
+                        .as_builder()
+                        .capacity(
+                            checked_sub_u64(
+                                inputs_capacity,
+                                new_capacity,
+                                "settlement output capacity",
+                            )
+                            .and_then(|amount| {
+                                checked_sub_u64(amount, fee, "settlement output capacity")
+                            })?,
+                        )
+                        .build();
+                    if two_parties_all_settled {
+                        vec![adjusted_settlement_output]
+                    } else {
+                        vec![new_commitment_output, adjusted_settlement_output]
+                    }
                 };
                 let tx = tx_builder.set_outputs(outputs).build();
                 return build_signed_settlement_tx(
@@ -2115,7 +2160,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
         let new_commitment_output_data = new_amount.to_le_bytes().to_vec().pack();
 
         let settlement_output = CellOutput::new_builder()
-            .lock(fee_provider_lock_script.clone())
+            .lock(payout_lock_script.clone())
             .type_(cell_output.type_().clone())
             .build();
         let settlement_output_data = if two_parties_all_settled {
@@ -2838,21 +2883,8 @@ mod tests {
             _funding_udt_type_script: Option<Script>,
             _keys: WatchChannelKeys,
             _settlement_data: SettlementData,
-        ) {
-            self.registered_features
-                .lock()
-                .expect("lock poisoned")
-                .push(ChannelFeatures::V2);
-        }
-
-        fn insert_watch_channel_with_features(
-            &self,
-            _node_id: NodeId,
-            _channel_id: Hash256,
-            _funding_udt_type_script: Option<Script>,
-            _keys: WatchChannelKeys,
-            _settlement_data: SettlementData,
             channel_features: ChannelFeatures,
+            _payout_lock_script: Option<Script>,
         ) {
             self.registered_features
                 .lock()
@@ -3049,6 +3081,7 @@ mod tests {
             local_settlement_data: settlement_data.clone(),
             revocation_data: None,
             channel_features: ChannelFeatures::V2,
+            payout_lock_script: None,
         };
         let witness = settlement_data_to_witness(
             &settlement_data,
@@ -3231,6 +3264,7 @@ mod tests {
             local_settlement_data: settlement_data.clone(),
             revocation_data: None,
             channel_features: ChannelFeatures::V2,
+            payout_lock_script: None,
         };
         let settlement_witness = SettlementWitness::build_from_witness(
             &[
@@ -3405,6 +3439,8 @@ mod tests {
                 remote_funding: Privkey::from(&[4u8; 32]).pubkey(),
             },
             settlement_data,
+            ChannelFeatures::V2,
+            None,
         );
 
         assert_eq!(
@@ -4002,6 +4038,7 @@ mod tests {
             local_settlement_data: preceding.clone(),
             revocation_data: None,
             channel_features: ChannelFeatures::V2,
+            payout_lock_script: None,
         };
         let witness = settlement_data_to_witness(
             &preceding,

@@ -2151,25 +2151,8 @@ impl WatchtowerStore for Store {
         funding_udt_type_script: Option<Script>,
         keys: WatchChannelKeys,
         settlement_data: SettlementData,
-    ) {
-        self.insert_watch_channel_with_features(
-            node_id,
-            channel_id,
-            funding_udt_type_script,
-            keys,
-            settlement_data,
-            ChannelFeatures::V2,
-        );
-    }
-
-    fn insert_watch_channel_with_features(
-        &self,
-        node_id: NodeId,
-        channel_id: Hash256,
-        funding_udt_type_script: Option<Script>,
-        keys: WatchChannelKeys,
-        settlement_data: SettlementData,
         channel_features: ChannelFeatures,
+        payout_lock_script: Option<Script>,
     ) {
         let lock = self.watchtower_write_lock(&node_id);
         let _guard = lock.lock();
@@ -2204,6 +2187,7 @@ impl WatchtowerStore for Store {
                 local_settlement_data: settlement_data.clone(),
                 revocation_data: None,
                 channel_features,
+                payout_lock_script,
             },
             "ChannelData",
         );

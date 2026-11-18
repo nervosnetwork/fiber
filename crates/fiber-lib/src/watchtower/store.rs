@@ -31,6 +31,7 @@ pub trait WatchtowerStore {
     }
     /// Insert a channel's funding tx lock script into the store, it will be used to monitor the channel,
     /// please note that the lock script should be globally unique, so that the watchtower can identify the channel.
+    #[allow(clippy::too_many_arguments)]
     fn insert_watch_channel(
         &self,
         node_id: NodeId,
@@ -38,26 +39,8 @@ pub trait WatchtowerStore {
         funding_udt_type_script: Option<Script>,
         keys: WatchChannelKeys,
         settlement_data: SettlementData,
-    ) {
-        self.insert_watch_channel_with_features(
-            node_id,
-            channel_id,
-            funding_udt_type_script,
-            keys,
-            settlement_data,
-            ChannelFeatures::V2,
-        );
-    }
-
-    /// Insert a channel while retaining its negotiated witness layout.
-    fn insert_watch_channel_with_features(
-        &self,
-        node_id: NodeId,
-        channel_id: Hash256,
-        funding_udt_type_script: Option<Script>,
-        keys: WatchChannelKeys,
-        settlement_data: SettlementData,
         channel_features: ChannelFeatures,
+        payout_lock_script: Option<Script>,
     );
     /// Stop monitoring a channel. Returns false if removal is refused for a live channel.
     fn remove_watch_channel(&self, node_id: NodeId, channel_id: Hash256) -> bool;

@@ -320,6 +320,8 @@ fn ensure_hosted_watch_skips_an_existing_row() {
             remote_amount: 22,
             tlcs: Vec::new(),
         },
+        fiber_types::ChannelFeatures::V2,
+        None,
     );
 
     super::watch::ensure_hosted_watch_channel(&Default::default(), &store, &record, channel_id)
