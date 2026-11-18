@@ -1884,6 +1884,10 @@ impl NetworkNode {
     }
 
     pub async fn start(&mut self) {
+        // A real restart is a new process with an empty cache: the node has to rebuild every
+        // channel from its record, not from a snapshot the previous process left in memory.
+        #[cfg(test)]
+        self.store.clear_channel_cache();
         let config = self.get_node_config();
         let new = Self::new_with_config(config).await;
         *self = new;
