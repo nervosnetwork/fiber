@@ -3452,6 +3452,62 @@ async fn test_forward_add_rejects_unbacked_or_already_forwarded_upstream() {
     task.await.unwrap();
 }
 
+#[tokio::test]
+async fn test_hosted_payment_add_requires_live_upstream_tlc() {
+    let (a, b, id) = create_nodes_with_established_channel(100000000000, 11800000000, false).await;
+    let initial = a.get_channel_actor_state(id);
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let (network, task) = Actor::spawn(None, CaptureNetwork, captured).await.unwrap();
+    let actor = ChannelActor::new(a.pubkey, b.pubkey, network.clone(), a.store.clone(), None);
+
+    for case in ["pending", "removed", "closed"] {
+        let mut state = initial.clone();
+        state.network = Some(network.clone().into());
+        let mut command = retry_batch_add(42, 1_000);
+        let upstream_id = crate::gen_rand_sha256_hash();
+        command.upstream_tlc_key = Some(fiber_types::UpstreamTlcKey {
+            incoming_channel_id: upstream_id,
+            incoming_tlc_id: 7,
+        });
+        let mut upstream = crate::fiber::tests::create_test_channel_state_with_tlc(
+            upstream_id,
+            7,
+            1_100,
+            command.payment_hash,
+            None,
+        );
+        match case {
+            "removed" => {
+                upstream
+                    .tlc_state
+                    .get_mut(&fiber_types::TLCId::Received(7))
+                    .unwrap()
+                    .removed_reason = Some(fiber_types::RemoveTlcReason::RemoveTlcFail(
+                    fiber_types::TlcErrPacket::new(
+                        fiber_types::TlcErr::new(fiber_types::TlcErrorCode::TemporaryNodeFailure),
+                        &[7; 32],
+                    ),
+                ));
+            }
+            "closed" => {
+                upstream.state = ChannelState::Closed(fiber_types::CloseFlags::empty());
+            }
+            _ => {}
+        }
+        a.store.insert_channel_actor_state(upstream);
+
+        let result = actor.add_tlc_update(&mut state, &command);
+        assert_eq!(result.is_ok(), case == "pending", "{case}: {result:?}");
+        assert_eq!(
+            state.tlc_state.offered_tlcs.tlcs.len(),
+            usize::from(case == "pending"),
+            "reject before allocating an outgoing TLC: {case}"
+        );
+    }
+    network.stop(None);
+    task.await.unwrap();
+}
+
 fn take_wire_messages(
     captured: &Arc<Mutex<Vec<FiberActorMessage>>>,
 ) -> Vec<FiberMessageWithTarget> {

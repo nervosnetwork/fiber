@@ -15,6 +15,9 @@ use crate::fiber::fee::{
 };
 #[cfg(debug_assertions)]
 use crate::fiber::network::DebugEvent;
+use crate::fiber::network::{
+    buffered_trampoline_upstream_status, BufferedTrampolineUpstreamStatus,
+};
 use crate::fiber::onchain_tlc_reconcile::{
     collect_onchain_confirmed_payer_tlcs, collect_onchain_excluded_tlcs,
     collect_onchain_fulfilled_tlcs, collect_onchain_payer_failures,
@@ -4641,6 +4644,39 @@ where
                 return Err(ProcessingChannelError::InvalidState(format!(
                     "Previous TLC {:?} on channel {} no longer backs this forward",
                     prev_id, prev_state.id
+                )));
+            }
+        }
+        if let Some(upstream_key) = command.upstream_tlc_key {
+            // Hosted PaymentSession attempts do not use `previous_tlc`, but each outgoing
+            // part must still be backed by its exact incoming TLC at admission time.
+            let stored_upstream = self
+                .store
+                .get_channel_actor_state(&upstream_key.incoming_channel_id)
+                .ok_or_else(|| {
+                    ProcessingChannelError::InvalidState(
+                        "Hosted payment upstream channel not found".to_string(),
+                    )
+                })?;
+            let upstream = if upstream_key.incoming_channel_id == current_state.id {
+                current_state
+            } else {
+                &stored_upstream
+            };
+            let upstream_tlc = upstream
+                .tlc_state
+                .get(&TLCId::Received(upstream_key.incoming_tlc_id));
+            if upstream.funding_udt_type_script != current_state.funding_udt_type_script
+                || upstream_tlc.is_none_or(|tlc| tlc.hash_algorithm != command.hash_algorithm)
+                || buffered_trampoline_upstream_status(
+                    upstream,
+                    command.payment_hash,
+                    upstream_key.incoming_tlc_id,
+                ) != BufferedTrampolineUpstreamStatus::Pending
+            {
+                return Err(ProcessingChannelError::InvalidState(format!(
+                    "Hosted payment upstream TLC {:?} on channel {} is unavailable",
+                    upstream_key.incoming_tlc_id, upstream_key.incoming_channel_id
                 )));
             }
         }

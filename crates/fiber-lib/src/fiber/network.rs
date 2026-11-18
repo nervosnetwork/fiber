@@ -181,30 +181,30 @@ pub(crate) fn onchain_upstream_removed_reason_matches(
 pub enum BufferedTrampolineUpstreamStatus {
     /// The exact upstream TLC still exists and has no removal queued.
     Pending,
-    /// The upstream TLC is absent, removed, or has a durable removal queued.
+    /// The upstream channel is closed, or its TLC is absent, removed, or queued for removal.
     Removed,
     /// The channel is unavailable or the TLC belongs to another payment hash.
     Unknown,
 }
 
-fn buffered_trampoline_upstream_status(
+pub(crate) fn buffered_trampoline_upstream_status(
     state: &ChannelActorState,
     payment_hash: Hash256,
-    previous_tlc: &PrevTlcInfo,
+    incoming_tlc_id: u64,
 ) -> BufferedTrampolineUpstreamStatus {
+    if state.is_closed() {
+        return BufferedTrampolineUpstreamStatus::Removed;
+    }
     if state.retryable_tlc_operations.iter().any(|operation| {
         matches!(
             operation,
             RetryableTlcOperation::RemoveTlc(tlc_id, _)
-                if *tlc_id == TLCId::Received(previous_tlc.prev_tlc_id)
+                if *tlc_id == TLCId::Received(incoming_tlc_id)
         )
     }) {
         return BufferedTrampolineUpstreamStatus::Removed;
     }
-    let Some(tlc) = state
-        .tlc_state
-        .get(&TLCId::Received(previous_tlc.prev_tlc_id))
-    else {
+    let Some(tlc) = state.tlc_state.get(&TLCId::Received(incoming_tlc_id)) else {
         return BufferedTrampolineUpstreamStatus::Removed;
     };
     if tlc.payment_hash != payment_hash {
@@ -212,8 +212,8 @@ fn buffered_trampoline_upstream_status(
             "Refusing to settle mismatched upstream trampoline TLC: payment_hash={:?}, tlc_payment_hash={:?}, channel_id={:?}, tlc_id={:?}",
             payment_hash,
             tlc.payment_hash,
-            previous_tlc.prev_channel_id,
-            previous_tlc.prev_tlc_id
+            state.id,
+            incoming_tlc_id
         );
         return BufferedTrampolineUpstreamStatus::Unknown;
     }
@@ -224,13 +224,29 @@ fn buffered_trampoline_upstream_status(
     }
 }
 
+fn buffered_trampoline_request_status<S: ChannelActorStateStore>(
+    store: &S,
+    request: &TrampolineForwardingRequest,
+) -> BufferedTrampolineUpstreamStatus {
+    store
+        .get_channel_actor_state(&request.previous_tlc.prev_channel_id)
+        .map(|channel| {
+            buffered_trampoline_upstream_status(
+                &channel,
+                request.payment_hash,
+                request.previous_tlc.prev_tlc_id,
+            )
+        })
+        .unwrap_or(BufferedTrampolineUpstreamStatus::Unknown)
+}
+
 fn trampoline_upstream_tlc_needs_settlement(
     state: &ChannelActorState,
     payment_hash: Hash256,
     previous_tlc: &PrevTlcInfo,
 ) -> bool {
     !state.is_closed()
-        && buffered_trampoline_upstream_status(state, payment_hash, previous_tlc)
+        && buffered_trampoline_upstream_status(state, payment_hash, previous_tlc.prev_tlc_id)
             == BufferedTrampolineUpstreamStatus::Pending
 }
 
@@ -3932,18 +3948,7 @@ where
                 let _ = reply.send(state.hosted_tenant_activity());
             }
             FiberActorCommand::InspectBufferedTrampolineUpstream { request, reply } => {
-                let status = state
-                    .store
-                    .get_channel_actor_state(&request.previous_tlc.prev_channel_id)
-                    .map(|channel| {
-                        buffered_trampoline_upstream_status(
-                            &channel,
-                            request.payment_hash,
-                            &request.previous_tlc,
-                        )
-                    })
-                    .unwrap_or(BufferedTrampolineUpstreamStatus::Unknown);
-                let _ = reply.send(status);
+                let _ = reply.send(buffered_trampoline_request_status(&state.store, &request));
             }
             #[cfg(not(target_arch = "wasm32"))]
             FiberActorCommand::DispatchBufferedTrampoline { request, reply } => {
@@ -3963,6 +3968,24 @@ where
                             .await;
                         }
                         let _ = reply.send(Ok(()));
+                        return Ok(());
+                    }
+                }
+                // The LSP's earlier inspection can become stale while it activates a tenant.
+                // Do not create a new downstream payment after its upstream TLC is gone.
+                match buffered_trampoline_request_status(&state.store, &request) {
+                    BufferedTrampolineUpstreamStatus::Pending => {}
+                    BufferedTrampolineUpstreamStatus::Removed => {
+                        let _ = reply.send(Err(DeliveryDispatchError::Permanent {
+                            reason: "upstream TLC no longer backs hosted delivery".to_string(),
+                            error_code: TlcErrorCode::TemporaryNodeFailure,
+                        }));
+                        return Ok(());
+                    }
+                    BufferedTrampolineUpstreamStatus::Unknown => {
+                        let _ = reply.send(Err(DeliveryDispatchError::Temporary {
+                            reason: "cannot verify hosted delivery upstream TLC".to_string(),
+                        }));
                         return Ok(());
                     }
                 }

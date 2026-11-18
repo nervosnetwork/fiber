@@ -9,9 +9,11 @@ use crate::fiber::config::{
 use crate::fiber::delivery::TrampolineForwardingRequest;
 use crate::fiber::graph::*;
 use crate::fiber::network::{
-    DebugEvent, FiberActorCommand, NetworkActorMessage, SendOnionPacketCommand,
+    BufferedTrampolineUpstreamStatus, DebugEvent, FiberActorCommand, NetworkActorMessage,
+    SendOnionPacketCommand,
 };
 use crate::fiber::payment::SendPaymentCommand;
+use crate::fiber::tests::create_test_channel_state_with_tlc;
 use crate::fiber::types::{TrampolineHopPayload, TrampolineOnionPacket};
 use crate::fiber::{FeatureVector, PaymentStatus, Privkey, Pubkey};
 use crate::gen_rand_fiber_public_key;
@@ -90,6 +92,113 @@ fn test_trampoline_forwarding_request_preserves_dispatch_context() {
         context.max_outgoing_tlc_expiry,
         Some(max_outgoing_tlc_expiry)
     );
+}
+
+fn buffered_dispatch_test_request(
+    payment_hash: Hash256,
+    channel_id: Hash256,
+) -> TrampolineForwardingRequest {
+    TrampolineForwardingRequest {
+        payment_hash,
+        next_node_id: gen_rand_fiber_public_key(),
+        amount_to_forward: 1_000,
+        hash_algorithm: HashAlgorithm::CkbHash,
+        build_max_fee_amount: 100,
+        tlc_expiry_delta: DEFAULT_FINAL_TLC_EXPIRY_DELTA,
+        tlc_expiry_limit: DEFAULT_FINAL_TLC_EXPIRY_DELTA * 2,
+        max_parts: None,
+        udt_type_script: None,
+        remaining_trampoline_onion: Vec::new(),
+        previous_tlc: PrevTlcInfo::new_with_shared_secret(channel_id, 7, 0, [7; 32]),
+        max_outgoing_tlc_expiry: now_timestamp_as_millis_u64() + DEFAULT_FINAL_TLC_EXPIRY_DELTA * 2,
+    }
+}
+
+#[tokio::test]
+async fn test_buffered_trampoline_inspection_rejects_closed_upstream() {
+    init_tracing();
+    let (mut nodes, _) = create_n_nodes_network_with_params(&[], 2, None).await;
+    let mut node = nodes.remove(0);
+    let payment_hash = gen_rand_sha256_hash();
+    let channel_id = gen_rand_sha256_hash();
+    let mut channel = create_test_channel_state_with_tlc(channel_id, 7, 1_000, payment_hash, None);
+    channel
+        .tlc_state
+        .get_mut(&TLCId::Received(7))
+        .unwrap()
+        .expiry = now_timestamp_as_millis_u64() + DEFAULT_FINAL_TLC_EXPIRY_DELTA * 3;
+    channel.state = fiber_types::ChannelState::Closed(fiber_types::CloseFlags::empty());
+    node.store.insert_channel_actor_state(channel);
+    let request = buffered_dispatch_test_request(payment_hash, channel_id);
+
+    let status = call!(node.network_actor, |reply| {
+        NetworkActorMessage::new_command(FiberActorCommand::InspectBufferedTrampolineUpstream {
+            request,
+            reply,
+        })
+    })
+    .unwrap();
+    assert_eq!(status, BufferedTrampolineUpstreamStatus::Removed);
+    node.stop().await;
+    nodes[0].stop().await;
+}
+
+#[tokio::test]
+async fn test_buffered_trampoline_dispatch_rechecks_removed_upstream() {
+    init_tracing();
+    let (mut nodes, _) = create_n_nodes_network_with_params(&[], 2, None).await;
+    let mut node = nodes.remove(0);
+    let payment_hash = gen_rand_sha256_hash();
+    let channel_id = gen_rand_sha256_hash();
+    let mut channel = create_test_channel_state_with_tlc(channel_id, 7, 1_000, payment_hash, None);
+    channel
+        .tlc_state
+        .get_mut(&TLCId::Received(7))
+        .unwrap()
+        .expiry = now_timestamp_as_millis_u64() + DEFAULT_FINAL_TLC_EXPIRY_DELTA * 3;
+    node.store.insert_channel_actor_state(channel.clone());
+    let request = buffered_dispatch_test_request(payment_hash, channel_id);
+    let payment_data = request.clone().into_send_payment_data();
+    assert!(payment_data.is_ok(), "{payment_data:?}");
+    let status = call!(node.network_actor, |reply| {
+        NetworkActorMessage::new_command(FiberActorCommand::InspectBufferedTrampolineUpstream {
+            request: request.clone(),
+            reply,
+        })
+    })
+    .unwrap();
+    assert_eq!(status, BufferedTrampolineUpstreamStatus::Pending);
+
+    channel
+        .tlc_state
+        .get_mut(&TLCId::Received(7))
+        .unwrap()
+        .removed_reason = Some(RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+        TlcErr::new(TlcErrorCode::TemporaryNodeFailure),
+        &[7; 32],
+    )));
+    node.store.insert_channel_actor_state(channel);
+    let result = call!(node.network_actor, |reply| {
+        NetworkActorMessage::new_command(FiberActorCommand::DispatchBufferedTrampoline {
+            request: request.clone(),
+            reply,
+        })
+    })
+    .unwrap();
+    assert!(
+        matches!(
+            &result,
+            Err(crate::fiber::delivery::DeliveryDispatchError::Permanent { reason, .. })
+                if reason.contains("upstream TLC")
+        ),
+        "{result:?}"
+    );
+    assert!(node
+        .store
+        .get_payment_session(request.hosted_session_key())
+        .is_none());
+    node.stop().await;
+    nodes[0].stop().await;
 }
 
 async fn send_manual_trampoline_final_keysend_tlc(
