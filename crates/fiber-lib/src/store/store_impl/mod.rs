@@ -1,6 +1,9 @@
 #[cfg(feature = "watchtower")]
 use ckb_types::packed::Script;
 
+use super::channel_state::{
+    deserialize_channel_state, new_channel_cache, ChannelStateCache, ChannelStates,
+};
 use crate::store::store_trait::{FiberStore, PrefixIterOptions};
 use fiber_store::backend::{BatchWriter, StorageBackend, TakeWhileFn};
 use fiber_store::iterator::{IteratorDirection, KVPair};
@@ -63,6 +66,8 @@ use tracing::warn;
 pub struct Store {
     inner: fiber_store::Store,
     watcher: Option<Arc<dyn Fn(StoreChange) + Send + Sync>>,
+    /// In-memory snapshots of channel states. `None` disables the cache.
+    channel_cache: Option<Arc<ChannelStateCache>>,
     #[cfg(feature = "watchtower")]
     watchtower_write_locks: Arc<parking_lot::Mutex<HashMap<NodeId, Arc<parking_lot::Mutex<()>>>>>,
     #[cfg(feature = "watchtower")]
@@ -178,6 +183,29 @@ impl Store {
             .is_some_and(|channel_state| channel_state.owns_payment_attempt(attempt))
     }
 
+    /// The channel records with the read cache, which is the only place that touches either.
+    pub(crate) fn channel_states(&self) -> ChannelStates<'_> {
+        ChannelStates::new(self, self.channel_cache.as_ref())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn channel_cache_len(&self) -> usize {
+        self.channel_states().cache_len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn channel_cache_peek(&self, id: &Hash256) -> Option<ChannelActorState> {
+        self.channel_states().cache_peek(id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn channel_cache_and_record(
+        &self,
+        id: &Hash256,
+    ) -> Option<(ChannelActorState, Option<ChannelActorState>)> {
+        self.channel_states().cache_and_record(id)
+    }
+
     #[cfg(feature = "watchtower")]
     fn watchtower_write_lock(&self, node_id: &NodeId) -> Arc<parking_lot::Mutex<()>> {
         self.watchtower_write_locks
@@ -223,6 +251,10 @@ impl StorageBackend for Store {
     }
 
     fn restore(&self, restore_path: &Path, db_path: &Path) -> Result<(), StoreError> {
+        // The snapshots describe the database that is about to be replaced.
+        if let Some(cache) = &self.channel_cache {
+            cache.clear();
+        }
         self.inner.restore(restore_path, db_path)
     }
 }
@@ -247,16 +279,16 @@ where
         .unwrap_or_else(|e| panic!("deserialization of {} failed: {}", field_name, e))
 }
 
-fn deserialize_channel_state(bytes: &[u8]) -> ChannelActorState {
-    fiber_types::channel_v2_validation::decode_channel_actor_data(bytes)
-        .unwrap_or_else(|e| panic!("deserialization of ChannelActorState failed: {e}"))
-        .into()
-}
-
 /// Open a store at `path`, running auto-migration with auto-confirm.
 /// Use this when no user interaction is needed (e.g. tests, simple setups).
 pub fn open_store<P: AsRef<Path>>(path: P) -> Result<Store, String> {
-    open_store_with_migration(path, false, Box::new(|_| true), Box::new(|_| {}))
+    open_store_with_migration(
+        path,
+        false,
+        crate::fiber::config::DEFAULT_STORE_CHANNEL_CACHE_CAPACITY,
+        Box::new(|_| true),
+        Box::new(|_| {}),
+    )
 }
 
 /// Open a store at `path`, running auto-migration with custom confirm/progress callbacks.
@@ -264,21 +296,33 @@ pub fn open_store<P: AsRef<Path>>(path: P) -> Result<Store, String> {
 ///
 /// `sync_writes` (`FiberConfig::store_sync_writes`) is set before the migrations run, so their
 /// writes wait for the disk too. The browser store has no such setting and ignores it.
+///
+/// `channel_cache_capacity` (`FiberConfig::store_channel_cache_capacity`) bounds the in-memory
+/// channel state cache; `0` disables it.
 pub fn open_store_with_migration<P: AsRef<Path>>(
     path: P,
     sync_writes: bool,
+    channel_cache_capacity: usize,
     confirm_fn: MigrateConfirmFn,
     progress_fn: MigrateProgressFn,
 ) -> Result<Store, String> {
     let mut migrate = DbMigrate::new();
     fiber_store::migrations::register_all_migrations(&mut migrate);
-    open_store_with_migrations(path, sync_writes, migrate, confirm_fn, progress_fn)
+    open_store_with_migrations(
+        path,
+        sync_writes,
+        channel_cache_capacity,
+        migrate,
+        confirm_fn,
+        progress_fn,
+    )
 }
 
 /// `open_store_with_migration` with the migrations given, for tests.
 pub(crate) fn open_store_with_migrations<P: AsRef<Path>>(
     path: P,
     sync_writes: bool,
+    channel_cache_capacity: usize,
     migrate: DbMigrate,
     confirm_fn: MigrateConfirmFn,
     progress_fn: MigrateProgressFn,
@@ -295,6 +339,7 @@ pub(crate) fn open_store_with_migrations<P: AsRef<Path>>(
     Ok(Store {
         inner: db,
         watcher: None,
+        channel_cache: new_channel_cache(channel_cache_capacity),
         #[cfg(feature = "watchtower")]
         watchtower_write_locks: Arc::new(parking_lot::Mutex::new(HashMap::new())),
         #[cfg(feature = "watchtower")]
@@ -322,6 +367,7 @@ pub fn check_validate<P: AsRef<Path>>(path: P) -> Result<(), String> {
     let store = Store {
         inner: db,
         watcher: None,
+        channel_cache: None,
         #[cfg(feature = "watchtower")]
         watchtower_write_locks: Arc::new(parking_lot::Mutex::new(HashMap::new())),
         #[cfg(feature = "watchtower")]
@@ -1049,79 +1095,19 @@ impl ChannelActorStateStore for Store {
     }
 
     fn get_channel_actor_state(&self, id: &Hash256) -> Option<ChannelActorState> {
-        let key = [&[CHANNEL_ACTOR_STATE_PREFIX], id.as_ref()].concat();
-        self.get(key).map(|v| deserialize_channel_state(v.as_ref()))
+        self.channel_states().get(id)
     }
 
     fn insert_channel_actor_state(&self, state: ChannelActorState) {
-        let mut batch = self.batch();
-
-        let kv = KeyValue::PubkeyChannelId((state.get_remote_pubkey(), state.id), state.state);
-        batch.put(kv.key(), kv.value());
-        if let Some(outpoint) = state.get_funding_transaction_outpoint() {
-            let kv = KeyValue::OutPointChannelId(outpoint, state.id);
-            batch.put(kv.key(), kv.value());
-        }
-        let kv = KeyValue::ChannelActorState(state.id, state);
-        batch.put(kv.key(), kv.value());
-        batch.commit();
+        self.channel_states().insert(state)
     }
 
     fn move_channel_actor_state(&self, old_id: &Hash256, state: ChannelActorState) {
-        if old_id == &state.id {
-            self.insert_channel_actor_state(state);
-            return;
-        }
-
-        let old_state = self.get_channel_actor_state(old_id);
-        let mut batch = self.batch();
-
-        if let Some(old_state) = old_state {
-            batch.delete([&[CHANNEL_ACTOR_STATE_PREFIX], old_id.as_ref()].concat());
-            let remote_pubkey_bytes = old_state.get_remote_pubkey().serialize();
-            batch.delete(
-                [
-                    &[PUBKEY_CHANNEL_ID_PREFIX][..],
-                    &remote_pubkey_bytes[..],
-                    old_id.as_ref(),
-                ]
-                .concat(),
-            );
-            if let Some(outpoint) = old_state.get_funding_transaction_outpoint() {
-                batch.delete([&[CHANNEL_OUTPOINT_CHANNEL_ID_PREFIX], outpoint.as_slice()].concat());
-            }
-        }
-
-        let kv = KeyValue::PubkeyChannelId((state.get_remote_pubkey(), state.id), state.state);
-        batch.put(kv.key(), kv.value());
-        if let Some(outpoint) = state.get_funding_transaction_outpoint() {
-            let kv = KeyValue::OutPointChannelId(outpoint, state.id);
-            batch.put(kv.key(), kv.value());
-        }
-        let kv = KeyValue::ChannelActorState(state.id, state);
-        batch.put(kv.key(), kv.value());
-        batch.commit();
+        self.channel_states().move_to(old_id, state)
     }
 
     fn delete_channel_actor_state(&self, id: &Hash256) {
-        if let Some(state) = self.get_channel_actor_state(id) {
-            let mut batch = self.batch();
-            batch.delete([&[CHANNEL_ACTOR_STATE_PREFIX], id.as_ref()].concat());
-            let remote_pubkey_bytes = state.get_remote_pubkey().serialize();
-            batch.delete(
-                [
-                    &[PUBKEY_CHANNEL_ID_PREFIX][..],
-                    &remote_pubkey_bytes[..],
-                    id.as_ref(),
-                ]
-                .concat(),
-            );
-            if let Some(outpoint) = state.get_funding_transaction_outpoint() {
-                batch.delete([&[CHANNEL_OUTPOINT_CHANNEL_ID_PREFIX], outpoint.as_slice()].concat());
-            }
-            batch.delete([&[CHANNEL_SHUTDOWN_SETTLEMENT_PREFIX], id.as_ref()].concat());
-            batch.commit();
-        }
+        self.channel_states().delete(id)
     }
 
     fn get_channel_ids_by_pubkey(&self, pubkey: &Pubkey) -> Vec<Hash256> {
