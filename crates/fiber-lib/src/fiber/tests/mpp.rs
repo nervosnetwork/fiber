@@ -3750,8 +3750,9 @@ async fn test_send_mpp_respect_min_tlc_value() {
 async fn test_send_mpp_can_retry() {
     init_tracing();
 
-    // we have 4 channels in the middle, but we disable a channel quite,
-    // Basic MPP will retry the payment with the other channels and succeed
+    // Pause the first hop until its planned attempt is stored, then disable
+    // the middle channel actually selected for that attempt. Disabling a
+    // fixed channel after send_payment races with forwarding.
     let (nodes, channels) = create_n_nodes_network(
         &[
             ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
@@ -3765,13 +3766,50 @@ async fn test_send_mpp_can_retry() {
     )
     .await;
     let [node_0, node_1, _node_2, node_3] = nodes.try_into().expect("4 nodes");
-    let res = node_0.send_mpp_payment(&node_3, 30000000000, Some(3)).await;
-    node_1.disable_channel_stealthy(channels[3]).await;
+    let preimage = gen_rand_sha256_hash();
+    let invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(30000000000))
+        .payment_preimage(preimage)
+        .payee_pub_key(node_3.pubkey.into())
+        .allow_mpp(true)
+        .payment_secret(gen_rand_sha256_hash())
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_3.private_key.0))
+        .expect("build invoice");
+    let payment_hash = *invoice.payment_hash();
+    node_3.insert_invoice(invoice.clone(), Some(preimage));
 
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    eprintln!("res: {:?}", res);
-    assert!(res.is_ok());
-    let payment_hash = res.unwrap().payment_hash;
+    let first_hop = node_0.get_channel_actor(channels[0]).await.unwrap();
+    let release = ractor::call_t!(
+        first_hop,
+        |reply| ChannelActorMessage::Command(ChannelCommand::TestPause(reply)),
+        5000
+    )
+    .expect("pause first-hop channel");
+    let send = node_0.send_payment(SendPaymentCommand {
+        max_parts: Some(3),
+        invoice: Some(invoice.to_string()),
+        ..Default::default()
+    });
+    let disable_selected = async {
+        wait_until_timeout(5000, || {
+            node_0
+                .get_payment_session(payment_hash)
+                .is_some_and(|session| session.attempts_count() > 0)
+        })
+        .await;
+        let session = node_0.get_payment_session(payment_hash).unwrap();
+        let first_route = session.attempts().next().unwrap().route.clone();
+        let selected_middle_channels = node_0
+            .routers_used_channels(std::slice::from_ref(&first_route), &channels[1..5])
+            .await;
+        assert_eq!(selected_middle_channels.len(), 1);
+        node_1
+            .disable_channel_stealthy(selected_middle_channels[0])
+            .await;
+        release.send(()).expect("resume first-hop channel");
+    };
+    let (res, ()) = tokio::join!(send, disable_selected);
+    res.expect("send MPP payment");
     node_0.wait_until_success(payment_hash).await;
 
     let payment_session = node_0.get_payment_session(payment_hash).unwrap();
