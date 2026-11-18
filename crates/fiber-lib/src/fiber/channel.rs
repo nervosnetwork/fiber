@@ -4602,6 +4602,16 @@ where
         command: &AddTlcCommand,
         current_state: &ChannelActorState,
     ) -> ProcessingChannelResult {
+        self.check_normal_forward_tlc_consistent(command, current_state)?;
+        self.check_hosted_tenant_tlc_consistent(command, current_state)?;
+        self.check_ordinary_trampoline_tlc_consistent(command, current_state)
+    }
+
+    fn check_normal_forward_tlc_consistent(
+        &self,
+        command: &AddTlcCommand,
+        current_state: &ChannelActorState,
+    ) -> ProcessingChannelResult {
         if let Some(prev_tlc_info) = command.previous_tlc {
             let stored_prev_state = self
                 .store
@@ -4647,6 +4657,14 @@ where
                 )));
             }
         }
+        Ok(())
+    }
+
+    fn check_hosted_tenant_tlc_consistent(
+        &self,
+        command: &AddTlcCommand,
+        current_state: &ChannelActorState,
+    ) -> ProcessingChannelResult {
         if let Some(upstream_key) = command.upstream_tlc_key {
             // Hosted PaymentSession attempts do not use `previous_tlc`, but each outgoing
             // part must still be backed by its exact incoming TLC at admission time.
@@ -4678,6 +4696,60 @@ where
                     "Hosted payment upstream TLC {:?} on channel {} is unavailable",
                     upstream_key.incoming_tlc_id, upstream_key.incoming_channel_id
                 )));
+            }
+        }
+        Ok(())
+    }
+
+    fn check_ordinary_trampoline_tlc_consistent(
+        &self,
+        command: &AddTlcCommand,
+        current_state: &ChannelActorState,
+    ) -> ProcessingChannelResult {
+        if command.attempt_id.is_some()
+            && command.upstream_tlc_key.is_none()
+            && command.previous_tlc.is_none()
+        {
+            // Ordinary trampoline sessions retain their hash-only execution identity.
+            // Check their persisted upstream context at the channel admission boundary,
+            // including retries after the first downstream attempt failed.
+            if let Some(context) = self
+                .store
+                .get_ordinary_trampoline_context(command.payment_hash)
+            {
+                if context.hash_algorithm != command.hash_algorithm
+                    || context.previous_tlcs.is_empty()
+                    || context.previous_tlcs.iter().any(|previous| {
+                        let stored_upstream = (previous.prev_channel_id != current_state.id)
+                            .then(|| {
+                                self.store
+                                    .get_channel_actor_state(&previous.prev_channel_id)
+                            })
+                            .flatten();
+                        let upstream = if previous.prev_channel_id == current_state.id {
+                            Some(current_state)
+                        } else {
+                            stored_upstream.as_ref()
+                        };
+                        upstream.is_none_or(|upstream| {
+                            upstream.funding_udt_type_script
+                                != current_state.funding_udt_type_script
+                                || upstream
+                                    .tlc_state
+                                    .get(&TLCId::Received(previous.prev_tlc_id))
+                                    .is_none_or(|tlc| tlc.hash_algorithm != command.hash_algorithm)
+                                || buffered_trampoline_upstream_status(
+                                    upstream,
+                                    command.payment_hash,
+                                    previous.prev_tlc_id,
+                                ) != BufferedTrampolineUpstreamStatus::Pending
+                        })
+                    })
+                {
+                    return Err(ProcessingChannelError::InvalidState(
+                        "Ordinary trampoline upstream TLC is unavailable".to_string(),
+                    ));
+                }
             }
         }
         Ok(())
@@ -10307,6 +10379,11 @@ pub trait ChannelActorStateStore {
         channel_id: Hash256,
         tlc_id: u64,
     ) -> bool;
+    /// Read only the forwarding context; ordinary payment attempts have none.
+    fn get_ordinary_trampoline_context(
+        &self,
+        payment_hash: Hash256,
+    ) -> Option<fiber_types::TrampolineContext>;
     fn get_channel_actor_state(&self, id: &Hash256) -> Option<ChannelActorState>;
     fn insert_channel_actor_state(&self, state: ChannelActorState);
 

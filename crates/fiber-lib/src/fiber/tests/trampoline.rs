@@ -2640,6 +2640,7 @@ async fn send_manual_trampoline_forward(
     upstream_hash_algorithm: HashAlgorithm,
     inner_hash_algorithm: HashAlgorithm,
     upstream_expiry: u64,
+    upstream_removed: bool,
 ) -> Result<(), TlcErr> {
     let payment_hash = gen_rand_sha256_hash();
     let amount_to_forward = 1000u128;
@@ -2667,6 +2668,16 @@ async fn send_manual_trampoline_forward(
         removed_confirmed_at: None,
         applied_flags: AppliedFlags::empty(),
     });
+    if upstream_removed {
+        node_b_state
+            .tlc_state
+            .get_mut(&TLCId::Received(1))
+            .unwrap()
+            .removed_reason = Some(RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+            TlcErr::new(TlcErrorCode::TemporaryNodeFailure),
+            &[0; 32],
+        )));
+    }
     node_b.update_channel_actor_state(node_b_state, None).await;
 
     let trampoline_onion_bytes = TrampolineOnionPacket::create(
@@ -2763,6 +2774,7 @@ async fn test_trampoline_forwarding_rejects_hash_algorithm_mismatch() {
         now_timestamp_as_millis_u64()
             + DEFAULT_FINAL_TLC_EXPIRY_DELTA
             + 2 * DEFAULT_TLC_EXPIRY_DELTA,
+        false,
     )
     .await;
 
@@ -2793,12 +2805,43 @@ async fn test_trampoline_forwarding_rejects_hash_algorithm_mismatch() {
         now_timestamp_as_millis_u64()
             + DEFAULT_FINAL_TLC_EXPIRY_DELTA
             + 2 * DEFAULT_TLC_EXPIRY_DELTA,
+        false,
     )
     .await;
 
     assert!(
         res.is_ok(),
         "matching hash algorithms must be accepted: {res:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_ordinary_trampoline_rejects_removed_upstream_before_dispatch() {
+    init_tracing();
+    let (nodes, channels) = create_n_nodes_network_with_visibility(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), true),
+            ((1, 2), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), true),
+        ],
+        3,
+    )
+    .await;
+    let [_payer, trampoline, recipient] = nodes.try_into().expect("3 nodes");
+    let result = send_manual_trampoline_forward(
+        &trampoline,
+        &recipient,
+        channels[0],
+        HashAlgorithm::CkbHash,
+        HashAlgorithm::CkbHash,
+        now_timestamp_as_millis_u64()
+            + DEFAULT_FINAL_TLC_EXPIRY_DELTA
+            + 2 * DEFAULT_TLC_EXPIRY_DELTA,
+        true,
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "removed upstream must not start a downstream payment"
     );
 }
 

@@ -1,8 +1,10 @@
 use super::ReestablishTimer;
 use super::*;
+use crate::fiber::delivery::TrampolineForwardingRequest;
 use crate::fiber::graph::NetworkGraphStateStore;
 use crate::fiber::network::FiberActorEvent;
 use crate::fiber::network::{NetworkActorMessage, PublicNetworkEvent};
+use crate::fiber::payment::PaymentSessionExt;
 use crate::fiber::tests::MockStore;
 use crate::tests::test_utils::create_nodes_with_established_channel;
 use fiber_store::StorageBackend;
@@ -3495,6 +3497,122 @@ async fn test_hosted_payment_add_requires_live_upstream_tlc() {
             _ => {}
         }
         a.store.insert_channel_actor_state(upstream);
+
+        let result = actor.add_tlc_update(&mut state, &command);
+        assert_eq!(result.is_ok(), case == "pending", "{case}: {result:?}");
+        assert_eq!(
+            state.tlc_state.offered_tlcs.tlcs.len(),
+            usize::from(case == "pending"),
+            "reject before allocating an outgoing TLC: {case}"
+        );
+    }
+    network.stop(None);
+    task.await.unwrap();
+}
+
+#[tokio::test]
+async fn test_ordinary_trampoline_add_requires_live_upstream_tlc() {
+    let (a, b, id) = create_nodes_with_established_channel(100000000000, 11800000000, false).await;
+    let initial = a.get_channel_actor_state(id);
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let (network, task) = Actor::spawn(None, CaptureNetwork, captured).await.unwrap();
+    let actor = ChannelActor::new(a.pubkey, b.pubkey, network.clone(), a.store.clone(), None);
+
+    for case in [
+        "pending",
+        "removed",
+        "closed",
+        "wrong_algorithm",
+        "same_channel_removed",
+    ] {
+        let mut state = initial.clone();
+        state.network = Some(network.clone().into());
+        let mut command = retry_batch_add(43, 1_000);
+        command.attempt_id = Some(1);
+        let upstream_id = if case == "same_channel_removed" {
+            id
+        } else {
+            crate::gen_rand_sha256_hash()
+        };
+        let upstream_tlc_id = 7;
+        let mut upstream = crate::fiber::tests::create_test_channel_state_with_tlc(
+            upstream_id,
+            upstream_tlc_id,
+            1_100,
+            command.payment_hash,
+            None,
+        );
+        match case {
+            "removed" => {
+                upstream
+                    .tlc_state
+                    .get_mut(&fiber_types::TLCId::Received(upstream_tlc_id))
+                    .unwrap()
+                    .removed_reason = Some(fiber_types::RemoveTlcReason::RemoveTlcFail(
+                    fiber_types::TlcErrPacket::new(
+                        fiber_types::TlcErr::new(fiber_types::TlcErrorCode::TemporaryNodeFailure),
+                        &[7; 32],
+                    ),
+                ));
+            }
+            "closed" => {
+                upstream.state = ChannelState::Closed(fiber_types::CloseFlags::empty());
+            }
+            "wrong_algorithm" => {
+                upstream
+                    .tlc_state
+                    .get_mut(&fiber_types::TLCId::Received(upstream_tlc_id))
+                    .unwrap()
+                    .hash_algorithm = fiber_types::HashAlgorithm::Sha256;
+            }
+            _ => {}
+        }
+        if case == "same_channel_removed" {
+            let inbound = upstream
+                .tlc_state
+                .get(&fiber_types::TLCId::Received(upstream_tlc_id))
+                .unwrap()
+                .clone();
+            state.tlc_state.add_received_tlc(inbound);
+            state
+                .tlc_state
+                .get_mut(&fiber_types::TLCId::Received(upstream_tlc_id))
+                .unwrap()
+                .removed_reason = Some(fiber_types::RemoveTlcReason::RemoveTlcFail(
+                fiber_types::TlcErrPacket::new(
+                    fiber_types::TlcErr::new(fiber_types::TlcErrorCode::TemporaryNodeFailure),
+                    &[7; 32],
+                ),
+            ));
+        }
+        a.store.insert_channel_actor_state(upstream);
+
+        let request = TrampolineForwardingRequest {
+            payment_hash: command.payment_hash,
+            next_node_id: b.pubkey,
+            amount_to_forward: command.amount,
+            hash_algorithm: command.hash_algorithm,
+            build_max_fee_amount: 100,
+            tlc_expiry_delta: crate::fiber::config::DEFAULT_FINAL_TLC_EXPIRY_DELTA,
+            tlc_expiry_limit: crate::fiber::config::DEFAULT_FINAL_TLC_EXPIRY_DELTA * 2,
+            max_parts: None,
+            udt_type_script: None,
+            remaining_trampoline_onion: Vec::new(),
+            previous_tlc: fiber_types::PrevTlcInfo::new_with_shared_secret(
+                upstream_id,
+                upstream_tlc_id,
+                100,
+                [7; 32],
+            ),
+            max_outgoing_tlc_expiry: command.expiry,
+        };
+        let payment_data = request.into_send_payment_data().unwrap();
+        a.store
+            .insert_payment_session(fiber_types::PaymentSession::new_session(
+                &a.store,
+                payment_data,
+                1,
+            ));
 
         let result = actor.add_tlc_update(&mut state, &command);
         assert_eq!(result.is_ok(), case == "pending", "{case}: {result:?}");

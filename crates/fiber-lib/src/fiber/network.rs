@@ -5724,6 +5724,20 @@ where
                     return Err(TlcErr::new(TlcErrorCode::IncorrectTlcExpiry));
                 }
 
+                // Keep the existing payload error precedence, then refuse to start
+                // a payment against an upstream TLC that can no longer be settled.
+                if buffered_trampoline_upstream_status(
+                    &prev_channel_state,
+                    payment_hash,
+                    prev_tlc.prev_tlc_id,
+                ) != BufferedTrampolineUpstreamStatus::Pending
+                {
+                    return Err(TlcErr::new_node_fail(
+                        TlcErrorCode::TemporaryNodeFailure,
+                        state.get_public_key(),
+                    ));
+                }
+
                 let request = TrampolineForwardingRequest {
                     payment_hash,
                     next_node_id,

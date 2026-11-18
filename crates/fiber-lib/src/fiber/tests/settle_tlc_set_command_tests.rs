@@ -215,6 +215,13 @@ impl PreimageStore for MockStore {
 }
 
 impl ChannelActorStateStore for MockStore {
+    fn get_ordinary_trampoline_context(
+        &self,
+        _payment_hash: Hash256,
+    ) -> Option<fiber_types::TrampolineContext> {
+        None
+    }
+
     fn has_trampoline_payment_for_tlc(
         &self,
         _payment_hash: Hash256,

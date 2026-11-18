@@ -1166,6 +1166,15 @@ impl NetworkActorStateStore for Store {
 }
 
 impl ChannelActorStateStore for Store {
+    fn get_ordinary_trampoline_context(
+        &self,
+        payment_hash: Hash256,
+    ) -> Option<fiber_types::TrampolineContext> {
+        let key = [&[PAYMENT_SESSION_PREFIX], payment_hash.as_ref()].concat();
+        self.get(key)
+            .map(|value| deserialize_from::<PaymentSession>(value.as_ref(), "PaymentSession"))
+            .and_then(|session| session.request.trampoline_context)
+    }
     #[cfg(not(target_arch = "wasm32"))]
     fn is_internal_channel(&self, peer: &Pubkey) -> Result<bool, String> {
         // Only Public T owns hosted peers. Tenant stores must retain their own
