@@ -107,7 +107,6 @@ fn convert_channel_actor_data(
         waiting_forward_tlc_tasks: decode_as_new(old.waiting_forward_tlc_tasks)?,
         remote_shutdown_script: old.remote_shutdown_script,
         local_shutdown_script: old.local_shutdown_script,
-        latest_commitment_transaction: old.latest_commitment_transaction,
         remote_commitment_points: decode_as_new(old.remote_commitment_points)?,
         remote_channel_public_keys: decode_as_new(old.remote_channel_public_keys)?,
         local_shutdown_info: decode_as_new(old.local_shutdown_info)?,

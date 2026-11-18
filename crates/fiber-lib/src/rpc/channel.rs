@@ -370,7 +370,7 @@ where
                     })
                     .collect(),
                 latest_commitment_transaction_hash: state
-                    .latest_commitment_transaction
+                    .latest_commitment_transaction()
                     .as_ref()
                     .map(|tx| tx.clone().into_view().hash().unpack()),
                 created_at: state.get_created_at_in_millis(),

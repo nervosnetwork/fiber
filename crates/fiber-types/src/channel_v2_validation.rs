@@ -279,7 +279,6 @@ pub fn validate_channel_v2(channel: &ChannelActorData) -> Result<(), String> {
         check(
             channel.remote_channel_public_keys.is_some()
                 && channel.funding_tx.is_some()
-                && channel.latest_commitment_transaction.is_some()
                 && session.incoming.is_some()
                 && session.outgoing.is_some(),
             "Missing funded V2 transaction/history",
@@ -738,16 +737,8 @@ pub fn validate_channel_v2(channel: &ChannelActorData) -> Result<(), String> {
             )?;
         }
     }
-    if let Some(incoming) = &session.incoming {
-        check(
-            channel
-                .latest_commitment_transaction
-                .as_ref()
-                .map(Entity::as_slice)
-                == Some(incoming.transaction.as_slice()),
-            "V2 latest usable commitment mismatch",
-        )?;
-    }
+    // The latest usable commitment is `session.incoming.transaction` itself; there is nothing
+    // left to cross-check.
     if session.own.context.is_some() {
         check(
             session

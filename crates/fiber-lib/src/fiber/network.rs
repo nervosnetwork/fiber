@@ -7183,7 +7183,7 @@ where
                                 ChannelState::AwaitingChannelReady(flags)
                                     if flags
                                         .contains(AwaitingChannelReadyFlags::OUR_CHANNEL_READY)
-                                        && state.latest_commitment_transaction.is_some() =>
+                                        && state.latest_commitment_transaction().is_some() =>
                                 {
                                     debug!(
                                         "Handling force shutdown command in AwaitingChannelReady state, flags: {:?}",
@@ -7193,7 +7193,7 @@ where
                                 ChannelState::AwaitingTxSignatures(_)
                                     if state.ephemeral_config.external_funding.signed_submitted
                                         && state.funding_tx_confirmed_at.is_some()
-                                        && state.latest_commitment_transaction.is_some() =>
+                                        && state.latest_commitment_transaction().is_some() =>
                                 {
                                     debug!("Handling force shutdown after early external funding confirmation");
                                 }
