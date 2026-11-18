@@ -3091,10 +3091,16 @@ where
                 if let Some(mut opening) = state.store.get_tenant_channel_opening(&channel_id) {
                     if opening.result.is_none() {
                         if let Some(channel) = state.store.get_channel_actor_state(&channel_id) {
-                            let result = channel.tenant_opening_result(funding_tx.clone());
-                            opening.result = Some(result.clone());
-                            state.store.put_tenant_channel_opening(opening);
-                            state.reply_tenant_opening(channel_id, Ok(result));
+                            match channel.tenant_opening_result(funding_tx.clone()) {
+                                Ok(result) => {
+                                    opening.result = Some(result.clone());
+                                    state.store.put_tenant_channel_opening(opening);
+                                    state.reply_tenant_opening(channel_id, Ok(result));
+                                }
+                                Err(err) => {
+                                    state.reply_tenant_opening(channel_id, Err(err));
+                                }
+                            }
                         }
                     }
                 }
@@ -4216,9 +4222,10 @@ where
                                 {
                                     if let Some(external) = &channel.external_funding {
                                         if !external.signed_submitted {
-                                            opening.result = Some(channel.tenant_opening_result(
+                                            let result = channel.tenant_opening_result(
                                                 external.unsigned_funding_tx.clone(),
-                                            ));
+                                            )?;
+                                            opening.result = Some(result);
                                             state.store.put_tenant_channel_opening(opening.clone());
                                         }
                                     }

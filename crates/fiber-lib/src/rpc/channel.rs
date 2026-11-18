@@ -14,7 +14,9 @@ use crate::rpc::utils::{rpc_error, RpcResultExt};
 use crate::rpc_scope::{BackendResolver, RpcBackendStore, ScopedBackend};
 use crate::{handle_actor_call, log_and_error};
 use ckb_types::{
-    core::{EpochNumberWithFraction as EpochNumberWithFractionCore, FeeRate},
+    core::{
+        DepType, EpochNumberWithFraction as EpochNumberWithFractionCore, FeeRate, ScriptHashType,
+    },
     packed::{self},
     prelude::{IntoTransactionView, Unpack},
 };
@@ -773,14 +775,12 @@ where
                 command, rpc_reply,
             ))
         };
-        handle_actor_call!(self.actor()?, message, params).map(|response| {
-            OpenChannelWithExternalFundingResult {
-                channel_id: response.channel_id.into(),
-                unsigned_funding_tx: ckb_jsonrpc_types::Transaction::from(
-                    response.unsigned_funding_tx,
-                ),
-                opening_context: None,
-            }
+        let response = handle_actor_call!(self.actor()?, message, params)?;
+        Ok(OpenChannelWithExternalFundingResult {
+            channel_id: response.channel_id.into(),
+            unsigned_funding_tx: try_into_rpc_transaction(response.unsigned_funding_tx)
+                .rpc_err()?,
+            opening_context: None,
         })
     }
 
@@ -981,7 +981,7 @@ fn to_rpc_musig2_signing_content(
         commitment_counter: content.commitment_counter.map(to_rpc_commitment_counter),
         key_agg_ctx: content.key_agg_ctx.serialize(),
         agg_nonce: content.agg_nonce.serialize().to_vec(),
-        content: to_rpc_musig2_signable_content(content.content),
+        content: to_rpc_musig2_signable_content(content.content)?,
     })
 }
 
@@ -1005,37 +1005,73 @@ fn to_rpc_commitment_counter(
     }
 }
 
+/// Validates that a packed `Script` has a valid `ScriptHashType` before JSON-RPC conversion.
+pub(crate) fn validate_packed_script_hash_type(script: &packed::Script) -> Result<(), String> {
+    ScriptHashType::try_from(script.hash_type())
+        .map(|_| ())
+        .map_err(|err| format!("invalid script hash_type: {err}"))
+}
+
+/// Converts a packed `Script` into `ckb_jsonrpc_types::Script`, rejecting invalid `hash_type` bytes.
+pub(crate) fn try_into_rpc_script(
+    script: packed::Script,
+) -> Result<ckb_jsonrpc_types::Script, String> {
+    validate_packed_script_hash_type(&script)?;
+    Ok(script.into())
+}
+
+/// Converts a packed `Transaction` into `ckb_jsonrpc_types::Transaction` without panicking on
+/// invalid `dep_type` or `hash_type` bytes.
+pub(crate) fn try_into_rpc_transaction(
+    tx: packed::Transaction,
+) -> Result<ckb_jsonrpc_types::Transaction, String> {
+    let raw = tx.raw();
+    for cell_dep in raw.cell_deps() {
+        DepType::try_from(cell_dep.dep_type())
+            .map_err(|err| format!("invalid cell_dep dep_type: {err}"))?;
+    }
+    for output in raw.outputs() {
+        validate_packed_script_hash_type(&output.lock())?;
+        if let Some(type_script) = output.type_().to_opt() {
+            validate_packed_script_hash_type(&type_script)?;
+        }
+    }
+    Ok(tx.into())
+}
+
 fn to_rpc_musig2_signable_content(
     content: fiber_types::Musig2SignableContent,
-) -> fiber_json_types::Musig2SignableContent {
+) -> Result<fiber_json_types::Musig2SignableContent, String> {
     if matches!(
         content,
         fiber_types::Musig2SignableContent::ChannelAnnouncement(_)
     ) {
-        return fiber_json_types::Musig2SignableContent::ChannelAnnouncement {
-            unsigned_announcement: content.canonical_bytes(),
-        };
+        return Ok(
+            fiber_json_types::Musig2SignableContent::ChannelAnnouncement {
+                unsigned_announcement: content.canonical_bytes(),
+            },
+        );
     }
     match content {
-        fiber_types::Musig2SignableContent::CommitmentTransaction(transaction) => {
+        fiber_types::Musig2SignableContent::CommitmentTransaction(transaction) => Ok(
             fiber_json_types::Musig2SignableContent::CommitmentTransaction {
-                transaction: transaction.into(),
-            }
-        }
-        fiber_types::Musig2SignableContent::CooperativeCloseTransaction(transaction) => {
+                transaction: try_into_rpc_transaction(transaction)?,
+            },
+        ),
+        fiber_types::Musig2SignableContent::CooperativeCloseTransaction(transaction) => Ok(
             fiber_json_types::Musig2SignableContent::CooperativeCloseTransaction {
-                transaction: transaction.into(),
-            }
-        }
+                transaction: try_into_rpc_transaction(transaction)?,
+            },
+        ),
         fiber_types::Musig2SignableContent::Revocation {
             output,
             output_data,
             commitment_lock_script_args,
-        } => fiber_json_types::Musig2SignableContent::Revocation {
+        } => Ok(fiber_json_types::Musig2SignableContent::Revocation {
             output,
             output_data,
             commitment_lock_script_args,
-        },
+        }),
         fiber_types::Musig2SignableContent::ChannelAnnouncement(_) => {
             unreachable!("ChannelAnnouncement is converted from canonical bytes before this match")
         }
@@ -1285,5 +1321,93 @@ mod signing_snapshot_tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn try_into_rpc_script_and_tx_reject_invalid_hash_type_and_dep_type() {
+        use ckb_types::{
+            packed,
+            prelude::{Builder, Entity, Pack},
+        };
+
+        let invalid_script = packed::Script::new_builder()
+            .hash_type(packed::Byte::new(0xff))
+            .build();
+        assert!(super::validate_packed_script_hash_type(&invalid_script).is_err());
+        assert!(super::try_into_rpc_script(invalid_script.clone()).is_err());
+
+        let invalid_lock_tx = packed::Transaction::new_builder()
+            .raw(
+                packed::RawTransaction::new_builder()
+                    .outputs(
+                        packed::CellOutputVec::new_builder()
+                            .push(
+                                packed::CellOutput::new_builder()
+                                    .lock(invalid_script.clone())
+                                    .build(),
+                            )
+                            .build(),
+                    )
+                    .build(),
+            )
+            .build();
+        assert!(super::try_into_rpc_transaction(invalid_lock_tx).is_err());
+
+        let invalid_type_tx = packed::Transaction::new_builder()
+            .raw(
+                packed::RawTransaction::new_builder()
+                    .outputs(
+                        packed::CellOutputVec::new_builder()
+                            .push(
+                                packed::CellOutput::new_builder()
+                                    .type_(Some(invalid_script).pack())
+                                    .build(),
+                            )
+                            .build(),
+                    )
+                    .build(),
+            )
+            .build();
+        assert!(super::try_into_rpc_transaction(invalid_type_tx).is_err());
+
+        let invalid_dep_tx = packed::Transaction::new_builder()
+            .raw(
+                packed::RawTransaction::new_builder()
+                    .cell_deps(
+                        packed::CellDepVec::new_builder()
+                            .push(
+                                packed::CellDep::new_builder()
+                                    .dep_type(packed::Byte::new(0xff))
+                                    .build(),
+                            )
+                            .build(),
+                    )
+                    .build(),
+            )
+            .build();
+        assert!(super::try_into_rpc_transaction(invalid_dep_tx.clone()).is_err());
+
+        let local = Privkey::from(&[1; 32]).pubkey();
+        let remote = Privkey::from(&[2; 32]).pubkey();
+        let public_nonce = musig2::SecNonce::build([3; 32]).build().public_nonce();
+        let content = fiber_types::Musig2SigningContent {
+            v2: Some(fiber_types::V2NonceBinding {
+                channel_id: [4; 32].into(),
+                owner: local,
+                public_nonce: public_nonce.clone(),
+            }),
+            slot: fiber_types::NonceSlot {
+                purpose: fiber_types::NoncePurpose::Closing,
+                commitment_number: 0,
+            },
+            commitment_counter: None,
+            key_agg_ctx: musig2::KeyAggContext::new([local, remote]).expect("valid key agg"),
+            agg_nonce: musig2::AggNonce::sum([public_nonce]),
+            content: fiber_types::Musig2SignableContent::CooperativeCloseTransaction(
+                invalid_dep_tx,
+            ),
+        };
+        let err = to_rpc_musig2_signing_content(content).unwrap_err();
+        assert!(err.contains("invalid cell_dep dep_type"), "{err}");
     }
 }

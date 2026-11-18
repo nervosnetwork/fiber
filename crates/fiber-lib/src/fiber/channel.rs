@@ -6147,18 +6147,20 @@ impl ChannelActorState {
     pub(crate) fn tenant_opening_result(
         &self,
         funding_tx: Transaction,
-    ) -> fiber_json_types::OpenChannelWithExternalFundingResult {
+    ) -> std::result::Result<fiber_json_types::OpenChannelWithExternalFundingResult, String> {
         let channel = self;
         let channel_id = self.get_id();
         let remote = channel.get_remote_channel_public_keys();
         let ckb = channel.funding_udt_type_script.is_none();
-        return fiber_json_types::OpenChannelWithExternalFundingResult {
+        Ok(fiber_json_types::OpenChannelWithExternalFundingResult {
             channel_id: channel_id.into(),
-            unsigned_funding_tx: funding_tx.into(),
+            unsigned_funding_tx: crate::rpc::channel::try_into_rpc_transaction(funding_tx)?,
             opening_context: Some(fiber_json_types::TenantChannelOpeningContext {
                 remote_funding_key: remote.funding_pubkey.into(),
                 remote_settlement_key: remote.tlc_base_key.into(),
-                remote_shutdown_script: channel.get_remote_shutdown_script().into(),
+                remote_shutdown_script: crate::rpc::channel::try_into_rpc_script(
+                    channel.get_remote_shutdown_script(),
+                )?,
                 commitment_delay_epoch: channel.commitment_delay_epoch.into(),
                 commitment_fee_rate: channel.commitment_fee_rate,
                 local_amount: channel.to_local_amount
@@ -6176,7 +6178,7 @@ impl ChannelActorState {
                 local_reserved_ckb_amount: channel.local_reserved_ckb_amount,
                 remote_reserved_ckb_amount: channel.remote_reserved_ckb_amount,
             }),
-        };
+        })
     }
 }
 
@@ -7393,6 +7395,13 @@ impl ChannelActorState {
         local_max_tlc_number_in_flight: u64,
         remote_max_tlc_number_in_flight: u64,
     ) -> ProcessingChannelResult {
+        crate::rpc::channel::validate_packed_script_hash_type(remote_shutdown_script)
+            .map_err(ProcessingChannelError::InvalidParameter)?;
+        if let Some(udt_type_script) = udt_type_script {
+            crate::rpc::channel::validate_packed_script_hash_type(udt_type_script)
+                .map_err(ProcessingChannelError::InvalidParameter)?;
+        }
+
         if local_max_tlc_number_in_flight > MAX_TLC_NUMBER_IN_FLIGHT {
             return Err(ProcessingChannelError::InvalidParameter(format!(
                 "Local max TLC number in flight {} is greater than the system maximal value {}",
@@ -8442,6 +8451,9 @@ impl ChannelActorState {
     }
 
     fn check_shutdown_fee_valid(&self, remote_close_script: &Script, remote_fee_rate: u64) -> bool {
+        if crate::rpc::channel::validate_packed_script_hash_type(remote_close_script).is_err() {
+            return false;
+        }
         let remote_shutdown_fee = match checked_calculate_shutdown_tx_fee(
             remote_fee_rate,
             &self.funding_udt_type_script,
@@ -13501,6 +13513,54 @@ mod tests {
             tlc.removed_reason = Some(fail);
             assert!(state.pending_received_tlc_claim_preimage(&tlc).is_none());
         }
+    }
+
+    #[test]
+    fn reject_invalid_script_hash_type_in_channel_validation_and_tenant_opening() {
+        let state =
+            channel_state_with_limits(ChannelConstraints::default(), ChannelConstraints::default());
+        let invalid_script = Script::new_builder()
+            .hash_type(ckb_types::packed::Byte::new(0xff))
+            .build();
+
+        assert!(!state.check_shutdown_fee_valid(&invalid_script, DEFAULT_FEE_RATE));
+
+        let err = ChannelActorState::check_accept_channel_parameters_for_values(
+            1_000_000,
+            1_000_000,
+            6_100_000_000,
+            6_100_000_000,
+            DEFAULT_COMMITMENT_FEE_RATE,
+            &None,
+            &invalid_script,
+            1,
+            1,
+        )
+        .unwrap_err();
+        assert!(matches!(err, ProcessingChannelError::InvalidParameter(_)));
+
+        let udt_err = ChannelActorState::check_accept_channel_parameters_for_values(
+            1_000_000,
+            1_000_000,
+            14_200_000_000,
+            14_200_000_000,
+            DEFAULT_COMMITMENT_FEE_RATE,
+            &Some(invalid_script.clone()),
+            &Script::default(),
+            1,
+            1,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            udt_err,
+            ProcessingChannelError::InvalidParameter(_)
+        ));
+
+        let mut tenant_state = state;
+        tenant_state.core.remote_shutdown_script = Some(invalid_script);
+        assert!(tenant_state
+            .tenant_opening_result(Transaction::default())
+            .is_err());
     }
 }
 
