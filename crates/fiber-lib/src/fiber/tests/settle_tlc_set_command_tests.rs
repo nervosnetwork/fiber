@@ -432,7 +432,6 @@ pub(crate) fn create_test_channel_state_with_tlc(
             local_shutdown_info: None,
             remote_shutdown_info: None,
             shutdown_transaction_hash: None,
-            latest_commitment_transaction: None,
             reestablishing: false,
             connectivity_state: fiber_types::ChannelConnectivityState::Online,
             pending_replay_updates: vec![],

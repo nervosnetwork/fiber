@@ -312,7 +312,6 @@ fn unaccepted_initial_cs_fixture(state: &mut ChannelActorState) -> CommitmentSig
         local: 1,
         remote: 1,
     };
-    state.latest_commitment_transaction = None;
     let session = &mut state.session;
     session.own = initial.funding;
     session.own.context = None;
@@ -545,7 +544,7 @@ async fn test_v2_commitment_acceptance_commits_once_before_publication() {
     let ack =
         RevokeAndAckV2::try_from(session.incoming.as_ref().unwrap().response.clone().unwrap())
             .unwrap();
-    assert!(stored.latest_commitment_transaction.is_some());
+    assert!(stored.latest_commitment_transaction().is_some());
 
     let sender_actor =
         ChannelActor::new(a.pubkey, b.pubkey, network.clone(), MockStore::new(), None);
@@ -1152,7 +1151,7 @@ async fn test_v2_external_funding_response_replay_is_phase_and_witness_bound() {
             "early" => {
                 state.state = ChannelState::SigningCommitment(SigningCommitmentFlags::empty())
             }
-            "no_history" => state.latest_commitment_transaction = None,
+            "no_history" => state.session.incoming = None,
             "acceptor" => state.is_acceptor = true,
             "ready" => state.state = ChannelState::ChannelReady,
             _ => {}
@@ -3227,13 +3226,13 @@ async fn test_v2_remote_commitment_points_survive_asymmetric_rounds_and_restore(
                 received.status,
                 fiber_types::TlcStatus::Inbound(fiber_types::InboundTlcStatus::Committed)
             );
-            let signed = local.latest_commitment_transaction.clone().unwrap();
+            let signed = local.latest_commitment_transaction().clone().unwrap();
             a.store.insert_channel_actor_state(local.clone());
             local = a.store.get_channel_actor_state(&id).unwrap();
             local.validate_session().unwrap();
             assert_eq!(
                 local
-                    .latest_commitment_transaction
+                    .latest_commitment_transaction()
                     .as_ref()
                     .unwrap()
                     .as_slice(),
@@ -4281,7 +4280,7 @@ async fn test_v2_actual_backup_rollback_quarantines_matching_malicious_peer() {
     let mut peer = b.get_channel_actor_state(id);
     let old_peer = peer.clone();
     let backed_up_nonce = local.session.own.public_nonce.clone();
-    let predecessor = local.latest_commitment_transaction.clone().unwrap();
+    let predecessor = local.latest_commitment_transaction().clone().unwrap();
     let consumed_funding_nonce;
     let myself = a.get_channel_actor(id).await.unwrap();
     let root = tempfile::tempdir().unwrap();
@@ -4309,7 +4308,7 @@ async fn test_v2_actual_backup_rollback_quarantines_matching_malicious_peer() {
         );
         assert_ne!(
             local
-                .latest_commitment_transaction
+                .latest_commitment_transaction()
                 .as_ref()
                 .unwrap()
                 .as_slice(),
@@ -4332,7 +4331,7 @@ async fn test_v2_actual_backup_rollback_quarantines_matching_malicious_peer() {
     assert_eq!(stale.state, ChannelState::Stale);
     assert_eq!(
         stale
-            .latest_commitment_transaction
+            .latest_commitment_transaction()
             .as_ref()
             .unwrap()
             .as_slice(),
@@ -4507,7 +4506,7 @@ async fn test_v2_close_peer_obligations_timeout_normal_and_reconnect() {
             let mut state = a.get_channel_actor_state(id);
             let mut peer = b.get_channel_actor_state(id);
             let myself = a.get_channel_actor(id).await.unwrap();
-            let predecessor = state.latest_commitment_transaction.clone().unwrap();
+            let predecessor = state.latest_commitment_transaction().clone().unwrap();
             let (request, _) = peer.prepare_outgoing_v2(false).unwrap();
             peer.tlc_state.waiting_ack = true;
             state.stage_incoming_v2(&request, false).unwrap();
@@ -4517,7 +4516,7 @@ async fn test_v2_close_peer_obligations_timeout_normal_and_reconnect() {
             peer.accept_ack_v2(&myself, &ack.unwrap(), false).unwrap();
             assert_ne!(
                 state
-                    .latest_commitment_transaction
+                    .latest_commitment_transaction()
                     .as_ref()
                     .unwrap()
                     .as_slice(),
@@ -4862,7 +4861,7 @@ async fn assert_offline_close_restart_rearms(closing: bool, expectation: Restart
         create_nodes_with_established_channel(100000000000, 11800000000, false).await;
     let predecessor = a
         .get_channel_actor_state(id)
-        .latest_commitment_transaction
+        .latest_commitment_transaction()
         .clone()
         .unwrap();
     let payment = a.send_payment_keysend(&b, 1000, false).await.unwrap();
@@ -5225,7 +5224,7 @@ async fn test_v2_close_after_update_crash_replay_conflicts_and_db_validation() {
     let ack = ack.unwrap();
     sa.stage_ack_v2(&ack).unwrap();
     sa.accept_ack_v2(&myself, &ack, false).unwrap();
-    let usable = sa.latest_commitment_transaction.clone().unwrap();
+    let usable = sa.latest_commitment_transaction().clone().unwrap();
     let old_nonce = sa.session.own.public_nonce.clone();
     let captured = Arc::new(Mutex::new(Vec::new()));
     let (network, task) = Actor::spawn(None, CaptureNetwork, captured.clone())
@@ -5303,7 +5302,7 @@ async fn test_v2_close_after_update_crash_replay_conflicts_and_db_validation() {
         original.response.as_ref().unwrap().as_slice()
     );
     assert_eq!(
-        sa.latest_commitment_transaction
+        sa.latest_commitment_transaction()
             .as_ref()
             .unwrap()
             .as_slice(),
@@ -5416,7 +5415,6 @@ async fn test_v2_close_after_update_crash_replay_conflicts_and_db_validation() {
                     .build()
                     .data();
                 incoming.transaction = tx.clone();
-                bad.latest_commitment_transaction = Some(tx);
             }
         }
         let encoded = bincode::serialize(&bad).unwrap();
@@ -6473,7 +6471,7 @@ async fn test_v2_recovery_resumes_staged_incoming_and_ack() {
         assert!(a_state.session.pending_ack.is_none());
         assert!(b_state.session.pending_incoming.is_none());
         let usable = b_state
-            .latest_commitment_transaction
+            .latest_commitment_transaction()
             .clone()
             .unwrap()
             .into_view();

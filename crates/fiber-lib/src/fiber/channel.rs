@@ -783,7 +783,7 @@ where
                 if state.session.incoming.is_some()
                     && state.session.outgoing.is_some()
                     && matches!(state.state, ChannelState::AwaitingChannelReady(_))
-                    && state.latest_commitment_transaction.is_some()
+                    && state.latest_commitment_transaction().is_some()
                     && state.ephemeral_config.external_funding.enabled
                     && state.ephemeral_config.external_funding.signed_submitted
                     && state
@@ -2199,7 +2199,7 @@ where
             }
             ChannelState::AwaitingChannelReady(flags)
                 if flags.contains(AwaitingChannelReadyFlags::OUR_CHANNEL_READY)
-                    && state.latest_commitment_transaction.is_some() =>
+                    && state.latest_commitment_transaction().is_some() =>
             {
                 debug!(
                     "Handling force shutdown command in AwaitingChannelReady state, flags: {:?}",
@@ -2209,7 +2209,7 @@ where
             ChannelState::AwaitingTxSignatures(_)
                 if state.ephemeral_config.external_funding.signed_submitted
                     && state.funding_tx_confirmed_at.is_some()
-                    && state.latest_commitment_transaction.is_some() =>
+                    && state.latest_commitment_transaction().is_some() =>
             {
                 debug!("Handling force shutdown after early external funding confirmation");
             }
@@ -3848,7 +3848,7 @@ where
             state.state,
             ChannelState::SigningCommitment(flags)
                 if flags.contains(SigningCommitmentFlags::COMMITMENT_SIGNED_SENT)
-        ) && state.latest_commitment_transaction.is_some();
+        ) && state.latest_commitment_transaction().is_some();
         if !can_submit {
             return Err(ProcessingChannelError::InvalidState(format!(
                 "Cannot submit signed external funding tx until peer CommitmentSigned is verified; state {:?}",
@@ -3877,7 +3877,7 @@ where
         &self,
         state: &ChannelActorState,
     ) -> ProcessingChannelResult {
-        if state.latest_commitment_transaction.is_none() {
+        if state.latest_commitment_transaction().is_none() {
             return Err(ProcessingChannelError::InvalidState(
                 "Cannot return external funding transaction without a local commitment".to_owned(),
             ));
@@ -3907,7 +3907,7 @@ where
         state: &ChannelActorState,
     ) -> ProcessingChannelResult {
         // A crash after sending TxUpdate must leave the local commitment available.
-        if state.latest_commitment_transaction.is_none() {
+        if state.latest_commitment_transaction().is_none() {
             return Err(ProcessingChannelError::InvalidState(
                 "Cannot release signed funding tx without a local commitment".to_string(),
             ));
@@ -4017,7 +4017,7 @@ where
                     ChannelState::AwaitingTxSignatures(flags)
                         if !flags.contains(AwaitingTxSignaturesFlags::TX_SIGNATURES_SENT)
                 ) && state.ephemeral_config.external_funding.signed_submitted
-                    && state.latest_commitment_transaction.is_some()
+                    && state.latest_commitment_transaction().is_some()
                 {
                     // Keep exchanging TxSignatures before sending ChannelReady. The
                     // signed funding tx may already be on chain, but the peer may
@@ -6672,7 +6672,6 @@ impl ChannelActorState {
                     remote_max_tlc_value_in_flight,
                     remote_max_tlc_number_in_flight,
                 ),
-                latest_commitment_transaction: None,
                 reestablishing: false,
                 connectivity_state: ChannelConnectivityState::Online,
                 pending_replay_updates: vec![],
@@ -6770,7 +6769,6 @@ impl ChannelActorState {
                 shutdown_transaction_hash: None,
                 local_reserved_ckb_amount,
                 remote_reserved_ckb_amount: 0,
-                latest_commitment_transaction: None,
                 reestablishing: false,
                 connectivity_state: ChannelConnectivityState::Online,
                 pending_replay_updates: vec![],
@@ -8773,9 +8771,9 @@ impl ChannelActorState {
                     // peer's CommitmentSigned (which is what populates
                     // latest_commitment_transaction). Without this, get_latest_commitment_transaction
                     // would panic on force-close. See GHSA-x6rw-txsignatures-verification.
-                    if self.latest_commitment_transaction.is_none() {
+                    if self.latest_commitment_transaction().is_none() {
                         error!(
-                            "Refusing to advance to ChannelReady for channel {:?}: latest_commitment_transaction is not set; the peer likely skipped sending CommitmentSigned",
+                            "Refusing to advance to ChannelReady for channel {:?}: no usable commitment transaction; the peer likely skipped sending CommitmentSigned",
                             self.get_id()
                         );
                         return;
@@ -9532,9 +9530,8 @@ impl ChannelActorState {
     ) -> Result<TransactionView, ProcessingChannelError> {
         self.ensure_v2_not_quarantined()?;
         let tx = self
-            .latest_commitment_transaction
-            .clone()
-            .expect("latest_commitment_transaction should exist");
+            .latest_commitment_transaction()
+            .expect("the usable commitment transaction should exist");
         let cell_deps = get_cell_deps(vec![Contract::FundingLock], &self.funding_udt_type_script)
             .await
             .map_err(|e| ProcessingChannelError::InternalError(e.to_string()))?;
@@ -10529,8 +10526,8 @@ impl ChannelActorState {
             .as_advanced_builder()
             .set_witnesses(vec![witness.pack()])
             .build();
-        // Install usable commitment before creating any predecessor revocation.
-        self.latest_commitment_transaction = Some(tx.data());
+        // Installing the commitment (below, as `session.incoming`) happens before creating any
+        // predecessor revocation; `latest_commitment_transaction()` derives from it.
         let funding = session.own.clone();
         let mut revocation = None;
         let response = if let Some(remote_nonce) = &request.revocation_nonce {
@@ -12232,7 +12229,6 @@ mod tests {
                 waiting_forward_tlc_tasks: HashMap::new(),
                 remote_shutdown_script: None,
                 local_shutdown_script: Script::default(),
-                latest_commitment_transaction: None,
                 remote_commitment_points: Vec::new(),
                 remote_channel_public_keys: Some(remote_signer.get_base_public_keys()),
                 local_shutdown_info: None,

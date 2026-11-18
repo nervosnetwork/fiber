@@ -5,7 +5,8 @@ use super::{decode_as_new, OldChannelActorData};
 pub(super) fn released_v2(
     channel: ChannelActorData,
 ) -> (OldChannelActorData, Option<ChannelSessionV2>) {
-    let session = channel.session;
+    let session = channel.session.clone();
+    let latest_commitment_transaction = channel.latest_commitment_transaction();
     let old = OldChannelActorData {
         state: decode_as_new(channel.state).unwrap(),
         public_channel_info: decode_as_new(channel.public_channel_info).unwrap(),
@@ -17,6 +18,7 @@ pub(super) fn released_v2(
         funding_tx: channel.funding_tx,
         funding_tx_confirmed_at: channel.funding_tx_confirmed_at,
         funding_udt_type_script: channel.funding_udt_type_script,
+        latest_commitment_transaction,
         is_acceptor: channel.is_acceptor,
         is_one_way: channel.is_one_way,
         to_local_amount: channel.to_local_amount,
@@ -36,7 +38,6 @@ pub(super) fn released_v2(
         waiting_forward_tlc_tasks: decode_as_new(channel.waiting_forward_tlc_tasks).unwrap(),
         remote_shutdown_script: channel.remote_shutdown_script,
         local_shutdown_script: channel.local_shutdown_script,
-        latest_commitment_transaction: channel.latest_commitment_transaction,
         remote_commitment_points: decode_as_new(channel.remote_commitment_points).unwrap(),
         remote_channel_public_keys: decode_as_new(channel.remote_channel_public_keys).unwrap(),
         local_shutdown_info: decode_as_new(channel.local_shutdown_info).unwrap(),

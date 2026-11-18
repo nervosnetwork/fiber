@@ -1740,11 +1740,6 @@ pub struct ChannelActorData {
     #[serde_as(as = "EntityHex")]
     pub local_shutdown_script: Script,
 
-    /// The latest commitment transaction we're holding,
-    /// it can be broadcasted to blockchain by us to force close the channel.
-    #[serde_as(as = "Option<EntityHex>")]
-    pub latest_commitment_transaction: Option<Transaction>,
-
     /// All the commitment point that are sent from the counterparty.
     /// We need to save all these points to derive the keys for the commitment transactions.
     pub remote_commitment_points: Vec<(u64, Pubkey)>,
@@ -1785,6 +1780,19 @@ pub struct ChannelActorData {
     pub channel_features: ChannelFeatures,
     /// Independent owner signing sessions.
     pub session: ChannelSessionV2,
+}
+
+impl ChannelActorData {
+    /// Latest commitment transaction, derived from the accepted incoming commitment.
+    ///
+    /// `accept_commitment_v2` installs the usable transaction in `session.incoming` in the same
+    /// step, so the record never needs to store it separately.
+    pub fn latest_commitment_transaction(&self) -> Option<Transaction> {
+        self.session
+            .incoming
+            .as_ref()
+            .map(|incoming| incoming.transaction.clone())
+    }
 }
 
 impl From<PubNonce> for molecule_fiber::PubNonce {

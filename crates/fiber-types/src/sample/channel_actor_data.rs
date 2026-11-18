@@ -98,7 +98,6 @@ fn sample_v2(seed: u64) -> ChannelActorData {
         waiting_forward_tlc_tasks: HashMap::new(),
         remote_shutdown_script: None,
         local_shutdown_script: ckb_types::packed::Script::default(),
-        latest_commitment_transaction: None,
         remote_commitment_points: vec![],
         remote_channel_public_keys: None,
         local_shutdown_info: None,
