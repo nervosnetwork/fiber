@@ -457,6 +457,8 @@ pub(crate) fn create_test_channel_state_with_tlc(
         funding_abort_detail: None,
         private_key: None,
         needs_backup: false,
+        musig2_agg_context_local_first: Default::default(),
+        musig2_agg_context_remote_first: Default::default(),
     }
 }
 
