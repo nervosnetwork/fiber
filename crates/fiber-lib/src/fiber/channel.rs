@@ -9521,15 +9521,9 @@ impl ChannelActorState {
     }
 
     pub(crate) fn get_commitment_lock_script_xonly(&self, for_remote: bool) -> [u8; 32] {
-        let local_pubkey = self.get_local_channel_public_keys().funding_pubkey;
-        let remote_pubkey = self.get_remote_channel_public_keys().funding_pubkey;
-        let pubkeys = if for_remote {
-            [local_pubkey, remote_pubkey]
-        } else {
-            [remote_pubkey, local_pubkey]
-        };
-        let key_agg_ctx = KeyAggContext::new(pubkeys).expect("Valid pubkeys");
-        key_agg_ctx.aggregated_pubkey::<Point>().serialize_xonly()
+        self.musig2_agg_context(for_remote)
+            .aggregated_pubkey::<Point>()
+            .serialize_xonly()
     }
 
     /// Get the latest commitment transaction with updated cell deps
@@ -11026,7 +11020,7 @@ where
             state.signer.funding_key.pubkey(),
             *state.get_remote_funding_pubkey(),
         );
-        let aggregate = musig2::KeyAggContext::new(keys).map_err(|e| invalid(e.to_string()))?;
+        let aggregate = state.get_deterministic_musig2_agg_context();
         let nonce = AggNonce::sum([close.own.public_nonce.clone(), remote.closing_nonce]);
         let message = compute_tx_message(&tx);
         let key = state.signer.funding_key.clone();
@@ -11129,11 +11123,7 @@ where
                 .ok_or_else(|| invalid("Missing remote closing nonce"))?,
         )
         .map_err(|e| invalid(e.to_string()))?;
-        let keys = state.order_things_for_musig2(
-            state.signer.funding_key.pubkey(),
-            *state.get_remote_funding_pubkey(),
-        );
-        let aggregate = musig2::KeyAggContext::new(keys).map_err(|e| invalid(e.to_string()))?;
+        let aggregate = state.get_deterministic_musig2_agg_context();
         let nonce = AggNonce::sum([close.own.public_nonce.clone(), remote.closing_nonce.clone()]);
         musig2::verify_partial(
             &aggregate,
