@@ -35,10 +35,10 @@ use fiber_types::schema::*;
 #[cfg(feature = "watchtower")]
 use fiber_types::ChannelFeatures;
 use fiber_types::{
-    Attempt, AttemptStatus, BroadcastMessage, BroadcastMessageID, ChannelData, ChannelOpenRecord,
-    ChannelState, Cursor, Direction, Hash256, PaymentCustomRecords, PaymentSession, PaymentStatus,
-    PersistentNetworkActorState, Pubkey, SettlementData, ShutdownSettlementRecord, TLCId,
-    TimedResult, CURSOR_SIZE,
+    Attempt, AttemptStatus, BroadcastMessage, BroadcastMessageID, ChannelData,
+    ChannelImmutableData, ChannelMutableData, ChannelOpenRecord, ChannelState, Cursor, Direction,
+    Hash256, PaymentCustomRecords, PaymentSession, PaymentStatus, PersistentNetworkActorState,
+    Pubkey, SettlementData, ShutdownSettlementRecord, TLCId, TimedResult, CURSOR_SIZE,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use fiber_types::{CchOrder, CchReceiveBtcOrderCreation, CchSendBtcOrderCreation};
@@ -247,10 +247,72 @@ where
         .unwrap_or_else(|e| panic!("deserialization of {} failed: {}", field_name, e))
 }
 
-fn deserialize_channel_state(bytes: &[u8]) -> ChannelActorState {
-    fiber_types::channel_v2_validation::decode_channel_actor_data(bytes)
+fn deserialize_channel_state(id: &Hash256, mutable: &[u8], immutable: &[u8]) -> ChannelActorState {
+    fiber_types::channel_v2_validation::decode_channel_actor_data_parts(id, mutable, immutable)
         .unwrap_or_else(|e| panic!("deserialization of ChannelActorState failed: {e}"))
         .into()
+}
+
+fn channel_mutable_key(id: &Hash256) -> Vec<u8> {
+    [&[CHANNEL_ACTOR_STATE_PREFIX], id.as_ref()].concat()
+}
+
+fn channel_immutable_key(id: &Hash256) -> Vec<u8> {
+    [&[CHANNEL_IMMUTABLE_STATE_PREFIX], id.as_ref()].concat()
+}
+
+/// Queue the two channel records plus their indexes into one atomic batch.
+// `store` is only read by the debug assertion.
+#[cfg_attr(not(debug_assertions), allow(unused_variables))]
+fn stage_channel_actor_state(
+    store: &Store,
+    batch: &mut impl BatchWriter,
+    state: ChannelActorState,
+) {
+    let id = state.id;
+    let channel_state = state.state;
+    let remote_pubkey = state.get_remote_pubkey();
+    let funding_outpoint = state.get_funding_transaction_outpoint();
+
+    let kv = KeyValue::PubkeyChannelId((remote_pubkey, id), channel_state);
+    batch.put(kv.key(), kv.value());
+    if let Some(outpoint) = funding_outpoint {
+        let kv = KeyValue::OutPointChannelId(outpoint, id);
+        batch.put(kv.key(), kv.value());
+    }
+
+    // Fixed once the channel is established: every opening-phase persist writes it and
+    // every transition to an established state is persisted, so established channels
+    // already have it. Checks below only cost work in debug builds.
+    // shortcut: a fixed field changed after ChannelReady is only caught by the debug
+    // assertion below and would not be persisted in release, upgrade if any runtime
+    // path needs to rewrite a field listed in ChannelImmutableData.
+    let write_immutable = !channel_state.is_established();
+    let (immutable, mutable) = state.core.into_parts();
+    let kv = KeyValue::ChannelMutableState(id, mutable);
+    batch.put(kv.key(), kv.value());
+    if write_immutable {
+        let kv = KeyValue::ChannelImmutableState(id, immutable);
+        batch.put(kv.key(), kv.value());
+    } else {
+        #[cfg(debug_assertions)]
+        debug_assert_immutable_unchanged(store, &id, &immutable);
+    }
+}
+
+/// Catch a field that was classified as immutable but is written on a live channel.
+#[cfg(debug_assertions)]
+fn debug_assert_immutable_unchanged(store: &Store, id: &Hash256, immutable: &ChannelImmutableData) {
+    let Some(stored) = store.get(channel_immutable_key(id)) else {
+        panic!("channel {id}: established state has no immutable record");
+    };
+    let stored: ChannelImmutableData = bincode::deserialize(&stored)
+        .unwrap_or_else(|e| panic!("stored immutable record of channel {id} is invalid: {e}"));
+    let differing = stored.differing_fields(immutable);
+    debug_assert!(
+        differing.is_empty(),
+        "channel {id}: immutable fields changed after the channel was established: {differing:?}"
+    );
 }
 
 /// Open a store at `path`, running auto-migration with auto-confirm.
@@ -347,6 +409,14 @@ pub fn check_validate<P: AsRef<Path>>(path: P) -> Result<(), String> {
 
         match key[0] {
             CHANNEL_ACTOR_STATE_PREFIX | CHANNEL_OPEN_RECORD_PREFIX | WATCHTOWER_CHANNEL_PREFIX => {
+            }
+            // Only split databases have these; pre-split ones are validated by the migration.
+            CHANNEL_IMMUTABLE_STATE_PREFIX => {
+                check_deserialization::<ChannelImmutableData>(
+                    &value,
+                    "CHANNEL_IMMUTABLE_STATE_PREFIX",
+                    &mut errors,
+                );
             }
             PUBLIC_KEY_NETWORK_ACTOR_STATE_PREFIX => {
                 check_deserialization::<PersistentNetworkActorState>(
@@ -481,7 +551,8 @@ fn parse_hold_tlc(key: &[u8], value: &[u8]) -> (Hash256, HoldTlc) {
 }
 
 pub enum KeyValue {
-    ChannelActorState(Hash256, ChannelActorState),
+    ChannelMutableState(Hash256, ChannelMutableData),
+    ChannelImmutableState(Hash256, ChannelImmutableData),
     CkbInvoice(Hash256, CkbInvoice),
     Preimage(Hash256, Hash256),
     CkbInvoiceStatus(Hash256, CkbInvoiceStatus),
@@ -586,9 +657,8 @@ pub trait StoreKeyValue {
 impl StoreKeyValue for KeyValue {
     fn key(&self) -> Vec<u8> {
         match self {
-            KeyValue::ChannelActorState(id, _) => {
-                [&[CHANNEL_ACTOR_STATE_PREFIX], id.as_ref()].concat()
-            }
+            KeyValue::ChannelMutableState(id, _) => channel_mutable_key(id),
+            KeyValue::ChannelImmutableState(id, _) => channel_immutable_key(id),
             KeyValue::CkbInvoice(id, _) => [&[CKB_INVOICE_PREFIX], id.as_ref()].concat(),
             KeyValue::Preimage(id, _) => [&[PREIMAGE_PREFIX], id.as_ref()].concat(),
             KeyValue::CkbInvoiceStatus(id, _) => {
@@ -694,7 +764,12 @@ impl StoreKeyValue for KeyValue {
 
     fn value(&self) -> Vec<u8> {
         match self {
-            KeyValue::ChannelActorState(_, state) => serialize_to_vec(state, "ChannelActorState"),
+            KeyValue::ChannelMutableState(_, state) => {
+                serialize_to_vec(state, "ChannelMutableState")
+            }
+            KeyValue::ChannelImmutableState(_, state) => {
+                serialize_to_vec(state, "ChannelImmutableState")
+            }
             KeyValue::CkbInvoice(_, invoice) => serialize_to_vec(invoice, "CkbInvoice"),
             KeyValue::Preimage(_, preimage) => serialize_to_vec(preimage, "Hash256"),
             KeyValue::CkbInvoiceStatus(_, status) => serialize_to_vec(status, "CkbInvoiceStatus"),
@@ -740,6 +815,24 @@ impl StoreKeyValue for KeyValue {
             }
             KeyValue::ChannelOpenRecord(_, record) => serialize_to_vec(record, "ChannelOpenRecord"),
         }
+    }
+}
+
+#[cfg(any(test, feature = "sample"))]
+impl Store {
+    /// Persist a fault-injected channel state, refreshing its immutable block too.
+    ///
+    /// Production channels never touch the immutable block once established, so the
+    /// normal write path skips it; tests that inject a fixed field need it stored.
+    pub fn insert_channel_actor_state_for_test(&self, state: ChannelActorState) {
+        let (immutable, _) = state.core.clone().into_parts();
+        let mut batch = self.batch();
+        batch.put(
+            channel_immutable_key(&state.id),
+            serialize_to_vec(&immutable, "ChannelImmutableData"),
+        );
+        batch.commit();
+        self.insert_channel_actor_state(state);
     }
 }
 
@@ -1049,21 +1142,16 @@ impl ChannelActorStateStore for Store {
     }
 
     fn get_channel_actor_state(&self, id: &Hash256) -> Option<ChannelActorState> {
-        let key = [&[CHANNEL_ACTOR_STATE_PREFIX], id.as_ref()].concat();
-        self.get(key).map(|v| deserialize_channel_state(v.as_ref()))
+        let mutable = self.get(channel_mutable_key(id))?;
+        let immutable = self.get(channel_immutable_key(id)).unwrap_or_else(|| {
+            panic!("channel {id} has no immutable record; run the database migration first")
+        });
+        Some(deserialize_channel_state(id, &mutable, &immutable))
     }
 
     fn insert_channel_actor_state(&self, state: ChannelActorState) {
         let mut batch = self.batch();
-
-        let kv = KeyValue::PubkeyChannelId((state.get_remote_pubkey(), state.id), state.state);
-        batch.put(kv.key(), kv.value());
-        if let Some(outpoint) = state.get_funding_transaction_outpoint() {
-            let kv = KeyValue::OutPointChannelId(outpoint, state.id);
-            batch.put(kv.key(), kv.value());
-        }
-        let kv = KeyValue::ChannelActorState(state.id, state);
-        batch.put(kv.key(), kv.value());
+        stage_channel_actor_state(self, &mut batch, state);
         batch.commit();
     }
 
@@ -1077,7 +1165,8 @@ impl ChannelActorStateStore for Store {
         let mut batch = self.batch();
 
         if let Some(old_state) = old_state {
-            batch.delete([&[CHANNEL_ACTOR_STATE_PREFIX], old_id.as_ref()].concat());
+            batch.delete(channel_mutable_key(old_id));
+            batch.delete(channel_immutable_key(old_id));
             let remote_pubkey_bytes = old_state.get_remote_pubkey().serialize();
             batch.delete(
                 [
@@ -1092,21 +1181,15 @@ impl ChannelActorStateStore for Store {
             }
         }
 
-        let kv = KeyValue::PubkeyChannelId((state.get_remote_pubkey(), state.id), state.state);
-        batch.put(kv.key(), kv.value());
-        if let Some(outpoint) = state.get_funding_transaction_outpoint() {
-            let kv = KeyValue::OutPointChannelId(outpoint, state.id);
-            batch.put(kv.key(), kv.value());
-        }
-        let kv = KeyValue::ChannelActorState(state.id, state);
-        batch.put(kv.key(), kv.value());
+        stage_channel_actor_state(self, &mut batch, state);
         batch.commit();
     }
 
     fn delete_channel_actor_state(&self, id: &Hash256) {
         if let Some(state) = self.get_channel_actor_state(id) {
             let mut batch = self.batch();
-            batch.delete([&[CHANNEL_ACTOR_STATE_PREFIX], id.as_ref()].concat());
+            batch.delete(channel_mutable_key(id));
+            batch.delete(channel_immutable_key(id));
             let remote_pubkey_bytes = state.get_remote_pubkey().serialize();
             batch.delete(
                 [
@@ -1172,7 +1255,13 @@ impl ChannelActorStateStore for Store {
         let prefix = &[CHANNEL_ACTOR_STATE_PREFIX];
         self.collect_by_prefix(prefix)
             .into_iter()
-            .map(|kv| deserialize_channel_state(kv.value.as_ref()))
+            .map(|kv| {
+                let channel_id: [u8; 32] = kv.key[1..]
+                    .try_into()
+                    .expect("channel id should be 32 bytes");
+                self.get_channel_actor_state(&channel_id.into())
+                    .expect("channel record must have both parts")
+            })
             .collect()
     }
 

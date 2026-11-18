@@ -11,6 +11,9 @@ use fiber_store::migration::{
 use std::cmp::Ordering;
 use std::sync::{Arc, RwLock};
 
+/// Layout published by the previous migration; the split migration is pending there.
+const PREVIOUS_DB_VERSION: &str = "20261113000001";
+
 fn gen_path() -> std::path::PathBuf {
     let tmp_dir = tempfile::Builder::new()
         .prefix("test-store")
@@ -237,9 +240,22 @@ fn test_nonempty_unversioned_database_is_not_stamped() {
     assert_eq!(store.get([0, 1]).unwrap(), b"unversioned channel bytes");
 }
 
+/// Write the two stored records of a current-epoch channel.
+fn put_split_channel(store: &fiber_store::Store, channel: &fiber_types::ChannelActorData) {
+    let (immutable, mutable) = channel.clone().into_parts();
+    store.put(
+        [&[1u8], channel.id.as_ref()].concat(),
+        bincode::serialize(&immutable).unwrap(),
+    );
+    store.put(
+        [&[0u8], channel.id.as_ref()].concat(),
+        bincode::serialize(&mutable).unwrap(),
+    );
+}
+
 #[test]
 #[cfg(feature = "watchtower")]
-fn test_current_epoch_rejects_other_channel_record_suffixes_without_writes() {
+fn test_upgrade_rejects_other_channel_record_suffixes_without_writes() {
     use crate::store::sample::StoreSample;
     use fiber_types::schema::{CHANNEL_OPEN_RECORD_PREFIX, WATCHTOWER_CHANNEL_PREFIX};
 
@@ -259,7 +275,7 @@ fn test_current_epoch_rejects_other_channel_record_suffixes_without_writes() {
         let key = [prefix, 1];
         {
             let store = fiber_store::Store::open_db(&path).unwrap();
-            store.put(MIGRATION_VERSION_KEY, LATEST_DB_VERSION);
+            store.put(MIGRATION_VERSION_KEY, PREVIOUS_DB_VERSION);
             store.put(key, &encoded);
         }
         assert!(crate::store::open_store(&path).is_err());
@@ -267,7 +283,7 @@ fn test_current_epoch_rejects_other_channel_record_suffixes_without_writes() {
         assert_eq!(store.get(key).unwrap(), encoded);
         assert_eq!(
             store.get(MIGRATION_VERSION_KEY).unwrap(),
-            LATEST_DB_VERSION.as_bytes()
+            PREVIOUS_DB_VERSION.as_bytes()
         );
     }
 }
@@ -277,36 +293,36 @@ fn test_v2_current_preflight_pages_closed_history_before_writes() {
     use crate::store::sample::StoreSample;
     use fiber_types::{ChannelActorData, ChannelState, CloseFlags};
     let path = gen_path();
-    let mut records = std::collections::BTreeMap::new();
+    let mut channels = Vec::new();
     for seed in 0..205 {
-        let channel = ChannelActorData::samples(seed).remove(0);
-        records.insert([&[0], channel.id.as_ref()].concat(), channel);
+        channels.push(ChannelActorData::samples(seed).remove(0));
     }
+    channels.sort_by(|a, b| a.id.as_ref().cmp(b.id.as_ref()));
     {
         let store = fiber_store::Store::open_db(&path).unwrap();
         store.put(MIGRATION_VERSION_KEY, LATEST_DB_VERSION);
-        for (key, channel) in &records {
-            store.put(key, bincode::serialize(channel).unwrap());
+        for channel in &channels {
+            put_split_channel(&store, channel);
         }
     }
     drop(crate::store::open_store(&path).expect("valid multi-page history"));
-    records.last_entry().unwrap().get_mut().state = ChannelState::Closed(CloseFlags::COOPERATIVE);
+
+    // A closed channel must still carry funded V2 history; the last record is on page three.
+    let last = channels.last_mut().unwrap();
+    last.state = ChannelState::Closed(CloseFlags::COOPERATIVE);
+    let (_, mutable) = last.clone().into_parts();
+    let mutable = bincode::serialize(&mutable).unwrap();
+    let mutable_key = [&[0], last.id.as_ref()].concat();
     {
         let store = fiber_store::Store::open_db(&path).unwrap();
-        let (key, channel) = records.last_key_value().unwrap();
-        store.put(key, bincode::serialize(channel).unwrap());
+        store.put(&mutable_key, &mutable);
     }
     assert!(
         crate::store::open_store(&path).is_err(),
         "invalid closed record on page three must be scanned"
     );
     let store = fiber_store::Store::open_db(&path).unwrap();
-    for (key, channel) in &records {
-        assert_eq!(
-            store.get(key).unwrap(),
-            bincode::serialize(channel).unwrap()
-        );
-    }
+    assert_eq!(store.get(&mutable_key).unwrap(), mutable);
     assert_eq!(
         store.get(MIGRATION_VERSION_KEY).unwrap(),
         LATEST_DB_VERSION.as_bytes()
@@ -319,22 +335,26 @@ fn test_v2_current_epoch_rejects_missing_session_before_writes() {
     use fiber_types::{ChannelActorData, ChannelState, CloseFlags};
     let path = gen_path();
     let mut record = ChannelActorData::samples(1561).remove(0);
-    record.channel_features = fiber_types::ChannelFeatures::V2;
     record.state = ChannelState::Closed(CloseFlags::COOPERATIVE);
-    let key = [&[0], record.id.as_ref()].concat();
-    let mut original = bincode::serialize(&record).unwrap();
-    original.truncate(original.len() - bincode::serialize(&record.session).unwrap().len());
+    let (immutable, mutable) = record.clone().into_parts();
+    let mut mutable = bincode::serialize(&mutable).unwrap();
+    mutable.truncate(mutable.len() - bincode::serialize(&record.session).unwrap().len());
+    let immutable = bincode::serialize(&immutable).unwrap();
+    let mutable_key = [&[0], record.id.as_ref()].concat();
+    let immutable_key = [&[1], record.id.as_ref()].concat();
     {
         let store = fiber_store::Store::open_db(&path).unwrap();
         store.put(MIGRATION_VERSION_KEY, LATEST_DB_VERSION);
-        store.put(&key, &original);
+        store.put(&immutable_key, &immutable);
+        store.put(&mutable_key, &mutable);
     }
     assert!(
         crate::store::open_store(&path).is_err(),
         "epoch cannot validate a full-hash channel without sessions"
     );
     let store = fiber_store::Store::open_db(&path).unwrap();
-    assert_eq!(store.get(&key).unwrap(), original);
+    assert_eq!(store.get(&mutable_key).unwrap(), mutable);
+    assert_eq!(store.get(&immutable_key).unwrap(), immutable);
     assert_eq!(
         store.get(MIGRATION_VERSION_KEY).unwrap(),
         LATEST_DB_VERSION.as_bytes()
@@ -347,19 +367,23 @@ fn test_v2_current_epoch_rejects_bootstrap_session_as_closed_channel() {
     let path = gen_path();
     let mut record = fiber_types::ChannelActorData::samples(1561).remove(0);
     record.state = fiber_types::ChannelState::Closed(fiber_types::CloseFlags::COOPERATIVE);
-    let key = [&[0], record.id.as_ref()].concat();
-    let encoded = bincode::serialize(&record).unwrap();
+    let (immutable, mutable) = record.clone().into_parts();
+    let mutable = bincode::serialize(&mutable).unwrap();
+    let immutable = bincode::serialize(&immutable).unwrap();
+    let mutable_key = [&[0], record.id.as_ref()].concat();
+    let immutable_key = [&[1], record.id.as_ref()].concat();
     {
         let store = fiber_store::Store::open_db(&path).unwrap();
         store.put(MIGRATION_VERSION_KEY, LATEST_DB_VERSION);
-        store.put(&key, &encoded);
+        store.put(&immutable_key, &immutable);
+        store.put(&mutable_key, &mutable);
     }
     assert!(
         crate::store::open_store(&path).is_err(),
         "a genuine bootstrap nonce is insufficient evidence for a funded closed channel"
     );
     let store = fiber_store::Store::open_db(&path).unwrap();
-    assert_eq!(store.get(&key).unwrap(), encoded);
+    assert_eq!(store.get(&mutable_key).unwrap(), mutable);
 }
 
 #[tokio::test]

@@ -35,6 +35,45 @@ pub fn decode_and_validate_channel_actor_data(bytes: &[u8]) -> Result<ChannelAct
     Ok(channel)
 }
 
+/// Decode one exact persisted record of `T`, rejecting trailing bytes.
+fn decode_exact<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, String> {
+    let mut cursor = Cursor::new(bytes);
+    let value: T = bincode::deserialize_from(&mut cursor).map_err(|e| e.to_string())?;
+    check(
+        cursor.position() == bytes.len() as u64,
+        "Trailing bytes in channel record",
+    )?;
+    Ok(value)
+}
+
+/// Decode the two stored records of a channel into the merged in-memory view.
+pub fn decode_channel_actor_data_parts(
+    id: &Hash256,
+    mutable_bytes: &[u8],
+    immutable_bytes: &[u8],
+) -> Result<ChannelActorData, String> {
+    let immutable: crate::ChannelImmutableData = decode_exact(immutable_bytes)?;
+    let mutable: crate::ChannelMutableData = decode_exact(mutable_bytes)?;
+    check(immutable.id == *id, "Channel immutable record id mismatch")?;
+    let channel = ChannelActorData::from_parts(immutable, mutable);
+    check(
+        channel.session.marker == 0x56320001,
+        "Missing or invalid V2 session",
+    )?;
+    Ok(channel)
+}
+
+/// Decode and fully validate the two stored records of a channel.
+pub fn decode_and_validate_channel_actor_data_parts(
+    id: &Hash256,
+    mutable_bytes: &[u8],
+    immutable_bytes: &[u8],
+) -> Result<ChannelActorData, String> {
+    let channel = decode_channel_actor_data_parts(id, mutable_bytes, immutable_bytes)?;
+    validate_channel_v2(&channel).map_err(|e| format!("Invalid channel {}: {e}", channel.id))?;
+    Ok(channel)
+}
+
 /// Canonical funding witness prefix required for XUDT compatibility.
 pub const XUDT_COMPATIBLE_WITNESS: [u8; 16] = [16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0];
 

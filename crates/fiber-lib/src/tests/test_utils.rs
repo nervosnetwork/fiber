@@ -1477,7 +1477,7 @@ impl NetworkNode {
         reload_params: Option<ReloadParams>,
     ) {
         let channel_id = state.id;
-        self.store.insert_channel_actor_state(state);
+        self.store.insert_channel_actor_state_for_test(state);
         self.network_actor
             .send_message(NetworkActorMessage::Command(
                 NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
