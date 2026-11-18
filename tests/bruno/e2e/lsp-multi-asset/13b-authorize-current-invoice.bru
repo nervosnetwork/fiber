@@ -1,0 +1,45 @@
+meta {
+  name: authorize current hosted invoice
+  type: http
+  seq: 13.5
+}
+
+post {
+  url: {{LSP_SDK_AGENT_URL}}/authorize
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {"type":"Invoice","channel_id":"placeholder","preimage":"placeholder",
+   "terms":{"payment_hash":"placeholder","hash_algorithm":"ckb_hash","inbound":true,"amount":0,"expires_at_ms":0,"min_tlc_expiry_delta_ms":86400000,"max_tlc_expiry_ms":0}}
+}
+
+script:pre-request {
+  const body = req.getBody();
+  body.channel_id = bru.getVar("CURRENT_INVOICE_CHANNEL_ID");
+  body.preimage = bru.getVar("CURRENT_INVOICE_PREIMAGE");
+  body.terms.payment_hash = bru.getVar("CURRENT_PAYMENT_HASH");
+  body.terms.amount = Number(bru.getVar("CURRENT_INVOICE_AMOUNT"));
+  const now = Date.now();
+  body.terms.expires_at_ms = now + 3600000;
+  // The payer permits seven days, plus the one-hour invoice acceptance window.
+  body.terms.max_tlc_expiry_ms = now + 7 * 86400000 + 3600000;
+  req.setBody(body);
+}
+
+assert {
+  res.status: eq 200
+  res.body.result.authorized: eq true
+}
+
+script:post-response {
+  if (res.body.result?.authorized !== true) {
+    throw new Error(`incoming invoice authorization failed: ${JSON.stringify(res.body)}`);
+  }
+  bru.setNextRequest("payer pay hosted invoice");
+}

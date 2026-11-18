@@ -1,0 +1,40 @@
+meta {
+  name: authorize prefund payment
+  type: http
+  seq: 5.91
+}
+
+post {
+  url: {{LSP_SDK_AGENT_URL}}/authorize
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {"type":"Payment","channel_id":"placeholder",
+   "terms":{"payment_hash":"placeholder","hash_algorithm":"ckb_hash","inbound":false,"amount":5000,"expires_at_ms":0,"min_tlc_expiry_delta_ms":60000,"max_tlc_expiry_ms":0}}
+}
+
+script:pre-request {
+  const body = req.getBody();
+  body.channel_id = bru.getVar("PREFUND_CHANNEL_ID");
+  body.terms.payment_hash = bru.getVar("PREFUND_PAYMENT_HASH");
+  const now = Date.now();
+  body.terms.expires_at_ms = now + 3600000;
+  body.terms.max_tlc_expiry_ms = now + 7 * 86400000 + 3600000;
+  req.setBody(body);
+}
+
+assert {
+  res.status: eq 200
+  res.body.result.authorized: eq true
+}
+
+script:post-response {
+  if (!res.body.result?.authorized) throw new Error(JSON.stringify(res.body));
+  bru.setNextRequest("send prefund payment");
+}

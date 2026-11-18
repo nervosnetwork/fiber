@@ -4,13 +4,13 @@
 //! a settlement proof for an exact local TLC id and full 32-byte payment hash.
 
 use crate::fiber::channel::{
-    settlement_data_to_witness, settlement_tlc_to_witness, tlc_expiry_delay, ChannelActorState,
-    ChannelActorStateStore,
+    settlement_tlc_to_witness, tlc_expiry_delay, ChannelActorState, ChannelActorStateStore,
 };
 use ckb_hash::blake2b_256;
 use ckb_sdk::util::blake160;
 use ckb_types::core::EpochNumberWithFraction;
 use ckb_types::packed::Script;
+use fiber_types::watchtower::settlement_data_witness;
 use fiber_types::{
     AppliedFlags, ChannelData, ChannelFeatures, ChannelState, CloseFlags, Hash256, HashAlgorithm,
     InboundTlcStatus, OutboundTlcStatus, Pubkey, RemoveTlcFulfill, RemoveTlcReason, SettlementData,
@@ -162,12 +162,20 @@ pub fn verify_and_select_settlement_data_with_superseded<'a>(
         &local_candidates
     };
     for &settlement_data in candidates {
-        let settlement_witness = settlement_data_to_witness(
+        // A bad persisted candidate must not abort the shared watchtower scan,
+        // nor hide a later valid pending/superseded snapshot for this channel.
+        let settlement_witness = match settlement_data_witness(
             settlement_data,
             parsed.for_remote,
-            channel_data.local_settlement_key.clone(),
+            channel_data.local_settlement_pubkey(),
             channel_data.remote_settlement_key,
-        );
+        ) {
+            Ok(witness) => witness,
+            Err(error) => {
+                warn!(channel_id = %channel_data.channel_id, %error, "Skipping invalid settlement snapshot");
+                continue;
+            }
+        };
         if blake160(&settlement_witness).as_ref() == parsed.witness_hash {
             return Some((parsed.for_remote, parsed.commitment_number, settlement_data));
         }
@@ -264,6 +272,7 @@ pub(crate) enum OnChainTlcResolution {
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct OnChainFulfilledTlc {
+    pub upstream_tlc_key: Option<crate::fiber_types::UpstreamTlcKey>,
     pub tlc_id: TLCId,
     pub forwarding_tlc: Option<(Hash256, u64)>,
     pub payment_hash: Hash256,
@@ -278,20 +287,49 @@ pub(crate) struct OnChainFulfilledTlc {
 /// inflight because the remove commitment handshake never reached `apply_remove_tlc_operation`.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct OnChainConfirmedPayerTlc {
+    pub upstream_tlc_key: Option<crate::fiber_types::UpstreamTlcKey>,
     pub tlc_id: TLCId,
     pub payment_hash: Hash256,
     pub attempt_id: u64,
     pub preimage: Hash256,
 }
 
+impl OnChainFulfilledTlc {
+    pub(crate) fn session_key(&self) -> crate::fiber_types::PaymentSessionKey {
+        crate::fiber_types::PaymentSessionKey {
+            payment_hash: self.payment_hash,
+            upstream_tlc_key: self.upstream_tlc_key,
+        }
+    }
+}
+
+impl OnChainConfirmedPayerTlc {
+    pub(crate) fn session_key(&self) -> crate::fiber_types::PaymentSessionKey {
+        crate::fiber_types::PaymentSessionKey {
+            payment_hash: self.payment_hash,
+            upstream_tlc_key: self.upstream_tlc_key,
+        }
+    }
+}
+
 /// An offered TLC failed by an on-chain timeout or exclusion from a confirmed commitment.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct OnChainTimeoutSettledTlc {
+    pub upstream_tlc_key: Option<crate::fiber_types::UpstreamTlcKey>,
     /// The downstream TLC on the force-closed channel that must be marked removed locally.
     pub tlc_id: TLCId,
     pub payment_hash: Hash256,
     pub shared_secret: [u8; 32],
     pub role: OnChainTimeoutTlcRole,
+}
+
+impl OnChainTimeoutSettledTlc {
+    pub(crate) fn session_key(&self) -> crate::fiber_types::PaymentSessionKey {
+        crate::fiber_types::PaymentSessionKey {
+            payment_hash: self.payment_hash,
+            upstream_tlc_key: self.upstream_tlc_key,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -388,6 +426,7 @@ pub(crate) fn collect_onchain_fulfilled_tlcs(
                 return None;
             };
             Some(OnChainFulfilledTlc {
+                upstream_tlc_key: tlc.upstream_tlc_key,
                 tlc_id: tlc.tlc_id,
                 forwarding_tlc: tlc.forwarding_tlc,
                 payment_hash: tlc.payment_hash,
@@ -429,6 +468,7 @@ pub(crate) fn collect_onchain_confirmed_payer_tlcs(
                 return None;
             }
             Some(OnChainConfirmedPayerTlc {
+                upstream_tlc_key: tlc.upstream_tlc_key,
                 tlc_id: tlc.tlc_id,
                 payment_hash: tlc.payment_hash,
                 attempt_id,
@@ -530,6 +570,7 @@ pub(crate) fn collect_onchain_excluded_tlcs(
             })
         })
         .map(|tlc| OnChainTimeoutSettledTlc {
+            upstream_tlc_key: tlc.upstream_tlc_key,
             tlc_id: tlc.tlc_id,
             payment_hash: tlc.payment_hash,
             shared_secret: tlc.shared_secret,
@@ -592,6 +633,7 @@ pub(crate) fn collect_onchain_timeout_settled_tlcs(
             };
 
             Some(OnChainTimeoutSettledTlc {
+                upstream_tlc_key: tlc.upstream_tlc_key,
                 tlc_id: tlc.tlc_id,
                 payment_hash: tlc.payment_hash,
                 shared_secret: tlc.shared_secret,
@@ -750,4 +792,21 @@ pub(crate) fn can_reconcile_onchain_fulfillment(tlc: &TlcInfo) -> bool {
                 | InboundTlcStatus::Committed
         )
     }
+}
+
+#[cfg(test)]
+pub(crate) fn verified_tracked_settlement_tlcs(
+    lock: &Script,
+    channel: &ChannelData,
+    expected_remote: bool,
+) -> Option<Vec<TrackedSettlementTlc>> {
+    let (for_remote, _, snapshot) = verify_and_select_settlement_data(channel, lock)?;
+    if for_remote != expected_remote {
+        return None;
+    }
+    Some(tracked_settlement_tlcs(
+        snapshot,
+        for_remote,
+        channel.channel_features,
+    ))
 }

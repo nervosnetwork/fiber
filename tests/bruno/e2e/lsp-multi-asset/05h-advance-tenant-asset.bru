@@ -1,0 +1,25 @@
+meta {
+  name: advance tenant asset
+  type: http
+  seq: 5.7
+}
+
+get {
+  url: {{LSP_SDK_AGENT_URL}}/status
+  body: none
+  auth: none
+}
+
+assert {
+  res.status: eq 200
+}
+
+script:post-response {
+  const asset = bru.getVar("CURRENT_ASSET");
+  if (asset === "xudt") {
+    bru.setNextRequest("prefund public T SIMPLE_UDT");
+    return;
+  }
+  bru.setVar("NEXT_TENANT_ASSET", asset === "ckb" ? "simple" : "xudt");
+  bru.setNextRequest("prepare next tenant channel");
+}

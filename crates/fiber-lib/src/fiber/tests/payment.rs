@@ -7,11 +7,13 @@ use crate::fiber::config::MAX_PAYMENT_TLC_EXPIRY_LIMIT;
 use crate::fiber::config::MIN_TLC_EXPIRY_DELTA;
 use crate::fiber::graph::NetworkGraphStateStore;
 use crate::fiber::network::*;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::fiber::onchain_tlc_reconcile::OnChainTlcSettlement;
 use crate::fiber::payment::*;
 use crate::fiber::types::*;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::fiber::ChannelConnectivityState;
-use crate::fiber::NetworkActorCommand;
+use crate::fiber::FiberActorCommand;
 use crate::fiber::NetworkActorMessage;
 use crate::fiber::{
     AddTlcCommand, ChannelState, CloseFlags, Hash256, PaymentHopData, PaymentStatus,
@@ -39,6 +41,7 @@ use crate::tests::test_utils::*;
 use crate::watchtower::WatchtowerStore;
 use crate::NetworkServiceEvent;
 use bech32::{encode, u5, Variant};
+#[cfg(not(target_arch = "wasm32"))]
 use ckb_sdk::core::TransactionBuilder;
 use ckb_types::packed::Script;
 use ckb_types::{core::tx_pool::TxStatus, packed::OutPoint};
@@ -49,11 +52,13 @@ use fiber_sphinx::OnionSharedSecretIter;
 use fiber_types::Hash256 as InternalHash256;
 use fiber_types::HashAlgorithm;
 use fiber_types::HopHint;
+#[cfg(not(target_arch = "wasm32"))]
 use fiber_types::OutboundTlcStatus;
 use fiber_types::RemoveTlcFulfill;
 use fiber_types::RouterHop;
 use fiber_types::SessionRoute;
 use fiber_types::TlcErrPacket;
+#[cfg(not(target_arch = "wasm32"))]
 use fiber_types::TlcInfo;
 use fiber_types::SIGNATURE_U5_SIZE;
 use fiber_types::{Attempt, AttemptStatus, PrevTlcInfo, TrampolineContext};
@@ -159,8 +164,8 @@ async fn test_review_late_update_preserves_trampoline_error_packet() {
     old.stop(None);
     task.await.unwrap();
     ractor::call!(relay.network_actor, |reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::TestSetPaymentActor(
-            hash,
+        NetworkActorMessage::new_command(FiberActorCommand::TestSetPaymentActor(
+            hash.into(),
             old.clone(),
             reply,
         ))
@@ -168,17 +173,18 @@ async fn test_review_late_update_preserves_trampoline_error_packet() {
     .unwrap();
     let wakeups = || {
         [
-            NetworkActorMessage::new_command(NetworkActorCommand::PaymentTlcUpdated(hash)),
-            NetworkActorMessage::new_event(NetworkActorEvent::RetrySendPayment(hash, Some(1))),
-            NetworkActorMessage::new_event(NetworkActorEvent::ResumePaymentAfterClosedChannel(
-                hash, 1,
+            NetworkActorMessage::new_command(FiberActorCommand::PaymentTlcUpdated(hash.into())),
+            NetworkActorMessage::new_event(FiberActorEvent::RetrySendPayment(hash.into(), Some(1))),
+            NetworkActorMessage::new_event(FiberActorEvent::ResumePaymentAfterClosedChannel(
+                hash.into(),
+                1,
             )),
         ]
     };
     for message in wakeups() {
         relay.network_actor.send_message(message).unwrap();
         let current = ractor::call!(relay.network_actor, |reply| {
-            NetworkActorMessage::new_command(NetworkActorCommand::GetPaymentActor(hash, reply))
+            NetworkActorMessage::new_command(FiberActorCommand::GetPaymentActor(hash.into(), reply))
         })
         .unwrap();
         assert_eq!(
@@ -190,7 +196,7 @@ async fn test_review_late_update_preserves_trampoline_error_packet() {
     relay
         .network_actor
         .send_message(NetworkActorMessage::new_event(
-            NetworkActorEvent::PaymentActorStopped(hash, old.get_id(), Some(packet)),
+            FiberActorEvent::PaymentActorStopped(hash.into(), old.get_id(), Some(packet)),
         ))
         .unwrap();
     wait_until(|| {
@@ -210,7 +216,7 @@ async fn test_review_late_update_preserves_trampoline_error_packet() {
     for message in wakeups() {
         relay.network_actor.send_message(message).unwrap();
         let current = ractor::call!(relay.network_actor, |reply| {
-            NetworkActorMessage::new_command(NetworkActorCommand::GetPaymentActor(hash, reply))
+            NetworkActorMessage::new_command(FiberActorCommand::GetPaymentActor(hash.into(), reply))
         })
         .unwrap();
         assert!(
@@ -240,7 +246,7 @@ async fn test_review_payment_actor_panic_does_not_loop() {
     let old = ractor::call_t!(
         payer.network_actor,
         |reply| {
-            NetworkActorMessage::new_command(NetworkActorCommand::GetPaymentActor(hash, reply))
+            NetworkActorMessage::new_command(FiberActorCommand::GetPaymentActor(hash.into(), reply))
         },
         5000
     )
@@ -251,7 +257,7 @@ async fn test_review_payment_actor_panic_does_not_loop() {
     payer
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::PaymentTlcUpdated(hash),
+            FiberActorCommand::PaymentTlcUpdated(hash.into()),
         ))
         .unwrap();
     let replacement = tokio::time::timeout(Duration::from_secs(2), async {
@@ -259,8 +265,9 @@ async fn test_review_payment_actor_panic_does_not_loop() {
             let actor = ractor::call_t!(
                 payer.network_actor,
                 |reply| {
-                    NetworkActorMessage::new_command(NetworkActorCommand::GetPaymentActor(
-                        hash, reply,
+                    NetworkActorMessage::new_command(FiberActorCommand::GetPaymentActor(
+                        hash.into(),
+                        reply,
                     ))
                 },
                 1000
@@ -278,13 +285,13 @@ async fn test_review_payment_actor_panic_does_not_loop() {
     payer
         .network_actor
         .send_message(NetworkActorMessage::new_event(
-            NetworkActorEvent::PaymentActorStopped(hash, old.get_id(), None),
+            FiberActorEvent::PaymentActorStopped(hash.into(), old.get_id(), None),
         ))
         .unwrap();
     let current = ractor::call_t!(
         payer.network_actor,
         |reply| {
-            NetworkActorMessage::new_command(NetworkActorCommand::GetPaymentActor(hash, reply))
+            NetworkActorMessage::new_command(FiberActorCommand::GetPaymentActor(hash.into(), reply))
         },
         5000
     )
@@ -362,9 +369,7 @@ async fn assert_durable_channel_admission(queued: bool) {
         let count = ractor::call_t!(
             payer.network_actor,
             |reply| {
-                NetworkActorMessage::new_command(NetworkActorCommand::GetInflightPaymentCount(
-                    reply,
-                ))
+                NetworkActorMessage::new_command(FiberActorCommand::GetInflightPaymentCount(reply))
             },
             1000
         )
@@ -950,9 +955,9 @@ async fn send_remove_tlc_fail_event(fixture: &RemoveTlcFailEventFixture, packet:
     fixture
         .node
         .network_actor
-        .send_message(NetworkActorMessage::Event(
-            NetworkActorEvent::TlcRemoveReceived(
-                fixture.payment_hash,
+        .send_message(NetworkActorMessage::new_event(
+            FiberActorEvent::TlcRemoveReceived(
+                fixture.payment_hash.into(),
                 Some(fixture.attempt_id),
                 RemoveTlcReason::RemoveTlcFail(packet),
                 None,
@@ -1005,6 +1010,7 @@ fn test_attempt(
     now: u64,
 ) -> Attempt {
     Attempt {
+        upstream_tlc_key: None,
         id,
         hash: payment_hash,
         try_limit: 3,
@@ -1055,6 +1061,7 @@ fn test_sender_side_trampoline_retry_does_not_reuse_visible_route_amount() {
         },
     ];
     let mut attempt = Attempt {
+        upstream_tlc_key: None,
         id: 1,
         hash: payment_hash,
         try_limit: 3,
@@ -1090,10 +1097,61 @@ fn test_sender_side_trampoline_retry_does_not_reuse_visible_route_amount() {
         Some(amount_to_trampoline)
     );
     assert_eq!(session.retry_amount(&attempt), Some(final_amount));
+    assert_eq!(session.remain_fee_amount(), Some(0));
+    assert_eq!(
+        session.retry_fee_amount(&attempt),
+        session.request.max_fee_amount
+    );
 
     attempt.set_success_status();
     session.cached_attempts = vec![attempt];
     assert_eq!(session.calc_payment_status(), PaymentStatus::Success);
+}
+
+#[test]
+fn test_retry_fee_budget_keeps_other_attempts_reserved() {
+    let source = gen_rand_fiber_public_key();
+    let target = gen_rand_fiber_public_key();
+    let payment_hash = gen_rand_sha256_hash();
+    let now = now_timestamp_as_millis_u64();
+    let request = SendPaymentDataBuilder::new(target, 1000, payment_hash)
+        .max_fee_amount(Some(100))
+        .allow_mpp(true)
+        .max_parts(Some(4))
+        .build()
+        .unwrap();
+    let mut retry = test_attempt(
+        1,
+        payment_hash,
+        source,
+        target,
+        vec![
+            PaymentHopData {
+                amount: 400,
+                next_hop: Some(target),
+                ..Default::default()
+            },
+            PaymentHopData {
+                amount: 350,
+                ..Default::default()
+            },
+        ],
+        now,
+    );
+    retry.status = AttemptStatus::Retrying;
+    retry.route.nodes[0].amount = 400;
+    let mut other = retry.clone();
+    other.id = 2;
+    other.route.nodes[0].amount = 660;
+    other.route.nodes.last_mut().unwrap().amount = 650;
+    let mut session = test_payment_session(request, now);
+    for status in [AttemptStatus::Inflight, AttemptStatus::Success] {
+        other.status = status;
+        session.cached_attempts = vec![retry.clone(), other.clone()];
+        assert_eq!(session.remain_fee_amount(), Some(40));
+        assert_eq!(session.retry_fee_amount(&retry), Some(90));
+        assert_eq!(session.cached_attempts.len(), 2);
+    }
 }
 
 #[test]
@@ -1673,11 +1731,12 @@ async fn test_receive_payment_rejects_oversized_custom_records() {
     .expect("create peeled packet");
 
     let add_tlc_result = ractor::call!(node_0.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: channels[0],
                 command: ChannelCommand::AddTlc(
                     AddTlcCommand {
+                        upstream_tlc_key: None,
                         amount,
                         hash_algorithm,
                         payment_hash,
@@ -6202,14 +6261,14 @@ async fn assert_confirmed_payer_timeout(trampoline: bool, restart: bool, no_live
         nodes[payer]
             .network_actor
             .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::CheckChannels,
+                FiberActorCommand::CheckChannels,
             ))
             .unwrap();
     } else {
         nodes[payer]
             .network_actor
             .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+                FiberActorCommand::ControlFiberChannel(ChannelCommandWithId {
                     channel_id: channel,
                     command: ChannelCommand::NotifyEvent(ChannelEvent::MaintainChannelTlcs),
                 }),
@@ -6232,7 +6291,7 @@ async fn assert_confirmed_payer_timeout(trampoline: bool, restart: bool, no_live
     nodes[payer]
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::CheckChannels,
+            FiberActorCommand::CheckChannels,
         ))
         .unwrap();
     nodes[payer].node_info().await;
@@ -6351,7 +6410,7 @@ async fn test_closed_channel_upstream_settlement_does_not_depend_on_check_channe
     node_1
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+            FiberActorCommand::ControlFiberChannel(ChannelCommandWithId {
                 channel_id: channels[1],
                 command: ChannelCommand::NotifyEvent(ChannelEvent::MaintainChannelTlcs),
             }),
@@ -6505,7 +6564,7 @@ async fn assert_closed_channel_upstream_fulfillment(uncommitted_peer_fulfill: bo
     node_1
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+            FiberActorCommand::ControlFiberChannel(ChannelCommandWithId {
                 channel_id: channels[1],
                 command: ChannelCommand::NotifyEvent(ChannelEvent::MaintainChannelTlcs),
             }),
@@ -6543,6 +6602,17 @@ async fn assert_closed_channel_upstream_fulfillment(uncommitted_peer_fulfill: bo
 #[cfg(feature = "watchtower")]
 #[tokio::test]
 async fn test_payer_payment_success_from_onchain_preimage() {
+    check_payer_onchain_execution(false).await;
+}
+
+#[cfg(feature = "watchtower")]
+#[tokio::test]
+async fn test_hosted_onchain_fulfill_does_not_complete_same_hash_public_session() {
+    check_payer_onchain_execution(true).await;
+}
+
+#[cfg(feature = "watchtower")]
+async fn check_payer_onchain_execution(hosted: bool) {
     init_tracing();
 
     let (nodes, channels) =
@@ -6591,6 +6661,37 @@ async fn test_payer_payment_success_from_onchain_preimage() {
         "TLC must be committed before force-close so on-chain fulfillment can settle it"
     );
 
+    let mut key = crate::fiber_types::PaymentSessionKey::from(payment_hash);
+    let original = node_0.store.get_payment_session(key).unwrap();
+    if hosted {
+        let scope = crate::fiber_types::UpstreamTlcKey {
+            incoming_channel_id: gen_rand_sha256_hash(),
+            incoming_tlc_id: 7,
+        };
+        key.upstream_tlc_key = Some(scope);
+        let mut scoped = original.clone();
+        scoped.request.upstream_tlc_key = Some(scope);
+        node_0.store.insert_payment_session(scoped);
+        for mut attempt in original.attempts().cloned() {
+            attempt.upstream_tlc_key = Some(scope);
+            node_0.store.insert_attempt(attempt);
+        }
+        let mut channel = node_0.get_channel_actor_state(channels[0]);
+        channel
+            .tlc_state
+            .get_mut(&offered_tlc_id)
+            .unwrap()
+            .upstream_tlc_key = Some(scope);
+        node_0
+            .update_channel_actor_state(
+                channel,
+                Some(ReloadParams {
+                    notify_changes: false,
+                }),
+            )
+            .await;
+    }
+
     node_0
         .send_shutdown(channels[0], true)
         .await
@@ -6610,7 +6711,7 @@ async fn test_payer_payment_success_from_onchain_preimage() {
     node_0
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+            FiberActorCommand::ControlFiberChannel(ChannelCommandWithId {
                 channel_id: channels[0],
                 command: ChannelCommand::NotifyEvent(ChannelEvent::MaintainChannelTlcs),
             }),
@@ -6619,12 +6720,13 @@ async fn test_payer_payment_success_from_onchain_preimage() {
 
     wait_until_timeout(30_000, || {
         node_0
-            .get_payment_session(payment_hash)
+            .store
+            .get_payment_session(key)
             .is_some_and(|session| session.status == PaymentStatus::Success)
     })
     .await;
     assert_eq!(
-        node_0.get_payment_status(payment_hash).await,
+        node_0.store.get_payment_session(key).unwrap().status,
         PaymentStatus::Success
     );
 
@@ -6648,6 +6750,17 @@ async fn test_payer_payment_success_from_onchain_preimage() {
         )),
         "on-chain payment success must persist a normal preimage record so CCH observes the same success signal as off-chain fulfillment"
     );
+    if hosted {
+        let ordinary = node_0.store.get_payment_session(payment_hash).unwrap();
+        assert_eq!(ordinary.status, PaymentStatus::Inflight);
+        assert_eq!(
+            bincode::serialize(&ordinary).unwrap(),
+            bincode::serialize(&original).unwrap()
+        );
+        assert!(ordinary
+            .attempts()
+            .all(|attempt| attempt.preimage.is_none()));
+    }
 }
 
 #[cfg(feature = "watchtower")]
@@ -6696,7 +6809,7 @@ impl MppRemoteRemovedPayerFixture {
         self.payer
             .network_actor
             .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+                FiberActorCommand::ControlFiberChannel(ChannelCommandWithId {
                     channel_id: self.stuck_channel_id,
                     command: ChannelCommand::NotifyEvent(ChannelEvent::MaintainChannelTlcs),
                 }),
@@ -6860,9 +6973,9 @@ async fn setup_mpp_remote_removed_payer_fixture_with_retry_channels(
     // successful while the force-closed split has not delivered its payer completion event.
     node_0
         .network_actor
-        .send_message(NetworkActorMessage::Event(
-            NetworkActorEvent::TlcRemoveReceived(
-                payment_hash,
+        .send_message(NetworkActorMessage::new_event(
+            FiberActorEvent::TlcRemoveReceived(
+                payment_hash.into(),
                 completed_tlc.attempt_id,
                 RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill { payment_preimage }),
                 None,
@@ -6922,8 +7035,8 @@ async fn setup_mpp_remote_removed_payer_fixture_with_retry_channels(
     let tx_hash = TransactionBuilder::default().build().hash();
     node_0
         .network_actor
-        .send_message(NetworkActorMessage::Event(
-            NetworkActorEvent::ClosingTransactionConfirmed(
+        .send_message(NetworkActorMessage::new_event(
+            FiberActorEvent::ClosingTransactionConfirmed(
                 node_1.pubkey,
                 stuck_channel_id,
                 tx_hash,
@@ -7035,7 +7148,7 @@ async fn test_mpp_payer_remote_removed_attempt_succeeds_after_restart() {
         .payer
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+            FiberActorCommand::ControlFiberChannel(ChannelCommandWithId {
                 channel_id: fixture.stuck_channel_id,
                 command: ChannelCommand::NotifyEvent(ChannelEvent::Stop(StopReason::Closed)),
             }),
@@ -7063,7 +7176,7 @@ async fn test_mpp_payer_remote_removed_attempt_succeeds_after_restart() {
         .payer
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::CheckChannels,
+            FiberActorCommand::CheckChannels,
         ))
         .expect("network actor alive");
     fixture.payer.node_info().await;
@@ -7447,7 +7560,7 @@ async fn test_payee_invoice_paid_from_onchain_preimage() {
     node_1
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+            FiberActorCommand::ControlFiberChannel(ChannelCommandWithId {
                 channel_id: channels[0],
                 command: ChannelCommand::NotifyEvent(ChannelEvent::MaintainChannelTlcs),
             }),
@@ -7526,8 +7639,8 @@ async fn test_payee_invoice_paid_when_onchain_preimage_arrives_after_settlement_
 
     node_1
         .network_actor
-        .send_message(NetworkActorMessage::Event(
-            NetworkActorEvent::ChannelSettlementCompleted(channels[0]),
+        .send_message(NetworkActorMessage::new_event(
+            FiberActorEvent::ChannelSettlementCompleted(channels[0]),
         ))
         .expect("network actor alive");
     wait_until_timeout(10_000, || {
@@ -7549,7 +7662,7 @@ async fn test_payee_invoice_paid_when_onchain_preimage_arrives_after_settlement_
     node_1
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+            FiberActorCommand::ControlFiberChannel(ChannelCommandWithId {
                 channel_id: channels[0],
                 command: ChannelCommand::NotifyEvent(ChannelEvent::MaintainChannelTlcs),
             }),
@@ -7624,8 +7737,8 @@ async fn test_hold_invoice_paid_when_settled_after_remote_force_close_and_onchai
     let tx_hash = TransactionBuilder::default().build().hash();
     node_1
         .network_actor
-        .send_message(NetworkActorMessage::Event(
-            NetworkActorEvent::ClosingTransactionConfirmed(
+        .send_message(NetworkActorMessage::new_event(
+            FiberActorEvent::ClosingTransactionConfirmed(
                 node_0.pubkey,
                 channels[0],
                 tx_hash,
@@ -7656,8 +7769,8 @@ async fn test_hold_invoice_paid_when_settled_after_remote_force_close_and_onchai
 
     node_1
         .network_actor
-        .send_message(NetworkActorMessage::Event(
-            NetworkActorEvent::ChannelSettlementCompleted(channels[0]),
+        .send_message(NetworkActorMessage::new_event(
+            FiberActorEvent::ChannelSettlementCompleted(channels[0]),
         ))
         .expect("network actor alive");
     wait_until_timeout(10_000, || {
@@ -7674,7 +7787,7 @@ async fn test_hold_invoice_paid_when_settled_after_remote_force_close_and_onchai
     node_1
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+            FiberActorCommand::ControlFiberChannel(ChannelCommandWithId {
                 channel_id: channels[0],
                 command: ChannelCommand::NotifyEvent(ChannelEvent::MaintainChannelTlcs),
             }),
@@ -7768,7 +7881,7 @@ async fn test_hold_invoice_paid_when_onchain_preimage_confirms_already_removed_r
     node_1
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::SettleOnChainFulfilledInvoice(payment_hash),
+            FiberActorCommand::SettleOnChainFulfilledInvoice(payment_hash),
         ))
         .expect("network actor alive");
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -7782,7 +7895,7 @@ async fn test_hold_invoice_paid_when_onchain_preimage_confirms_already_removed_r
     node_1
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+            FiberActorCommand::ControlFiberChannel(ChannelCommandWithId {
                 channel_id: channels[0],
                 command: ChannelCommand::NotifyEvent(ChannelEvent::MaintainChannelTlcs),
             }),
@@ -7864,11 +7977,12 @@ async fn test_payee_mpp_invoice_paid_from_onchain_preimages_across_channels() {
 
     for channel_id in channels.iter().copied() {
         call!(node_0.network_actor, |rpc_reply| {
-            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
                     channel_id,
                     command: ChannelCommand::AddTlc(
                         AddTlcCommand {
+                            upstream_tlc_key: None,
                             amount: 10_000,
                             hash_algorithm,
                             payment_hash,
@@ -7915,7 +8029,7 @@ async fn test_payee_mpp_invoice_paid_from_onchain_preimages_across_channels() {
     node_1
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+            FiberActorCommand::ControlFiberChannel(ChannelCommandWithId {
                 channel_id: channels[0],
                 command: ChannelCommand::NotifyEvent(ChannelEvent::MaintainChannelTlcs),
             }),
@@ -7925,7 +8039,7 @@ async fn test_payee_mpp_invoice_paid_from_onchain_preimages_across_channels() {
     node_1
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+            FiberActorCommand::ControlFiberChannel(ChannelCommandWithId {
                 channel_id: channels[1],
                 command: ChannelCommand::NotifyEvent(ChannelEvent::MaintainChannelTlcs),
             }),
@@ -8090,7 +8204,7 @@ async fn test_onchain_settlement_restart_restores_upstream_waiting_commitment_ac
     );
 
     let upstream_control_before_close_confirmation = call!(node_1.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: channels[0],
                 command: ChannelCommand::Update(
@@ -8141,8 +8255,8 @@ async fn test_onchain_settlement_restart_restores_upstream_waiting_commitment_ac
 
     node_1
         .network_actor
-        .send_message(NetworkActorMessage::Event(
-            NetworkActorEvent::ChannelSettlementCompleted(channels[1]),
+        .send_message(NetworkActorMessage::new_event(
+            FiberActorEvent::ChannelSettlementCompleted(channels[1]),
         ))
         .expect("network actor alive");
 
@@ -8246,8 +8360,8 @@ async fn test_check_channels_onchain_fulfillment_fallback_marks_downstream_tlc()
     insert_onchain_preimage(&node_1.store, &channels[1], payment_hash, hold_preimage);
     node_1
         .network_actor
-        .send_message(NetworkActorMessage::Event(
-            NetworkActorEvent::ChannelSettlementCompleted(channels[1]),
+        .send_message(NetworkActorMessage::new_event(
+            FiberActorEvent::ChannelSettlementCompleted(channels[1]),
         ))
         .expect("network actor alive");
     wait_until(|| {
@@ -8262,8 +8376,8 @@ async fn test_check_channels_onchain_fulfillment_fallback_marks_downstream_tlc()
 
     node_1
         .network_actor
-        .send_message(NetworkActorMessage::Command(
-            NetworkActorCommand::CheckChannels,
+        .send_message(NetworkActorMessage::new_command(
+            FiberActorCommand::CheckChannels,
         ))
         .expect("network actor alive");
 
@@ -8359,8 +8473,8 @@ async fn test_check_channels_fallback_does_not_mark_downstream_when_upstream_rej
 
     node_1
         .network_actor
-        .send_message(NetworkActorMessage::Event(
-            NetworkActorEvent::ChannelSettlementCompleted(channels[1]),
+        .send_message(NetworkActorMessage::new_event(
+            FiberActorEvent::ChannelSettlementCompleted(channels[1]),
         ))
         .expect("network actor alive");
     wait_until(|| {
@@ -8387,8 +8501,8 @@ async fn test_check_channels_fallback_does_not_mark_downstream_when_upstream_rej
     insert_onchain_preimage(&node_1.store, &channels[1], payment_hash, hold_preimage);
     node_1
         .network_actor
-        .send_message(NetworkActorMessage::Command(
-            NetworkActorCommand::CheckChannels,
+        .send_message(NetworkActorMessage::new_command(
+            FiberActorCommand::CheckChannels,
         ))
         .expect("network actor alive");
     node_1.node_info().await;
@@ -8484,8 +8598,8 @@ async fn test_check_channels_fallback_does_not_mutate_live_downstream_actor_stat
     insert_onchain_preimage(&node_1.store, &channels[1], payment_hash, hold_preimage);
     node_1
         .network_actor
-        .send_message(NetworkActorMessage::Command(
-            NetworkActorCommand::CheckChannels,
+        .send_message(NetworkActorMessage::new_command(
+            FiberActorCommand::CheckChannels,
         ))
         .expect("network actor alive");
     node_1.node_info().await;
@@ -8626,7 +8740,7 @@ async fn assert_payer_settlement_completion(peer_failed: bool, offline: bool) {
         node_0
             .network_actor
             .send_message(NetworkActorMessage::new_event(
-                NetworkActorEvent::ChannelSettlementCompleted(channels[0]),
+                FiberActorEvent::ChannelSettlementCompleted(channels[0]),
             ))
             .unwrap();
         node_0.node_info().await;
@@ -8653,8 +8767,8 @@ async fn assert_payer_settlement_completion(peer_failed: bool, offline: bool) {
     insert_onchain_preimage(&node_0.store, &channels[0], payment_hash, hold_preimage);
     node_0
         .network_actor
-        .send_message(NetworkActorMessage::Event(
-            NetworkActorEvent::ChannelSettlementCompleted(channels[0]),
+        .send_message(NetworkActorMessage::new_event(
+            FiberActorEvent::ChannelSettlementCompleted(channels[0]),
         ))
         .expect("network actor alive");
 
@@ -8719,6 +8833,7 @@ async fn assert_payer_settlement_completion(peer_failed: bool, offline: bool) {
     legacy
         .retryable_tlc_operations
         .push_back(fiber_types::RetryableTlcOperation::AddTlc(AddTlcCommand {
+            upstream_tlc_key: None,
             amount: old_tlc.amount,
             payment_hash,
             attempt_id: old_tlc.attempt_id,
@@ -8756,7 +8871,7 @@ async fn assert_payer_settlement_completion(peer_failed: bool, offline: bool) {
     node_0
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::PaymentTlcUpdated(payment_hash),
+            FiberActorCommand::PaymentTlcUpdated(payment_hash.into()),
         ))
         .unwrap();
     node_0.node_info().await;
@@ -8823,8 +8938,8 @@ async fn test_payment_succeeds_when_onchain_preimage_arrives_before_settlement_c
     insert_onchain_preimage(&node_0.store, &channels[0], payment_hash, hold_preimage);
     node_0
         .network_actor
-        .send_message(NetworkActorMessage::Event(
-            NetworkActorEvent::ChannelSettlementCompleted(channels[0]),
+        .send_message(NetworkActorMessage::new_event(
+            FiberActorEvent::ChannelSettlementCompleted(channels[0]),
         ))
         .expect("network actor alive");
 
@@ -9269,11 +9384,12 @@ async fn test_shutdown_with_pending_tlc() {
     )
     .expect("create pending onion packet");
     let add_tlc_result = call!(nodes[0].network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: channels[0],
                 command: ChannelCommand::AddTlc(
                     AddTlcCommand {
+                        upstream_tlc_key: None,
                         amount: 1000,
                         hash_algorithm,
                         payment_hash,
@@ -9314,7 +9430,7 @@ async fn test_shutdown_with_pending_tlc() {
     ));
 
     let remove_tlc_result = call!(nodes[1].network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: channels[0],
                 command: ChannelCommand::RemoveTlc(
@@ -9435,11 +9551,12 @@ async fn test_payment_onion_invoice_udt_type_script_mismatch_fails() {
     .expect("create peeled packet");
 
     let add_tlc_result = call!(source_node.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: channels[0],
                 command: ChannelCommand::AddTlc(
                     AddTlcCommand {
+                        upstream_tlc_key: None,
                         amount,
                         hash_algorithm,
                         payment_hash,
@@ -9540,11 +9657,12 @@ async fn test_payment_onion_invoice_hash_algorithm_mismatch_fails() {
     .expect("create peeled packet");
 
     let add_tlc_result = call!(source_node.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: channels[0],
                 command: ChannelCommand::AddTlc(
                     AddTlcCommand {
+                        upstream_tlc_key: None,
                         amount,
                         hash_algorithm: tlc_hash_algorithm,
                         payment_hash,
@@ -9670,11 +9788,12 @@ async fn test_forward_payment_rejects_mismatched_hash_algorithm_between_wire_and
     .expect("create peeled packet");
 
     let add_tlc_result = call!(source_node.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: channels[0],
                 command: ChannelCommand::AddTlc(
                     AddTlcCommand {
+                        upstream_tlc_key: None,
                         amount: source_amount,
                         hash_algorithm: wire_hash_algorithm,
                         payment_hash,
@@ -9945,7 +10064,7 @@ async fn test_send_payment_remove_tlc_with_preimage_will_retry() {
     node_0
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::DisconnectPeer(
+            PublicNetworkCommand::DisconnectPeer(
                 node1_pubkey,
                 PeerDisconnectReason::Requested,
                 None,
@@ -10047,7 +10166,7 @@ async fn test_send_payment_send_each_other_reestablishing() {
     node_0
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::DisconnectPeer(
+            PublicNetworkCommand::DisconnectPeer(
                 node1_pubkey,
                 PeerDisconnectReason::Requested,
                 None,
@@ -10695,7 +10814,7 @@ async fn test_send_payment_with_reconnect_two_times() {
         node0
             .network_actor
             .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::DisconnectPeer(
+                PublicNetworkCommand::DisconnectPeer(
                     node1_pubkey,
                     PeerDisconnectReason::Requested,
                     None,
@@ -11123,11 +11242,12 @@ async fn test_payment_with_payment_data_record() {
     .expect("create peeled packet");
 
     let add_tlc_result_1 = ractor::call!(source_node.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: channels[0],
                 command: ChannelCommand::AddTlc(
                     AddTlcCommand {
+                        upstream_tlc_key: None,
                         amount: 10000000000,
                         hash_algorithm,
                         payment_hash,
@@ -11224,11 +11344,12 @@ async fn test_payment_with_insufficient_total_amount() {
     .expect("create peeled packet");
 
     let add_tlc_result_1 = ractor::call!(source_node.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: channels[0],
                 command: ChannelCommand::AddTlc(
                     AddTlcCommand {
+                        upstream_tlc_key: None,
                         amount: 10000000000,
                         hash_algorithm,
                         payment_hash,
@@ -11253,7 +11374,7 @@ async fn test_payment_with_insufficient_total_amount() {
     node_1
         .network_actor
         .send_after(Duration::from_secs(5), move || {
-            NetworkActorMessage::Command(NetworkActorCommand::TimeoutHoldTlc(
+            NetworkActorMessage::new_command(FiberActorCommand::TimeoutHoldTlc(
                 payment_hash,
                 channel_id,
                 tlc_id,
@@ -11429,11 +11550,12 @@ async fn test_payment_with_wrong_payment_secret() {
     .expect("create peeled packet");
 
     let add_tlc_result_1 = ractor::call!(source_node.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: channels[0],
                 command: ChannelCommand::AddTlc(
                     AddTlcCommand {
+                        upstream_tlc_key: None,
                         amount: 10000000000,
                         hash_algorithm,
                         payment_hash,
@@ -11539,11 +11661,12 @@ async fn test_payment_with_insufficient_amount_with_payment_data() {
     .expect("create peeled packet");
 
     let add_tlc_result_1 = ractor::call!(source_node.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: channels[0],
                 command: ChannelCommand::AddTlc(
                     AddTlcCommand {
+                        upstream_tlc_key: None,
                         amount: 9000000000,
                         hash_algorithm,
                         payment_hash,
@@ -11644,11 +11767,12 @@ async fn test_payment_with_insufficient_amount_without_payment_data() {
     .expect("create peeled packet");
 
     let add_tlc_result_1 = ractor::call!(source_node.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: channels[0],
                 command: ChannelCommand::AddTlc(
                     AddTlcCommand {
+                        upstream_tlc_key: None,
                         amount: 9000000000,
                         hash_algorithm,
                         payment_hash,
@@ -12259,6 +12383,41 @@ async fn test_send_payment_max_fee_rate_limit() {
     assert_eq!(payment_data.max_fee_amount, Some(10));
 }
 
+#[test]
+fn test_send_payment_uses_invoice_trampoline_route_hint() {
+    let (payee_private_key, payee) = gen_rand_secp256k1_keypair_tuple();
+    let trampoline = gen_rand_fiber_public_key();
+    let invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(1_000))
+        .payment_preimage(gen_rand_sha256_hash())
+        .payee_pub_key(payee)
+        .trampoline_route_hint(trampoline.into())
+        .build_with_sign(|message| SECP256K1.sign_ecdsa_recoverable(message, &payee_private_key))
+        .expect("build invoice with trampoline route hint");
+
+    let payment = SendPaymentData::new(
+        SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            ..Default::default()
+        },
+        Currency::Fibd,
+    )
+    .expect("build trampoline payment from invoice hint");
+    assert_eq!(payment.trampoline_hops, Some(vec![trampoline]));
+
+    let explicit_trampoline = gen_rand_fiber_public_key();
+    let payment = SendPaymentData::new(
+        SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            trampoline_hops: Some(vec![explicit_trampoline]),
+            ..Default::default()
+        },
+        Currency::Fibd,
+    )
+    .expect("explicit trampoline hop overrides invoice hint");
+    assert_eq!(payment.trampoline_hops, Some(vec![explicit_trampoline]));
+}
+
 fn malicious_invoice_that_used_to_panic_parser() -> String {
     let mut data = vec![u5::try_from_u8(0).expect("valid unsigned invoice marker")];
     data.extend(std::iter::repeat_n(
@@ -12392,10 +12551,10 @@ async fn test_local_remove_notification_reuses_retry_policy_without_double_failu
     let actor = PaymentActor::new(
         node.store.clone(),
         node.network_graph.clone(),
-        node.network_actor.clone(),
+        crate::fiber::FiberActorRef::from_network(&node.network_actor),
     );
     let mut state = PaymentActorState::new(PaymentActorArguments {
-        payment_hash,
+        session_key: payment_hash.into(),
         init_command: PaymentActorMessage::CheckPaymentStatus,
     });
     let completion = PaymentTlcRemoveContext {
@@ -12445,7 +12604,7 @@ async fn test_local_remove_notification_reuses_retry_policy_without_double_failu
     // Fresh actor state must request recovery of the persisted retry exactly once.
     // This checks the handler result, not timer execution or a full node restart.
     let mut recovered_state = PaymentActorState::new(PaymentActorArguments {
-        payment_hash,
+        session_key: payment_hash.into(),
         init_command: PaymentActorMessage::CheckPaymentStatus,
     });
     assert!(actor
@@ -12622,11 +12781,11 @@ async fn test_missing_payment_session_is_still_logged() {
     let actor = PaymentActor::new(
         node.store.clone(),
         node.network_graph.clone(),
-        node.network_actor.clone(),
+        crate::fiber::FiberActorRef::from_network(&node.network_actor),
     );
     let payment_hash = gen_rand_sha256_hash();
     let mut state = PaymentActorState::new(PaymentActorArguments {
-        payment_hash,
+        session_key: payment_hash.into(),
         init_command: PaymentActorMessage::RetrySendPayment(None),
     });
     let (mailbox, task) = ractor::Actor::spawn(None, Mailbox, ())

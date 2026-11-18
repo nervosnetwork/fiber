@@ -14,7 +14,7 @@ use crate::fiber::channel::{
     ChannelActor, ChannelActorMessage, ChannelActorState, ChannelActorStateStore,
 };
 use crate::fiber::graph::NetworkGraphStateStore;
-use crate::fiber::network::{NetworkActorCommand, NetworkActorEvent, NetworkActorMessage};
+use crate::fiber::network::{FiberActorCommand, FiberActorEvent, FiberActorMessage, FiberActorRef};
 use crate::fiber::payment::{PaymentSessionExt, SendPaymentDataBuilder};
 use crate::fiber::tests::settle_tlc_set_command_tests::{
     create_test_channel_state_with_tlc, MockStore,
@@ -61,11 +61,11 @@ impl Actor for NullChannelActor {
 /// immediately dropped reply.
 struct SilentNetworkActor;
 
-type SilentNetworkState = Arc<Mutex<Vec<NetworkActorMessage>>>;
+type SilentNetworkState = Arc<Mutex<Vec<FiberActorMessage>>>;
 
 #[async_trait::async_trait]
 impl Actor for SilentNetworkActor {
-    type Msg = NetworkActorMessage;
+    type Msg = FiberActorMessage;
     type State = SilentNetworkState;
     type Arguments = SilentNetworkState;
 
@@ -102,6 +102,7 @@ fn offered_tlc(
     attempt_id: Option<u64>,
 ) -> TlcInfo {
     TlcInfo {
+        upstream_tlc_key: None,
         status: TlcStatus::Outbound(OutboundTlcStatus::Committed),
         tlc_id: TLCId::Offered(tlc_id),
         amount,
@@ -175,7 +176,7 @@ async fn test_pending_forward_is_relinked_to_existing_downstream_tlc() {
     let actor = ChannelActor::new(
         gen_rand_fiber_public_key(),
         gen_rand_fiber_public_key(),
-        network,
+        FiberActorRef::from_fiber(&network),
         store,
         None,
     );
@@ -226,7 +227,7 @@ async fn test_pending_forward_without_downstream_tlc_is_failed_back() {
     let actor = ChannelActor::new(
         gen_rand_fiber_public_key(),
         gen_rand_fiber_public_key(),
-        network,
+        FiberActorRef::from_fiber(&network),
         store,
         None,
     );
@@ -286,7 +287,7 @@ async fn test_failed_forward_dispatch_keeps_recoverable_ownership() {
         let actor = ChannelActor::new(
             state.get_local_pubkey(),
             state.get_remote_pubkey(),
-            stopped,
+            FiberActorRef::from_fiber(&stopped),
             MockStore::new(),
             None,
         );
@@ -322,11 +323,11 @@ async fn test_failed_forward_dispatch_keeps_recoverable_ownership() {
         let (network, task) = Actor::spawn(None, SilentNetworkActor, Default::default())
             .await
             .unwrap();
-        restored.network = Some(network.clone());
+        restored.network = Some(FiberActorRef::from_fiber(&network));
         let actor = ChannelActor::new(
             restored.get_local_pubkey(),
             restored.get_remote_pubkey(),
-            network.clone(),
+            FiberActorRef::from_fiber(&network),
             store,
             None,
         );
@@ -390,6 +391,7 @@ fn queued_forward_add(upstream: Hash256, hash: Hash256) -> fiber_types::AddTlcCo
     )
     .unwrap();
     fiber_types::AddTlcCommand {
+        upstream_tlc_key: None,
         amount: 1000,
         payment_hash: hash,
         attempt_id: None,
@@ -434,7 +436,7 @@ async fn test_pending_forward_queue_survives_recovery_and_relinks_after_creation
         let actor = ChannelActor::new(
             gen_rand_fiber_public_key(),
             gen_rand_fiber_public_key(),
-            network.clone(),
+            FiberActorRef::from_fiber(&network),
             store.clone(),
             None,
         );
@@ -524,7 +526,7 @@ async fn test_pending_forward_queue_must_match_upstream_identity_and_hash() {
         let actor = ChannelActor::new(
             gen_rand_fiber_public_key(),
             gen_rand_fiber_public_key(),
-            network.clone(),
+            FiberActorRef::from_fiber(&network),
             store,
             None,
         );
@@ -599,7 +601,7 @@ async fn test_pending_trampoline_forward_is_resumed_only_for_matching_tlc() {
         let actor = ChannelActor::new(
             gen_rand_fiber_public_key(),
             gen_rand_fiber_public_key(),
-            network.clone(),
+            FiberActorRef::from_fiber(&network),
             store,
             None,
         );
@@ -627,7 +629,7 @@ async fn test_pending_trampoline_forward_is_resumed_only_for_matching_tlc() {
             .await
             .unwrap();
             assert!(
-                matches!(captured.lock().unwrap().as_slice(), [NetworkActorMessage::Event(NetworkActorEvent::RetrySendPayment(hash, None))] if *hash == payment_hash),
+                matches!(captured.lock().unwrap().as_slice(), [FiberActorMessage::Event(FiberActorEvent::RetrySendPayment(hash, None))] if hash.payment_hash == payment_hash),
                 "re-drive the payment owner, including its terminal outcome replay"
             );
         } else {
@@ -677,7 +679,7 @@ async fn test_v2_settled_remove_defers_when_payment_effect_lookup_times_out() {
     let actor = ChannelActor::new(
         gen_rand_fiber_public_key(),
         gen_rand_fiber_public_key(),
-        network,
+        FiberActorRef::from_fiber(&network),
         store,
         None,
     );
@@ -724,18 +726,18 @@ async fn test_v2_inapplicable_settled_remove_closes_instead_of_panicking() {
     state.tlc_state.offered_tlcs.tlcs.push(tlc);
     state.tlc_state.offered_tlcs.next_tlc_id = 1;
 
-    let captured: Arc<Mutex<Vec<NetworkActorMessage>>> = Default::default();
+    let captured: Arc<Mutex<Vec<FiberActorMessage>>> = Default::default();
     let (network, _) = Actor::spawn(None, SilentNetworkActor, captured.clone())
         .await
         .expect("spawn network actor");
-    state.network = Some(network.clone());
+    state.network = Some(FiberActorRef::from_fiber(&network));
     let store = MockStore::new();
     store.insert_channel_actor_state(state.clone());
     let myself = spawn_null_channel_actor().await;
     let actor = ChannelActor::new(
         gen_rand_fiber_public_key(),
         gen_rand_fiber_public_key(),
-        network.clone(),
+        FiberActorRef::from_fiber(&network),
         store,
         None,
     );
@@ -754,7 +756,7 @@ async fn test_v2_inapplicable_settled_remove_closes_instead_of_panicking() {
                 if messages.iter().any(|message| {
                     matches!(
                         message,
-                        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+                        FiberActorMessage::Command(FiberActorCommand::ControlFiberChannel(
                             crate::fiber::channel::ChannelCommandWithId {
                                 channel_id,
                                 command: crate::fiber::channel::ChannelCommand::Shutdown(

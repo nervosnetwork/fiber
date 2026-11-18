@@ -1,0 +1,47 @@
+meta {
+  name: prefund public T XUDT
+  type: http
+  seq: 5.96
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Authorization: Bearer {{LSP_OPERATOR_TOKEN}}
+}
+
+body:json {
+  {
+    "id":"42","jsonrpc":"2.0","method":"new_invoice",
+    "params":[{
+      "amount":"0x1388",
+      "currency":"Fibd",
+      "expiry":"0xe10",
+      "payment_hash":"0x62e92744b599c27b6ae39232830de4f555255b81f816448b54eb235befe41090",
+      "udt_type_script":{"code_hash":"{{XUDT_CODE_HASH}}","hash_type":"data2","args":"{{XUDT_SCRIPT_ARGS}}"},
+      "description":"prefund Public T XUDT liquidity"
+    }]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+  res.body.result.invoice_address: isDefined
+}
+
+script:post-response {
+  if (res.body.error) throw new Error(JSON.stringify(res.body.error));
+  bru.setVar("PREFUND_ASSET", "xudt");
+  bru.setVar("PREFUND_CHANNEL_ID", bru.getVar("HOSTED_XUDT_CHANNEL_ID"));
+  bru.setVar("PREFUND_INVOICE", res.body.result.invoice_address);
+  bru.setVar("PREFUND_PAYMENT_HASH", res.body.result.invoice.data.payment_hash);
+  bru.setVar("PREFUND_PREIMAGE", "0x5555555555555555555555555555555555555555555555555555555555555555");
+  bru.setVar("PREFUND_ITERATION", 0);
+  bru.setVar("PREFUND_INVOICE_ITERATION", 0);
+  bru.setNextRequest("authorize prefund payment");
+}

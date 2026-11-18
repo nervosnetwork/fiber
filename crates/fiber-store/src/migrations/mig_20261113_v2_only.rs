@@ -5,8 +5,8 @@ use bincode::Options;
 use ckb_types::{packed::OutPoint, prelude::*};
 use fiber_types::channel_v2_validation::validate_channel_v2;
 use fiber_types::schema::{
-    ARCHIVED_V1_PREFIX, CHANNEL_ACTOR_STATE_PREFIX, CHANNEL_OPEN_RECORD_PREFIX,
-    CHANNEL_OUTPOINT_CHANNEL_ID_PREFIX, CHANNEL_SHUTDOWN_SETTLEMENT_PREFIX,
+    ARCHIVED_V1_PREFIX, ATTEMPT_PREFIX, CHANNEL_ACTOR_STATE_PREFIX, CHANNEL_OPEN_RECORD_PREFIX,
+    CHANNEL_OUTPOINT_CHANNEL_ID_PREFIX, CHANNEL_SHUTDOWN_SETTLEMENT_PREFIX, PAYMENT_SESSION_PREFIX,
     PUBKEY_CHANNEL_ID_PREFIX, WATCHTOWER_CHANNEL_PREFIX, WATCHTOWER_SUPERSEDED_SETTLEMENT_PREFIX,
 };
 use fiber_types::{
@@ -56,6 +56,56 @@ impl Migration for MigrationObj {
     }
 }
 
+fn convert_named<T: serde::Serialize, U: DeserializeOwned>(old: T) -> Result<U, String> {
+    serde_json::from_value(serde_json::to_value(old).map_err(|error| error.to_string())?)
+        .map_err(|error| error.to_string())
+}
+
+fn convert_settlement(
+    old: fiber_types_0100::SettlementData,
+) -> Result<fiber_types::SettlementData, String> {
+    Ok(fiber_types::SettlementData {
+        local_amount: old.local_amount,
+        remote_amount: old.remote_amount,
+        tlcs: old
+            .tlcs
+            .into_iter()
+            .map(|tlc| {
+                let key: fiber_types::Privkey = decode_as_new(tlc.local_key)?;
+                Ok(fiber_types::SettlementTlc {
+                    tlc_id: decode_as_new(tlc.tlc_id)?,
+                    hash_algorithm: decode_as_new(tlc.hash_algorithm)?,
+                    payment_amount: tlc.payment_amount,
+                    payment_hash: decode_as_new(tlc.payment_hash)?,
+                    expiry: tlc.expiry,
+                    local_key_pubkey: Some(key.pubkey()),
+                    local_key: Some(key),
+                    local_key_commitment_number: None,
+                    remote_key: decode_as_new(tlc.remote_key)?,
+                })
+            })
+            .collect::<Result<_, String>>()?,
+    })
+}
+
+fn convert_watch_channel(old: OldChannelData) -> Result<ChannelData, String> {
+    let key: fiber_types::Privkey = decode_as_new(old.local_settlement_key)?;
+    Ok(ChannelData {
+        channel_id: decode_as_new(old.channel_id)?,
+        funding_udt_type_script: old.funding_udt_type_script,
+        local_settlement_key_pubkey: Some(key.pubkey()),
+        local_settlement_key: Some(key),
+        remote_settlement_key: decode_as_new(old.remote_settlement_key)?,
+        local_funding_pubkey: decode_as_new(old.local_funding_pubkey)?,
+        remote_funding_pubkey: decode_as_new(old.remote_funding_pubkey)?,
+        remote_settlement_data: convert_settlement(old.remote_settlement_data)?,
+        pending_remote_settlement_data: convert_settlement(old.pending_remote_settlement_data)?,
+        local_settlement_data: convert_settlement(old.local_settlement_data)?,
+        revocation_data: decode_as_new(old.revocation_data)?,
+        channel_features: ChannelFeatures::V2,
+    })
+}
+
 enum ChannelRecord {
     Current(Box<ChannelActorData>),
     Legacy(Box<OldChannelActorData>),
@@ -97,13 +147,14 @@ fn convert_channel_actor_data(
         commitment_fee_rate: old.commitment_fee_rate,
         commitment_delay_epoch: old.commitment_delay_epoch,
         funding_fee_rate: old.funding_fee_rate,
-        signer: decode_as_new(old.signer)?,
+        signer: Some(decode_as_new(old.signer)?),
+        signing_context: Default::default(),
         local_channel_public_keys: decode_as_new(old.local_channel_public_keys)?,
         commitment_numbers: decode_as_new(old.commitment_numbers)?,
         local_constraints: decode_as_new(old.local_constraints)?,
         remote_constraints: decode_as_new(old.remote_constraints)?,
-        tlc_state: decode_as_new(old.tlc_state)?,
-        retryable_tlc_operations: decode_as_new(old.retryable_tlc_operations)?,
+        tlc_state: convert_named(old.tlc_state)?,
+        retryable_tlc_operations: convert_named(old.retryable_tlc_operations)?,
         waiting_forward_tlc_tasks: decode_as_new(old.waiting_forward_tlc_tasks)?,
         remote_shutdown_script: old.remote_shutdown_script,
         local_shutdown_script: old.local_shutdown_script,
@@ -374,7 +425,13 @@ fn scan(store: &dyn MigrationStore, apply: bool) -> Result<(), String> {
         }
         match record.commitment_contract_features.bits() {
             1 => {
-                let _: ChannelData = decode_exact(&value)?;
+                let converted = convert_watch_channel(record)?;
+                if apply {
+                    store.put(
+                        &key,
+                        &bincode::serialize(&converted).map_err(|error| error.to_string())?,
+                    );
+                }
             }
             0 => {
                 if key.len() != 33 {
@@ -414,6 +471,62 @@ fn scan(store: &dyn MigrationStore, apply: bool) -> Result<(), String> {
                 }
             }
             _ => return Err("Unsupported watchtower channel features".to_owned()),
+        }
+    }
+    if upgrading {
+        // Released records have no hosted execution scope. Convert fields by name
+        // so adding optional local metadata cannot shift bincode's nested layout.
+        for (key, value) in store.iter_prefix(&[PAYMENT_SESSION_PREFIX]) {
+            let old: fiber_types_0100::PaymentSession = decode_exact(&value)?;
+            let converted: fiber_types::PaymentSession = convert_named(old)?;
+            if key
+                != [
+                    &[PAYMENT_SESSION_PREFIX],
+                    converted.request.payment_hash.as_ref(),
+                ]
+                .concat()
+            {
+                return Err("Invalid released payment session key".to_owned());
+            }
+            if apply {
+                store.put(
+                    &key,
+                    &bincode::serialize(&converted).map_err(|error| error.to_string())?,
+                );
+            }
+        }
+        for (key, value) in store.iter_prefix(&[ATTEMPT_PREFIX]) {
+            let old: fiber_types_0100::Attempt = decode_exact(&value)?;
+            let converted: fiber_types::Attempt = convert_named(old)?;
+            if key
+                != [
+                    &[ATTEMPT_PREFIX],
+                    converted.payment_hash.as_ref(),
+                    &converted.id.to_le_bytes(),
+                ]
+                .concat()
+            {
+                return Err("Invalid released payment attempt key".to_owned());
+            }
+            if apply {
+                store.put(
+                    &key,
+                    &bincode::serialize(&converted).map_err(|error| error.to_string())?,
+                );
+            }
+        }
+        for (key, value) in store.iter_prefix(&[WATCHTOWER_SUPERSEDED_SETTLEMENT_PREFIX]) {
+            let snapshots: Vec<fiber_types_0100::SettlementData> = decode_exact(&value)?;
+            let converted = snapshots
+                .into_iter()
+                .map(convert_settlement)
+                .collect::<Result<Vec<_>, _>>()?;
+            if apply {
+                store.put(
+                    &key,
+                    &bincode::serialize(&converted).map_err(|error| error.to_string())?,
+                );
+            }
         }
     }
     if blocked_count != 0 {

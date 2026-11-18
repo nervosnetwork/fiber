@@ -13,7 +13,7 @@ async fn test_zero_fee_ring_restart_preserves_each_nodes_balance() {
     use crate::fiber::graph::NetworkGraphStateStore;
     use crate::fiber::network::{PeerDisconnectReason, TestFiberMessageKind};
     use crate::fiber::payment::SendPaymentCommand;
-    use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
+    use crate::fiber::{NetworkActorMessage, PublicNetworkCommand};
     use crate::invoice::{Currency, InvoiceBuilder};
     use crate::tests::test_utils::{
         create_n_nodes_network_with_params, wait_until_timeout, ChannelParameters,
@@ -127,7 +127,7 @@ async fn test_zero_fee_ring_restart_preserves_each_nodes_balance() {
     nodes[0].stop().await;
     let disconnected_peer = nodes[2].pubkey;
     ractor::call!(nodes[1].network_actor, |reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::DisconnectPeer(
+        NetworkActorMessage::new_command(PublicNetworkCommand::DisconnectPeer(
             disconnected_peer,
             PeerDisconnectReason::Requested,
             Some(reply),
@@ -300,13 +300,18 @@ async fn test_node_restart() {
     node_b
         .add_unexpected_events(panic_unexpected_events.clone())
         .await;
+    let mut payments = Vec::new();
 
     for cycle in 0..10 {
         debug!("=== Restart cycle {} ===", cycle);
 
         for _i in 0..10 {
-            let _payment1 = node_a.send_payment_keysend(&node_b, 1, false).await;
-            let _payment2 = node_b.send_payment_keysend(&node_a, 1, false).await;
+            if let Ok(payment) = node_a.send_payment_keysend(&node_b, 1, false).await {
+                payments.push((true, payment.payment_hash));
+            }
+            if let Ok(payment) = node_b.send_payment_keysend(&node_a, 1, false).await {
+                payments.push((false, payment.payment_hash));
+            }
         }
 
         let node_a_unexpected_events = node_a.get_triggered_unexpected_events().await;
@@ -349,7 +354,53 @@ async fn test_node_restart() {
         );
     }
 
-    // Verify no stuck TLCs after all restart cycles.
+    // Bursts can outpace settlement on CI, especially with trace logging. Wait for
+    // accepted payments as well as TLC cleanup, rather than treating an in-flight
+    // round at the fixed post-restart sleep boundary as a permanent stall.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(300);
+    loop {
+        let mut pending = Vec::new();
+        for &(from_a, hash) in &payments {
+            let node = if from_a { &node_a } else { &node_b };
+            let status = node
+                .get_payment_session(hash)
+                .expect("accepted payment has a persisted session")
+                .status;
+            if !status.is_final() {
+                pending.push((from_a, hash, status));
+            }
+        }
+        let state_a = node_a.get_channel_actor_state(channel_id);
+        let state_b = node_b.get_channel_actor_state(channel_id);
+        let tlcs_a = state_a.tlc_state.all_tlcs().count();
+        let tlcs_b = state_b.tlc_state.all_tlcs().count();
+        if pending.is_empty() && tlcs_a == 0 && tlcs_b == 0 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "restart recovery did not drain: pending={pending:?}, \
+             A(tlcs={tlcs_a}, reestablishing={}, waiting_ack={}, retryable={}), \
+             B(tlcs={tlcs_b}, reestablishing={}, waiting_ack={}, retryable={})",
+            state_a.reestablishing,
+            state_a.tlc_state.waiting_ack,
+            state_a.retryable_tlc_operations.len(),
+            state_b.reestablishing,
+            state_b.tlc_state.waiting_ack,
+            state_b.retryable_tlc_operations.len(),
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    for (name, node) in [("node_a", &node_a), ("node_b", &node_b)] {
+        let events = node.get_triggered_unexpected_events().await;
+        assert!(
+            events.is_empty(),
+            "{name} got unexpected events while draining: {events:?}"
+        );
+    }
+
+    // Verify no stuck TLCs after all restart cycles and bounded settlement.
     let state_a = node_a.get_channel_actor_state(channel_id);
     let state_b = node_b.get_channel_actor_state(channel_id);
     let tlc_count_a = state_a.tlc_state.all_tlcs().count();

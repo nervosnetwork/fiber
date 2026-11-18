@@ -69,23 +69,27 @@ async function run({ confirms = true, indexerLag = 0, payout = 10096998905n,
       if (committed && capacityReads++ >= indexerLag) indexed = true;
       const capacity = body.params[0].script.args === 'node1'
         ? baseline - 10097001443n + (indexed ? payout : 0n)
-        : baseline - 10000001000n;
+        : baseline - 35000001000n;
       context.res.body = rpcError ? { error: { code: -1, message: 'indexer unavailable' } }
         : { result: { capacity: `0x${capacity.toString(16)}` } };
     }
     await hook(request.post);
     for (const line of request.assertions.trim().split('\n').filter(Boolean)) {
-      const [expression, operator, value] = line.trim().match(/^(.*): (\w+) (.*)$/).slice(1);
+      const [expression, operator, value] = line.trim().match(/^(.*): (\w+)(?: (.*))?$/).slice(1);
       const actual = vm.runInContext(expression, context);
       if (operator === 'eq') assert.equal(actual, JSON.parse(value));
+      else if (operator === 'isUndefined') assert.equal(actual, undefined);
+      else if (operator === 'isDefined') assert.notEqual(actual, undefined);
       else {
         // Evaluate the unchanged balance limit first to reproduce CI's exact
         // deficit; also require actual chain/indexer progress before assertions.
         assert.ok(actual < Number(value),
           `balance assertion failed: ${actual} ${operator} ${value}; mines=${mines}`);
-        assert.ok(indexed, 'final balance assertions must wait for the indexed payout');
-        finalAssertions++;
       }
+    }
+    if (index >= 2 && next === undefined) {
+      assert.ok(indexed, 'final balance checks must wait for the indexed payout');
+      finalAssertions++;
     }
     index = next === undefined ? index + 1 : requests.findIndex(r => r.name === next);
     assert.ok(index >= 0, `unknown next request in this scenario: ${next}`);

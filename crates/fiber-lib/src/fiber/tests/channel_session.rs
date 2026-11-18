@@ -1,7 +1,10 @@
 use super::ReestablishTimer;
 use super::*;
+use crate::fiber::delivery::TrampolineForwardingRequest;
 use crate::fiber::graph::NetworkGraphStateStore;
-use crate::fiber::network::NetworkActorEvent;
+use crate::fiber::network::FiberActorEvent;
+use crate::fiber::network::{NetworkActorMessage, PublicNetworkEvent};
+use crate::fiber::payment::PaymentSessionExt;
 use crate::fiber::tests::MockStore;
 use crate::tests::test_utils::create_nodes_with_established_channel;
 use fiber_store::StorageBackend;
@@ -12,8 +15,8 @@ struct CaptureNetwork;
 
 #[async_trait::async_trait]
 impl Actor for CaptureNetwork {
-    type Msg = NetworkActorMessage;
-    type State = Arc<Mutex<Vec<NetworkActorMessage>>>;
+    type Msg = FiberActorMessage;
+    type State = Arc<Mutex<Vec<FiberActorMessage>>>;
     type Arguments = Self::State;
 
     async fn pre_start(
@@ -29,7 +32,7 @@ impl Actor for CaptureNetwork {
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        if let NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        if let FiberActorMessage::Command(FiberActorCommand::ControlFiberChannel(
             super::ChannelCommandWithId {
                 command: super::ChannelCommand::TestBarrier(reply),
                 ..
@@ -44,10 +47,10 @@ impl Actor for CaptureNetwork {
     }
 }
 
-async fn capture_barrier(network: &ActorRef<NetworkActorMessage>, id: fiber_types::Hash256) {
+async fn capture_barrier(network: &ActorRef<FiberActorMessage>, id: fiber_types::Hash256) {
     ractor::call_t!(
         network,
-        |reply| NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        |reply| FiberActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             super::ChannelCommandWithId {
                 channel_id: id,
                 command: super::ChannelCommand::TestBarrier(reply),
@@ -76,7 +79,7 @@ async fn assert_reconnects_share_reestablish_timeout(maintenance: bool) {
         .unwrap();
     let (myself, handle) = Actor::spawn(None, NoopChannelActor, ()).await.unwrap();
     let mut state = a.get_channel_actor_state(id);
-    state.network = Some(network.clone());
+    state.network = Some(network.clone().into());
     assert!(!state.tlc_state.waiting_ack);
     let actor = ChannelActor::new(a.pubkey, b.pubkey, network.clone(), a.store.clone(), None);
     state.mark_reestablishing_offline();
@@ -108,7 +111,7 @@ async fn assert_reconnects_share_reestablish_timeout(maintenance: bool) {
             .iter()
             .filter(|message| {
                 matches!(message,
-                NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+                FiberActorMessage::Command(FiberActorCommand::ControlFiberChannel(
                     super::ChannelCommandWithId {
                         command: super::ChannelCommand::Shutdown(command, _), ..
                     }
@@ -130,7 +133,7 @@ async fn assert_reconnects_share_reestablish_timeout(maintenance: bool) {
             capture_barrier(&network, id).await;
             assert!(!captured.lock().unwrap().iter().any(|message| matches!(
                 message,
-                NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+                FiberActorMessage::Command(FiberActorCommand::ControlFiberChannel(
                     super::ChannelCommandWithId {
                         command: super::ChannelCommand::Shutdown(_, _),
                         ..
@@ -159,9 +162,9 @@ async fn test_v2_early_shutdown_replays_ready_before_shutdown() {
         .await
         .unwrap();
     let (myself, handle) = Actor::spawn(None, NoopChannelActor, ()).await.unwrap();
-    sender.network = Some(network.clone());
+    sender.network = Some(network.clone().into());
     sender.private_key = Some(a.private_key.clone());
-    receiver.network = Some(network.clone());
+    receiver.network = Some(network.clone().into());
     receiver.private_key = Some(b.private_key.clone());
     receiver.state = ChannelState::AwaitingChannelReady(
         fiber_types::AwaitingChannelReadyFlags::OUR_CHANNEL_READY,
@@ -203,7 +206,7 @@ async fn test_v2_early_shutdown_replays_ready_before_shutdown() {
         )
         .unwrap();
         *state = ChannelActorState::from(core);
-        state.network = Some(network.clone());
+        state.network = Some(network.clone().into());
         state.private_key = Some(key);
     }
     capture_barrier(&network, id).await;
@@ -331,7 +334,13 @@ fn unaccepted_initial_cs_fixture(state: &mut ChannelActorState) -> CommitmentSig
 async fn test_v2_initial_cs_survives_repeated_reconnects() {
     let (mut a, mut b, id) =
         create_nodes_with_established_channel(100000000000, 11800000000, false).await;
-    let peer_key = a.get_channel_actor_state(id).signer.funding_key.clone();
+    let peer_key = a
+        .get_channel_actor_state(id)
+        .signer
+        .as_ref()
+        .unwrap()
+        .funding_key
+        .clone();
     let mut owner = b.get_channel_actor_state(id);
     let request = unaccepted_initial_cs_fixture(&mut owner);
     b.stop().await;
@@ -340,7 +349,7 @@ async fn test_v2_initial_cs_survives_repeated_reconnects() {
         .await
         .unwrap();
     let (myself, handle) = Actor::spawn(None, NoopChannelActor, ()).await.unwrap();
-    owner.network = Some(network.clone());
+    owner.network = Some(network.clone().into());
     owner.private_key = Some(b.private_key.clone());
     owner.validate_session().unwrap();
     assert!(
@@ -387,7 +396,7 @@ async fn test_v2_initial_cs_survives_repeated_reconnects() {
         )
         .unwrap();
         owner = ChannelActorState::from(data);
-        owner.network = Some(network.clone());
+        owner.network = Some(network.clone().into());
         owner.private_key = Some(b.private_key.clone());
     }
     assert!(
@@ -441,7 +450,13 @@ async fn test_v2_initial_cs_survives_repeated_reconnects() {
 async fn test_v2_staged_initial_cs_keeps_context_across_reconnect() {
     let (mut a, mut b, id) =
         create_nodes_with_established_channel(100000000000, 11800000000, false).await;
-    let peer_key = a.get_channel_actor_state(id).signer.funding_key.clone();
+    let peer_key = a
+        .get_channel_actor_state(id)
+        .signer
+        .as_ref()
+        .unwrap()
+        .funding_key
+        .clone();
     let mut owner = b.get_channel_actor_state(id);
     let request = unaccepted_initial_cs_fixture(&mut owner);
     b.stop().await;
@@ -450,7 +465,7 @@ async fn test_v2_staged_initial_cs_keeps_context_across_reconnect() {
         .await
         .unwrap();
     let (myself, handle) = Actor::spawn(None, NoopChannelActor, ()).await.unwrap();
-    owner.network = Some(network.clone());
+    owner.network = Some(network.clone().into());
     owner.private_key = Some(b.private_key.clone());
     owner.stage_incoming_v2(&request, true).unwrap();
     let pending = owner.session.pending_incoming.clone().unwrap();
@@ -468,7 +483,7 @@ async fn test_v2_staged_initial_cs_keeps_context_across_reconnect() {
     )
     .unwrap();
     owner = ChannelActorState::from(core);
-    owner.network = Some(network.clone());
+    owner.network = Some(network.clone().into());
     owner.private_key = Some(b.private_key.clone());
     owner.mark_reestablishing_offline();
     let peer_nonce = allocate_nonce(
@@ -522,8 +537,8 @@ async fn test_v2_commitment_acceptance_commits_once_before_publication() {
     let (network, task) = Actor::spawn(None, CaptureNetwork, Default::default())
         .await
         .unwrap();
-    sender.network = Some(network.clone());
-    owner.network = Some(network.clone());
+    sender.network = Some(network.clone().into());
+    owner.network = Some(network.clone().into());
     let (myself, handle) = Actor::spawn(None, NoopChannelActor, ()).await.unwrap();
     let (request, _) = sender.prepare_outgoing_v2(false).unwrap();
     sender.tlc_state.waiting_ack = true;
@@ -577,8 +592,8 @@ async fn test_v2_closing_commits_only_at_publication_boundaries() {
     let (network, task) = Actor::spawn(None, CaptureNetwork, captured.clone())
         .await
         .unwrap();
-    sa.network = Some(network.clone());
-    sb.network = Some(network.clone());
+    sa.network = Some(network.clone().into());
+    sb.network = Some(network.clone().into());
     let actor_a = ChannelActor::new(a.pubkey, b.pubkey, network.clone(), MockStore::new(), None);
     let actor_b = ChannelActor::new(b.pubkey, a.pubkey, network.clone(), MockStore::new(), None);
     actor_a
@@ -641,8 +656,8 @@ async fn test_v2_closing_commits_only_at_publication_boundaries() {
     capture_barrier(&network, id).await;
     assert!(matches!(
         captured.lock().unwrap().as_slice(),
-        [NetworkActorMessage::Event(
-            NetworkActorEvent::ClosingTransactionPending(..)
+        [FiberActorMessage::Event(
+            FiberActorEvent::ClosingTransactionPending(..)
         )]
     ));
     let stored = actor_a.store.get_channel_actor_state(&id).unwrap();
@@ -671,7 +686,7 @@ async fn test_v2_remove_effects_wait_for_message_tail_even_after_partial_lookup_
         let (network, task) = Actor::spawn(None, CaptureNetwork, captured.clone())
             .await
             .unwrap();
-        state.network = Some(network.clone());
+        state.network = Some(network.clone().into());
         let balances = (state.to_local_amount, state.to_remote_amount);
         for tag in 0..3 {
             let preimage = fiber_types::Hash256::from([tag; 32]);
@@ -742,7 +757,7 @@ async fn test_v2_remove_effects_wait_for_message_tail_even_after_partial_lookup_
                 .iter()
                 .filter(|message| matches!(
                     message,
-                    NetworkActorMessage::Command(NetworkActorCommand::RelayV2RemoveEffect { .. })
+                    FiberActorMessage::Command(FiberActorCommand::RelayV2RemoveEffect { .. })
                 ))
                 .count(),
             0,
@@ -750,7 +765,7 @@ async fn test_v2_remove_effects_wait_for_message_tail_even_after_partial_lookup_
         );
         // Before commit, recovery reapplies removals from the original durable TLCs.
         let mut restored = ChannelActorState::from(stored.core);
-        restored.network = Some(network.clone());
+        restored.network = Some(network.clone().into());
         assert_eq!(restored.pending_remove_effects_v2, 0);
         actor.replay_remove_effects_v2(&restored);
         capture_barrier(&network, id).await;
@@ -761,7 +776,7 @@ async fn test_v2_remove_effects_wait_for_message_tail_even_after_partial_lookup_
                 .iter()
                 .filter(|message| matches!(
                     message,
-                    NetworkActorMessage::Command(NetworkActorCommand::RelayV2RemoveEffect { .. })
+                    FiberActorMessage::Command(FiberActorCommand::RelayV2RemoveEffect { .. })
                 ))
                 .count(),
             0
@@ -791,9 +806,8 @@ async fn test_v2_remove_effects_wait_for_message_tail_even_after_partial_lookup_
             .unwrap()
             .iter()
             .filter_map(|message| match message {
-                NetworkActorMessage::Command(NetworkActorCommand::RelayV2RemoveEffect {
-                    tlc,
-                    ..
+                FiberActorMessage::Command(FiberActorCommand::RelayV2RemoveEffect {
+                    tlc, ..
                 }) => Some(tlc.tlc_id),
                 _ => None,
             })
@@ -822,7 +836,7 @@ async fn test_v2_remove_effects_wait_for_message_tail_even_after_partial_lookup_
                 .iter()
                 .filter(|message| matches!(
                     message,
-                    NetworkActorMessage::Command(NetworkActorCommand::RelayV2RemoveEffect { .. })
+                    FiberActorMessage::Command(FiberActorCommand::RelayV2RemoveEffect { .. })
                 ))
                 .count(),
             applied,
@@ -845,9 +859,7 @@ async fn test_v2_remove_effects_wait_for_message_tail_even_after_partial_lookup_
                     .iter()
                     .filter(|message| matches!(
                         message,
-                        NetworkActorMessage::Command(
-                            NetworkActorCommand::RelayV2RemoveEffect { .. }
-                        )
+                        FiberActorMessage::Command(FiberActorCommand::RelayV2RemoveEffect { .. })
                     ))
                     .count(),
                 applied
@@ -861,9 +873,7 @@ async fn test_v2_remove_effects_wait_for_message_tail_even_after_partial_lookup_
                     .iter()
                     .filter(|message| matches!(
                         message,
-                        NetworkActorMessage::Command(
-                            NetworkActorCommand::RelayV2RemoveEffect { .. }
-                        )
+                        FiberActorMessage::Command(FiberActorCommand::RelayV2RemoveEffect { .. })
                     ))
                     .count(),
                 applied * 2,
@@ -884,7 +894,7 @@ async fn test_v2_remove_effects_precede_force_close_without_publishing_failed_re
     let (network, task) = Actor::spawn(None, CaptureNetwork, captured.clone())
         .await
         .unwrap();
-    state.network = Some(network.clone());
+    state.network = Some(network.clone().into());
     let balances = (state.to_local_amount, state.to_remote_amount);
     for tag in 0..3 {
         let preimage = fiber_types::Hash256::from([tag; 32]);
@@ -923,10 +933,10 @@ async fn test_v2_remove_effects_precede_force_close_without_publishing_failed_re
         .unwrap()
         .iter()
         .filter_map(|message| match message {
-            NetworkActorMessage::Command(NetworkActorCommand::RelayV2RemoveEffect {
-                tlc, ..
-            }) => Some(Some(tlc.tlc_id)),
-            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            FiberActorMessage::Command(FiberActorCommand::RelayV2RemoveEffect { tlc, .. }) => {
+                Some(Some(tlc.tlc_id))
+            }
+            FiberActorMessage::Command(FiberActorCommand::ControlFiberChannel(
                 super::ChannelCommandWithId {
                     command: super::ChannelCommand::Shutdown(command, _),
                     ..
@@ -964,7 +974,7 @@ async fn test_v2_retired_nonce_cannot_sign_a_later_round() {
     for use_retired in [false, true] {
         let mut sender = sender.clone();
         let mut owner = owner.clone();
-        owner.network = Some(network.clone());
+        owner.network = Some(network.clone().into());
         let retired = owner.session.own.clone();
         owner.mark_reestablishing_offline();
         owner.on_peer_reconnected();
@@ -1013,7 +1023,7 @@ async fn test_v2_round_advance_discards_retired_allocations() {
     let (network, task) = Actor::spawn(None, CaptureNetwork, Default::default())
         .await
         .unwrap();
-    owner.network = Some(network.clone());
+    owner.network = Some(network.clone().into());
     let before = owner.session.own.public_nonce.clone();
     owner.mark_reestablishing_offline();
     owner.on_peer_reconnected();
@@ -1051,8 +1061,8 @@ async fn test_v2_lost_ack_handshakes_keep_restorable_sessions_and_fresh_nonce() 
         .await
         .unwrap();
     let (myself, handle) = Actor::spawn(None, NoopChannelActor, ()).await.unwrap();
-    sender.network = Some(network.clone());
-    owner.network = Some(network.clone());
+    sender.network = Some(network.clone().into());
+    owner.network = Some(network.clone().into());
     let actor = ChannelActor::new(a.pubkey, b.pubkey, network.clone(), MockStore::new(), None);
     let (request, _) = sender.prepare_outgoing_v2(false).unwrap();
     sender.tlc_state.waiting_ack = true;
@@ -1081,7 +1091,7 @@ async fn test_v2_lost_ack_handshakes_keep_restorable_sessions_and_fresh_nonce() 
         )
         .unwrap();
         sender = ChannelActorState::from(core);
-        sender.network = Some(network.clone());
+        sender.network = Some(network.clone().into());
     }
     // Reconnect once more after restoring: RAA must be gated by a fresh valid handshake.
     sender.mark_reestablishing_offline();
@@ -1131,7 +1141,7 @@ async fn test_v2_external_funding_response_replay_is_phase_and_witness_bound() {
         "ready",
     ] {
         let mut state = a.get_channel_actor_state(id);
-        state.network = Some(network.clone());
+        state.network = Some(network.clone().into());
         state.ephemeral_config.external_funding.enabled = true;
         state.ephemeral_config.external_funding.signed_submitted = true;
         state.ephemeral_config.external_funding.funding_lock_script =
@@ -1247,7 +1257,7 @@ async fn test_closed_local_add_waits_for_durable_payment_receipt() {
         .await
         .unwrap();
     let (myself, handle) = Actor::spawn(None, NoopChannelActor, ()).await.unwrap();
-    source.network = Some(network.clone());
+    source.network = Some(network.clone().into());
     let actor = ChannelActor::new(a.pubkey, b.pubkey, network.clone(), a.store.clone(), None);
     actor
         .apply_retryable_tlc_operations(&myself, &mut source, true)
@@ -1405,7 +1415,7 @@ async fn test_closed_local_add_receipt_checks_identity_and_deduplicates_retry() 
         }
         let result = ractor::call_t!(
             a.network_actor,
-            |reply| NetworkActorMessage::new_command(NetworkActorCommand::CompleteClosedLocalAdd {
+            |reply| NetworkActorMessage::new_command(FiberActorCommand::CompleteClosedLocalAdd {
                 channel_id: id,
                 command: Box::new(invalid),
                 reply,
@@ -1427,7 +1437,7 @@ async fn test_closed_local_add_receipt_checks_identity_and_deduplicates_retry() 
         a.store.insert_attempt(newer.clone());
         ractor::call_t!(
             a.network_actor,
-            |reply| NetworkActorMessage::new_command(NetworkActorCommand::CompleteClosedLocalAdd {
+            |reply| NetworkActorMessage::new_command(FiberActorCommand::CompleteClosedLocalAdd {
                 channel_id: id,
                 command: Box::new(command.clone()),
                 reply,
@@ -1469,7 +1479,7 @@ async fn test_closed_local_add_receipt_checks_identity_and_deduplicates_retry() 
     for _ in 0..2 {
         ractor::call_t!(
             a.network_actor,
-            |reply| NetworkActorMessage::new_command(NetworkActorCommand::CompleteClosedLocalAdd {
+            |reply| NetworkActorMessage::new_command(FiberActorCommand::CompleteClosedLocalAdd {
                 channel_id: id,
                 command: Box::new(command.clone()),
                 reply,
@@ -1501,9 +1511,9 @@ async fn test_v2_missing_ready_precedes_pending_first_commitment() {
         .await
         .unwrap();
     let (myself, handle) = Actor::spawn(None, NoopChannelActor, ()).await.unwrap();
-    sender.network = Some(network.clone());
+    sender.network = Some(network.clone().into());
     sender.private_key = Some(a.private_key.clone());
-    receiver.network = Some(network.clone());
+    receiver.network = Some(network.clone().into());
     receiver.private_key = Some(b.private_key.clone());
     receiver.state = ChannelState::AwaitingChannelReady(
         fiber_types::AwaitingChannelReadyFlags::OUR_CHANNEL_READY,
@@ -1650,7 +1660,7 @@ async fn test_forward_recovery_recognizes_fulfilled_outbox_owner() {
     upstream
         .waiting_forward_tlc_tasks
         .insert(source_id, [7; 32]);
-    upstream.network = Some(network.clone());
+    upstream.network = Some(network.clone().into());
     a.store.insert_channel_actor_state(upstream.clone());
     let mut command = retry_batch_add(92, 1000);
     command.payment_hash = hash;
@@ -1701,7 +1711,7 @@ async fn test_closed_channel_keeps_undelivered_outbox_recoverable() {
         .await
         .unwrap();
     let (myself, handle) = Actor::spawn(None, NoopChannelActor, ()).await.unwrap();
-    state.network = Some(network.clone());
+    state.network = Some(network.clone().into());
     let actor = ChannelActor::new(a.pubkey, b.pubkey, network.clone(), a.store.clone(), None);
     let preimage = fiber_types::Hash256::from([91; 32]);
     let mut command = retry_batch_add(91, 1000);
@@ -1765,12 +1775,12 @@ async fn test_closed_channel_keeps_undelivered_outbox_recoverable() {
         let messages = captured.lock().unwrap();
         assert!(messages.iter().any(|message| matches!(
             message,
-            NetworkActorMessage::Command(NetworkActorCommand::RelayV2RemoveEffect { .. })
+            FiberActorMessage::Command(FiberActorCommand::RelayV2RemoveEffect { .. })
         )));
         assert!(
             !messages.iter().any(|message| matches!(
                 message,
-                NetworkActorMessage::Notification(NetworkServiceEvent::RemoteTxComplete(..))
+                FiberActorMessage::Notification(NetworkServiceEvent::RemoteTxComplete(..))
             )),
             "an outbox-only worker must not re-register a fully closed channel with the watchtower"
         );
@@ -1854,7 +1864,7 @@ async fn test_v2_waiting_close_confirmation_keeps_chain_watch_actor() {
         assert!(
             captured.lock().unwrap().iter().any(|message| matches!(
                 message,
-                NetworkActorMessage::Notification(NetworkServiceEvent::RemoteTxComplete(..))
+                FiberActorMessage::Notification(NetworkServiceEvent::RemoteTxComplete(..))
             )),
             "waiting for close confirmation must retain watchtower protection"
         );
@@ -2055,6 +2065,12 @@ async fn test_v2_closed_outbox_replays_on_restart_and_stops_after_receipt() {
 
 #[tokio::test]
 async fn test_v2_ready_publication_crash_replays_saved_nonce() {
+    // Keep the paired actor handlers off the test thread's stack: each future
+    // carries a full channel state, including the external signing context.
+    Box::pin(assert_ready_publication_crash_replays_saved_nonce()).await;
+}
+
+async fn assert_ready_publication_crash_replays_saved_nonce() {
     let (mut a, mut b, id) =
         create_nodes_with_established_channel(100000000000, 11800000000, false).await;
     let initial_peer = a.get_channel_actor_state(id);
@@ -2073,7 +2089,7 @@ async fn test_v2_ready_publication_crash_replays_saved_nonce() {
         let mut peer = initial_peer.clone();
         let mut opening = initial_opening.clone();
         for state in [&mut opening, &mut peer] {
-            state.network = Some(network.clone());
+            state.network = Some(network.clone().into());
             state.commitment_numbers = fiber_types::CommitmentNumbers {
                 local: 1,
                 remote: 1,
@@ -2110,18 +2126,17 @@ async fn test_v2_ready_publication_crash_replays_saved_nonce() {
                 .unwrap();
         }
         opening.validate_session().unwrap();
-        actor
-            .handle_event(
-                &myself,
-                &mut opening,
-                super::ChannelEvent::FundingTransactionConfirmed(
-                    confirmed.0.clone(),
-                    confirmed.1,
-                    confirmed.2,
-                ),
-            )
-            .await
-            .unwrap();
+        Box::pin(actor.handle_event(
+            &myself,
+            &mut opening,
+            super::ChannelEvent::FundingTransactionConfirmed(
+                confirmed.0.clone(),
+                confirmed.1,
+                confirmed.2,
+            ),
+        ))
+        .await
+        .unwrap();
         capture_barrier(&network, id).await;
         let first = take_wire_messages(&captured)
             .into_iter()
@@ -2145,7 +2160,7 @@ async fn test_v2_ready_publication_crash_replays_saved_nonce() {
         let durable = actor.store.get_channel_actor_state(&id).unwrap();
         let mut restarted = ChannelActorState::from(durable.core);
         restarted.validate_session().unwrap();
-        restarted.network = Some(network.clone());
+        restarted.network = Some(network.clone().into());
         restarted.private_key = Some(b.private_key.clone());
         restarted.mark_reestablishing_offline();
         actor
@@ -2205,7 +2220,7 @@ async fn test_v2_opening_reconnect_replays_identical_ready() {
         .await
         .unwrap();
     let (myself, handle) = Actor::spawn(None, NoopChannelActor, ()).await.unwrap();
-    opening.network = Some(network.clone());
+    opening.network = Some(network.clone().into());
     opening.private_key = Some(b.private_key.clone());
     let original = opening.ready_wire_message().unwrap().to_molecule_bytes();
     opening.state = ChannelState::AwaitingChannelReady(
@@ -2241,7 +2256,7 @@ async fn test_v2_opening_reconnect_replays_identical_ready() {
     );
     for missed in [false, true] {
         let mut peer = peer.clone();
-        peer.network = Some(network.clone());
+        peer.network = Some(network.clone().into());
         peer.private_key = Some(a.private_key.clone());
         if missed {
             peer.state = ChannelState::AwaitingChannelReady(
@@ -2307,7 +2322,7 @@ async fn test_v2_ready_replay_uses_committed_bootstrap_nonce() {
     let (myself, handle) = Actor::spawn(None, NoopChannelActor, ()).await.unwrap();
     for prior_reconnect_event in [false, true] {
         let mut state = a.get_channel_actor_state(id);
-        state.network = Some(network.clone());
+        state.network = Some(network.clone().into());
         state.mark_reestablishing_offline();
         let actor = ChannelActor::new(a.pubkey, b.pubkey, network.clone(), MockStore::new(), None);
         if prior_reconnect_event {
@@ -2345,7 +2360,7 @@ async fn test_v2_ready_replay_uses_committed_bootstrap_nonce() {
         capture_barrier(&network, id).await;
         let messages = captured.lock().unwrap();
         assert!(messages.iter().any(|message| matches!(message,
-            NetworkActorMessage::Command(NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget {
+            FiberActorMessage::Command(FiberActorCommand::SendFiberMessage(FiberMessageWithTarget {
                 message: FiberMessage::ChannelNormalOperation(FiberChannelMessage::ChannelReadyV2(ready)), ..
             })) if &ready.next_commitment_nonce == nonce)));
         drop(messages);
@@ -2379,7 +2394,7 @@ async fn test_pending_forward_recovery_only_saves_changed_ownership() {
     let (network, task) = Actor::spawn(None, CaptureNetwork, Default::default())
         .await
         .unwrap();
-    incoming.network = Some(network.clone());
+    incoming.network = Some(network.clone().into());
     let actor = ChannelActor::new(
         incoming.get_local_pubkey(),
         incoming.get_remote_pubkey(),
@@ -2428,7 +2443,7 @@ async fn test_v2_receipt_only_saves_early_before_preimage_cleanup() {
     let (myself, handle) = Actor::spawn(None, NoopChannelActor, ()).await.unwrap();
     for (fulfill, retain, early_writes) in [(false, false, 0), (true, true, 0), (true, false, 1)] {
         let mut state = a.get_channel_actor_state(id);
-        state.network = Some(network.clone());
+        state.network = Some(network.clone().into());
         let preimage = fiber_types::Hash256::from([74; 32]);
         let mut add = retry_batch_add(74, 1000);
         add.payment_hash = add.hash_algorithm.hash(preimage).into();
@@ -2475,7 +2490,7 @@ async fn test_v2_receipt_only_saves_early_before_preimage_cleanup() {
         );
         capture_barrier(&network, id).await;
         assert_eq!(captured.lock().unwrap().iter().filter(|message| matches!(message,
-            NetworkActorMessage::Notification(NetworkServiceEvent::PreimageRemoved(hash)) if *hash == add.payment_hash)).count(), if fulfill && !retain { 1 } else { 0 });
+            FiberActorMessage::Notification(NetworkServiceEvent::PreimageRemoved(hash)) if *hash == add.payment_hash)).count(), if fulfill && !retain { 1 } else { 0 });
         captured.lock().unwrap().clear();
         actor.persist_state_and_publish_pending_effects(&mut state);
         assert_eq!(actor.store.channel_state_writes.get(), early_writes + 1);
@@ -2506,7 +2521,7 @@ struct TerminalRetryNetworkState {
 
 #[async_trait::async_trait]
 impl Actor for TerminalRetryNetwork {
-    type Msg = NetworkActorMessage;
+    type Msg = FiberActorMessage;
     type State = TerminalRetryNetworkState;
     type Arguments = Self::State;
 
@@ -2524,11 +2539,10 @@ impl Actor for TerminalRetryNetwork {
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        if let NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(command)) =
-            message
+        if let FiberActorMessage::Command(FiberActorCommand::ControlFiberChannel(command)) = message
         {
             if command.channel_id == state.upstream.id {
-                state.upstream.network = Some(myself.clone());
+                state.upstream.network = Some(myself.clone().into());
                 let actor = ChannelActor::new(
                     state.upstream.local_pubkey,
                     state.upstream.remote_pubkey,
@@ -2580,6 +2594,10 @@ impl Actor for RetryTaskCounter {
 
 #[tokio::test]
 async fn test_closed_v2_retry_queue_hands_off_adds_and_keeps_chain_obligations() {
+    Box::pin(assert_closed_v2_retry_queue_hands_off_adds_and_keeps_chain_obligations()).await;
+}
+
+async fn assert_closed_v2_retry_queue_hands_off_adds_and_keeps_chain_obligations() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let (mut a, mut b, id) =
         create_nodes_with_established_channel(100000000000, 11800000000, false).await;
@@ -2635,7 +2653,7 @@ async fn test_closed_v2_retry_queue_hands_off_adds_and_keeps_chain_obligations()
     )
     .await
     .unwrap();
-    state.network = Some(network.clone());
+    state.network = Some(network.clone().into());
     let actor = ChannelActor::new(a.pubkey, b.pubkey, network.clone(), a.store.clone(), None);
     let mut preimages = Vec::new();
     for index in 0..2 {
@@ -2713,14 +2731,14 @@ async fn test_closed_v2_retry_queue_hands_off_adds_and_keeps_chain_obligations()
     state.validate_session().unwrap();
     actor.persist_state_and_publish_pending_effects(&mut state);
     let mut restored = ChannelActorState::from(a.store.get_channel_actor_state(&id).unwrap().core);
-    restored.network = Some(network.clone());
+    restored.network = Some(network.clone().into());
     restored.validate_session().unwrap();
     actor
         .apply_retryable_tlc_operations(&myself, &mut restored, true)
         .await;
     // Crash after upstream's durable receipt but before retiring the downstream queue.
     let mut cut = ChannelActorState::from(before_receipts);
-    cut.network = Some(network.clone());
+    cut.network = Some(network.clone().into());
     actor
         .apply_retryable_tlc_operations(&myself, &mut cut, true)
         .await;
@@ -2757,7 +2775,7 @@ async fn test_terminal_forward_receipt_is_identity_checked_and_idempotent() {
         let hash = fiber_types::Hash256::from([41; 32]);
         let mut state =
             crate::fiber::tests::create_test_channel_state_with_tlc(id, 0, 1000, hash, None);
-        state.network = Some(network.clone());
+        state.network = Some(network.clone().into());
         state
             .waiting_forward_tlc_tasks
             .insert(fiber_types::TLCId::Received(0), [7; 32]);
@@ -2870,7 +2888,7 @@ async fn test_closed_forward_handoff_survives_timeout_and_watch_chain_restart() 
     let (myself, handle) = Actor::spawn(None, RetryTaskCounter, retried.clone())
         .await
         .unwrap();
-    state.network = Some(silent.clone());
+    state.network = Some(silent.clone().into());
     let actor = ChannelActor::new(a.pubkey, b.pubkey, silent.clone(), a.store.clone(), None);
     actor
         .apply_retryable_tlc_operations(&myself, &mut state, true)
@@ -2900,7 +2918,7 @@ async fn test_closed_forward_handoff_survives_timeout_and_watch_chain_restart() 
     )
     .await
     .unwrap();
-    restored.network = Some(network.clone());
+    restored.network = Some(network.clone().into());
     let actor = ChannelActor::new(a.pubkey, b.pubkey, network.clone(), a.store.clone(), None);
     let (restarted, restarted_task) = Actor::spawn(
         None,
@@ -3031,7 +3049,7 @@ async fn test_closed_forward_queue_preserves_another_durable_owner() {
         )
         .await
         .unwrap();
-        state.network = Some(network.clone());
+        state.network = Some(network.clone().into());
         let actor = ChannelActor::new(a.pubkey, b.pubkey, network.clone(), a.store.clone(), None);
         actor
             .apply_retryable_tlc_operations(&sink, &mut state, true)
@@ -3086,7 +3104,7 @@ async fn test_closed_retry_scheduler_does_not_rearm_nonempty_queue() {
     let (network, task) = Actor::spawn(None, CaptureNetwork, captured.clone())
         .await
         .unwrap();
-    state.network = Some(network.clone());
+    state.network = Some(network.clone().into());
     let actor = ChannelActor::new(
         state.local_pubkey,
         state.remote_pubkey,
@@ -3109,10 +3127,10 @@ async fn test_closed_retry_scheduler_does_not_rearm_nonempty_queue() {
     );
     capture_barrier(&network, id).await;
     assert!(captured.lock().unwrap().iter().any(|message| matches!(message,
-        NetworkActorMessage::Command(NetworkActorCommand::CompleteClosedLocalAdd { command, .. }) if command.attempt_id == Some(123))));
+        FiberActorMessage::Command(FiberActorCommand::CompleteClosedLocalAdd { command, .. }) if command.attempt_id == Some(123))));
     assert!(!captured.lock().unwrap().iter().any(|message| matches!(
         message,
-        NetworkActorMessage::Event(NetworkActorEvent::AddTlcResult(..))
+        FiberActorMessage::Event(FiberActorEvent::AddTlcResult(..))
     )));
     network.stop(None);
     task.await.unwrap();
@@ -3136,8 +3154,8 @@ async fn test_v2_remote_commitment_points_survive_asymmetric_rounds_and_restore(
     let (network, task) = Actor::spawn(None, CaptureNetwork, Arc::new(Mutex::new(Vec::new())))
         .await
         .unwrap();
-    local.network = Some(network.clone());
-    remote.network = Some(network.clone());
+    local.network = Some(network.clone().into());
+    remote.network = Some(network.clone().into());
     let local_actor = ChannelActor::new(a.pubkey, b.pubkey, network.clone(), a.store.clone(), None);
     let remote_actor =
         ChannelActor::new(b.pubkey, a.pubkey, network.clone(), b.store.clone(), None);
@@ -3250,7 +3268,7 @@ async fn test_v2_remote_commitment_points_survive_asymmetric_rounds_and_restore(
                     .collect::<Vec<_>>(),
                 vec![2, 3, 4, 5, 6]
             );
-            local.network = Some(network.clone());
+            local.network = Some(network.clone().into());
         }
     }
     for state in [&local, &remote] {
@@ -3273,6 +3291,7 @@ async fn test_v2_remote_commitment_points_survive_asymmetric_rounds_and_restore(
 
 fn retry_batch_add(tag: u8, amount: u128) -> fiber_types::AddTlcCommand {
     fiber_types::AddTlcCommand {
+        upstream_tlc_key: None,
         amount,
         payment_hash: [tag; 32].into(),
         attempt_id: None,
@@ -3309,7 +3328,7 @@ async fn test_forward_add_rejects_unbacked_or_already_forwarded_upstream() {
         "valid",
     ] {
         let mut state = initial.clone();
-        state.network = Some(network.clone());
+        state.network = Some(network.clone().into());
         let mut command = retry_batch_add(42, 1000);
         let upstream_id = if case == "same_channel_queued_remove" {
             id
@@ -3413,7 +3432,7 @@ async fn test_forward_add_rejects_unbacked_or_already_forwarded_upstream() {
         let sent = captured.lock().unwrap().iter().any(|message| {
             matches!(
                 message,
-                NetworkActorMessage::Command(NetworkActorCommand::SendFiberMessage(
+                FiberActorMessage::Command(FiberActorCommand::SendFiberMessage(
                     FiberMessageWithTarget {
                         message: FiberMessage::ChannelNormalOperation(FiberChannelMessage::AddTlc(
                             _
@@ -3435,13 +3454,185 @@ async fn test_forward_add_rejects_unbacked_or_already_forwarded_upstream() {
     task.await.unwrap();
 }
 
+#[tokio::test]
+async fn test_hosted_payment_add_requires_live_upstream_tlc() {
+    let (a, b, id) = create_nodes_with_established_channel(100000000000, 11800000000, false).await;
+    let initial = a.get_channel_actor_state(id);
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let (network, task) = Actor::spawn(None, CaptureNetwork, captured).await.unwrap();
+    let actor = ChannelActor::new(a.pubkey, b.pubkey, network.clone(), a.store.clone(), None);
+
+    for case in ["pending", "removed", "closed"] {
+        let mut state = initial.clone();
+        state.network = Some(network.clone().into());
+        let mut command = retry_batch_add(42, 1_000);
+        let upstream_id = crate::gen_rand_sha256_hash();
+        command.upstream_tlc_key = Some(fiber_types::UpstreamTlcKey {
+            incoming_channel_id: upstream_id,
+            incoming_tlc_id: 7,
+        });
+        let mut upstream = crate::fiber::tests::create_test_channel_state_with_tlc(
+            upstream_id,
+            7,
+            1_100,
+            command.payment_hash,
+            None,
+        );
+        match case {
+            "removed" => {
+                upstream
+                    .tlc_state
+                    .get_mut(&fiber_types::TLCId::Received(7))
+                    .unwrap()
+                    .removed_reason = Some(fiber_types::RemoveTlcReason::RemoveTlcFail(
+                    fiber_types::TlcErrPacket::new(
+                        fiber_types::TlcErr::new(fiber_types::TlcErrorCode::TemporaryNodeFailure),
+                        &[7; 32],
+                    ),
+                ));
+            }
+            "closed" => {
+                upstream.state = ChannelState::Closed(fiber_types::CloseFlags::empty());
+            }
+            _ => {}
+        }
+        a.store.insert_channel_actor_state(upstream);
+
+        let result = actor.add_tlc_update(&mut state, &command);
+        assert_eq!(result.is_ok(), case == "pending", "{case}: {result:?}");
+        assert_eq!(
+            state.tlc_state.offered_tlcs.tlcs.len(),
+            usize::from(case == "pending"),
+            "reject before allocating an outgoing TLC: {case}"
+        );
+    }
+    network.stop(None);
+    task.await.unwrap();
+}
+
+#[tokio::test]
+async fn test_ordinary_trampoline_add_requires_live_upstream_tlc() {
+    let (a, b, id) = create_nodes_with_established_channel(100000000000, 11800000000, false).await;
+    let initial = a.get_channel_actor_state(id);
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let (network, task) = Actor::spawn(None, CaptureNetwork, captured).await.unwrap();
+    let actor = ChannelActor::new(a.pubkey, b.pubkey, network.clone(), a.store.clone(), None);
+
+    for case in [
+        "pending",
+        "removed",
+        "closed",
+        "wrong_algorithm",
+        "same_channel_removed",
+    ] {
+        let mut state = initial.clone();
+        state.network = Some(network.clone().into());
+        let mut command = retry_batch_add(43, 1_000);
+        command.attempt_id = Some(1);
+        let upstream_id = if case == "same_channel_removed" {
+            id
+        } else {
+            crate::gen_rand_sha256_hash()
+        };
+        let upstream_tlc_id = 7;
+        let mut upstream = crate::fiber::tests::create_test_channel_state_with_tlc(
+            upstream_id,
+            upstream_tlc_id,
+            1_100,
+            command.payment_hash,
+            None,
+        );
+        match case {
+            "removed" => {
+                upstream
+                    .tlc_state
+                    .get_mut(&fiber_types::TLCId::Received(upstream_tlc_id))
+                    .unwrap()
+                    .removed_reason = Some(fiber_types::RemoveTlcReason::RemoveTlcFail(
+                    fiber_types::TlcErrPacket::new(
+                        fiber_types::TlcErr::new(fiber_types::TlcErrorCode::TemporaryNodeFailure),
+                        &[7; 32],
+                    ),
+                ));
+            }
+            "closed" => {
+                upstream.state = ChannelState::Closed(fiber_types::CloseFlags::empty());
+            }
+            "wrong_algorithm" => {
+                upstream
+                    .tlc_state
+                    .get_mut(&fiber_types::TLCId::Received(upstream_tlc_id))
+                    .unwrap()
+                    .hash_algorithm = fiber_types::HashAlgorithm::Sha256;
+            }
+            _ => {}
+        }
+        if case == "same_channel_removed" {
+            let inbound = upstream
+                .tlc_state
+                .get(&fiber_types::TLCId::Received(upstream_tlc_id))
+                .unwrap()
+                .clone();
+            state.tlc_state.add_received_tlc(inbound);
+            state
+                .tlc_state
+                .get_mut(&fiber_types::TLCId::Received(upstream_tlc_id))
+                .unwrap()
+                .removed_reason = Some(fiber_types::RemoveTlcReason::RemoveTlcFail(
+                fiber_types::TlcErrPacket::new(
+                    fiber_types::TlcErr::new(fiber_types::TlcErrorCode::TemporaryNodeFailure),
+                    &[7; 32],
+                ),
+            ));
+        }
+        a.store.insert_channel_actor_state(upstream);
+
+        let request = TrampolineForwardingRequest {
+            payment_hash: command.payment_hash,
+            next_node_id: b.pubkey,
+            amount_to_forward: command.amount,
+            hash_algorithm: command.hash_algorithm,
+            build_max_fee_amount: 100,
+            tlc_expiry_delta: crate::fiber::config::DEFAULT_FINAL_TLC_EXPIRY_DELTA,
+            tlc_expiry_limit: crate::fiber::config::DEFAULT_FINAL_TLC_EXPIRY_DELTA * 2,
+            max_parts: None,
+            udt_type_script: None,
+            remaining_trampoline_onion: Vec::new(),
+            previous_tlc: fiber_types::PrevTlcInfo::new_with_shared_secret(
+                upstream_id,
+                upstream_tlc_id,
+                100,
+                [7; 32],
+            ),
+            max_outgoing_tlc_expiry: command.expiry,
+        };
+        let payment_data = request.into_send_payment_data().unwrap();
+        a.store
+            .insert_payment_session(fiber_types::PaymentSession::new_session(
+                &a.store,
+                payment_data,
+                1,
+            ));
+
+        let result = actor.add_tlc_update(&mut state, &command);
+        assert_eq!(result.is_ok(), case == "pending", "{case}: {result:?}");
+        assert_eq!(
+            state.tlc_state.offered_tlcs.tlcs.len(),
+            usize::from(case == "pending"),
+            "reject before allocating an outgoing TLC: {case}"
+        );
+    }
+    network.stop(None);
+    task.await.unwrap();
+}
+
 fn take_wire_messages(
-    captured: &Arc<Mutex<Vec<NetworkActorMessage>>>,
+    captured: &Arc<Mutex<Vec<FiberActorMessage>>>,
 ) -> Vec<FiberMessageWithTarget> {
     std::mem::take(&mut *captured.lock().unwrap())
         .into_iter()
         .filter_map(|message| match message {
-            NetworkActorMessage::Command(NetworkActorCommand::SendFiberMessage(message)) => {
+            FiberActorMessage::Command(FiberActorCommand::SendFiberMessage(message)) => {
                 Some(message)
             }
             _ => None,
@@ -3463,8 +3654,8 @@ async fn test_v2_stale_snapshot_reproduces_tlc_conflict_invalid_cs_and_ack_timeo
     let (network, task) = Actor::spawn(None, CaptureNetwork, captured.clone())
         .await
         .unwrap();
-    sender.network = Some(network.clone());
-    receiver.network = Some(network.clone());
+    sender.network = Some(network.clone().into());
+    receiver.network = Some(network.clone().into());
     let actor = ChannelActor::new(a.pubkey, b.pubkey, network.clone(), a.store.clone(), None);
     let peer = ChannelActor::new(b.pubkey, a.pubkey, network.clone(), b.store.clone(), None);
     let (myself, handle) = Actor::spawn(None, NoopChannelActor, ()).await.unwrap();
@@ -3501,8 +3692,8 @@ async fn test_v2_stale_snapshot_reproduces_tlc_conflict_invalid_cs_and_ack_timeo
     a.store.insert_channel_actor_state(stale);
     let mut restored = a.store.get_channel_actor_state(&id).unwrap();
     let mut receiver = b.store.get_channel_actor_state(&id).unwrap();
-    restored.network = Some(network.clone());
-    receiver.network = Some(network.clone());
+    restored.network = Some(network.clone().into());
+    receiver.network = Some(network.clone().into());
     actor
         .reestablish_v2(&myself, &mut restored, receiver.reestablish_message_v2())
         .await
@@ -3574,7 +3765,7 @@ async fn test_v2_stale_snapshot_reproduces_tlc_conflict_invalid_cs_and_ack_timeo
         .unwrap()
         .iter()
         .any(|message| matches!(message,
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        FiberActorMessage::Command(FiberActorCommand::ControlFiberChannel(
             super::ChannelCommandWithId { command: super::ChannelCommand::Shutdown(command, _), .. }
         )) if command.force)));
     myself.stop(None);
@@ -3597,8 +3788,8 @@ async fn test_v2_updates_wait_for_commit_before_becoming_peer_visible() {
     let (network, task) = Actor::spawn(None, CaptureNetwork, captured.clone())
         .await
         .unwrap();
-    sender.network = Some(network.clone());
-    receiver.network = Some(network.clone());
+    sender.network = Some(network.clone().into());
+    receiver.network = Some(network.clone().into());
     a.store.insert_channel_actor_state(sender.clone());
     let actor = ChannelActor::new(a.pubkey, b.pubkey, network.clone(), a.store.clone(), None);
     let peer = ChannelActor::new(b.pubkey, a.pubkey, network.clone(), b.store.clone(), None);
@@ -3618,7 +3809,7 @@ async fn test_v2_updates_wait_for_commit_before_becoming_peer_visible() {
     let mut restored = a.store.get_channel_actor_state(&id).unwrap();
     assert_eq!(restored.tlc_state.offered_tlcs.next_tlc_id, 1763);
     assert!(restored.tlc_state.offered_tlcs.tlcs.is_empty());
-    restored.network = Some(network.clone());
+    restored.network = Some(network.clone().into());
     // A different payment may reuse an uncommitted ID only if the old Add was never published.
     actor
         .handle_add_tlc_command(&myself, &mut restored, &retry_batch_add(13, 1))
@@ -3679,6 +3870,10 @@ async fn test_v2_updates_wait_for_commit_before_becoming_peer_visible() {
 
 #[tokio::test]
 async fn test_v2_force_closing_removal_is_committed_and_published_without_cs() {
+    Box::pin(assert_v2_force_closing_removal_is_committed_and_published_without_cs()).await;
+}
+
+async fn assert_v2_force_closing_removal_is_committed_and_published_without_cs() {
     let (mut a, mut b, id) =
         create_nodes_with_established_channel(100000000000, 11800000000, false).await;
     let preimage = crate::gen_rand_sha256_hash();
@@ -3727,7 +3922,7 @@ async fn test_v2_force_closing_removal_is_committed_and_published_without_cs() {
         let (myself, handle) = Actor::spawn(None, NoopChannelActor, ()).await.unwrap();
         let actor = ChannelActor::new(b.pubkey, a.pubkey, network.clone(), MockStore::new(), None);
         let mut state = forwarder.clone();
-        state.network = Some(network.clone());
+        state.network = Some(network.clone().into());
         // Force close must not publish an Add left over from an unsigned batch.
         actor
             .add_tlc_update(&mut state, &retry_batch_add(200, 1))
@@ -3807,7 +4002,7 @@ async fn test_v2_force_closing_removal_is_committed_and_published_without_cs() {
             panic!("expected only a removal notification")
         };
         let mut payer = payer.clone();
-        payer.network = Some(network.clone());
+        payer.network = Some(network.clone().into());
         let peer = ChannelActor::new(a.pubkey, b.pubkey, network.clone(), a.store.clone(), None);
         peer.handle_remove_tlc_peer_message(&mut payer, remove.clone())
             .unwrap();
@@ -3826,7 +4021,7 @@ async fn test_v2_force_closing_removal_is_committed_and_published_without_cs() {
             "do not republish on every message tail"
         );
         let mut restored = ChannelActorState::from(durable.core);
-        restored.network = Some(network.clone());
+        restored.network = Some(network.clone().into());
         actor.persist_state_and_publish_pending_effects(&mut restored);
         capture_barrier(&network, id).await;
         let replayed = take_wire_messages(&captured);
@@ -3855,7 +4050,7 @@ async fn test_v2_preparation_failure_keeps_pending_updates_unpublished() {
     let (network, task) = Actor::spawn(None, CaptureNetwork, captured.clone())
         .await
         .unwrap();
-    state.network = Some(network.clone());
+    state.network = Some(network.clone().into());
     let actor = ChannelActor::new(a.pubkey, b.pubkey, network.clone(), MockStore::new(), None);
     let (myself, handle) = Actor::spawn(None, NoopChannelActor, ()).await.unwrap();
     actor
@@ -3891,7 +4086,7 @@ async fn test_v2_retry_queue_batches_after_ack() {
     let (network, task) = Actor::spawn(None, CaptureNetwork, captured.clone())
         .await
         .unwrap();
-    state.network = Some(network.clone());
+    state.network = Some(network.clone().into());
     let actor = ChannelActor::new(a.pubkey, b.pubkey, network.clone(), a.store.clone(), None);
     let (myself, handle) = Actor::spawn(None, NoopChannelActor, ()).await.unwrap();
 
@@ -3970,7 +4165,7 @@ async fn test_v2_retry_queue_batches_after_ack() {
         .unwrap()
         .iter()
         .filter_map(|message| match message {
-            NetworkActorMessage::Command(NetworkActorCommand::SendFiberMessage(message)) => {
+            FiberActorMessage::Command(FiberActorCommand::SendFiberMessage(message)) => {
                 Some(message.message.clone())
             }
             _ => None,
@@ -4033,7 +4228,7 @@ async fn test_v2_retry_queue_checks_limits_and_reports_results() {
         (10000, 0, false, vec![]),
     ] {
         let mut state = initial.clone();
-        state.network = Some(network.clone());
+        state.network = Some(network.clone().into());
         state.remote_constraints.max_tlc_value_in_flight = value_limit;
         state.remote_constraints.max_tlc_number_in_flight = count_limit;
         if balance_limit {
@@ -4071,7 +4266,7 @@ async fn test_v2_retry_queue_checks_limits_and_reports_results() {
         let results = messages
             .iter()
             .filter_map(|message| match message {
-                NetworkActorMessage::Event(NetworkActorEvent::AddTlcResult(hash, _, result, _)) => {
+                FiberActorMessage::Event(FiberActorEvent::AddTlcResult(hash, _, result, _)) => {
                     Some((*hash, result.is_ok()))
                 }
                 _ => None,
@@ -4081,7 +4276,7 @@ async fn test_v2_retry_queue_checks_limits_and_reports_results() {
             results,
             (0..4)
                 .map(|tag| (
-                    fiber_types::Hash256::from([tag; 32]),
+                    fiber_types::Hash256::from([tag; 32]).into(),
                     accepted.contains(&tag)
                 ))
                 .collect::<Vec<_>>()
@@ -4091,7 +4286,7 @@ async fn test_v2_retry_queue_checks_limits_and_reports_results() {
             .filter(|message| {
                 matches!(
                     message,
-                    NetworkActorMessage::Command(NetworkActorCommand::SendFiberMessage(
+                    FiberActorMessage::Command(FiberActorCommand::SendFiberMessage(
                         FiberMessageWithTarget {
                             message: FiberMessage::ChannelNormalOperation(
                                 FiberChannelMessage::CommitmentSignedV2(_)
@@ -4134,7 +4329,7 @@ async fn test_v2_retry_queue_preserves_mixed_update_replay() {
     let (network, task) = Actor::spawn(None, CaptureNetwork, captured.clone())
         .await
         .unwrap();
-    state.network = Some(network.clone());
+    state.network = Some(network.clone().into());
     let actor = ChannelActor::new(a.pubkey, b.pubkey, network.clone(), a.store.clone(), None);
     let (myself, handle) = Actor::spawn(None, NoopChannelActor, ()).await.unwrap();
     actor.register_retryable_tlc_add(&myself, &mut state, retry_batch_add(1, 2000));
@@ -4276,6 +4471,10 @@ async fn test_v2_storage_codec_defers_corrupt_intent_to_preflight_and_restore() 
 
 #[tokio::test]
 async fn test_v2_actual_backup_rollback_quarantines_matching_malicious_peer() {
+    Box::pin(assert_v2_actual_backup_rollback_quarantines_matching_malicious_peer()).await;
+}
+
+async fn assert_v2_actual_backup_rollback_quarantines_matching_malicious_peer() {
     let (a, b, id) = create_nodes_with_established_channel(100000000000, 11800000000, false).await;
     let mut local = a.get_channel_actor_state(id);
     let mut peer = b.get_channel_actor_state(id);
@@ -4345,7 +4544,7 @@ async fn test_v2_actual_backup_rollback_quarantines_matching_malicious_peer() {
     let (network, task) = Actor::spawn(None, CaptureNetwork, captured.clone())
         .await
         .unwrap();
-    stale.network = Some(network.clone());
+    stale.network = Some(network.clone().into());
     stale.mark_reestablishing_offline();
     let actor = ChannelActor::new(a.pubkey, b.pubkey, network.clone(), store, None);
     let _ = actor
@@ -4395,13 +4594,11 @@ async fn test_v2_actual_backup_rollback_quarantines_matching_malicious_peer() {
     task.await.unwrap();
     assert!(!captured.lock().unwrap().iter().any(|m| matches!(
         m,
-        NetworkActorMessage::Event(
-            crate::fiber::network::NetworkActorEvent::ClosingTransactionPending(..)
-        ) | NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(_))
-            | NetworkActorMessage::Event(crate::fiber::network::NetworkActorEvent::ChannelReady(
-                ..
-            ))
-            | NetworkActorMessage::Notification(
+        FiberActorMessage::Event(
+            crate::fiber::network::FiberActorEvent::ClosingTransactionPending(..)
+        ) | FiberActorMessage::Command(FiberActorCommand::ControlFiberChannel(_))
+            | FiberActorMessage::Event(crate::fiber::network::FiberActorEvent::ChannelReady(..))
+            | FiberActorMessage::Notification(
                 NetworkServiceEvent::ChannelOnline(..) | NetworkServiceEvent::ChannelReady(..)
             )
     )));
@@ -4420,7 +4617,7 @@ async fn test_v2_restart_resets_ack_and_close_peer_waits() {
         let captured = Arc::new(Mutex::new(Vec::new()));
         let (network, task) = Actor::spawn(None, CaptureNetwork, captured).await.unwrap();
         let actor = ChannelActor::new(a.pubkey, b.pubkey, network.clone(), a.store.clone(), None);
-        state.network = Some(network.clone());
+        state.network = Some(network.clone().into());
         if waiting_ack {
             state.prepare_outgoing_v2(false).unwrap();
             state.tlc_state.waiting_ack = true;
@@ -4532,8 +4729,8 @@ async fn test_v2_close_peer_obligations_timeout_normal_and_reconnect() {
             let (network, task) = Actor::spawn(None, CaptureNetwork, captured.clone())
                 .await
                 .unwrap();
-            state.network = Some(network.clone());
-            peer.network = Some(network.clone());
+            state.network = Some(network.clone().into());
+            peer.network = Some(network.clone().into());
             let actor =
                 ChannelActor::new(a.pubkey, b.pubkey, network.clone(), a.store.clone(), None);
             let remote =
@@ -4614,11 +4811,11 @@ async fn test_v2_close_peer_obligations_timeout_normal_and_reconnect() {
             let shutdown = {
                 let mut messages = captured.lock().unwrap();
                 let index = messages.iter().position(|m| matches!(m,
-                    NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+                    FiberActorMessage::Command(FiberActorCommand::ControlFiberChannel(
                         super::ChannelCommandWithId { channel_id, command: super::ChannelCommand::Shutdown(command, _) }
                     )) if *channel_id == id && command.force
                 )).expect("CheckActiveChannel must request force close, not merely schedule another check");
-                let NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+                let FiberActorMessage::Command(FiberActorCommand::ControlFiberChannel(
                     super::ChannelCommandWithId {
                         command: super::ChannelCommand::Shutdown(command, _),
                         ..
@@ -4637,7 +4834,7 @@ async fn test_v2_close_peer_obligations_timeout_normal_and_reconnect() {
             network.stop(None);
             task.await.unwrap();
             let messages = captured.lock().unwrap();
-            assert!(messages.iter().any(|m| matches!(m, NetworkActorMessage::Event(crate::fiber::network::NetworkActorEvent::ClosingTransactionPending(_, _, tx, true)) if tx.data().as_slice() == usable.as_slice())));
+            assert!(messages.iter().any(|m| matches!(m, FiberActorMessage::Event(crate::fiber::network::FiberActorEvent::ClosingTransactionPending(_, _, tx, true)) if tx.data().as_slice() == usable.as_slice())));
             assert!(!state.peer_does_not_reply_ack_in_time());
         }
     }
@@ -4687,8 +4884,8 @@ async fn test_v2_replayed_accepted_cs_is_answered_from_durable_record() {
     let (network, network_task) = Actor::spawn(None, CaptureNetwork, captured.clone())
         .await
         .unwrap();
-    state_a.network = Some(network.clone());
-    state_b.network = Some(network.clone());
+    state_a.network = Some(network.clone().into());
+    state_b.network = Some(network.clone().into());
     let actor_b = ChannelActor::new(b.pubkey, a.pubkey, network.clone(), b.store.clone(), None);
     let (b_ref, b_handle) = Actor::spawn(None, NoopChannelActor, ())
         .await
@@ -4738,7 +4935,7 @@ async fn test_v2_replayed_accepted_cs_is_answered_from_durable_record() {
         .filter(|message| {
             matches!(
                 message,
-                NetworkActorMessage::Command(NetworkActorCommand::SendFiberMessage(
+                FiberActorMessage::Command(FiberActorCommand::SendFiberMessage(
                     FiberMessageWithTarget {
                         message: FiberMessage::ChannelNormalOperation(
                             FiberChannelMessage::RevokeAndAckV2(_)
@@ -4767,7 +4964,7 @@ async fn test_v2_partition_suspends_and_then_restarts_peer_response_window() {
     let (network, task) = Actor::spawn(None, CaptureNetwork, captured.clone())
         .await
         .unwrap();
-    state.network = Some(network.clone());
+    state.network = Some(network.clone().into());
     let actor = ChannelActor::new(a.pubkey, b.pubkey, network.clone(), a.store.clone(), None);
 
     // A cooperative close is in flight, so our own peer-response obligation exists.
@@ -4918,7 +5115,7 @@ async fn assert_offline_close_restart_rearms(closing: bool, expectation: Restart
         RestartCloseExpectation::AwaitChain => {
             let captured = Arc::new(Mutex::new(Vec::new()));
             let (network, task) = Actor::spawn(None, CaptureNetwork, captured).await.unwrap();
-            retained.network = Some(network.clone());
+            retained.network = Some(network.clone().into());
             let actor =
                 ChannelActor::new(a.pubkey, b.pubkey, network.clone(), a.store.clone(), None);
             actor
@@ -5037,7 +5234,7 @@ async fn assert_shutdown_draining_ack_watchdog(restart: bool) {
         .await;
     a.network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::ControlFiberChannel(super::ChannelCommandWithId {
+            FiberActorCommand::ControlFiberChannel(super::ChannelCommandWithId {
                 channel_id: id,
                 command: super::ChannelCommand::CommitmentSigned(None),
             }),
@@ -5080,8 +5277,8 @@ async fn assert_shutdown_draining_ack_watchdog(restart: bool) {
     let peer_shutdown = ShutdownV2::try_from(close.remote_shutdown.clone().unwrap()).unwrap();
     // Duplicate shutdowns must neither unblock signing nor replace the ACK intent.
     a.network_actor
-        .send_message(NetworkActorMessage::Event(
-            crate::fiber::network::NetworkActorEvent::FiberMessage(
+        .send_message(NetworkActorMessage::PublicEvent(
+            PublicNetworkEvent::FiberMessage(
                 b.pubkey,
                 FiberMessage::shutdown_v2(peer_shutdown),
                 None,
@@ -5231,8 +5428,8 @@ async fn test_v2_close_after_update_crash_replay_conflicts_and_db_validation() {
     let (network, task) = Actor::spawn(None, CaptureNetwork, captured.clone())
         .await
         .unwrap();
-    sa.network = Some(network.clone());
-    sb.network = Some(network.clone());
+    sa.network = Some(network.clone().into());
+    sb.network = Some(network.clone().into());
     let actor_a = ChannelActor::new(a.pubkey, b.pubkey, network.clone(), a.store.clone(), None);
     let actor_b = ChannelActor::new(b.pubkey, a.pubkey, network.clone(), b.store.clone(), None);
     actor_a
@@ -5447,8 +5644,8 @@ async fn test_v2_rejected_shutdown_leaves_no_stale_remote_info_across_restore() 
     let (network, task) = Actor::spawn(None, CaptureNetwork, captured.clone())
         .await
         .unwrap();
-    sa.network = Some(network.clone());
-    sb.network = Some(network.clone());
+    sa.network = Some(network.clone().into());
+    sb.network = Some(network.clone().into());
     let actor_a = ChannelActor::new(a.pubkey, b.pubkey, network.clone(), a.store.clone(), None);
     let actor_b = ChannelActor::new(b.pubkey, a.pubkey, network.clone(), b.store.clone(), None);
 
@@ -5535,7 +5732,7 @@ async fn test_v2_recovery_handshake_precedes_replay_and_watchdog_bounds_wait() {
     let (network, task) = Actor::spawn(None, CaptureNetwork, captured.clone())
         .await
         .unwrap();
-    state.network = Some(network.clone());
+    state.network = Some(network.clone().into());
     let actor = ChannelActor::new(a.pubkey, b.pubkey, network.clone(), a.store.clone(), None);
     // Traffic before the peer handshake cannot consume our verification nonce.
     let mut incoming = b.get_channel_actor_state(id);
@@ -5618,7 +5815,7 @@ async fn test_v2_recovery_handshake_precedes_replay_and_watchdog_bounds_wait() {
         let wire = messages
             .iter()
             .filter_map(|m| match m {
-                NetworkActorMessage::Command(NetworkActorCommand::SendFiberMessage(m)) => {
+                FiberActorMessage::Command(FiberActorCommand::SendFiberMessage(m)) => {
                     Some(&m.message)
                 }
                 _ => None,
@@ -5681,7 +5878,7 @@ async fn test_v2_recovery_dual_owed_preserves_both_original_orders() {
         let (network, task) = Actor::spawn(None, CaptureNetwork, captured.clone())
             .await
             .unwrap();
-        state.network = Some(network.clone());
+        state.network = Some(network.clone().into());
         let actor = ChannelActor::new(a.pubkey, b.pubkey, network.clone(), a.store.clone(), None);
         actor
             .reestablish_v2(&myself, &mut state, peer_state.reestablish_message_v2())
@@ -5696,7 +5893,7 @@ async fn test_v2_recovery_dual_owed_preserves_both_original_orders() {
                     .filter(|m| {
                         matches!(
                             m,
-                            NetworkActorMessage::Command(NetworkActorCommand::SendFiberMessage(_))
+                            FiberActorMessage::Command(FiberActorCommand::SendFiberMessage(_))
                         )
                     })
                     .count()
@@ -5714,7 +5911,7 @@ async fn test_v2_recovery_dual_owed_preserves_both_original_orders() {
             let wire = messages
                 .iter()
                 .filter_map(|m| match m {
-                    NetworkActorMessage::Command(NetworkActorCommand::SendFiberMessage(m)) => {
+                    FiberActorMessage::Command(FiberActorCommand::SendFiberMessage(m)) => {
                         Some(&m.message)
                     }
                     _ => None,
@@ -5861,7 +6058,7 @@ async fn test_v2_onchain_relay_confirmation_drops_matching_remove_effect() {
     let (network, task) = Actor::spawn(None, CaptureNetwork, captured.clone())
         .await
         .unwrap();
-    state.network = Some(network.clone());
+    state.network = Some(network.clone().into());
     let actor = ChannelActor::new(a.pubkey, b.pubkey, network.clone(), a.store.clone(), None);
 
     let reason = fiber_types::RemoveTlcReason::RemoveTlcFail(fiber_types::TlcErrPacket::new(
@@ -5869,6 +6066,7 @@ async fn test_v2_onchain_relay_confirmation_drops_matching_remove_effect() {
         &[0u8; 32],
     ));
     let tlc = fiber_types::TlcInfo {
+        upstream_tlc_key: None,
         status: fiber_types::TlcStatus::Outbound(
             fiber_types::OutboundTlcStatus::RemoveAckConfirmed,
         ),
@@ -6109,8 +6307,8 @@ async fn test_v2_committed_batch_recovers_every_publication_cut_without_id_reuse
         let (network, task) = Actor::spawn(None, CaptureNetwork, captured.clone())
             .await
             .unwrap();
-        sender.network = Some(network.clone());
-        receiver.network = Some(network.clone());
+        sender.network = Some(network.clone().into());
+        receiver.network = Some(network.clone().into());
         let actor = ChannelActor::new(a.pubkey, b.pubkey, network.clone(), a.store.clone(), None);
         let peer = ChannelActor::new(b.pubkey, a.pubkey, network.clone(), b.store.clone(), None);
         let (myself, handle) = Actor::spawn(None, NoopChannelActor, ()).await.unwrap();
@@ -6145,7 +6343,7 @@ async fn test_v2_committed_batch_recovers_every_publication_cut_without_id_reuse
         assert_eq!(sender.tlc_state.offered_tlcs.next_tlc_id, 1765);
         assert_eq!(sender.session.outgoing.as_ref().unwrap().updates.len(), 2);
         for state in [&mut sender, &mut receiver] {
-            state.network = Some(network.clone());
+            state.network = Some(network.clone().into());
             state.mark_reestablishing_offline();
             state.on_peer_reconnected();
         }
@@ -6296,6 +6494,7 @@ async fn test_v2_recovery_replays_updates_before_regenerated_cs() {
     let mut receiver = b.get_channel_actor_state(id);
     let myself = a.get_channel_actor(id).await.unwrap();
     let command = fiber_types::AddTlcCommand {
+        upstream_tlc_key: None,
         amount: 2000,
         payment_hash: [42; 32].into(),
         attempt_id: None,
@@ -6326,7 +6525,7 @@ async fn test_v2_recovery_replays_updates_before_regenerated_cs() {
     let (network, task) = Actor::spawn(None, CaptureNetwork, captured.clone())
         .await
         .unwrap();
-    sender.network = Some(network.clone());
+    sender.network = Some(network.clone().into());
     let actor = ChannelActor::new(a.pubkey, b.pubkey, network.clone(), a.store.clone(), None);
     actor
         .reestablish_v2(&myself, &mut sender, receiver.reestablish_message_v2())
@@ -6338,7 +6537,7 @@ async fn test_v2_recovery_replays_updates_before_regenerated_cs() {
         .unwrap()
         .iter()
         .filter_map(|message| match message {
-            NetworkActorMessage::Command(NetworkActorCommand::SendFiberMessage(message)) => {
+            FiberActorMessage::Command(FiberActorCommand::SendFiberMessage(message)) => {
                 Some(message.message.clone())
             }
             _ => None,
@@ -6598,8 +6797,8 @@ async fn test_v2_shutdown_after_force_close_preserves_confirmation_flag() {
     let (network, task) = Actor::spawn(None, CaptureNetwork, captured.clone())
         .await
         .unwrap();
-    sa.network = Some(network.clone());
-    sb.network = Some(network.clone());
+    sa.network = Some(network.clone().into());
+    sb.network = Some(network.clone().into());
     let actor_a = ChannelActor::new(a.pubkey, b.pubkey, network.clone(), a.store.clone(), None);
     let actor_b = ChannelActor::new(b.pubkey, a.pubkey, network.clone(), b.store.clone(), None);
 
@@ -6636,7 +6835,7 @@ async fn test_v2_shutdown_after_force_close_preserves_confirmation_flag() {
     assert!(
         !captured.lock().unwrap().iter().any(|message| matches!(
             message,
-            NetworkActorMessage::Command(NetworkActorCommand::SendFiberMessage(
+            FiberActorMessage::Command(FiberActorCommand::SendFiberMessage(
                 crate::fiber::network::FiberMessageWithTarget {
                     message: FiberMessage::ChannelNormalOperation(
                         FiberChannelMessage::CommitmentSignedV2(_)
@@ -6679,7 +6878,7 @@ async fn test_v2_force_close_reconnect_keeps_outgoing_session_and_restart_state(
     let (network, task) = Actor::spawn(None, CaptureNetwork, captured.clone())
         .await
         .unwrap();
-    state.network = Some(network.clone());
+    state.network = Some(network.clone().into());
     let actor = ChannelActor::new(a.pubkey, b.pubkey, network.clone(), a.store.clone(), None);
     actor
         .reestablish_v2(&myself, &mut state, receiver.reestablish_message_v2())
@@ -6700,7 +6899,7 @@ async fn test_v2_force_close_reconnect_keeps_outgoing_session_and_restart_state(
     // No signature is attempted in a phase that already published a close.
     assert!(!captured.lock().unwrap().iter().any(|message| matches!(
         message,
-        NetworkActorMessage::Command(NetworkActorCommand::SendFiberMessage(
+        FiberActorMessage::Command(FiberActorCommand::SendFiberMessage(
             crate::fiber::network::FiberMessageWithTarget {
                 message: FiberMessage::ChannelNormalOperation(
                     FiberChannelMessage::CommitmentSignedV2(_)
@@ -6743,7 +6942,7 @@ async fn test_v2_force_close_during_ready_keeps_restart_state_valid() {
     let (network, task) = Actor::spawn(None, CaptureNetwork, captured.clone())
         .await
         .unwrap();
-    state.network = Some(network.clone());
+    state.network = Some(network.clone().into());
     let actor = ChannelActor::new(a.pubkey, b.pubkey, network.clone(), a.store.clone(), None);
     actor
         .handle_shutdown_command(

@@ -18,6 +18,8 @@ use crate::backend::StorageBackend;
 use crate::db_migrate::DbMigrate;
 use crate::migration::MIGRATION_VERSION_KEY;
 
+#[path = "payment_tests.rs"]
+mod payment_tests;
 #[path = "test_utils.rs"]
 mod test_utils;
 use test_utils::released_v2;
@@ -357,7 +359,7 @@ fn test_legacy_watchtower_obligation_blocks_all_writes() {
 }
 
 #[test]
-fn test_full_hash_watchtower_record_retains_its_exact_bytes() {
+fn test_full_hash_watchtower_record_retains_keys_and_v2_witness() {
     let (_dir, store) = database();
     let mut record = super::OldChannelData::samples(69).remove(0);
     record.commitment_contract_features =
@@ -370,8 +372,32 @@ fn test_full_hash_watchtower_record_retains_its_exact_bytes() {
     let encoded = bincode::serialize(&record).unwrap();
     store.put(&key, &encoded);
     migrate(&store).unwrap();
-    assert_eq!(store.get(&key).unwrap(), encoded);
-    let _: fiber_types::ChannelData = decode_exact(&encoded).unwrap();
+    let converted: fiber_types::ChannelData = decode_exact(&store.get(&key).unwrap()).unwrap();
+    assert_eq!(converted.channel_features, fiber_types::ChannelFeatures::V2);
+    assert_eq!(
+        converted.local_settlement_key.unwrap().as_ref(),
+        record.local_settlement_key.as_ref()
+    );
+    for (old, new) in record
+        .local_settlement_data
+        .tlcs
+        .iter()
+        .zip(&converted.local_settlement_data.tlcs)
+    {
+        assert_eq!(
+            new.local_key.as_ref().unwrap().as_ref(),
+            old.local_key.as_ref()
+        );
+        assert_eq!(
+            new.local_key_pubkey.unwrap(),
+            new.local_key.as_ref().unwrap().pubkey()
+        );
+        assert_eq!(new.local_key_commitment_number, None);
+        assert_eq!(new.payment_hash.as_ref(), old.payment_hash.as_ref());
+    }
+    let before = snapshot(&store);
+    migrate(&store).unwrap();
+    assert_eq!(snapshot(&store), before, "migration must be idempotent");
 }
 
 #[test]

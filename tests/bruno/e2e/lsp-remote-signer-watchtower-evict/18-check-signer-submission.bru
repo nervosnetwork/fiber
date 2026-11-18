@@ -1,0 +1,22 @@
+meta {
+  name: verify external signer submitted a watchtower signature
+  type: http
+  seq: 18
+}
+
+get {
+  url: {{LSP_SDK_AGENT_URL}}/status
+  body: none
+  auth: none
+}
+
+assert {
+  res.status: eq 200
+}
+
+script:post-response {
+  const submissions = res.body.watchtower_submissions[bru.getVar("REMOTE_CHANNEL_ID")];
+  if (!submissions || submissions.length === 0) {
+    throw new Error("watchtower settled without an accepted SDK signature");
+  }
+}

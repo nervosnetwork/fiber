@@ -11,6 +11,86 @@ use serde_with::serde_as;
 use std::collections::HashMap;
 use strum::{AsRefStr, EnumString};
 
+/// Identifies the received TLC that a public LSP node is forwarding to a hosted tenant.
+/// Both fields are interpreted from the public node's perspective, not the tenant's.
+///
+/// A payment hash identifies a hashlock, not a unique local payment execution. The
+/// public node may already have an unrelated outgoing payment with the same hash.
+/// Combining this key with the hash in [`PaymentSessionKey`] keeps the hosted
+/// session, its attempts and their outcomes separate from that outgoing payment.
+///
+/// ```text
+/// Payer P                  Public T / LSP                  Hosted tenant U
+///    |                            |                              |
+///    |-- channel C_PT, TLC #7 --->|-- channel C_TU, TLC #21 ---->|
+///    |                            |                              |
+///    |                  upstream_tlc_key = (C_PT, 7)             |
+///    |                  carried by the hosted session,          |
+///    |                  its attempts and outgoing TLC #21       |
+/// ```
+///
+/// The key records the source of the forwarding work, not the downstream TLC's
+/// own location: in the example it is `(C_PT, 7)`, never `(C_TU, 21)`. Downstream
+/// retries or MPP parts may create different outgoing TLCs, but all retain the
+/// same upstream key. Replaying the same incoming request after a lost reply or
+/// restart therefore selects the same session; its outcome can be matched to the
+/// exact upstream delivery rather than to any payment sharing its hash.
+///
+/// This is local execution and persistence metadata, never a peer wire field or
+/// a replacement hashlock. Ordinary payments and ordinary trampoline forwarding
+/// leave [`PaymentSessionKey::upstream_tlc_key`] absent. Distinguishing incoming
+/// TLCs does not by itself implement aggregation of multiple upstream MPP parts.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+pub struct UpstreamTlcKey {
+    /// Public node's incoming channel for the held upstream TLC.
+    pub incoming_channel_id: Hash256,
+    /// Received TLC ID within that channel.
+    pub incoming_tlc_id: u64,
+}
+
+/// A hashlock is not an execution identity: independent payments may share it.
+/// Ordinary payments retain their hash-only identity; hosted forwarding is scoped
+/// to its incoming TLC so replay resumes the same execution.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+pub struct PaymentSessionKey {
+    /// The actual hashlock, unchanged in invoices, onions and channel messages.
+    pub payment_hash: Hash256,
+    /// Absent for ordinary payments and ordinary trampoline forwarding.
+    pub upstream_tlc_key: Option<UpstreamTlcKey>,
+}
+
+impl From<Hash256> for PaymentSessionKey {
+    fn from(payment_hash: Hash256) -> Self {
+        Self {
+            payment_hash,
+            upstream_tlc_key: None,
+        }
+    }
+}
+
+impl std::fmt::Display for PaymentSessionKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.payment_hash)?;
+        if let Some(id) = self.upstream_tlc_key {
+            write!(f, ":{}:{}", id.incoming_channel_id, id.incoming_tlc_id)?;
+        }
+        Ok(())
+    }
+}
+
+impl PaymentSessionKey {
+    /// Preserve ordinary key bytes. Scoped records append the incoming TLC identity;
+    /// prefix scans must filter by the complete key, not just the hash prefix.
+    pub fn storage_bytes(self) -> Vec<u8> {
+        let mut bytes = self.payment_hash.as_ref().to_vec();
+        if let Some(id) = self.upstream_tlc_key {
+            bytes.extend_from_slice(id.incoming_channel_id.as_ref());
+            bytes.extend_from_slice(&id.incoming_tlc_id.to_le_bytes());
+        }
+        bytes
+    }
+}
+
 /// The status of a payment, will update as the payment progresses.
 /// The transfer path for payment status is `Created -> Inflight -> Success | Failed`.
 ///
@@ -662,6 +742,8 @@ pub struct Attempt {
     pub created_at: u64,
     pub last_updated_at: u64,
     pub last_error: Option<String>,
+    /// Local execution scope; None preserves ordinary hash-only payments.
+    pub upstream_tlc_key: Option<UpstreamTlcKey>,
 }
 
 impl std::fmt::Debug for Attempt {
@@ -685,6 +767,14 @@ impl std::fmt::Debug for Attempt {
 }
 
 impl Attempt {
+    /// Identify the owning payment independently of its onion session key.
+    pub fn session_key(&self) -> PaymentSessionKey {
+        PaymentSessionKey {
+            payment_hash: self.payment_hash,
+            upstream_tlc_key: self.upstream_tlc_key,
+        }
+    }
+
     pub fn set_inflight_status(&mut self) {
         self.status = AttemptStatus::Inflight;
         self.last_error = None;
@@ -882,6 +972,8 @@ pub struct SendPaymentData {
     pub trampoline_hops: Option<Vec<Pubkey>>,
     #[serde(default)]
     pub trampoline_context: Option<TrampolineContext>,
+    /// Local execution scope; None preserves ordinary hash-only payments.
+    pub upstream_tlc_key: Option<UpstreamTlcKey>,
 }
 
 /// A payment session tracking the state of a payment attempt.
@@ -909,6 +1001,14 @@ pub const DEFAULT_MAX_PARTS: u64 = 12;
 pub const DEFAULT_PAYMENT_MPP_ATTEMPT_TRY_LIMIT: u32 = 3;
 
 impl SendPaymentData {
+    /// Local payment identity; unrelated executions may share the hashlock.
+    pub fn session_key(&self) -> PaymentSessionKey {
+        PaymentSessionKey {
+            payment_hash: self.payment_hash,
+            upstream_tlc_key: self.upstream_tlc_key,
+        }
+    }
+
     /// Maximum number of parallel parts for this payment.
     pub fn max_parts(&self) -> usize {
         self.max_parts.unwrap_or(DEFAULT_MAX_PARTS) as usize
@@ -929,6 +1029,11 @@ impl SendPaymentData {
 }
 
 impl PaymentSession {
+    /// Stable key used by the actor, attempts and persisted payment records.
+    pub fn session_key(&self) -> PaymentSessionKey {
+        self.request.session_key()
+    }
+
     pub fn update_with_attempt(&mut self, attempt: Attempt) {
         if let Some(a) = self.cached_attempts.iter_mut().find(|a| a.id == attempt.id) {
             *a = attempt;
@@ -1021,6 +1126,15 @@ impl PaymentSession {
         self.request.amount.saturating_sub(sent_amount)
     }
 
+    /// Fee budget for replacing an attempt after its old channel work has resolved.
+    pub fn retry_fee_amount(&self, attempt: &Attempt) -> Option<u128> {
+        let mut remaining = self.clone();
+        remaining.cached_attempts.retain(|cached| {
+            cached.id != attempt.id || cached.session_key() != attempt.session_key()
+        });
+        remaining.remain_fee_amount()
+    }
+
     /// Amount to use when rebuilding a route for a retrying attempt.
     ///
     /// For sender-side trampoline routing, the visible route receiver is the first
@@ -1056,6 +1170,7 @@ impl PaymentSession {
         let route = SessionRoute::new(source, target, &route_hops);
 
         Attempt {
+            upstream_tlc_key: self.request.upstream_tlc_key,
             id: attempt_id,
             hash,
             try_limit,
