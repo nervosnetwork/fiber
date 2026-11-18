@@ -3884,6 +3884,32 @@ where
             ));
         }
 
+        if !signed_tx.raw().inputs().is_empty() {
+            let has_non_placeholder_witness =
+                signed_tx
+                    .witnesses()
+                    .into_iter()
+                    .enumerate()
+                    .any(|(index, witness)| {
+                        !is_empty_or_placeholder_witness(&witness)
+                            && unsigned_tx
+                                .witnesses()
+                                .get(index)
+                                .is_none_or(|orig| is_empty_or_placeholder_witness(&orig))
+                    });
+            let first_witness_signed = state.is_acceptor
+                || signed_tx
+                    .witnesses()
+                    .get(0)
+                    .is_some_and(|w| !is_empty_or_placeholder_witness(&w));
+            if !has_non_placeholder_witness || !first_witness_signed {
+                return Err(ProcessingChannelError::InvalidParameter(
+                    "Signed funding transaction is missing non-placeholder external witnesses"
+                        .to_string(),
+                ));
+            }
+        }
+
         let signed_view = signed_tx.clone().into_view();
 
         if !state.is_tx_final(signed_tx)? {

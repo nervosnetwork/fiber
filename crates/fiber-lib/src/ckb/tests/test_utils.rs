@@ -589,6 +589,9 @@ impl Actor for MockChainActor {
             VerifyFundingTx { reply, .. } => {
                 let _ = reply.send(Ok(()));
             }
+            GetFundingSourceLockScript(reply) => {
+                let _ = reply.send(None);
+            }
             AddFundingTx(_) | RemoveFundingTx(_) | CommitFundingTx(..) => {
                 // ignore
             }

@@ -824,7 +824,6 @@ impl MockChainActorMiddleware for UnderfundInitialFundingTx {
                 funding_cell_lock_script,
                 funding_udt_type_script,
                 funding_source_lock_script,
-                allow_peer_funding_source_lock,
                 funding_fee_rate,
                 reply,
             } = message
@@ -832,7 +831,6 @@ impl MockChainActorMiddleware for UnderfundInitialFundingTx {
                 return Ok(Some(message));
             };
             let context = FundingContext {
-                allow_peer_funding_source_lock,
                 rpc_url: "http://127.0.0.1:8114".to_string(),
                 funding_source_lock_script: funding_source_lock_script
                     .unwrap_or_else(Script::default),
@@ -11701,7 +11699,7 @@ async fn test_external_funding_duplicate_tx_complete_after_signed_submit_is_igno
     let [node_a, node_b] = new_2_nodes_with_auto_accept().await;
     let (channel_id, unsigned_tx) =
         open_external_funding_channel(&node_a, &node_b, 100_000_000_000).await;
-    let signed_tx = mock_sign_external_funding_tx(&unsigned_tx);
+    let signed_tx = mock_sign_external_funding_tx_with_witness(&unsigned_tx, [9u8; 65].pack());
 
     let submit_message = |rpc_reply| {
         NetworkActorMessage::new_command(FiberActorCommand::SubmitSignedFundingTx {
@@ -11992,6 +11990,121 @@ async fn test_submit_signed_funding_tx_cell_deps_mismatch() {
 }
 
 #[tokio::test]
+async fn test_submit_signed_funding_tx_rejects_placeholder_witness() {
+    use crate::ckb::contracts::{get_cell_deps_by_contracts, get_script_by_contract};
+    use crate::ckb::is_secp_sighash_placeholder_witness;
+    use ckb_types::packed::{CellOutput, WitnessArgs};
+
+    init_tracing();
+
+    let wallet_lock =
+        get_script_by_contract(Contract::Secp256k1Lock, &b"ext-wallet-placeholder"[..]);
+    let wallet_cell_deps = get_cell_deps_by_contracts(vec![Contract::Secp256k1Lock])
+        .await
+        .expect("secp cell deps");
+    let seed_tx = TransactionView::new_advanced_builder()
+        .output(
+            CellOutput::new_builder()
+                .capacity(Capacity::shannons(200_000_000_000).pack())
+                .lock(wallet_lock)
+                .build(),
+        )
+        .output_data(Bytes::default())
+        .build();
+
+    let mut node_b = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .node_name(Some("ext-placeholder-node-b".to_string()))
+            .base_dir_prefix("test-ext-placeholder-node-b-")
+            .fiber_config_updater(|config| {
+                config.auto_accept_channel_ckb_funding_amount =
+                    Some(DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT);
+            })
+            .build(),
+    )
+    .await;
+    assert!(matches!(
+        node_b.submit_tx(seed_tx.clone()).await,
+        TxStatus::Committed(..)
+    ));
+    let wallet_outpoint = seed_tx.output_pts_iter().next().expect("seed output");
+
+    let middleware = Box::new(InjectExternalFundingInputMiddleware {
+        input_outpoint: wallet_outpoint,
+        cell_deps: wallet_cell_deps,
+    });
+    let mut node_a = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .node_name(Some("ext-placeholder-node-a".to_string()))
+            .base_dir_prefix("test-ext-placeholder-node-a-")
+            .mock_chain_actor_middleware(middleware)
+            .build(),
+    )
+    .await;
+    assert!(matches!(
+        node_a.submit_tx(seed_tx).await,
+        TxStatus::Committed(..)
+    ));
+    node_a.connect_to(&mut node_b).await;
+
+    let (channel_id, unsigned_tx) =
+        open_external_funding_channel(&node_a, &node_b, 100_000_000_000).await;
+
+    // Empty witness must be rejected when tx has inputs.
+    let empty_witness_tx = mock_sign_external_funding_tx(&unsigned_tx);
+    let err = call!(node_a.network_actor, |reply| {
+        NetworkActorMessage::new_command(FiberActorCommand::SubmitSignedFundingTx {
+            channel_id,
+            signed_tx: empty_witness_tx,
+            reply,
+        })
+    })
+    .expect("node_a alive")
+    .expect_err("empty witness must be rejected");
+    assert!(
+        err.contains("missing non-placeholder external witnesses"),
+        "unexpected error: {err}"
+    );
+
+    // 65-zero-byte placeholder WitnessArgs must also be rejected.
+    let placeholder_witness = WitnessArgs::new_builder()
+        .lock(Some(ckb_types::bytes::Bytes::from(vec![0u8; 65])).pack())
+        .build();
+    assert!(is_secp_sighash_placeholder_witness(
+        placeholder_witness.as_slice()
+    ));
+    let placeholder_tx = mock_sign_external_funding_tx_with_witness(
+        &unsigned_tx,
+        placeholder_witness.as_bytes().pack(),
+    );
+    let err = call!(node_a.network_actor, |reply| {
+        NetworkActorMessage::new_command(FiberActorCommand::SubmitSignedFundingTx {
+            channel_id,
+            signed_tx: placeholder_tx,
+            reply,
+        })
+    })
+    .expect("node_a alive")
+    .expect_err("placeholder witness must be rejected");
+    assert!(
+        err.contains("missing non-placeholder external witnesses"),
+        "unexpected error: {err}"
+    );
+
+    // A non-placeholder witness is accepted.
+    let signed_tx = mock_sign_external_funding_tx_with_witness(&unsigned_tx, [9u8; 65].pack());
+    call!(node_a.network_actor, |reply| {
+        NetworkActorMessage::new_command(FiberActorCommand::SubmitSignedFundingTx {
+            channel_id,
+            signed_tx,
+            reply,
+        })
+    })
+    .expect("node_a alive")
+    .expect("non-placeholder external witness should succeed");
+}
+
+#[tokio::test]
 async fn test_external_funding_invalid_tlc_expiry_delta() {
     init_tracing();
 
@@ -12171,7 +12284,7 @@ async fn do_test_external_funding_tx_abort_preserves_recoverable_state() {
     assert!(matches!(state.state, ChannelState::SigningCommitment(flags)
         if flags.contains(SigningCommitmentFlags::COMMITMENT_SIGNED_SENT)));
 
-    let signed_tx = mock_sign_external_funding_tx(&unsigned_tx);
+    let signed_tx = mock_sign_external_funding_tx_with_witness(&unsigned_tx, [9u8; 65].pack());
     node_b
         .hold_next_fiber_messages(
             node_a.pubkey,
@@ -12235,7 +12348,7 @@ async fn do_test_external_funding_can_force_close_after_early_confirmation() {
     let [mut node_a, node_b] = new_2_nodes_with_auto_accept().await;
     let (channel_id, unsigned_tx) =
         open_external_funding_channel(&node_a, &node_b, 100_000_000_000).await;
-    let signed_tx = mock_sign_external_funding_tx(&unsigned_tx);
+    let signed_tx = mock_sign_external_funding_tx_with_witness(&unsigned_tx, [9u8; 65].pack());
 
     node_b
         .hold_next_fiber_messages(
@@ -12308,7 +12421,7 @@ async fn do_test_external_funding_replays_lost_signed_tx_after_restart() {
     assert!(before.session.marker == 0x56320001);
     assert!(before.latest_commitment_transaction.is_some());
     let outgoing = before.session.outgoing.clone();
-    let signed_tx = mock_sign_external_funding_tx(&unsigned_tx);
+    let signed_tx = mock_sign_external_funding_tx_with_witness(&unsigned_tx, [9u8; 65].pack());
 
     node_a
         .hold_next_fiber_messages(node_b.pubkey, channel_id, TestFiberMessageKind::TxUpdate, 1)
@@ -12545,7 +12658,7 @@ async fn test_external_funding_spent_input_automatically_aborts_stuck_channel_v2
         Some(wallet_outpoint.clone()),
         "unsigned funding tx should consume the wallet input"
     );
-    let signed_tx = mock_sign_external_funding_tx(&unsigned_tx);
+    let signed_tx = mock_sign_external_funding_tx_with_witness(&unsigned_tx, [9u8; 65].pack());
 
     // Peer goes offline before submit_signed_funding_tx (#1674 follow-up reproduction).
     node_b.stop().await;
@@ -12953,7 +13066,7 @@ async fn test_submit_signed_funding_tx_after_restart_for_external_funding() {
     let [mut node_a, mut node_b] = new_2_nodes_with_auto_accept().await;
     let (channel_id, unsigned_tx) =
         open_external_funding_channel(&node_a, &node_b, 100_000_000_000).await;
-    let signed_tx = mock_sign_external_funding_tx(&unsigned_tx);
+    let signed_tx = mock_sign_external_funding_tx_with_witness(&unsigned_tx, [9u8; 65].pack());
 
     node_a.restart().await;
     tokio::time::sleep(Duration::from_millis(1000)).await;
@@ -12996,7 +13109,7 @@ async fn test_submit_signed_funding_tx_after_acceptor_restart_for_external_fundi
     let [mut node_a, mut node_b] = new_2_nodes_with_auto_accept().await;
     let (channel_id, unsigned_tx) =
         open_external_funding_channel(&node_a, &node_b, 100_000_000_000).await;
-    let signed_tx = mock_sign_external_funding_tx(&unsigned_tx);
+    let signed_tx = mock_sign_external_funding_tx_with_witness(&unsigned_tx, [9u8; 65].pack());
 
     node_b.restart().await;
     tokio::time::sleep(Duration::from_millis(1000)).await;
@@ -13092,7 +13205,7 @@ async fn test_external_funding_initiator_restart_after_signed_submit_resumes_han
     let [mut node_a, mut node_b] = new_2_nodes_with_auto_accept().await;
     let (channel_id, unsigned_tx) =
         open_external_funding_channel(&node_a, &node_b, 100_000_000_000).await;
-    let signed_tx = mock_sign_external_funding_tx(&unsigned_tx);
+    let signed_tx = mock_sign_external_funding_tx_with_witness(&unsigned_tx, [9u8; 65].pack());
 
     let submit_message = |rpc_reply| {
         NetworkActorMessage::new_command(FiberActorCommand::SubmitSignedFundingTx {

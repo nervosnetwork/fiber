@@ -3786,7 +3786,7 @@ where
                     .await?
             }
             FiberActorCommand::VerifyFundingTx {
-                peer,
+                peer: _,
                 local_tx,
                 remote_tx,
                 funding_cell_lock_script,
@@ -3804,7 +3804,6 @@ where
                         funding_cell_lock_script,
                         funding_udt_type_script,
                         funding_source_lock_script,
-                        allow_peer_funding_source_lock: state.in_process_peers.contains_key(&peer),
                         funding_fee_rate,
                     });
             }
@@ -8177,6 +8176,18 @@ where
                 "hosted tenant outbound channels require user-owned external signer material"
                     .into(),
             ));
+        }
+        if let Ok(Some(local_funding_lock)) = call_t!(
+            self.chain_actor,
+            CkbChainMessage::GetFundingSourceLockScript,
+            DEFAULT_CHAIN_ACTOR_TIMEOUT
+        ) {
+            if command.funding_lock_script == local_funding_lock {
+                return Err(ProcessingChannelError::InvalidParameter(
+                    "External funding lock script cannot match the node's local funding source lock script"
+                        .to_string(),
+                ));
+            }
         }
         let store = self.store.clone();
         let network = self.network.clone();

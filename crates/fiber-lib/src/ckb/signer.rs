@@ -6,14 +6,15 @@
 
 use ckb_sdk::{
     constants::SIGHASH_TYPE_HASH,
-    traits::SecpCkbRawKeySigner,
+    traits::{SecpCkbRawKeySigner, TransactionDependencyProvider},
     tx_builder::unlock_tx_async,
-    unlock::{ScriptUnlocker, SecpSighashUnlocker},
+    unlock::{ScriptUnlocker, SecpSighashUnlocker, UnlockError},
     util::blake160,
     ScriptId,
 };
+use ckb_types::packed;
 use secp256k1::{Message, PublicKey, SecretKey, SECP256K1};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::{config::new_default_transaction_dependency_provider, FundingError, FundingTx};
 
@@ -78,11 +79,47 @@ impl LocalSigner {
     ///
     /// This method encapsulates the signing logic to avoid exposing the secret key
     /// directly to callers. It uses CKB SDK's `unlock_tx_async` internally.
+    /// When `allowed_local_inputs` is provided, every input unlocked by
+    /// `local_lock_script` must belong to that locally-funded set so that peer
+    /// inputs sharing our lock script cannot be unlocked via the same script group.
     pub async fn sign_funding_tx(
         &self,
-        mut tx: FundingTx,
+        tx: FundingTx,
         rpc_url: String,
+        local_lock_script: &packed::Script,
+        allowed_local_inputs: Option<&HashSet<packed::OutPoint>>,
     ) -> Result<FundingTx, FundingError> {
+        let tx_dep_provider = new_default_transaction_dependency_provider(&rpc_url, 10).await;
+        self.sign_funding_tx_with_provider(
+            tx,
+            &tx_dep_provider,
+            local_lock_script,
+            allowed_local_inputs,
+        )
+        .await
+    }
+
+    /// Sign a funding transaction against an explicit dependency provider.
+    pub async fn sign_funding_tx_with_provider<P: TransactionDependencyProvider>(
+        &self,
+        mut tx: FundingTx,
+        tx_dep_provider: &P,
+        local_lock_script: &packed::Script,
+        allowed_local_inputs: Option<&HashSet<packed::OutPoint>>,
+    ) -> Result<FundingTx, FundingError> {
+        let inner_tx = tx.take().ok_or(FundingError::AbsentTx)?;
+        if let Some(allowed) = allowed_local_inputs {
+            for (input_index, input) in inner_tx.inputs().into_iter().enumerate() {
+                let out_point = input.previous_output();
+                let cell_output = tx_dep_provider
+                    .get_cell_async(&out_point)
+                    .await
+                    .map_err(UnlockError::TxDep)?;
+                if &cell_output.lock() == local_lock_script && !allowed.contains(&out_point) {
+                    return Err(FundingError::PeerInputUsesOurFundingLock { input_index });
+                }
+            }
+        }
         let signer = SecpCkbRawKeySigner::new_with_secret_keys(vec![self.secret_key]);
         let sighash_unlocker = SecpSighashUnlocker::from(Box::new(signer) as Box<_>);
         let sighash_script_id = ScriptId::new_type(SIGHASH_TYPE_HASH.clone());
@@ -91,10 +128,8 @@ impl LocalSigner {
             sighash_script_id,
             Box::new(sighash_unlocker) as Box<dyn ScriptUnlocker>,
         );
-        let inner_tx = tx.take().ok_or(FundingError::AbsentTx)?;
-        let tx_dep_provider = new_default_transaction_dependency_provider(&rpc_url, 10).await;
 
-        let (signed_tx, _) = unlock_tx_async(inner_tx, &tx_dep_provider, &unlockers).await?;
+        let (signed_tx, _) = unlock_tx_async(inner_tx, tx_dep_provider, &unlockers).await?;
         tx.update_for_self(signed_tx);
         Ok(tx)
     }
@@ -185,5 +220,121 @@ mod tests {
 
         // They should be identical
         assert_eq!(signer_sig, direct_sig_bytes);
+    }
+
+    #[tokio::test]
+    async fn test_sign_funding_tx_rejects_peer_input_using_local_lock() {
+        use crate::ckb::contracts::{get_cell_deps_by_contracts, get_script_by_contract, Contract};
+        use ckb_sdk::traits::OffchainTransactionDependencyProvider;
+        use ckb_types::core::{Capacity, TransactionView};
+        use ckb_types::packed::{Byte32, CellInput, CellOutput, OutPoint};
+        use ckb_types::prelude::{Builder, Entity, Pack, Unpack};
+
+        let secret_key = SecretKey::from_slice(&[7u8; 32]).unwrap();
+        let signer = LocalSigner::new(secret_key);
+        let local_lock = get_script_by_contract(Contract::Secp256k1Lock, signer.pubkey_hash());
+        let peer_lock = get_script_by_contract(Contract::Secp256k1Lock, &[0x99u8; 20][..]);
+        let cell_deps = get_cell_deps_by_contracts(vec![Contract::Secp256k1Lock])
+            .await
+            .expect("secp256k1 cell deps");
+
+        let local_outpoint = OutPoint::new(Byte32::from_slice(&[1u8; 32]).unwrap(), 0);
+        let peer_outpoint = OutPoint::new(Byte32::from_slice(&[2u8; 32]).unwrap(), 0);
+
+        let local_cell = CellOutput::new_builder()
+            .capacity(Capacity::shannons(100_000_000_000).pack())
+            .lock(local_lock.clone())
+            .build();
+        let peer_cell = CellOutput::new_builder()
+            .capacity(Capacity::shannons(100_000_000_000).pack())
+            .lock(peer_lock)
+            .build();
+
+        // Case 1: local input + peer input with peer's own lock -> signing succeeds.
+        let mut provider = OffchainTransactionDependencyProvider::default();
+        provider.cells.insert(
+            (local_outpoint.tx_hash().unpack(), 0),
+            (local_cell.clone(), ckb_types::bytes::Bytes::new()),
+        );
+        provider.cells.insert(
+            (peer_outpoint.tx_hash().unpack(), 0),
+            (peer_cell, ckb_types::bytes::Bytes::new()),
+        );
+        let tx = TransactionView::new_advanced_builder()
+            .cell_deps(cell_deps.clone())
+            .input(CellInput::new(local_outpoint.clone(), 0))
+            .input(CellInput::new(peer_outpoint.clone(), 0))
+            .output(local_cell.clone())
+            .output_data(ckb_types::packed::Bytes::default())
+            .witnesses(vec![
+                ckb_types::packed::Bytes::default(),
+                ckb_types::packed::Bytes::default(),
+            ])
+            .build();
+        let allowed = HashSet::from([local_outpoint.clone()]);
+        let signed = signer
+            .sign_funding_tx_with_provider(tx.into(), &provider, &local_lock, Some(&allowed))
+            .await
+            .expect("local input + distinct peer lock should sign");
+        assert!(!signed.into_inner().unwrap().witnesses().is_empty());
+
+        // Case 2: peer injects an input with local_lock alongside local input (same script group).
+        provider.cells.insert(
+            (peer_outpoint.tx_hash().unpack(), 0),
+            (local_cell.clone(), ckb_types::bytes::Bytes::new()),
+        );
+        let malicious_tx = TransactionView::new_advanced_builder()
+            .cell_deps(cell_deps.clone())
+            .input(CellInput::new(local_outpoint.clone(), 0))
+            .input(CellInput::new(peer_outpoint.clone(), 0))
+            .output(local_cell.clone())
+            .output_data(ckb_types::packed::Bytes::default())
+            .witnesses(vec![
+                ckb_types::packed::Bytes::default(),
+                ckb_types::packed::Bytes::default(),
+            ])
+            .build();
+        let err = signer
+            .sign_funding_tx_with_provider(
+                malicious_tx.clone().into(),
+                &provider,
+                &local_lock,
+                Some(&allowed),
+            )
+            .await
+            .expect_err("peer input using local lock must be rejected before signing");
+        assert!(
+            matches!(
+                err,
+                FundingError::PeerInputUsesOurFundingLock { input_index: 1 }
+            ),
+            "expected PeerInputUsesOurFundingLock at index 1, got {err:?}"
+        );
+
+        // Case 3: node contributed 0 inputs (allowed set is empty), peer injected local_lock input.
+        let zero_local_tx = TransactionView::new_advanced_builder()
+            .cell_deps(cell_deps)
+            .input(CellInput::new(peer_outpoint, 0))
+            .output(local_cell)
+            .output_data(ckb_types::packed::Bytes::default())
+            .witnesses(vec![ckb_types::packed::Bytes::default()])
+            .build();
+        let empty_allowed = HashSet::new();
+        let err = signer
+            .sign_funding_tx_with_provider(
+                zero_local_tx.into(),
+                &provider,
+                &local_lock,
+                Some(&empty_allowed),
+            )
+            .await
+            .expect_err("peer input using local lock must be rejected when local funded 0 inputs");
+        assert!(
+            matches!(
+                err,
+                FundingError::PeerInputUsesOurFundingLock { input_index: 0 }
+            ),
+            "expected PeerInputUsesOurFundingLock at index 0, got {err:?}"
+        );
     }
 }
