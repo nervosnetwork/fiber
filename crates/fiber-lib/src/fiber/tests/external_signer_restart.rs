@@ -2551,3 +2551,114 @@ async fn test_signature_deadline_while_awaiting_received_revoke() {
     )
     .await;
 }
+
+#[tokio::test]
+async fn test_internal_channel_maintenance_force_closes_stalled_local_announced_tlc() {
+    use crate::fiber::channel::{ChannelActor, ChannelEvent};
+    use crate::fiber::network::FiberActorEvent;
+    use crate::fiber::{FiberActorMessage, FiberActorRef};
+    use ractor::Actor;
+
+    init_tracing();
+    let (_restartable, signer) = RestartableExternalSigner::create().await;
+    let ([mut tenant, mut public_node], channel_id) =
+        setup_restartable_external_channel(false, &signer).await;
+
+    let payment = public_node
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(tenant.pubkey),
+            amount: Some(10_000),
+            keysend: Some(true),
+            max_fee_rate: Some(1000),
+            final_tlc_expiry_delta: Some(MIN_TLC_EXPIRY_DELTA + 120_000),
+            ..Default::default()
+        })
+        .await
+        .expect("start inbound payment");
+    approve_fixture_keysend(&signer, &public_node, payment.payment_hash, 10_000, true).await;
+
+    // Wait until tenant pauses at external signing, leaving public_node's offered TLC
+    // in LocalAnnounced + waiting_ack = true.
+    wait_until_async_timeout(|| async {
+        matches!(
+            get_signing_status(&tenant, channel_id)
+                .await
+                .unwrap()
+                .status,
+            ChannelSigningStatus::SignatureRequired {
+                transition: ChannelSigningTransition::CompleteReceivedCommitment,
+                ..
+            }
+        )
+    })
+    .await;
+
+    let mut public_state = public_node.get_channel_actor_state(channel_id);
+    assert!(public_state.tlc_state.waiting_ack);
+    assert!(public_state
+        .tlc_state
+        .offered_tlcs
+        .tlcs
+        .iter()
+        .any(|tlc| tlc.outbound_status() == fiber_types::OutboundTlcStatus::LocalAnnounced));
+
+    tenant.stop().await;
+    public_node.stop().await;
+
+    let previous_tx = public_state.latest_commitment_transaction.clone().unwrap();
+    public_state.ephemeral_config.is_internal_channel = true;
+    for tlc in &mut public_state.tlc_state.offered_tlcs.tlcs {
+        tlc.expiry = 0;
+    }
+
+    let (sender, mut messages) = tokio::sync::mpsc::unbounded_channel();
+    let (network, network_task) = Actor::spawn(None, DeadlineNetworkProbe, sender)
+        .await
+        .unwrap();
+    let network_ref = FiberActorRef::from_network(&network);
+    public_state.network = Some(network_ref.clone());
+    let channel = ChannelActor::new(
+        public_node.pubkey,
+        tenant.pubkey,
+        network_ref,
+        public_node.store.clone(),
+        None,
+    );
+    let (myself, actor_task) = Actor::spawn(None, DeadlineChannelProbe, ()).await.unwrap();
+
+    channel
+        .handle_event(
+            &myself,
+            &mut public_state,
+            ChannelEvent::MaintainChannelTlcs,
+        )
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        public_state.state,
+        ChannelState::ShuttingDown(ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION)
+    ));
+    let closing_tx = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(NetworkActorMessage::Fiber(FiberActorMessage::Event(
+                FiberActorEvent::ClosingTransactionPending(id, _, tx, true),
+            ))) = messages.recv().await
+            {
+                assert_eq!(id, channel_id);
+                break tx;
+            }
+        }
+    })
+    .await
+    .expect("internal channel force close emits closing transaction");
+    assert_eq!(
+        closing_tx.data().witnesses().as_slice(),
+        previous_tx.witnesses().as_slice()
+    );
+
+    myself.stop(None);
+    network.stop(None);
+    actor_task.await.unwrap();
+    network_task.await.unwrap();
+}

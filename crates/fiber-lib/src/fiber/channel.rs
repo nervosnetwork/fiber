@@ -4400,6 +4400,10 @@ where
                         ChannelState::ChannelReady | ChannelState::ShuttingDown(_)
                     )
                 {
+                    if state.periodic_signature_tlc_deadline_reached(now) {
+                        self.force_close_expired_signature(myself, state).await?;
+                        return Ok(());
+                    }
                     self.force_close_expiring_offered_tlcs(myself, state, now);
                 }
                 // Only closed or shutting-down channels can have on-chain TLC settlement
@@ -6260,6 +6264,49 @@ impl ChannelActorState {
             && self
                 .pending_tlc_signature_deadline()
                 .is_some_and(|deadline| now >= deadline)
+    }
+
+    /// Periodic maintenance check for TLC safety deadlines blocked on external
+    /// signing or internal-channel peer acknowledgement/revocation.
+    ///
+    /// Unlike `signature_tlc_deadline_reached`, on a healthy internal channel
+    /// that is neither awaiting an external signature nor waiting for peer ack
+    /// of an offered TLC, ordinary expiring `Received` TLCs are handled by
+    /// `maintain_expiring_received_tlcs` without force-closing.
+    pub(crate) fn periodic_signature_tlc_deadline_reached(&self, now: u64) -> bool {
+        if !matches!(
+            self.state,
+            ChannelState::ChannelReady | ChannelState::ShuttingDown(_)
+        ) || matches!(
+            self.state,
+            ChannelState::ShuttingDown(flags)
+                if flags.contains(ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION)
+        ) {
+            return false;
+        }
+        if self.signing_context.is_awaiting_signature() {
+            return self
+                .pending_tlc_signature_deadline()
+                .is_some_and(|deadline| now >= deadline);
+        }
+        if !self.ephemeral_config.is_internal_channel {
+            return false;
+        }
+        let reserve = tlc_expiry_delay(&EpochNumberWithFraction::from_full_value(
+            self.commitment_delay_epoch,
+        ));
+        self.tlc_state
+            .offered_tlcs
+            .tlcs
+            .iter()
+            .filter(|tlc| {
+                tlc.removed_confirmed_at.is_none()
+                    && (self.tlc_state.waiting_ack
+                        || tlc.outbound_status() == OutboundTlcStatus::LocalAnnounced)
+            })
+            .map(|tlc| tlc.expiry.saturating_sub(reserve))
+            .min()
+            .is_some_and(|deadline| now >= deadline)
     }
 }
 
@@ -13212,6 +13259,46 @@ mod tests {
         offered.expiry = reserve - 1;
         state.tlc_state.offered_tlcs.tlcs.push(offered);
         assert_eq!(state.pending_tlc_signature_deadline(), Some(0));
+    }
+
+    #[test]
+    fn periodic_signature_deadline_guards_healthy_received_tlcs_and_catches_stalled_local_announced(
+    ) {
+        let mut state =
+            channel_state_with_limits(ChannelConstraints::default(), ChannelConstraints::default());
+        state.state = ChannelState::ChannelReady;
+        state.ephemeral_config.is_internal_channel = true;
+        state.commitment_delay_epoch = EpochNumberWithFraction::new(6, 0, 1).full_value();
+        let reserve = tlc_expiry_delay(&EpochNumberWithFraction::from_full_value(
+            state.commitment_delay_epoch,
+        ));
+
+        // Healthy internal channel with an expiring Received TLC must NOT trigger force-close.
+        let mut received = committed_tlc(TLCId::Received(0), 10);
+        received.status = TlcStatus::Inbound(InboundTlcStatus::Committed);
+        received.expiry = 100_000 + reserve;
+        state.tlc_state.received_tlcs.tlcs.push(received);
+        assert!(!state.periodic_signature_tlc_deadline_reached(100_000));
+        assert!(!state.periodic_signature_tlc_deadline_reached(100_000 + reserve));
+
+        // Stalled LocalAnnounced offered TLC on internal channel MUST trigger at deadline.
+        let mut offered = committed_tlc(TLCId::Offered(0), 10);
+        offered.status = TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced);
+        offered.expiry = 100_000 + reserve;
+        state.tlc_state.offered_tlcs.tlcs.push(offered);
+        state.tlc_state.waiting_ack = true;
+        assert!(!state.periodic_signature_tlc_deadline_reached(99_999));
+        assert!(state.periodic_signature_tlc_deadline_reached(100_000));
+
+        // Even if waiting_ack was cleared by reestablish while offered TLC stays LocalAnnounced,
+        // the deadline check still triggers.
+        state.tlc_state.waiting_ack = false;
+        assert!(state.periodic_signature_tlc_deadline_reached(100_000));
+
+        // Once force-close has started waiting for on-chain confirmation, stop re-triggering.
+        state.state =
+            ChannelState::ShuttingDown(ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION);
+        assert!(!state.periodic_signature_tlc_deadline_reached(100_000));
     }
 
     #[test]
