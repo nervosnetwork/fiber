@@ -1683,3 +1683,105 @@ fn test_rejected_tlcs_are_still_logged_as_error() {
         "ERROR events for a rejected extra TLC and a TLC on a paid invoice"
     );
 }
+
+#[test]
+fn test_mpp_excludes_failed_and_queued_fail_tlcs_for_hold_and_non_hold_invoices() {
+    use fiber_types::{RemoveTlcReason, TlcErr, TlcErrPacket};
+
+    for (is_non_hold, fail_via_queue) in
+        [(true, true), (true, false), (false, true), (false, false)]
+    {
+        let preimage = gen_rand_sha256_hash();
+        let payment_hash = Hash256::from(ckb_hash::blake2b_256(preimage));
+        let channel_0 = gen_rand_sha256_hash();
+        let channel_1 = gen_rand_sha256_hash();
+
+        let mut state_0 =
+            create_test_channel_state_with_tlc(channel_0, 0, 500, payment_hash, Some(1000));
+        let fail_reason = RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+            TlcErr::new(TlcErrorCode::HoldTlcTimeout),
+            &[0u8; 32],
+        ));
+        if fail_via_queue {
+            // Simulates a RemoveTlcFail queued while the channel is in WaitingTlcAck.
+            state_0.retryable_tlc_operations.push_back(
+                fiber_types::RetryableTlcOperation::RemoveTlc(TLCId::Received(0), fail_reason),
+            );
+        } else {
+            state_0
+                .tlc_state
+                .received_tlcs
+                .tlcs
+                .first_mut()
+                .unwrap()
+                .removed_reason = Some(fail_reason);
+        }
+        let state_1 =
+            create_test_channel_state_with_tlc(channel_1, 1, 500, payment_hash, Some(1000));
+
+        let mut store = MockStore::new()
+            .with_invoice(
+                create_test_invoice(payment_hash, Some(1000), true),
+                CkbInvoiceStatus::Open,
+            )
+            .with_channel_state(state_0)
+            .with_channel_state(state_1)
+            .with_hold_tlc(payment_hash, channel_0, 0)
+            .with_hold_tlc(payment_hash, channel_1, 1);
+        if is_non_hold {
+            store = store.with_preimage(payment_hash, preimage);
+        }
+
+        let settlements = SettleTlcSetCommand::new_hold_tlc_set(payment_hash, &store).run();
+        assert!(
+            settlements.is_empty(),
+            "failed/queued-fail MPP part must not allow underpaid settlement (is_non_hold={is_non_hold}, fail_via_queue={fail_via_queue})"
+        );
+        assert_eq!(
+            store.get_invoice_status(&payment_hash),
+            Some(CkbInvoiceStatus::Open),
+            "invoice must remain Open when one MPP part is already failed/queued-fail"
+        );
+    }
+}
+
+#[test]
+fn test_mpp_retains_queued_fulfill_tlc_during_settlement_retry() {
+    use fiber_types::{RemoveTlcFulfill, RemoveTlcReason};
+
+    let preimage = gen_rand_sha256_hash();
+    let payment_hash = Hash256::from(ckb_hash::blake2b_256(preimage));
+    let channel_0 = gen_rand_sha256_hash();
+    let channel_1 = gen_rand_sha256_hash();
+
+    let mut state_0 =
+        create_test_channel_state_with_tlc(channel_0, 0, 500, payment_hash, Some(1000));
+    state_0
+        .retryable_tlc_operations
+        .push_back(fiber_types::RetryableTlcOperation::RemoveTlc(
+            TLCId::Received(0),
+            RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+                payment_preimage: preimage,
+            }),
+        ));
+    let state_1 = create_test_channel_state_with_tlc(channel_1, 1, 500, payment_hash, Some(1000));
+
+    let store = MockStore::new()
+        .with_invoice(
+            create_test_invoice(payment_hash, Some(1000), true),
+            CkbInvoiceStatus::Open,
+        )
+        .with_preimage(payment_hash, preimage)
+        .with_channel_state(state_0)
+        .with_channel_state(state_1)
+        .with_hold_tlc(payment_hash, channel_0, 0)
+        .with_hold_tlc(payment_hash, channel_1, 1);
+
+    let settlements = SettleTlcSetCommand::new_hold_tlc_set(payment_hash, &store).run();
+    assert_eq!(settlements.len(), 2);
+    assert!(settlements.iter().all(is_fulfill_settlement));
+    assert_eq!(
+        store.get_invoice_status(&payment_hash),
+        Some(CkbInvoiceStatus::Received)
+    );
+}

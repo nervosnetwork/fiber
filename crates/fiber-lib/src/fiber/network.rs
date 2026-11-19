@@ -5077,12 +5077,39 @@ where
         );
     }
 
+    fn cleanup_resolved_hold_tlcs(&self, payment_hash: Hash256, include_fulfilled: bool) {
+        let should_clean = |reason: &RemoveTlcReason| {
+            include_fulfilled || matches!(reason, RemoveTlcReason::RemoveTlcFail(_))
+        };
+        for hold in self.store.get_payment_hold_tlcs(payment_hash) {
+            let Some(channel) = self.store.get_channel_actor_state(&hold.channel_id) else {
+                continue;
+            };
+            let id = TLCId::Received(hold.tlc_id);
+            if channel.tlc_state.get(&id).is_some_and(|tlc| {
+                tlc.payment_hash == payment_hash
+                    && (tlc.removed_reason.as_ref().is_some_and(should_clean)
+                        || channel.retryable_tlc_operations.iter().any(|op| {
+                            matches!(
+                                op,
+                                fiber_types::RetryableTlcOperation::RemoveTlc(queued, reason)
+                                    if *queued == id && should_clean(reason)
+                            )
+                        }))
+            }) {
+                self.store
+                    .remove_payment_hold_tlc(&payment_hash, &hold.channel_id, hold.tlc_id);
+            }
+        }
+    }
+
     fn settle_hold_tlc_set(
         &self,
         myself: FiberActorRef,
         state: &mut FiberActorState<S, C>,
         payment_hash: Hash256,
     ) {
+        self.cleanup_resolved_hold_tlcs(payment_hash, false);
         let settlements = SettleTlcSetCommand::new_hold_tlc_set(payment_hash, &self.store).run();
         self.apply_tlc_settlements(myself, state, settlements, Some(payment_hash));
     }
@@ -5097,21 +5124,7 @@ where
         // RemoveTlcResult removed the hold. These TLCs are intentionally excluded
         // by can_auto_fulfill_received_tlc: recomputing a settlement would replace
         // the already selected outcome. Complete only the ownership handoff.
-        for hold in self.store.get_payment_hold_tlcs(payment_hash) {
-            let Some(channel) = self.store.get_channel_actor_state(&hold.channel_id) else {
-                continue;
-            };
-            let id = TLCId::Received(hold.tlc_id);
-            if channel.tlc_state.get(&id).is_some_and(|tlc| {
-                tlc.payment_hash == payment_hash
-                    && (tlc.removed_reason.is_some()
-                        || channel.retryable_tlc_operations.iter().any(|op| {
-                            matches!(op, fiber_types::RetryableTlcOperation::RemoveTlc(queued, _) if *queued == id)
-                        }))
-            }) {
-                self.store.remove_payment_hold_tlc(&payment_hash, &hold.channel_id, hold.tlc_id);
-            }
-        }
+        self.cleanup_resolved_hold_tlcs(payment_hash, true);
         let settlements =
             SettleTlcSetCommand::new_received_hold_tlc_set(payment_hash, &self.store).run();
         self.apply_tlc_settlements(myself, state, settlements, Some(payment_hash));

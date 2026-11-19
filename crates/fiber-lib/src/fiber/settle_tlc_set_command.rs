@@ -449,10 +449,25 @@ fn make_sttlement_context<S: ChannelActorStateStore>(
     state
         .get_received_tlc(tlc_id)
         // Hold settlement retries must still see TLCs already handed to the durable
-        // remove queue; omitting one part makes a fulfilled MPP set look incomplete.
+        // fulfill queue; omitting one part makes a fulfilled MPP set look incomplete.
+        // Failed TLCs (removed or queued with RemoveTlcFail) must never count toward
+        // invoice fulfillment or they can cause MPP underpayment.
         .filter(|tlc_info| {
             tlc_info.forwarding_tlc.is_none()
                 && !state.is_waiting_forward_result_for_received_tlc(tlc_info.tlc_id)
+                && !matches!(
+                    tlc_info.removed_reason,
+                    Some(RemoveTlcReason::RemoveTlcFail(_))
+                )
+                && !state.retryable_tlc_operations.iter().any(|op| {
+                    matches!(
+                        op,
+                        fiber_types::RetryableTlcOperation::RemoveTlc(
+                            queued,
+                            RemoveTlcReason::RemoveTlcFail(_)
+                        ) if *queued == tlc_info.tlc_id
+                    )
+                })
         })
         .map(|tlc_info| TlcSettlementContext::new(tlc_info, channel_id))
 }
