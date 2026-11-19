@@ -1459,8 +1459,6 @@ pub struct IncomingCommitmentV2 {
 #[serde_as]
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ChannelSessionV2 {
-    /// Schema marker checked on reopen, independently of database epoch.
-    pub marker: u32,
     /// Exactly one active own commitment verification nonce.
     pub own: SigningNonceV2,
     /// Previously advertised own verification nonces, newest first. A reconnect rotates `own`

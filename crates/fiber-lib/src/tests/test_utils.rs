@@ -244,6 +244,23 @@ pub fn mock_ecdsa_signature() -> EcdsaSignature {
     let signature = SECP256K1.sign_ecdsa(&message, &secret_key);
     EcdsaSignature(signature)
 }
+/// A persisted V2 session belongs to this node: it is bound to the funding key and is the
+/// commitment-owner nonce the protocol signs with.
+pub fn assert_v2_session_durable(state: &crate::fiber::channel::ChannelActorState) {
+    assert_eq!(
+        state.session.own.owner,
+        state.signer.funding_key.pubkey(),
+        "V2 session must be persisted and bound to the funding key"
+    );
+    assert!(
+        matches!(
+            state.session.own.purpose,
+            fiber_types::NoncePurposeV2::Commitment
+        ),
+        "V2 session must hold the commitment-owner nonce"
+    );
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 pub fn generate_store() -> (Store, TempDir) {
     let temp_dir = TempDir::new("test-fnn-node");

@@ -4848,7 +4848,7 @@ async fn test_received_tlc_claim_force_closes_after_offline_restart_v2() {
     init_tracing();
     let (mut payer, mut payee, channel_id) =
         create_nodes_with_established_channel(HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT, true).await;
-    assert!(payee.get_channel_actor_state(channel_id).session.marker == 0x56320001);
+    assert_v2_session_durable(&payee.get_channel_actor_state(channel_id));
     let mut claims = Vec::new();
     for algorithm in [HashAlgorithm::Sha256, HashAlgorithm::CkbHash] {
         let preimage = gen_rand_sha256_hash();
@@ -9607,10 +9607,8 @@ async fn test_abandon_failed_channel_without_accept() {
 
     let temp_channel_id = open_channel_result.channel_id;
     let node_a_channel_actor_state = node_a.get_channel_actor_state_unchecked(temp_channel_id);
-    assert!(
-        node_a_channel_actor_state.unwrap().session.marker == 0x56320001,
-        "V2 bootstrap nonce must be durable before advertisement"
-    );
+    // The bootstrap nonce must be durable before advertisement.
+    assert_v2_session_durable(&node_a_channel_actor_state.unwrap());
 
     let res = node_a.send_abandon_channel(temp_channel_id).await;
     assert!(res.is_ok());
@@ -9769,10 +9767,8 @@ async fn test_abandon_channel_with_peer_accept() {
 
     let temp_channel_id = open_channel_result.channel_id;
     let node_a_channel_actor_state = node_a.get_channel_actor_state_unchecked(temp_channel_id);
-    assert!(
-        node_a_channel_actor_state.unwrap().session.marker == 0x56320001,
-        "V2 bootstrap nonce must be durable before advertisement"
-    );
+    // The bootstrap nonce must be durable before advertisement.
+    assert_v2_session_durable(&node_a_channel_actor_state.unwrap());
 
     // stop ckb chain actor to make sure funding tx is not sent
     node_a.send_ckb_chain_message(crate::ckb::CkbChainMessage::Stop);
@@ -9826,7 +9822,7 @@ async fn test_abandon_channel_with_peer_accept() {
     // so node_b will not received `TxCollaborationCommand::TxUpdate` message
     // V2 has durably advertised its bootstrap nonce before collaboration.
     let channel_actor_state = node_b.get_channel_actor_state_unchecked(new_channel_id);
-    assert!(channel_actor_state.unwrap().session.marker == 0x56320001);
+    assert_v2_session_durable(&channel_actor_state.unwrap());
 
     let res = node_b.send_abandon_channel(new_channel_id).await;
     eprintln!("res: {:?}", res);
@@ -12154,7 +12150,7 @@ async fn do_test_external_funding_tx_abort_preserves_recoverable_state() {
 
     // The wallet can sign immediately when open returns; the exit must already be durable.
     let state = node_a.get_channel_actor_state(channel_id);
-    assert!(state.session.marker == 0x56320001);
+    assert_v2_session_durable(&state);
     assert!(state.latest_commitment_transaction().is_some());
     assert!(!state.ephemeral_config.external_funding.signed_submitted);
     assert!(matches!(state.state, ChannelState::SigningCommitment(flags)
@@ -12294,7 +12290,7 @@ async fn do_test_external_funding_replays_lost_signed_tx_after_restart() {
     let (channel_id, unsigned_tx) =
         open_external_funding_channel(&node_a, &node_b, 100_000_000_000).await;
     let before = node_a.get_channel_actor_state(channel_id);
-    assert!(before.session.marker == 0x56320001);
+    assert_v2_session_durable(&before);
     assert!(before.latest_commitment_transaction().is_some());
     let outgoing = before.session.outgoing.clone();
     let signed_tx = mock_sign_external_funding_tx(&unsigned_tx);
