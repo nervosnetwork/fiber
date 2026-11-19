@@ -5,6 +5,7 @@ use fiber_store::backend::StorageBackend;
 use fiber_store::db_migrate::DbMigrate;
 use fiber_store::migration::{Migration, MigrationStore, INIT_DB_VERSION, MIGRATION_VERSION_KEY};
 
+use crate::fiber::config::DEFAULT_STORE_CHANNEL_CACHE_CAPACITY;
 use crate::store::store_impl::{open_store_with_migration, open_store_with_migrations};
 use crate::tests::test_utils::TempDir;
 use crate::FiberConfig;
@@ -26,12 +27,40 @@ fn test_store_sync_writes_is_read_from_the_config_file() {
 }
 
 #[test]
+fn test_store_channel_cache_capacity_is_configurable() {
+    assert_eq!(
+        FiberConfig::default().store_channel_cache_capacity(),
+        DEFAULT_STORE_CHANNEL_CACHE_CAPACITY
+    );
+
+    let configured: <FiberConfig as ClapSerde>::Opt =
+        serde_yaml::from_str("store_channel_cache_capacity: 128").expect("parse fiber config");
+    assert_eq!(
+        FiberConfig::from(configured).store_channel_cache_capacity(),
+        128
+    );
+
+    // 0 disables the cache instead of falling back to the default.
+    let disabled: <FiberConfig as ClapSerde>::Opt =
+        serde_yaml::from_str("store_channel_cache_capacity: 0").expect("parse fiber config");
+    assert_eq!(
+        FiberConfig::from(disabled).store_channel_cache_capacity(),
+        0
+    );
+}
+
+#[test]
 fn test_store_sync_writes_reaches_the_backend() {
     for sync in [true, false] {
         let dir = TempDir::new("store-sync-writes");
-        let store =
-            open_store_with_migration(dir.as_ref(), sync, Box::new(|_| true), Box::new(|_| {}))
-                .expect("open store");
+        let store = open_store_with_migration(
+            dir.as_ref(),
+            sync,
+            DEFAULT_STORE_CHANNEL_CACHE_CAPACITY,
+            Box::new(|_| true),
+            Box::new(|_| {}),
+        )
+        .expect("open store");
         assert_eq!(store.sync_writes(), sync);
         assert_eq!(store.clone().sync_writes(), sync);
     }
@@ -69,6 +98,7 @@ fn test_store_sync_writes_cover_the_migrations() {
         let store = open_store_with_migrations(
             dir.as_ref(),
             sync,
+            DEFAULT_STORE_CHANNEL_CACHE_CAPACITY,
             migrate,
             Box::new(|_| true),
             Box::new(|_| {}),

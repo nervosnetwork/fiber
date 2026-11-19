@@ -19,6 +19,7 @@ bitmask-enum = "2.2.5"
 ckb-jsonrpc-types = "1"
 ckb-sdk = { version = "5" }
 ckb-testtool = { version = "1", optional = true }
+dashmap = "5"
 ckb-types = "1"
 clap = { version = "4.5.2", features = ["derive", "env", "string"] }
 clap-serde-derive = "0.2.1"
