@@ -10,8 +10,10 @@ on:
 
 jobs:
   dispatch:
+    # Skip unrelated comments before allocating a runner; the step checks the exact command.
     if: >-
       github.actor != 'github-actions[bot]' &&
+      contains(github.event.comment.body, '/review') &&
       (github.event.comment.author_association == 'OWNER' ||
        github.event.comment.author_association == 'MEMBER' ||
        github.event.comment.author_association == 'COLLABORATOR')
@@ -37,60 +39,45 @@ jobs:
           import json, os, re, sys, urllib.request
           import subprocess
 
-          def gh(*args):
-              result = subprocess.run(
-                  ["gh", "api", *args],
-                  check=True,
-                  capture_output=True,
-                  text=True,
-              )
-              return result.stdout
-
           body = os.environ["COMMENT_BODY"] or ""
+          if not re.match(r"^\s*/review(?:\s|$)", body):
+              print("No /review command. Skipping.")
+              sys.exit(0)
+
           number = os.environ["ISSUE_NUMBER"]
           repo = os.environ["REPO"]
-          marker = "<!-- multica-review-active -->"
-          start = re.match(r"^\s*/multica-review\b", body) is not None
+          comment_id = int(os.environ["COMMENT_ID"])
 
-          comments = json.loads(gh(f"repos/{repo}/issues/{number}/comments", "--paginate"))
-          active = any(marker in (c.get("body") or "") for c in comments)
-
-          if start:
-              event = "start"
-          elif active:
-              event = "followup"
-          else:
-              print("No /multica-review session on this thread. Skipping.")
-              sys.exit(0)
+          def github_post(path, field):
+              subprocess.run(
+                  ["gh", "api", "--method", "POST", f"repos/{repo}/{path}", "-f", field],
+                  check=True,
+                  stdout=subprocess.DEVNULL,
+              )
 
           is_pr = os.environ["IS_PULL_REQUEST"].lower() == "true"
           payload = {
-              "event": event,
+              "event": "start",
               "repository": repo,
               "number": int(number),
               "is_pull_request": is_pr,
-              "comment_id": int(os.environ["COMMENT_ID"]),
+              "comment_id": comment_id,
               "comment_url": os.environ["COMMENT_URL"],
               "comment_body": body,
               "sender": os.environ["SENDER"],
               "instruction": (
                   "Start an English Multica convention review for this pull request. "
                   "Read the diff and the triggering comment."
-                  if event == "start"
-                  else "Continue the existing English Multica review for this same pull request. "
-                  "Treat the new comment as a follow-up. Do not open a second review."
               ),
           }
 
           webhook = os.environ.get("WEBHOOK_URL", "").strip()
           if not webhook:
-              if event == "start":
-                  gh(
-                      f"repos/{repo}/issues/{number}/comments",
-                      "-f",
-                      "body=Multica review was not sent. Add repository secret MULTICA_REVIEW_WEBHOOK_URL (the Fiber Autopilot webhook URL), then comment /multica-review again.\n"
-                      + marker,
-                  )
+              github_post(
+                  f"issues/{number}/comments",
+                  "body=Multica review was not sent. Add repository secret MULTICA_REVIEW_WEBHOOK_URL "
+                  "(the Fiber Autopilot webhook URL), then comment /review again."
+              )
               print("MULTICA_REVIEW_WEBHOOK_URL is not set.")
               sys.exit(1)
 
@@ -103,13 +90,7 @@ jobs:
           with urllib.request.urlopen(request, timeout=30) as response:
               print(f"Webhook status {response.status}")
 
-          if event == "start" and not active:
-              kind = "pull request" if is_pr else "issue"
-              gh(
-                  f"repos/{repo}/issues/{number}/comments",
-                  "-f",
-                  "body="
-                  + f"Multica review queued for this {kind}. Later comments here continue the same review. The review reply is in English.\n"
-                  + marker,
-              )
+          # PR conversation comments use the issues API; inline review comments use the pulls API.
+          resource = "pulls" if os.environ["GITHUB_EVENT_NAME"] == "pull_request_review_comment" else "issues"
+          github_post(f"{resource}/comments/{comment_id}/reactions", "content=eyes")
           PY
