@@ -7,8 +7,6 @@ use fiber_types::{
 };
 use musig2::{AggNonce, BinaryEncoding, KeyAggContext, PartialSignature, PubNonce, SecNonce};
 
-pub(super) const SESSION_MARKER: u32 = 0x56320001;
-
 /// Allocate the initial owner-bound signing session before constructing a channel.
 pub(crate) fn new_session(
     channel_id: Hash256,
@@ -16,7 +14,6 @@ pub(crate) fn new_session(
     remote_nonce: Option<PubNonce>,
 ) -> ChannelSessionV2 {
     ChannelSessionV2 {
-        marker: SESSION_MARKER,
         own: allocate_nonce(
             channel_id,
             key.pubkey(),

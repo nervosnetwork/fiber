@@ -11,7 +11,7 @@ use crate::{
     ChannelActorData, Hash256, NoncePurposeV2, Privkey, Pubkey, RevocationContextV2, SigningNonceV2,
 };
 
-/// Decode an exact persisted V2 channel and check its session marker.
+/// Decode an exact persisted V2 channel.
 pub fn decode_channel_actor_data(bytes: &[u8]) -> Result<ChannelActorData, String> {
     let mut cursor = Cursor::new(bytes);
     let channel: ChannelActorData =
@@ -19,10 +19,6 @@ pub fn decode_channel_actor_data(bytes: &[u8]) -> Result<ChannelActorData, Strin
     check(
         cursor.position() == bytes.len() as u64,
         "Trailing bytes in channel record",
-    )?;
-    check(
-        channel.session.marker == 0x56320001,
-        "Missing or invalid V2 session",
     )?;
     Ok(channel)
 }
@@ -263,10 +259,6 @@ fn commitment_snapshot(
 /// Bound-but-unsigned records are legitimate crash-recovery intents.
 pub fn validate_channel_v2(channel: &ChannelActorData) -> Result<(), String> {
     let session = &channel.session;
-    check(
-        session.marker == 0x56320001,
-        "Invalid V2 feature/session marker",
-    )?;
     let funded = matches!(
         channel.state,
         crate::ChannelState::ChannelReady

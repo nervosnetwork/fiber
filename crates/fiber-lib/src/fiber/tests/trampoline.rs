@@ -4184,7 +4184,7 @@ async fn assert_trampoline_success_drains_remaining_tlc(restart: bool) {
     ];
     let (nodes, channels) = create_n_nodes_network_with_visibility(&specifications, 3).await;
     let [node_a, mut node_b, mut node_c] = nodes.try_into().expect("three nodes");
-    assert!(node_b.get_channel_actor_state(channels[0]).session.marker == 0x56320001);
+    assert_v2_session_durable(&node_b.get_channel_actor_state(channels[0]));
     wait_until_node_supports_trampoline_routing(&node_a, &node_b).await;
 
     let amount = 1_500_000_000_u128;

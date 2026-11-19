@@ -210,24 +210,17 @@ fn test_migration_resumes_after_partial_v2_conversion_and_v1_archive() {
 }
 
 #[test]
-fn test_truncated_or_invalid_v2_is_never_repaired() {
-    for truncate in [true, false] {
-        let (_dir, store) = database();
-        let channel = sample(77);
-        let mut stored = released_v2(channel);
-        if !truncate {
-            stored.1.as_mut().unwrap().marker = 0;
-        }
-        let key = actor_key(&stored.0.id);
-        let mut value = bincode::serialize(&stored).unwrap();
-        if truncate {
-            value.pop();
-        }
-        store.put(&key, value);
-        let original = snapshot(&store);
-        assert!(migrate(&store).is_err());
-        assert_eq!(snapshot(&store), original);
-    }
+fn test_truncated_v2_is_never_repaired() {
+    let (_dir, store) = database();
+    let channel = sample(77);
+    let stored = released_v2(channel);
+    let key = actor_key(&stored.0.id);
+    let mut value = bincode::serialize(&stored).unwrap();
+    value.pop();
+    store.put(&key, value);
+    let original = snapshot(&store);
+    assert!(migrate(&store).is_err());
+    assert_eq!(snapshot(&store), original);
 }
 
 #[test]

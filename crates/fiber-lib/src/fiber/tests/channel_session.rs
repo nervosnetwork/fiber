@@ -5375,11 +5375,10 @@ async fn test_v2_close_after_update_crash_replay_conflicts_and_db_validation() {
         let store = fiber_store::Store::open_db(path.path()).unwrap();
         assert_eq!(store.get(&key).unwrap(), bytes);
     }
-    for mutation in 0..9 {
+    for mutation in 1..9 {
         let mut bad = sa.core.clone();
         let session = &mut bad.session;
         match mutation {
-            0 => session.marker ^= 1,
             1 => session.closing.as_mut().unwrap().own.seed[0] ^= 1,
             2 => {
                 session
@@ -6583,7 +6582,8 @@ async fn test_v2_pending_aggregation_context_survives_restart() {
     assert!(restored_sender.stage_ack_v2(&conflicting).is_err());
     restored_sender.stage_ack_v2(&response).unwrap();
     restored_sender.validate_session().unwrap();
-    restored_sender.session.marker = 0;
+    // A session that is not bound to our funding key is not usable.
+    restored_sender.session.own.owner = crate::gen_rand_fiber_public_key();
     assert!(restored_sender.validate_session().is_err());
 }
 
