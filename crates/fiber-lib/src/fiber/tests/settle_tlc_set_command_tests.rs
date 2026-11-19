@@ -222,13 +222,13 @@ impl ChannelActorStateStore for MockStore {
         None
     }
 
-    fn has_trampoline_payment_for_tlc(
+    fn trampoline_payment_session_for_tlc(
         &self,
         _payment_hash: Hash256,
         _channel_id: Hash256,
         _tlc_id: u64,
-    ) -> bool {
-        false
+    ) -> Option<crate::fiber_types::PaymentSessionKey> {
+        None
     }
 
     fn get_channel_actor_state(&self, id: &Hash256) -> Option<ChannelActorState> {

@@ -192,7 +192,13 @@ pub(crate) fn buffered_trampoline_upstream_status(
     payment_hash: Hash256,
     incoming_tlc_id: u64,
 ) -> BufferedTrampolineUpstreamStatus {
-    if state.is_closed() {
+    if state.is_closed()
+        || matches!(
+            state.state,
+            ChannelState::ShuttingDown(flags)
+                if flags.contains(ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION)
+        )
+    {
         return BufferedTrampolineUpstreamStatus::Removed;
     }
     if state.retryable_tlc_operations.iter().any(|operation| {
@@ -2084,6 +2090,8 @@ where
             inflight_tracers: Default::default(),
             #[cfg(not(target_arch = "wasm32"))]
             delivery_port: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            deferred_hosted_trampoline_settlements: Default::default(),
             #[cfg(test)]
             test_fiber_message_hold: None,
             #[cfg(test)]
@@ -2524,7 +2532,7 @@ where
                 }
 
                 state
-                    .recover_trampoline_settlements_for_channel(channel_id)
+                    .recover_trampoline_settlements_for_channel(myself.clone(), channel_id)
                     .await;
 
                 debug_event!(
@@ -7009,6 +7017,18 @@ where
             #[cfg(not(target_arch = "wasm32"))]
             PublicNetworkCommand::SetDeliveryPort(port) => {
                 state.fiber.delivery_port = Some(port);
+                let deferred =
+                    std::mem::take(&mut state.fiber.deferred_hosted_trampoline_settlements);
+                for session_key in deferred {
+                    state
+                        .fiber
+                        .resolve_trampoline_upstream(
+                            FiberActorRef::from_network(&myself),
+                            session_key,
+                            None,
+                        )
+                        .await;
+                }
                 Ok(())
             }
             #[cfg(any(debug_assertions, feature = "bench"))]
@@ -7185,6 +7205,9 @@ pub struct FiberActorState<S, C> {
     // public P2P runtime state, and is absent for ordinary nodes and hosted tenants.
     #[cfg(not(target_arch = "wasm32"))]
     delivery_port: Option<Arc<dyn HostedDeliveryPort>>,
+    // Scoped hosted trampoline settlements observed before SetDeliveryPort arrived.
+    #[cfg(not(target_arch = "wasm32"))]
+    deferred_hosted_trampoline_settlements: HashSet<PaymentSessionKey>,
     #[cfg(test)]
     test_fiber_message_hold: Option<TestFiberMessageHold>,
     #[cfg(test)]
@@ -9600,7 +9623,8 @@ where
             if let Some(port) = self.delivery_port.clone() {
                 // The delivery service itself calls NetworkActor during recovery and
                 // tenant activation. Await its decision outside this handler so those
-                // calls can be served.
+                // calls can be served, retrying transient port/timeout failures with
+                // bounded exponential backoff so InFlight deliveries do not stall.
                 let request = PaymentOutcomeRequest {
                     session_key,
                     payment_status: session.status,
@@ -9608,25 +9632,48 @@ where
                     failure_code: session.last_error_code,
                 };
                 crate::tasks::spawn(async move {
-                    match port.decide_payment_outcome(request).await {
-                        Ok(PaymentOutcomeDecision::SettleUpstream) => {
-                            let _ = _myself.send_message(FiberActorMessage::new_command(
-                                FiberActorCommand::SettleLspPaymentOutcome {
-                                    session: Box::new(session),
-                                    last_error_packet,
-                                },
-                            ));
-                        }
-                        Ok(PaymentOutcomeDecision::RetryDelivery) => {}
-                        Err(error) => {
-                            warn!(
-                                %session_key,
-                                %error,
-                                "Failed to persist hosted payment outcome before upstream settlement"
-                            );
+                    const MAX_ATTEMPTS: usize = 5;
+                    let mut backoff = Duration::from_millis(500);
+                    for attempt in 1..=MAX_ATTEMPTS {
+                        match port.decide_payment_outcome(request.clone()).await {
+                            Ok(PaymentOutcomeDecision::SettleUpstream) => {
+                                let _ = _myself.send_message(FiberActorMessage::new_command(
+                                    FiberActorCommand::SettleLspPaymentOutcome {
+                                        session: Box::new(session),
+                                        last_error_packet,
+                                    },
+                                ));
+                                return;
+                            }
+                            Ok(PaymentOutcomeDecision::RetryDelivery) => return,
+                            Err(error) => {
+                                if attempt < MAX_ATTEMPTS {
+                                    warn!(
+                                        %session_key,
+                                        attempt,
+                                        %error,
+                                        "Retrying hosted payment outcome decision after transient failure"
+                                    );
+                                    tokio::time::sleep(backoff).await;
+                                    backoff = (backoff * 2).min(Duration::from_secs(5));
+                                } else {
+                                    warn!(
+                                        %session_key,
+                                        %error,
+                                        "Failed to persist hosted payment outcome before upstream settlement"
+                                    );
+                                }
+                            }
                         }
                     }
                 });
+                return;
+            } else if session_key.upstream_tlc_key.is_some() {
+                // Hosted delivery port is attached right after NetworkActor starts via
+                // SetDeliveryPort. Defer scoped settlements until the port arrives so a
+                // Deferred retry is never failed early on restart.
+                self.deferred_hosted_trampoline_settlements
+                    .insert(session_key);
                 return;
             }
         }
@@ -9765,7 +9812,11 @@ where
         }
     }
 
-    async fn recover_trampoline_settlements_for_channel(&mut self, channel_id: Hash256) {
+    async fn recover_trampoline_settlements_for_channel(
+        &mut self,
+        myself: FiberActorRef,
+        channel_id: Hash256,
+    ) {
         let Some(payment_hashes) = self.pending_trampoline_settlements.remove(&channel_id) else {
             return;
         };
@@ -9774,7 +9825,10 @@ where
                 continue;
             };
             if session.status.is_final() {
-                if let Err(error) = self
+                if payment_hash.upstream_tlc_key.is_some() {
+                    self.resolve_trampoline_upstream(myself.clone(), payment_hash, None)
+                        .await;
+                } else if let Err(error) = self
                     .settle_trampoline_payment(&session, None, Some(channel_id))
                     .await
                 {

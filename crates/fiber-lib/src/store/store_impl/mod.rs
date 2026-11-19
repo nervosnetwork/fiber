@@ -1264,12 +1264,12 @@ impl ChannelActorStateStore for Store {
         }
     }
 
-    fn has_trampoline_payment_for_tlc(
+    fn trampoline_payment_session_for_tlc(
         &self,
         payment_hash: Hash256,
         channel_id: Hash256,
         tlc_id: u64,
-    ) -> bool {
+    ) -> Option<PaymentSessionKey> {
         let scoped = PaymentSessionKey {
             payment_hash,
             upstream_tlc_key: Some(UpstreamTlcKey {
@@ -1277,7 +1277,8 @@ impl ChannelActorStateStore for Store {
                 incoming_tlc_id: tlc_id,
             }),
         };
-        [payment_hash.into(), scoped].into_iter().any(|key| {
+        // Check the scoped hosted session before any ordinary unscoped session sharing the hash.
+        [scoped, payment_hash.into()].into_iter().find(|&key| {
             self.get_payment_session(key)
                 .and_then(|session| session.request.trampoline_context)
                 .is_some_and(|context| {
@@ -1286,6 +1287,48 @@ impl ChannelActorStateStore for Store {
                     })
                 })
         })
+    }
+
+    fn has_active_hosted_delivery_for_tlc(
+        &self,
+        payment_hash: Hash256,
+        channel_id: Hash256,
+        tlc_id: u64,
+    ) -> bool {
+        if self.namespace.is_some() {
+            return false;
+        }
+        #[cfg(all(feature = "lsp", not(target_arch = "wasm32")))]
+        {
+            let key = crate::lsp::LspPaymentDeliveryKey {
+                incoming_channel_id: channel_id,
+                incoming_tlc_id: tlc_id,
+            };
+            match crate::lsp::LspPaymentDeliveryStore::get_lsp_payment_delivery(
+                &self.namespaced(NodeNamespace::lsp_metadata()),
+                &key,
+            ) {
+                Ok(Some(delivery)) => {
+                    delivery.payment_hash == payment_hash && !delivery.status.is_final()
+                }
+                Ok(None) => false,
+                Err(error) => {
+                    tracing::warn!(
+                        %payment_hash,
+                        %channel_id,
+                        tlc_id,
+                        %error,
+                        "Failed to inspect hosted delivery ownership for incoming TLC; preserving TLC"
+                    );
+                    true
+                }
+            }
+        }
+        #[cfg(not(all(feature = "lsp", not(target_arch = "wasm32"))))]
+        {
+            let _ = (payment_hash, channel_id, tlc_id);
+            false
+        }
     }
 
     fn get_channel_actor_state(&self, id: &Hash256) -> Option<ChannelActorState> {

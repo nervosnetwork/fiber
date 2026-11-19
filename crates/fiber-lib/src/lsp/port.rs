@@ -16,7 +16,8 @@ use crate::fiber_types::{Hash256, Pubkey};
 use super::LspServiceMessage;
 
 /// Upper bound on how long the core waits for a delivery decision.
-const DELIVERY_CALL_TIMEOUT_MS: u64 = 5_000;
+/// Must exceed slow downstream RPC waits inside `LspService` (such as 10s dispatch calls).
+const DELIVERY_CALL_TIMEOUT_MS: u64 = 15_000;
 
 /// [`HostedDeliveryPort`] backed by the LSP service actor.
 #[derive(Debug)]

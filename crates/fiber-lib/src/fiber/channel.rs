@@ -2580,6 +2580,10 @@ where
                                 command.payment_hash,
                                 upstream.id,
                                 previous.prev_tlc_id,
+                            ) || self.store.has_active_hosted_delivery_for_tlc(
+                                command.payment_hash,
+                                upstream.id,
+                                previous.prev_tlc_id,
                             ) || matches!(
                                 owners.get(&(
                                     upstream.id,
@@ -2833,16 +2837,25 @@ where
             }
             let payment_hash = tlc.payment_hash;
             let tlc_id_u64 = u64::from(tlc_id);
-            if self
-                .store
-                .has_trampoline_payment_for_tlc(payment_hash, channel_id, tlc_id_u64)
+            if let Some(session_key) =
+                self.store
+                    .trampoline_payment_session_for_tlc(payment_hash, channel_id, tlc_id_u64)
             {
                 // RetrySendPayment also replays a terminal payment's upstream result.
                 self.network
                     .send_message(FiberActorMessage::new_event(
-                        FiberActorEvent::RetrySendPayment(payment_hash.into(), None),
+                        FiberActorEvent::RetrySendPayment(session_key, None),
                     ))
                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                continue;
+            }
+            if self
+                .store
+                .has_active_hosted_delivery_for_tlc(payment_hash, channel_id, tlc_id_u64)
+            {
+                // A buffered/deferred hosted delivery owns this incoming TLC even before a
+                // downstream PaymentSession exists (attempt_count == 0); preserve it for
+                // LspService recovery instead of failing it back on restart.
                 continue;
             }
             let add_tlc_result = match index.get(&(channel_id, tlc_id_u64, payment_hash)) {
@@ -10471,13 +10484,32 @@ pub trait ChannelActorStateStore {
     fn is_internal_channel(&self, _pubkey: &Pubkey) -> Result<bool, String> {
         Ok(false)
     }
+    /// Return the exact persisted trampoline payment session key owning this upstream TLC.
+    fn trampoline_payment_session_for_tlc(
+        &self,
+        payment_hash: Hash256,
+        channel_id: Hash256,
+        tlc_id: u64,
+    ) -> Option<crate::fiber_types::PaymentSessionKey>;
     /// Whether a persisted trampoline payment owns this exact upstream TLC.
     fn has_trampoline_payment_for_tlc(
         &self,
         payment_hash: Hash256,
         channel_id: Hash256,
         tlc_id: u64,
-    ) -> bool;
+    ) -> bool {
+        self.trampoline_payment_session_for_tlc(payment_hash, channel_id, tlc_id)
+            .is_some()
+    }
+    /// Whether an active (non-final) hosted LSP payment delivery owns this upstream TLC.
+    fn has_active_hosted_delivery_for_tlc(
+        &self,
+        _payment_hash: Hash256,
+        _channel_id: Hash256,
+        _tlc_id: u64,
+    ) -> bool {
+        false
+    }
     /// Read only the forwarding context; ordinary payment attempts have none.
     fn get_ordinary_trampoline_context(
         &self,

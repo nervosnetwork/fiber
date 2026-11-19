@@ -341,9 +341,17 @@ impl<S: LspPaymentDeliveryStore> LspPaymentDeliveryManager<S> {
             }
             return Ok(Some(delivery.clone()));
         }
-        Ok(deliveries
-            .into_iter()
-            .max_by_key(|delivery| (delivery.updated_at, delivery.created_at)))
+        Ok(deliveries.into_iter().max_by_key(|delivery| {
+            let key = delivery.key();
+            (
+                delivery.updated_at,
+                delivery.created_at,
+                delivery.status == LspPaymentDeliveryStatus::Succeeded,
+                delivery.attempt_count,
+                key.incoming_channel_id,
+                key.incoming_tlc_id,
+            )
+        }))
     }
 
     pub fn list_pending(&self) -> Result<Vec<LspPaymentDelivery>, String> {
@@ -596,5 +604,79 @@ impl<S: LspPaymentDeliveryStore> LspPaymentDeliveryManager<S> {
         delivery.updated_at = now;
         self.store.put_lsp_payment_delivery(&delivery)?;
         Ok(delivery)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fiber_types::{HashAlgorithm, PrevTlcInfo};
+    use crate::gen_rand_sha256_hash;
+    use crate::tests::gen_utils::gen_rand_fiber_public_key;
+    use crate::tests::test_utils::generate_store;
+
+    #[test]
+    fn get_by_payment_hash_prefers_succeeded_on_same_ms_tie() {
+        let (store, _dir) = generate_store();
+        let manager = LspPaymentDeliveryManager::new(store.clone());
+        let payment_hash = gen_rand_sha256_hash();
+        let channel_a = Hash256::from([1u8; 32]);
+        let channel_b = Hash256::from([2u8; 32]);
+
+        let make_delivery = |channel_id: Hash256, tlc_id: u64, status: LspPaymentDeliveryStatus| {
+            LspPaymentDelivery {
+                payment_hash,
+                tenant_id: TenantId::new("tenant-tie").unwrap(),
+                private_channel_id: gen_rand_sha256_hash(),
+                status,
+                request: TrampolineForwardingRequest {
+                    next_node_id: gen_rand_fiber_public_key(),
+                    amount_to_forward: 100,
+                    payment_hash,
+                    tlc_expiry_delta: 3600,
+                    tlc_expiry_limit: 7200,
+                    build_max_fee_amount: 10,
+                    max_parts: None,
+                    udt_type_script: None,
+                    remaining_trampoline_onion: vec![],
+                    previous_tlc: PrevTlcInfo::new_with_shared_secret(
+                        channel_id, tlc_id, 10, [0u8; 32],
+                    ),
+                    hash_algorithm: HashAlgorithm::CkbHash,
+                    max_outgoing_tlc_expiry: 100_000,
+                },
+                buffer_deadline: 10_000,
+                created_at: 5_000,
+                updated_at: 5_000,
+                attempt_count: 1,
+                last_error: None,
+                last_error_code: None,
+            }
+        };
+
+        // Even though channel_b has a larger key, channel_a is Succeeded and must win on equal timestamps.
+        store
+            .put_lsp_payment_delivery(&make_delivery(
+                channel_a,
+                0,
+                LspPaymentDeliveryStatus::Succeeded,
+            ))
+            .unwrap();
+        store
+            .put_lsp_payment_delivery(&make_delivery(
+                channel_b,
+                9,
+                LspPaymentDeliveryStatus::Failed {
+                    reason: "downstream failed".to_string(),
+                },
+            ))
+            .unwrap();
+
+        let selected = manager
+            .get_by_payment_hash(&payment_hash)
+            .unwrap()
+            .expect("selected delivery");
+        assert_eq!(selected.status, LspPaymentDeliveryStatus::Succeeded);
+        assert_eq!(selected.key().incoming_channel_id, channel_a);
     }
 }

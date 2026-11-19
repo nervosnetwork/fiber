@@ -121,6 +121,7 @@ pub enum LspServiceMessage {
     ),
     ResumeDelivery(LspPaymentDeliveryKey),
     ExpireDelivery(LspPaymentDeliveryKey),
+    ReconcileInFlightDeliveries,
     TenantChannelOnline(Pubkey, Hash256),
     TenantChannelOffline(Pubkey, Hash256),
     PaymentOutcomeReady(
@@ -150,6 +151,9 @@ pub struct LspServiceState {
     #[cfg(feature = "watchtower")]
     signing_events: crate::signing::SigningEvents,
     pub ready_tenants: HashMap<TenantId, HashSet<Hash256>>,
+    // Deduplicates in-flight/settling reconciliation timers so periodic ticks
+    // never amplify per-delivery retry loops.
+    reconciling_deliveries: HashSet<LspPaymentDeliveryKey>,
 }
 
 impl LspServiceState {
@@ -267,12 +271,15 @@ impl LspServiceState {
     }
 
     fn schedule_reconciliation_retry(
+        &mut self,
         myself: &ActorRef<LspServiceMessage>,
         key: LspPaymentDeliveryKey,
     ) {
-        myself.send_after(Duration::from_secs(1), move || {
-            LspServiceMessage::ResumeDelivery(key)
-        });
+        if self.reconciling_deliveries.insert(key) {
+            myself.send_after(Duration::from_secs(1), move || {
+                LspServiceMessage::ResumeDelivery(key)
+            });
+        }
     }
 
     fn record_payment_outcome(
@@ -384,6 +391,11 @@ impl Actor for LspService {
             let _ = myself.send_message(LspServiceMessage::ResumeDelivery(key));
             LspServiceState::schedule_delivery_deadline(&myself, key, delivery.buffer_deadline);
         }
+        // Periodically reconcile InFlight / SettlingUpstream deliveries so a transient
+        // outcome-decision timeout or dropped notification cannot stall a delivery.
+        myself.send_interval(Duration::from_secs(5), || {
+            LspServiceMessage::ReconcileInFlightDeliveries
+        });
         Ok(LspServiceState {
             config: args.config,
             public_node_id: args.public_node_id,
@@ -399,6 +411,7 @@ impl Actor for LspService {
             #[cfg(feature = "watchtower")]
             signing_events: args.signing_events,
             ready_tenants: HashMap::new(),
+            reconciling_deliveries: HashSet::new(),
         })
     }
 
@@ -631,6 +644,7 @@ impl Actor for LspService {
                 let _ = reply.send(result);
             }
             LspServiceMessage::ResumeDelivery(key) => {
+                state.reconciling_deliveries.remove(&key);
                 self.resume_delivery(myself, state, key).await?;
             }
             LspServiceMessage::ExpireDelivery(key) => {
@@ -733,7 +747,7 @@ impl Actor for LspService {
                     && payment_status.is_final()
                 {
                     if let Ok(Some(delivery)) = state.delivery_for_outcome(session_key) {
-                        LspServiceState::schedule_reconciliation_retry(&myself, delivery.key());
+                        state.schedule_reconciliation_retry(&myself, delivery.key());
                     }
                 }
                 let _ = reply.send(result);
@@ -747,6 +761,19 @@ impl Actor for LspService {
                 if let Some(delivery) = state.delivery_for_outcome(session_key)? {
                     let key = delivery.key();
                     state.finish_upstream_settlement(&key, payment_status, failure)?;
+                }
+            }
+            LspServiceMessage::ReconcileInFlightDeliveries => {
+                for delivery in state.delivery_manager.list_pending()? {
+                    let key = delivery.key();
+                    if matches!(
+                        delivery.status,
+                        LspPaymentDeliveryStatus::InFlight
+                            | LspPaymentDeliveryStatus::SettlingUpstream { .. }
+                    ) && state.reconciling_deliveries.insert(key)
+                    {
+                        let _ = myself.send_message(LspServiceMessage::ResumeDelivery(key));
+                    }
                 }
             }
         }
@@ -844,7 +871,7 @@ impl LspService {
                     %error,
                     "Failed to settle hosted delivery failure"
                 );
-                LspServiceState::schedule_reconciliation_retry(myself, delivery.key());
+                state.schedule_reconciliation_retry(myself, delivery.key());
             }
         }
         Ok(())
@@ -914,7 +941,7 @@ impl LspService {
                             %error,
                             "Failed to reconcile hosted upstream settlement"
                         );
-                        LspServiceState::schedule_reconciliation_retry(&myself, key);
+                        state.schedule_reconciliation_retry(&myself, key);
                         return Ok(());
                     }
                     state.finish_upstream_settlement(&key, payment.status, payment.failed_error)?;
@@ -925,7 +952,7 @@ impl LspService {
                         payment.failed_error,
                         payment.failed_error_code,
                     )?;
-                    LspServiceState::schedule_reconciliation_retry(&myself, key);
+                    state.schedule_reconciliation_retry(&myself, key);
                 }
                 return Ok(());
             }
@@ -944,7 +971,7 @@ impl LspService {
                 LspPaymentDeliveryStatus::InFlight
                     | LspPaymentDeliveryStatus::SettlingUpstream { .. }
             ) {
-                LspServiceState::schedule_reconciliation_retry(&myself, key);
+                state.schedule_reconciliation_retry(&myself, key);
                 return Ok(());
             }
         }
@@ -1091,7 +1118,7 @@ impl LspService {
             delivery.status,
             LspPaymentDeliveryStatus::SettlingUpstream { .. }
         ) {
-            LspServiceState::schedule_reconciliation_retry(&myself, key);
+            state.schedule_reconciliation_retry(&myself, key);
             return Ok(());
         }
         let now = crate::now_timestamp_as_millis_u64();
@@ -1110,7 +1137,7 @@ impl LspService {
                     %payment_hash,
                     "Cannot expire hosted delivery while upstream TLC state is unknown"
                 );
-                LspServiceState::schedule_reconciliation_retry(&myself, key);
+                state.schedule_reconciliation_retry(&myself, key);
                 return Ok(());
             }
             Err(error) => {
@@ -1119,7 +1146,7 @@ impl LspService {
                     %error,
                     "Failed to inspect upstream TLC before expiring hosted delivery"
                 );
-                LspServiceState::schedule_reconciliation_retry(&myself, key);
+                state.schedule_reconciliation_retry(&myself, key);
                 return Ok(());
             }
         }
