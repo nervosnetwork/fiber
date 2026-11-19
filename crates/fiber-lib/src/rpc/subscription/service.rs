@@ -125,7 +125,8 @@ impl SubscriptionService {
                     | SigningChange::WatchtowerUpdated { status, .. } => {
                         SubscriptionEvent::WatchtowerSigning(Box::new(
                             fiber_json_types::GetWatchtowerSigningStatusResult {
-                                channel_id: id.into(), status: status.clone(),
+                                channel_id: id.into(),
+                                status: status.clone(),
                             },
                         ))
                     }
@@ -241,11 +242,14 @@ impl<S: RpcServerStore> Source<S> {
 
     #[cfg(feature = "watchtower")]
     fn watchtower_event(&self, id: Hash256) -> SubscriptionEvent {
+        let (_, _, node_retry_after_ms) = self.watchtower.watchtower_fee_hold_stats(&self.node);
         SubscriptionEvent::WatchtowerSigning(Box::new(
             fiber_json_types::GetWatchtowerSigningStatusResult {
                 channel_id: id.into(),
-                status: crate::rpc::watchtower::to_rpc_watchtower_signing_status(
+                status: crate::rpc::watchtower::to_rpc_watchtower_signing_status_with_backoff(
                     self.watchtower.get_watchtower_signer(&self.node, &id),
+                    node_retry_after_ms,
+                    crate::now_timestamp_as_millis_u64(),
                 ),
             },
         ))

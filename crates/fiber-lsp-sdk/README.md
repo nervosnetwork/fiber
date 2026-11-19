@@ -197,3 +197,52 @@ Preimage release
                               |
   Later commitment: verify TLC removal and exact balance increase
 ```
+
+## Watchtower Quotas, Fee-Hold Limits, and Recovery
+
+The LSP watchtower enforces per-tenant and global resource limits to protect operator storage and fee UTXOs. Hitting a limit **never corrupts or deletes existing watched channels or signing state**, but failing to handle it can leave newly opened channels or invoices unprotected, or delay on-chain settlement.
+
+`fiber-lsp-sdk` provides policy and callback hooks so applications can react safely without embedding transport or background loops in the SDK:
+
+- [`WatchtowerLimitPolicy`]: defaults to `FailClosed` (recommended). `PruneAndRetry` allows pruning closed channels or settled/expired preimages and retrying once for **tenant-scoped** limits, while still failing closed on **global** limits.
+- [`WatchtowerEventHandler`]: receives `on_quota_exceeded(&WatchtowerQuotaError, WatchtowerQuotaAction)` and `on_status_update(&WatchtowerHealthStatus)`.
+- [`HostedSession::handle_watchtower_status_result`]: evaluates `GetWatchtowerSigningStatusResult` (`NoSignatureRequired`, `SignatureRequired { request_id, content, expires_at_ms }`, or `Backoff { retry_after_ms, consecutive_expired_requests }`), notifies `WatchtowerEventHandler`, and returns `(WatchtowerHealthStatus, ProcessOutcome)`.
+- [`HostedSession::handle_watchtower_rpc_error`]: classifies watchtower RPC quota errors and invokes `on_quota_exceeded` with the recommended [`WatchtowerQuotaAction`].
+
+### 1. Watchtower channel quota (`create_watch_channel`)
+
+- **Defaults**: `64` watched channels per tenant, `4096` globally (configurable by the LSP operator).
+- **Behavior when exceeded**: `create_watch_channel` returns an `InvalidParams` JSON-RPC error containing `quota exceeded`. Updates to already-watched channels (`update_revocation`, `update_local_settlement`, `update_pending_remote_settlement`) and removals (`remove_watch_channel`) are not blocked.
+- **Safe client handling**:
+  1. **Fail closed by default (`WatchtowerLimitPolicy::FailClosed`)**: never ignore the error or fund/use a channel while assuming watchtower protection is active.
+  2. **Tenant cap (`WatchtowerQuotaScope::Tenant`)**: if using `WatchtowerLimitPolicy::PruneAndRetry`, call `remove_watch_channel` only for channels that are already closed and finalized on-chain, then retry `create_watch_channel` once; if it still fails, fail closed.
+  3. **Global cap (`WatchtowerQuotaScope::Global`)**: always fail closed and surface an operator-capacity error to the user.
+
+### 2. Watchtower preimage quota (`create_preimage` & hosted invoices)
+
+- **Defaults**: `256` watched preimages per tenant, `16384` globally.
+- **Behavior when exceeded**:
+  - Direct `create_preimage` RPC calls fail with `InvalidParams` (`quota exceeded`).
+  - For hosted tenants creating invoices via `new_invoice`, the asynchronous `PreimageCreated` forwarding skips watchtower registration with a server warning rather than failing `new_invoice`.
+- **Safe client handling**:
+  1. **Prune proactively**: call `remove_preimage` (and clean up expired or already-settled invoices) as part of normal wallet housekeeping so the active preimage count stays well below the per-tenant cap.
+  2. **Retry before sharing an invoice**: if `create_preimage` fails with `WatchtowerQuotaScope::Tenant`, prune stale preimages and retry before handing the invoice to a payer; on `WatchtowerQuotaScope::Global` or repeated failure, fail closed rather than risking an unclaimed inbound TLC during an offline force-close.
+
+### 3. External signing fee-hold caps, 30-minute TTL, and per-node backoff
+
+- **Limits**:
+  - Concurrent active fee-holding requests (`pending_requests + signed_signatures`): **4 per channel**, **16 per tenant (`node_id`)**, **64 globally**.
+  - **Non-renewing 30-minute TTL**: each pending or signed-but-unconfirmed request holds operator fee cells for at most 30 minutes (`WATCHTOWER_HOLD_MS`) from creation.
+  - **Per-node exponential backoff**: if a request expires unsigned or fails CKB broadcast (excluding `-1107` already-in-mempool), the watchtower evicts it, releases the fee cells, and pauses new fee-holding requests across **all channels of that `node_id`** starting at 5 minutes and doubling up to 60 minutes. A successful broadcast resets the channel's backoff state.
+- **Status feedback & safe client handling**:
+  1. **Feed full status results into `HostedSession::handle_watchtower_status_result`**: inspect the reported [`WatchtowerHealthStatus`] (`Healthy`, `PendingSignature { expires_at_ms, remaining_ms, .. }`, or `InBackoff { retry_after_ms, remaining_backoff_ms, consecutive_expired_requests }`).
+  2. **Sign promptly within TTL**: keep `watchtower_signing` subscriptions (or `get_watchtower_signing_status` polling) responsive and submit verified signatures well before `expires_at_ms`.
+  3. **Verify before signing**: only submit signatures that pass `HostedSession` / `ChainVerifier` checks; repeatedly submitting invalid or unspendable transactions triggers per-node backoff across all of the tenant's channels.
+  4. **Respect backoff**: when `WatchtowerHealthStatus::InBackoff` is reported, avoid tight-loop polling and wait until `retry_after_ms`.
+  5. **Emergency self-broadcast**: check `health.needs_self_broadcast(dispute_deadline_ms, now_ms, safety_margin_ms)`. When `true`, construct and broadcast the settlement transaction directly from the locally persisted recovery record using the wallet's own fee inputs.
+
+### 4. Input and witness bounds
+
+- **TLC cap**: at most **254** TLCs per settlement snapshot (`MAX_WITNESS_TLC_COUNT = 0xfe`).
+- **Script / output data cap**: at most **1024 bytes** for `funding_udt_type_script` args, `payout_lock_script` args, and `revocation_data.output_data`.
+- Clients should enforce these bounds locally before sending watchtower RPCs.

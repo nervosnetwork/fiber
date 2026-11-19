@@ -2535,7 +2535,8 @@ Read-only projection of a watchtower's external signing requests.
 
 #### Enum with values of
 
-* `NoSignatureRequired` - No external signature is currently required for this watched channel.
+* `NoSignatureRequired` - No external signature is currently required and no retry backoff is active.
 * `SignatureRequired` - Settlement or TLC spend is paused until this signature is submitted.
+* `Backoff` - New fee-holding signing requests are paused due to channel or tenant retry backoff.
 ---
 

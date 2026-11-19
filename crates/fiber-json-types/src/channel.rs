@@ -2,7 +2,7 @@
 
 use crate::define_rpc_flags;
 use crate::schema_helpers::*;
-use crate::serde_utils::{EntityHex, Hash256, Pubkey, SliceHex, U128Hex, U64Hex};
+use crate::serde_utils::{EntityHex, Hash256, Pubkey, SliceHex, U128Hex, U32Hex, U64Hex};
 use ckb_jsonrpc_types::{CellDep, EpochNumberWithFraction, Script, Transaction};
 use ckb_types::packed::CellOutput;
 use ckb_types::packed::OutPoint;
@@ -1018,7 +1018,7 @@ pub struct GetWatchtowerSigningStatusResult {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "type")]
 pub enum WatchtowerSigningStatus {
-    /// No external signature is currently required for this watched channel.
+    /// No external signature is currently required and no retry backoff is active.
     NoSignatureRequired,
     /// Settlement or TLC spend is paused until this signature is submitted.
     SignatureRequired {
@@ -1026,6 +1026,21 @@ pub enum WatchtowerSigningStatus {
         request_id: Hash256,
         /// Structured on-chain plaintext independently hashed by the signer.
         content: OnchainSigningContent,
+        /// Unix millisecond timestamp when this request's 30-minute fee-cell hold expires.
+        #[serde_as(as = "U64Hex")]
+        #[schemars(schema_with = "schema_as_uint_hex")]
+        expires_at_ms: u64,
+    },
+    /// New fee-holding signing requests are paused due to channel or tenant retry backoff.
+    Backoff {
+        /// Effective Unix millisecond timestamp when retry backoff ends.
+        #[serde_as(as = "U64Hex")]
+        #[schemars(schema_with = "schema_as_uint_hex")]
+        retry_after_ms: u64,
+        /// Number of consecutive expired or failed-broadcast requests on this channel.
+        #[serde_as(as = "U32Hex")]
+        #[schemars(schema_with = "schema_as_uint_hex")]
+        consecutive_expired_requests: u32,
     },
 }
 

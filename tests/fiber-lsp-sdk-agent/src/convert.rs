@@ -374,6 +374,7 @@ pub(crate) mod tests {
                     key_purpose: fiber_json_types::OnchainKeyPurpose::Settlement,
                     transaction: tx.into(),
                 },
+                expires_at_ms: 0,
             },
             fiber_lsp_sdk::OnchainSpendAuthorization {
                 source: record.reference.clone(),

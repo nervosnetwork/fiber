@@ -492,8 +492,11 @@ where
         {
             return Err(rpc_error("watched channel not found"));
         }
-        let status = to_rpc_watchtower_signing_status(
+        let (_, _, node_retry_after_ms) = self.store.watchtower_fee_hold_stats(&node_id);
+        let status = to_rpc_watchtower_signing_status_with_backoff(
             self.store.get_watchtower_signer(&node_id, &channel_id),
+            node_retry_after_ms,
+            crate::now_timestamp_as_millis_u64(),
         );
         Ok(GetWatchtowerSigningStatusResult {
             channel_id: channel_id.into(),
@@ -591,12 +594,28 @@ where
 pub(crate) fn to_rpc_watchtower_signing_status(
     state: fiber_types::WatchtowerSignerState,
 ) -> WatchtowerSigningStatus {
+    to_rpc_watchtower_signing_status_with_backoff(state, 0, crate::now_timestamp_as_millis_u64())
+}
+
+#[cfg(feature = "watchtower")]
+pub(crate) fn to_rpc_watchtower_signing_status_with_backoff(
+    state: fiber_types::WatchtowerSignerState,
+    node_retry_after_ms: u64,
+    now_ms: u64,
+) -> WatchtowerSigningStatus {
     use fiber_types::{OnchainKeyPurpose, WatchtowerSignerState};
 
     match state {
         WatchtowerSignerState::Internal => WatchtowerSigningStatus::NoSignatureRequired,
         WatchtowerSignerState::External(external) => {
             if let Some((request_id, content)) = external.first_pending() {
+                let expires_at_ms = external
+                    .pending_request_created_at_ms
+                    .get(&request_id)
+                    .map(|created_at_ms| {
+                        created_at_ms.saturating_add(crate::ckb::held_cells::WATCHTOWER_HOLD_MS)
+                    })
+                    .unwrap_or(0);
                 WatchtowerSigningStatus::SignatureRequired {
                     request_id: request_id.into(),
                     content: fiber_json_types::OnchainSigningContent {
@@ -610,9 +629,18 @@ pub(crate) fn to_rpc_watchtower_signing_status(
                         },
                         transaction: content.transaction.clone().into(),
                     },
+                    expires_at_ms,
                 }
             } else {
-                WatchtowerSigningStatus::NoSignatureRequired
+                let effective_retry_after_ms = external.retry_after_ms.max(node_retry_after_ms);
+                if effective_retry_after_ms > now_ms {
+                    WatchtowerSigningStatus::Backoff {
+                        retry_after_ms: effective_retry_after_ms,
+                        consecutive_expired_requests: external.consecutive_expired_requests,
+                    }
+                } else {
+                    WatchtowerSigningStatus::NoSignatureRequired
+                }
             }
         }
     }

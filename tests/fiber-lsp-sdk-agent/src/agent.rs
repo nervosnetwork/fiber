@@ -771,7 +771,10 @@ impl<R: FiberRpc, S: SignerStore> Agent<R, S> {
         channel_id: Hash256,
         status: WatchtowerSigningStatus,
     ) -> Result<()> {
-        if matches!(status, WatchtowerSigningStatus::NoSignatureRequired) {
+        if matches!(
+            status,
+            WatchtowerSigningStatus::NoSignatureRequired | WatchtowerSigningStatus::Backoff { .. }
+        ) {
             return Ok(());
         }
         let approval = self
@@ -898,7 +901,8 @@ impl<R: FiberRpc, S: SignerStore> Agent<R, S> {
             .tenant_token()
             .context("agent is not registered")?;
         let key_purpose = match &status {
-            WatchtowerSigningStatus::NoSignatureRequired => return Ok(()),
+            WatchtowerSigningStatus::NoSignatureRequired
+            | WatchtowerSigningStatus::Backoff { .. } => return Ok(()),
             WatchtowerSigningStatus::SignatureRequired { content, .. } => content.key_purpose,
         };
         let outcome = self

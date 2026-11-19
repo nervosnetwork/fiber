@@ -283,3 +283,151 @@ async fn tenant_watch_channel_and_preimage_quotas_enforced_and_host_exempt() {
         Some(p6.preimage.into())
     );
 }
+
+#[tokio::test]
+async fn watchtower_signing_status_exposes_backoff_and_pending_ttl() {
+    use ckb_types::core::TransactionBuilder;
+    use ckb_types::packed::OutPoint;
+    use fiber_types::{OnchainKeyPurpose, OnchainSigningContent, WatchtowerSignerState};
+
+    let (store, _dir) = generate_store();
+    let server = WatchtowerRpcServerImpl::new(store.clone());
+    let tenant = NodeId::from_bytes(Privkey::from([31; 32]).pubkey().serialize().to_vec());
+    let ctx = RpcContext {
+        node_id: tenant.to_string(),
+        tenant_scoped: true,
+    };
+
+    let ch1 = Hash256::from([41; 32]);
+    let ch2 = Hash256::from([42; 32]);
+    for ch in [ch1, ch2] {
+        server
+            .create_watch_channel(
+                ctx.clone(),
+                CreateWatchChannelParams {
+                    channel_id: ch.into(),
+                    funding_udt_type_script: None,
+                    local_settlement_key: None,
+                    local_settlement_key_pubkey: Some(Privkey::from([1; 32]).pubkey().into()),
+                    remote_settlement_key: Privkey::from([2; 32]).pubkey().into(),
+                    local_funding_pubkey: Privkey::from([5; 32]).pubkey().into(),
+                    remote_funding_pubkey: Privkey::from([6; 32]).pubkey().into(),
+                    settlement_data: snapshot(1).into(),
+                    channel_features: Default::default(),
+                    payout_lock_script: None,
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    // Initially healthy: NoSignatureRequired.
+    let initial = server
+        .get_watchtower_signing_status(
+            ctx.clone(),
+            GetWatchtowerSigningStatusParams {
+                channel_id: ch1.into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(initial.status, WatchtowerSigningStatus::NoSignatureRequired);
+
+    // Populate pending request + future backoff on ch1.
+    let req_id = Hash256::from([99; 32]);
+    let now_ms = crate::now_timestamp_as_millis_u64();
+    let created_at_ms = now_ms;
+    let retry_after_ms = now_ms + 300_000;
+    store
+        .update_watchtower_signer(&tenant, &ch1, |state| {
+            if let WatchtowerSignerState::External(ext) = state {
+                let tx = TransactionBuilder::default()
+                    .input(ckb_types::packed::CellInput::new(OutPoint::default(), 0))
+                    .build()
+                    .data();
+                ext.pending_requests.insert(
+                    req_id,
+                    OnchainSigningContent {
+                        key_purpose: OnchainKeyPurpose::Settlement,
+                        transaction: tx,
+                    },
+                );
+                ext.pending_request_created_at_ms
+                    .insert(req_id, created_at_ms);
+                ext.consecutive_expired_requests = 2;
+                ext.retry_after_ms = retry_after_ms;
+            }
+            Ok::<_, std::convert::Infallible>(())
+        })
+        .unwrap();
+
+    // ch1 has a pending request -> SignatureRequired with exact expires_at_ms.
+    let status_ch1 = server
+        .get_watchtower_signing_status(
+            ctx.clone(),
+            GetWatchtowerSigningStatusParams {
+                channel_id: ch1.into(),
+            },
+        )
+        .await
+        .unwrap();
+    match status_ch1.status {
+        WatchtowerSigningStatus::SignatureRequired {
+            request_id,
+            expires_at_ms,
+            ..
+        } => {
+            assert_eq!(request_id, req_id.into());
+            assert_eq!(
+                expires_at_ms,
+                created_at_ms + crate::ckb::held_cells::WATCHTOWER_HOLD_MS
+            );
+        }
+        other => panic!("expected SignatureRequired, got {other:?}"),
+    }
+
+    // Sibling channel ch2 has no pending request -> Backoff with effective per-node retry_after_ms.
+    let status_ch2 = server
+        .get_watchtower_signing_status(
+            ctx.clone(),
+            GetWatchtowerSigningStatusParams {
+                channel_id: ch2.into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        status_ch2.status,
+        WatchtowerSigningStatus::Backoff {
+            retry_after_ms,
+            consecutive_expired_requests: 0,
+        }
+    );
+
+    // Once ch1's pending request is cleared while backoff is active -> Backoff with consecutive count.
+    store
+        .update_watchtower_signer(&tenant, &ch1, |state| {
+            if let WatchtowerSignerState::External(ext) = state {
+                ext.pending_requests.clear();
+                ext.pending_request_created_at_ms.clear();
+            }
+            Ok::<_, std::convert::Infallible>(())
+        })
+        .unwrap();
+    let status_ch1_backoff = server
+        .get_watchtower_signing_status(
+            ctx,
+            GetWatchtowerSigningStatusParams {
+                channel_id: ch1.into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        status_ch1_backoff.status,
+        WatchtowerSigningStatus::Backoff {
+            retry_after_ms,
+            consecutive_expired_requests: 2,
+        }
+    );
+}

@@ -26,6 +26,7 @@ mod root_key;
 mod session;
 mod signer;
 mod store;
+mod watchtower;
 
 pub use fiber_types::{
     ChannelOpenSignerMaterial, NextChannelSignerMaterial, TenantId, TenantRegistryPayload,
@@ -49,6 +50,13 @@ pub use session::{
 };
 pub use signer::{ChannelSigner, CreatedRootSigner, RootSigner};
 pub use store::{MemoryStore, MemoryStoreError, SignerStore};
+#[cfg(feature = "json")]
+pub use watchtower::evaluate_watchtower_status;
+pub use watchtower::{
+    handle_watchtower_rpc_error, NoopWatchtowerEventHandler, WatchtowerEventHandler,
+    WatchtowerHealthStatus, WatchtowerLimitPolicy, WatchtowerQuotaAction, WatchtowerQuotaError,
+    WatchtowerQuotaKind, WatchtowerQuotaScope,
+};
 
 pub use commitment::{
     CommitmentContext, CommitmentParameters, CommitmentReview, PaymentAuthorization,

@@ -1647,6 +1647,7 @@ async fn onchain_claim_checks_live_input_witness_destination_fee_and_maturity() 
                     key_purpose: fiber_json_types::OnchainKeyPurpose::Settlement,
                     transaction: content.transaction.clone().into(),
                 },
+                expires_at_ms: 0,
             };
             let wire = serde_json::to_vec(&status).unwrap();
             let ProcessOutcome::NeedConfirmation(pending) = session
@@ -2625,6 +2626,7 @@ async fn assert_onchain_rpc_rejected(
                 key_purpose: fiber_json_types::OnchainKeyPurpose::Settlement,
                 transaction: content.transaction.clone().into(),
             },
+            expires_at_ms: 0,
         };
         let wire = serde_json::to_vec(&status).unwrap();
         let before = f.store.snapshot().unwrap();

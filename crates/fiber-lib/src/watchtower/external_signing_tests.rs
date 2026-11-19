@@ -666,6 +666,9 @@ fn spent_inputs_prune_watchtower_requests_and_publish_successor() {
                     assert_eq!(*request_id, (*live_id).into())
                 }
                 WatchtowerSigningStatus::NoSignatureRequired => assert!(already_signed),
+                WatchtowerSigningStatus::Backoff { .. } => {
+                    panic!("unexpected backoff during live signing test")
+                }
             }
             let event = runtime.block_on(async {
                 tokio::time::timeout(std::time::Duration::from_secs(1), changes.recv())

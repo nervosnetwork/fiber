@@ -6,19 +6,21 @@
 use std::collections::HashMap;
 
 use fiber_json_types::{
-    ChannelSigningStatus, CreateWatchChannelParams, RegisterLspTenantParams,
-    RegisterLspTenantResult, SubmitChannelSignatureParams, SubmitWatchtowerSignatureParams,
-    WatchtowerSigningStatus,
+    ChannelSigningStatus, CreateWatchChannelParams, GetWatchtowerSigningStatusResult,
+    RegisterLspTenantParams, RegisterLspTenantResult, SubmitChannelSignatureParams,
+    SubmitWatchtowerSignatureParams, WatchtowerSigningStatus,
 };
 use fiber_types::{Hash256, TenantId, TenantRegistryPayload};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
+    evaluate_watchtower_status, handle_watchtower_rpc_error,
     json::{musig2_from_rpc, next_material_to_rpc, onchain_from_rpc, settlement_from_rpc},
     ChannelKeyId, ChannelOpenSignerMaterial, ChannelSignature, ChannelSigningContent,
     OwnedSettlementBinding, PaymentRegistry, PreparedSigning, RootSigner, SignerError, SignerStore,
-    SigningDecision, SigningPolicy,
+    SigningDecision, SigningPolicy, WatchtowerEventHandler, WatchtowerHealthStatus,
+    WatchtowerLimitPolicy, WatchtowerQuotaAction,
 };
 
 #[cfg(test)]
@@ -108,16 +110,18 @@ pub struct HostedSession<S> {
     root: RootSigner<S>,
     state: HostedSessionState,
     policy: SigningPolicy,
+    watchtower_limit_policy: WatchtowerLimitPolicy,
     registry: PaymentRegistry,
 }
 
 impl<S: SignerStore> HostedSession<S> {
-    /// Create a session with [`SigningPolicy::Auto`].
+    /// Create a session with [`SigningPolicy::Auto`] and [`WatchtowerLimitPolicy::FailClosed`].
     pub fn new(root: RootSigner<S>) -> Self {
         Self {
             root,
             state: HostedSessionState::default(),
             policy: SigningPolicy::Auto,
+            watchtower_limit_policy: WatchtowerLimitPolicy::FailClosed,
             registry: PaymentRegistry::default(),
         }
     }
@@ -126,6 +130,17 @@ impl<S: SignerStore> HostedSession<S> {
     pub fn with_policy(mut self, policy: SigningPolicy) -> Self {
         self.policy = policy;
         self
+    }
+
+    /// Replace the watchtower quota limit policy (defaults to [`WatchtowerLimitPolicy::FailClosed`]).
+    pub fn with_watchtower_limit_policy(mut self, policy: WatchtowerLimitPolicy) -> Self {
+        self.watchtower_limit_policy = policy;
+        self
+    }
+
+    /// Active watchtower quota limit policy.
+    pub fn watchtower_limit_policy(&self) -> WatchtowerLimitPolicy {
+        self.watchtower_limit_policy
     }
 
     /// Restore a previously serialized session map.
@@ -451,6 +466,33 @@ impl<S: SignerStore> HostedSession<S> {
         self.decide(pending, 0).await
     }
 
+    /// Handle a full `get_watchtower_signing_status` (or `watchtower_signing` subscription)
+    /// payload, reporting structured [`WatchtowerHealthStatus`] (TTL / backoff) to `handler`
+    /// alongside the signing [`ProcessOutcome`]. Does not submit.
+    pub async fn handle_watchtower_status_result(
+        &mut self,
+        result: GetWatchtowerSigningStatusResult,
+        now_ms: u64,
+        handler: &mut impl WatchtowerEventHandler,
+    ) -> Result<(WatchtowerHealthStatus, ProcessOutcome), SessionError> {
+        let health = evaluate_watchtower_status(&result, now_ms);
+        handler.on_status_update(&health);
+        let outcome = self
+            .handle_watchtower_status(result.channel_id.into(), result.status)
+            .await?;
+        Ok((health, outcome))
+    }
+
+    /// Classify a watchtower RPC error using this session's [`WatchtowerLimitPolicy`]
+    /// and notify `handler` if a quota limit was hit.
+    pub fn handle_watchtower_rpc_error(
+        &self,
+        message: &str,
+        handler: &mut impl WatchtowerEventHandler,
+    ) -> Option<WatchtowerQuotaAction> {
+        handle_watchtower_rpc_error(self.watchtower_limit_policy, handler, message)
+    }
+
     /// Sign a request the user has already confirmed. Skips the interaction policy,
     /// but rechecks mandatory commitment validation with fresh wallet time.
     pub async fn confirm(
@@ -649,6 +691,7 @@ impl<S: SignerStore> HostedSession<S> {
         let WatchtowerSigningStatus::SignatureRequired {
             request_id,
             content,
+            ..
         } = status
         else {
             return Ok(ProcessOutcome::Idle);
@@ -696,6 +739,7 @@ impl<S: SignerStore> HostedSession<S> {
         let WatchtowerSigningStatus::SignatureRequired {
             request_id,
             content,
+            ..
         } = status
         else {
             return Ok(None);
@@ -1039,6 +1083,7 @@ mod tests {
                 key_purpose: fiber_json_types::OnchainKeyPurpose::Settlement,
                 transaction: tx.into(),
             },
+            expires_at_ms: 0,
         }
     }
 
