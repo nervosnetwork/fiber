@@ -25,7 +25,7 @@ impl HostedTlcLookup for crate::fiber::channel::ChannelActorState {
     }
 }
 use crate::fiber::channel::ChannelActorStateStore;
-use crate::fiber_types::{Hash256, RemoveTlcFulfill, TlcErr, TlcErrPacket};
+use crate::fiber_types::{Hash256, RemoveTlcFulfill, TlcErr, TlcErrPacket, NO_SHARED_SECRET};
 use crate::lsp::LspPaymentDeliveryStatus as DeliveryStatus;
 
 async fn settle_desk_hold(desk: &NetworkNode, hash: Hash256, preimage: Hash256) {
@@ -554,19 +554,29 @@ async fn check_downstream_outcome_isolation(fulfill: bool) {
     .await;
     desk_pays_the_buyer(&network, &invoice).await;
     let delivery = wait_for_buyer_delivery(&network, hash).await;
+    let public = &network.nodes[0];
+    let previous = delivery.request.previous_tlc;
+    let offered = public
+        .get_channel_actor_state(delivery.private_channel_id)
+        .find_hosted_tlc(hash, &previous)
+        .unwrap()
+        .clone();
+    let id = u64::from(offered.tlc_id);
+    // InFlight means dispatch started, not that the buyer applied its AddTlc.
+    // The received TLC initially has NO_SHARED_SECRET until the commitment is
+    // acknowledged and its onion is peeled; a failure packet made earlier
+    // cannot be decrypted by the hosted payment attempt.
+    wait_until_async_timeout(|| async {
+        buyer
+            .node
+            .get_tlc(buyer.private_channel_id, TLCId::Received(id))
+            .is_some_and(|tlc| tlc.payment_hash == hash && tlc.shared_secret != NO_SHARED_SECRET)
+    })
+    .await;
     let service = network.lsp(0).actor.clone();
     service.stop(None);
     wait_until_async_timeout(|| async { service.get_status() == ractor::ActorStatus::Stopped })
         .await;
-    let public = &network.nodes[0];
-    let previous = delivery.request.previous_tlc;
-    let id = u64::from(
-        public
-            .get_channel_actor_state(delivery.private_channel_id)
-            .find_hosted_tlc(hash, &previous)
-            .unwrap()
-            .tlc_id,
-    );
     // Exercise payment result routing, not CKB proof verification.
     let reason = if fulfill {
         RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
@@ -575,30 +585,34 @@ async fn check_downstream_outcome_isolation(fulfill: bool) {
     } else {
         let received = buyer
             .node
-            .get_channel_actor_state(buyer.private_channel_id)
-            .tlc_state
-            .received_tlcs
-            .tlcs
-            .iter()
-            .find(|tlc| tlc.payment_hash == hash)
-            .unwrap()
-            .clone();
-        RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+            .get_tlc(buyer.private_channel_id, TLCId::Received(id))
+            .unwrap();
+        let packet = TlcErrPacket::new(
             TlcErr::new_node_fail(TlcErrorCode::PermanentNodeFailure, buyer.node.pubkey),
             &received.shared_secret,
-        ))
+        );
+        let attempt = public
+            .store
+            .get_attempt(
+                delivery.request.hosted_session_key(),
+                offered.attempt_id.unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            packet
+                .decode(&attempt.session_key, attempt.hops_public_keys())
+                .map(|decoded| decoded.error.error_code),
+            Some(TlcErrorCode::PermanentNodeFailure),
+            "injected failure must belong to the hosted attempt"
+        );
+        RemoveTlcReason::RemoveTlcFail(packet)
     };
     public
         .network_actor
         .send_message(NetworkActorMessage::new_event(
             crate::fiber::network::FiberActorEvent::TlcRemoveReceived(
                 delivery.request.hosted_session_key(),
-                public
-                    .get_channel_actor_state(delivery.private_channel_id)
-                    .tlc_state
-                    .get(&TLCId::Offered(id))
-                    .unwrap()
-                    .attempt_id,
+                offered.attempt_id,
                 reason.clone(),
                 None,
             ),
@@ -638,14 +652,8 @@ async fn check_downstream_outcome_isolation(fulfill: bool) {
         // expecting the safe GetPayment projection to expose final failure.
         let received = buyer
             .node
-            .get_channel_actor_state(buyer.private_channel_id)
-            .tlc_state
-            .received_tlcs
-            .tlcs
-            .iter()
-            .find(|tlc| tlc.payment_hash == hash)
-            .unwrap()
-            .clone();
+            .get_tlc(buyer.private_channel_id, TLCId::Received(id))
+            .unwrap();
         let channel = buyer
             .node
             .get_channel_actor(buyer.private_channel_id)

@@ -859,6 +859,7 @@ impl<R: FiberRpc, S: SignerStore> Agent<R, S> {
         Ok(fiber_lsp_sdk::OnchainSpendAuthorization {
             source,
             destination,
+            fee_sponsor_lock: None,
             fee: total,
             additional_inputs,
             cell_deps: deps,

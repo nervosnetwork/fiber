@@ -378,6 +378,7 @@ pub(crate) mod tests {
             fiber_lsp_sdk::OnchainSpendAuthorization {
                 source: record.reference.clone(),
                 destination,
+                fee_sponsor_lock: None,
                 fee: 5,
                 additional_inputs: vec![],
                 cell_deps: vec![],
