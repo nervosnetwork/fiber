@@ -45,28 +45,28 @@ async fn tenant_watch_channel_rejects_oversized_snapshot_without_writing() {
         payout_lock_script: None,
     };
     // Exercise JSON decoding/conversion as well as the tenant RPC handler.
-    let wire = serde_json::to_string(&params(256)).unwrap();
+    let wire = serde_json::to_string(&params(255)).unwrap();
     let error = server
         .create_watch_channel(ctx.clone(), serde_json::from_str(&wire).unwrap())
         .await
         .unwrap_err();
-    assert!(error.message().contains("max 255"), "{error}");
+    assert!(error.message().contains("max 254"), "{error}");
     assert!(store.get_watch_channel(&node, &channel).is_none());
     assert!(store.get_watch_channels_with_nodes().is_empty());
 
     server
-        .create_watch_channel(ctx.clone(), params(255))
+        .create_watch_channel(ctx.clone(), params(254))
         .await
         .unwrap();
     let before = store.get_watch_channel(&node, &channel).unwrap();
-    assert_eq!(before.local_settlement_data.tlcs.len(), 255);
+    assert_eq!(before.local_settlement_data.tlcs.len(), 254);
     for update in [
         server
             .update_local_settlement(
                 ctx.clone(),
                 UpdateLocalSettlementParams {
                     channel_id: channel.into(),
-                    settlement_data: snapshot(256).into(),
+                    settlement_data: snapshot(255).into(),
                 },
             )
             .await,
@@ -75,16 +75,16 @@ async fn tenant_watch_channel_rejects_oversized_snapshot_without_writing() {
                 ctx.clone(),
                 UpdatePendingRemoteSettlementParams {
                     channel_id: channel.into(),
-                    settlement_data: snapshot(256).into(),
+                    settlement_data: snapshot(255).into(),
                 },
             )
             .await,
     ] {
-        assert!(update.unwrap_err().message().contains("max 255"));
+        assert!(update.unwrap_err().message().contains("max 254"));
     }
     // Store writers must enforce the same boundary even without the RPC facade.
-    store.update_local_settlement(node.clone(), channel, snapshot(256));
-    store.update_pending_remote_settlement(node.clone(), channel, snapshot(256));
+    store.update_local_settlement(node.clone(), channel, snapshot(255));
+    store.update_pending_remote_settlement(node.clone(), channel, snapshot(255));
     let after = store.get_watch_channel(&node, &channel).unwrap();
     assert_eq!(after.local_settlement_data, before.local_settlement_data);
     assert_eq!(
@@ -92,4 +92,23 @@ async fn tenant_watch_channel_rejects_oversized_snapshot_without_writing() {
         before.pending_remote_settlement_data
     );
     assert_eq!(after.remote_settlement_data, before.remote_settlement_data);
+
+    // Oversized payout_lock_script args must be rejected.
+    use ckb_types::prelude::{Builder, Entity, Pack};
+    let mut huge_payout_params = params(1);
+    huge_payout_params.channel_id = Hash256::from([9; 32]).into();
+    huge_payout_params.payout_lock_script = Some(
+        ckb_types::packed::Script::new_builder()
+            .args([0u8; 2048].as_slice().pack())
+            .build()
+            .into(),
+    );
+    let err = server
+        .create_watch_channel(ctx.clone(), huge_payout_params)
+        .await
+        .unwrap_err();
+    assert!(
+        err.message().contains("payout_lock_script args exceeds"),
+        "{err}"
+    );
 }

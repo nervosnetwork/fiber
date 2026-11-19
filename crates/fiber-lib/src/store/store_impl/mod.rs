@@ -69,7 +69,60 @@ pub struct Store {
     #[cfg(feature = "watchtower")]
     watchtower_write_locks: Arc<parking_lot::Mutex<HashMap<NodeId, Arc<parking_lot::Mutex<()>>>>>,
     #[cfg(feature = "watchtower")]
+    watchtower_quota_counts: Arc<parking_lot::Mutex<WatchtowerQuotaCounts>>,
+    #[cfg(feature = "watchtower")]
     onchain_tlc_settlement_write_lock: Arc<parking_lot::Mutex<()>>,
+}
+
+#[cfg(feature = "watchtower")]
+#[derive(Default)]
+struct WatchtowerQuotaCounts {
+    initialized: bool,
+    channels_total: usize,
+    channels_per_node: HashMap<NodeId, usize>,
+    preimages_total: usize,
+    preimages_per_node: HashMap<NodeId, usize>,
+}
+
+#[cfg(feature = "watchtower")]
+impl WatchtowerQuotaCounts {
+    fn inc_channel(&mut self, node_id: &NodeId) {
+        if self.initialized {
+            self.channels_total = self.channels_total.saturating_add(1);
+            *self.channels_per_node.entry(node_id.clone()).or_default() += 1;
+        }
+    }
+
+    fn dec_channel(&mut self, node_id: &NodeId) {
+        if self.initialized {
+            self.channels_total = self.channels_total.saturating_sub(1);
+            if let Some(count) = self.channels_per_node.get_mut(node_id) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    self.channels_per_node.remove(node_id);
+                }
+            }
+        }
+    }
+
+    fn inc_preimage(&mut self, node_id: &NodeId) {
+        if self.initialized {
+            self.preimages_total = self.preimages_total.saturating_add(1);
+            *self.preimages_per_node.entry(node_id.clone()).or_default() += 1;
+        }
+    }
+
+    fn dec_preimages(&mut self, node_id: &NodeId, removed: usize) {
+        if self.initialized && removed > 0 {
+            self.preimages_total = self.preimages_total.saturating_sub(removed);
+            if let Some(count) = self.preimages_per_node.get_mut(node_id) {
+                *count = count.saturating_sub(removed);
+                if *count == 0 {
+                    self.preimages_per_node.remove(node_id);
+                }
+            }
+        }
+    }
 }
 
 #[cfg(feature = "watchtower")]
@@ -111,6 +164,8 @@ impl Store {
             watcher: None,
             #[cfg(feature = "watchtower")]
             watchtower_write_locks: self.watchtower_write_locks.clone(),
+            #[cfg(feature = "watchtower")]
+            watchtower_quota_counts: self.watchtower_quota_counts.clone(),
             #[cfg(feature = "watchtower")]
             onchain_tlc_settlement_write_lock: self.onchain_tlc_settlement_write_lock.clone(),
         }
@@ -416,6 +471,10 @@ pub(crate) fn open_store_with_migrations<P: AsRef<Path>>(
         #[cfg(feature = "watchtower")]
         watchtower_write_locks: Arc::new(parking_lot::Mutex::new(HashMap::new())),
         #[cfg(feature = "watchtower")]
+        watchtower_quota_counts: Arc::new(
+            parking_lot::Mutex::new(WatchtowerQuotaCounts::default()),
+        ),
+        #[cfg(feature = "watchtower")]
         onchain_tlc_settlement_write_lock: Arc::new(parking_lot::Mutex::new(())),
     })
 }
@@ -455,6 +514,10 @@ pub fn check_validate<P: AsRef<Path>>(path: P) -> Result<(), String> {
         watcher: None,
         #[cfg(feature = "watchtower")]
         watchtower_write_locks: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+        #[cfg(feature = "watchtower")]
+        watchtower_quota_counts: Arc::new(
+            parking_lot::Mutex::new(WatchtowerQuotaCounts::default()),
+        ),
         #[cfg(feature = "watchtower")]
         onchain_tlc_settlement_write_lock: Arc::new(parking_lot::Mutex::new(())),
     };
@@ -1078,9 +1141,12 @@ impl Store {
                     .map(|(node_id, _)| node_id)
                     .collect();
                 for node_id in node_ids {
+                    let mut counts = self.watchtower_quota_counts.lock();
                     let lock = self.watchtower_write_lock(&node_id);
                     let _guard = lock.lock();
-                    self.cleanup_unused_watch_preimages_locked(&node_id, target, || {});
+                    let removed =
+                        self.cleanup_unused_watch_preimages_locked(&node_id, target, || {});
+                    counts.dec_preimages(&node_id, removed);
                 }
             }
         }
@@ -1092,9 +1158,11 @@ impl Store {
         target: WatchtowerPreimageCleanupTarget<'_>,
         before_commit: impl FnOnce(),
     ) {
+        let mut counts = self.watchtower_quota_counts.lock();
         let lock = self.watchtower_write_lock(node_id);
         let _guard = lock.lock();
-        self.cleanup_unused_watch_preimages_locked(node_id, target, before_commit);
+        let removed = self.cleanup_unused_watch_preimages_locked(node_id, target, before_commit);
+        counts.dec_preimages(node_id, removed);
     }
 
     fn cleanup_unused_watch_preimages_locked(
@@ -1102,7 +1170,7 @@ impl Store {
         node_id: &NodeId,
         target: WatchtowerPreimageCleanupTarget<'_>,
         before_commit: impl FnOnce(),
-    ) {
+    ) -> usize {
         let preimages = match target {
             WatchtowerPreimageCleanupTarget::Exact(payment_hash) => {
                 if self
@@ -1120,11 +1188,11 @@ impl Store {
             _ => self.watch_preimage_entries(Some(node_id)),
         };
         if preimages.is_empty() {
-            return;
+            return 0;
         }
 
         let mut batch = self.batch();
-        let mut has_change = false;
+        let mut removed = 0usize;
         for (node_id, payment_hash) in preimages {
             if !target.matches(&payment_hash) {
                 continue;
@@ -1136,13 +1204,14 @@ impl Store {
                     &node_id,
                     &payment_hash,
                 ));
-                has_change = true;
+                removed += 1;
             }
         }
-        if has_change {
+        if removed > 0 {
             before_commit();
             batch.commit();
         }
+        removed
     }
 }
 
@@ -2127,24 +2196,30 @@ impl NetworkGraphStateStore for Store {
 }
 
 #[cfg(feature = "watchtower")]
-impl WatchtowerStore for Store {
-    fn get_watch_channels_for_node(&self, node_id: &NodeId) -> Vec<ChannelData> {
-        self.watch_channels_for_node(node_id)
+impl Store {
+    /// Lazily populate in-memory watchtower channel and preimage counts once from storage.
+    fn ensure_watchtower_quota_counts_initialized(&self, counts: &mut WatchtowerQuotaCounts) {
+        if counts.initialized {
+            return;
+        }
+        for (raw_key, _) in self.prefix_iterator(vec![WATCHTOWER_CHANNEL_PREFIX]) {
+            if let Some((channel_node_id, _)) = Self::parse_watchtower_channel_key(&raw_key) {
+                counts.channels_total += 1;
+                *counts.channels_per_node.entry(channel_node_id).or_default() += 1;
+            }
+        }
+        for (raw_key, _) in self.prefix_iterator(vec![WATCHTOWER_NODE_PAYMENTHASH_PREFIX]) {
+            if raw_key.len() > 32 && raw_key.first() == Some(&WATCHTOWER_NODE_PAYMENTHASH_PREFIX) {
+                let owner = NodeId::from_bytes(raw_key[1..raw_key.len() - 32].to_vec());
+                counts.preimages_total += 1;
+                *counts.preimages_per_node.entry(owner).or_default() += 1;
+            }
+        }
+        counts.initialized = true;
     }
 
-    fn get_watch_channels_with_nodes(&self) -> Vec<(NodeId, ChannelData)> {
-        let prefix = vec![WATCHTOWER_CHANNEL_PREFIX];
-        self.collect_by_prefix(&prefix)
-            .into_iter()
-            .filter_map(|kv| {
-                let (node_id, _) = Self::parse_watchtower_channel_key(&kv.key)?;
-                let channel_data = deserialize_from(kv.value.as_ref(), "ChannelData");
-                Some((node_id, channel_data))
-            })
-            .collect()
-    }
-
-    fn insert_watch_channel(
+    #[allow(clippy::too_many_arguments)]
+    fn insert_watch_channel_inner(
         &self,
         node_id: NodeId,
         channel_id: Hash256,
@@ -2153,7 +2228,9 @@ impl WatchtowerStore for Store {
         settlement_data: SettlementData,
         channel_features: ChannelFeatures,
         payout_lock_script: Option<Script>,
-    ) {
+        quotas: Option<&crate::lsp_config::WatchtowerQuotas>,
+    ) -> Result<(), String> {
+        let mut counts = self.watchtower_quota_counts.lock();
         let lock = self.watchtower_write_lock(&node_id);
         let _guard = lock.lock();
         let key = [
@@ -2165,12 +2242,25 @@ impl WatchtowerStore for Store {
         // Registration is at-least-once across channel actor crashes. Never reset
         // an already monitored channel's usable settlement/revocation or signer state.
         if self.get(&key).is_some() {
-            return;
+            return Ok(());
         }
         let external = keys.local_settlement.is_external();
-        if let Err(error) = settlement_data.validate_signing_keys(external) {
-            tracing::error!(%channel_id, %error, "invalid watch channel signing keys");
-            return;
+        settlement_data.validate_signing_keys(external)?;
+        if let Some(quotas) = quotas {
+            self.ensure_watchtower_quota_counts_initialized(&mut counts);
+            let node_count = counts.channels_per_node.get(&node_id).copied().unwrap_or(0);
+            if node_count >= quotas.max_channels_per_node {
+                return Err(format!(
+                    "watchtower channel quota exceeded for node (max {})",
+                    quotas.max_channels_per_node
+                ));
+            }
+            if counts.channels_total >= quotas.max_channels_total {
+                return Err(format!(
+                    "global watchtower channel quota exceeded (max {})",
+                    quotas.max_channels_total
+                ));
+            }
         }
         let (local_settlement_key, local_settlement_key_pubkey) = keys.local_settlement.to_parts();
         let value = serialize_to_vec(
@@ -2209,6 +2299,122 @@ impl WatchtowerStore for Store {
             serialize_to_vec(&signer_state, "WatchtowerSignerState"),
         );
         batch.commit();
+        counts.inc_channel(&node_id);
+        Ok(())
+    }
+
+    fn insert_watch_preimage_inner(
+        &self,
+        node_id: NodeId,
+        payment_hash: Hash256,
+        preimage: Hash256,
+        quotas: Option<&crate::lsp_config::WatchtowerQuotas>,
+    ) -> Result<(), String> {
+        let mut counts = self.watchtower_quota_counts.lock();
+        let lock = self.watchtower_write_lock(&node_id);
+        let _guard = lock.lock();
+        let already_exists = self
+            .get(Self::watchtower_preimage_key(&node_id, &payment_hash))
+            .is_some();
+        if let Some(quotas) = quotas {
+            if already_exists {
+                return Ok(());
+            }
+            self.ensure_watchtower_quota_counts_initialized(&mut counts);
+            let node_count = counts
+                .preimages_per_node
+                .get(&node_id)
+                .copied()
+                .unwrap_or(0);
+            if node_count >= quotas.max_preimages_per_node {
+                return Err(format!(
+                    "watchtower preimage quota exceeded for node (max {})",
+                    quotas.max_preimages_per_node
+                ));
+            }
+            if counts.preimages_total >= quotas.max_preimages_total {
+                return Err(format!(
+                    "global watchtower preimage quota exceeded (max {})",
+                    quotas.max_preimages_total
+                ));
+            }
+        }
+        let mut batch = self.batch();
+        let kv = KeyValue::WatchtowerPreimage(payment_hash, node_id.clone(), preimage);
+        batch.put(kv.key(), kv.value());
+        let kv = KeyValue::WatchtowerNodePaymentHash(node_id.clone(), payment_hash);
+        batch.put(kv.key(), kv.value());
+        batch.commit();
+        if !already_exists {
+            counts.inc_preimage(&node_id);
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "watchtower")]
+impl WatchtowerStore for Store {
+    fn get_watch_channels_for_node(&self, node_id: &NodeId) -> Vec<ChannelData> {
+        self.watch_channels_for_node(node_id)
+    }
+
+    fn get_watch_channels_with_nodes(&self) -> Vec<(NodeId, ChannelData)> {
+        let prefix = vec![WATCHTOWER_CHANNEL_PREFIX];
+        self.collect_by_prefix(&prefix)
+            .into_iter()
+            .filter_map(|kv| {
+                let (node_id, _) = Self::parse_watchtower_channel_key(&kv.key)?;
+                let channel_data = deserialize_from(kv.value.as_ref(), "ChannelData");
+                Some((node_id, channel_data))
+            })
+            .collect()
+    }
+
+    fn insert_watch_channel(
+        &self,
+        node_id: NodeId,
+        channel_id: Hash256,
+        funding_udt_type_script: Option<Script>,
+        keys: WatchChannelKeys,
+        settlement_data: SettlementData,
+        channel_features: ChannelFeatures,
+        payout_lock_script: Option<Script>,
+    ) {
+        if let Err(error) = self.insert_watch_channel_inner(
+            node_id,
+            channel_id,
+            funding_udt_type_script,
+            keys,
+            settlement_data,
+            channel_features,
+            payout_lock_script,
+            None,
+        ) {
+            tracing::error!(%channel_id, %error, "invalid watch channel signing keys");
+        }
+    }
+
+    fn insert_watch_channel_checked(
+        &self,
+        node_id: NodeId,
+        channel_id: Hash256,
+        funding_udt_type_script: Option<Script>,
+        keys: WatchChannelKeys,
+        settlement_data: SettlementData,
+        channel_features: ChannelFeatures,
+        payout_lock_script: Option<Script>,
+        quotas: &crate::lsp_config::WatchtowerQuotas,
+    ) -> Result<(), String> {
+        self.insert_watch_channel_inner(
+            node_id,
+            channel_id,
+            funding_udt_type_script,
+            keys,
+            settlement_data,
+            channel_features,
+            payout_lock_script,
+            Some(quotas),
+        )
     }
 
     fn remove_watch_channel(&self, node_id: NodeId, channel_id: Hash256) -> bool {
@@ -2231,15 +2437,20 @@ impl WatchtowerStore for Store {
             channel_id.as_ref(),
         ]
         .concat();
+        let mut counts = self.watchtower_quota_counts.lock();
         let lock = self.watchtower_write_lock(&node_id);
         let _guard = lock.lock();
         let superseded = self.get_superseded_remote_settlements(&node_id, &channel_id);
-        let payment_hashes = self
-            .get(key.clone())
+        let existing = self.get(key.clone());
+        let existed = existing.is_some();
+        let payment_hashes = existing
             .map(|v| deserialize_from::<ChannelData>(v.as_ref(), "ChannelData"))
             .map(|channel_data| Self::watch_channel_payment_hashes(&channel_data, &superseded))
             .unwrap_or_default();
         self.delete(key);
+        if existed {
+            counts.dec_channel(&node_id);
+        }
         self.delete(
             [
                 &[WATCHTOWER_SIGNER_PREFIX],
@@ -2256,11 +2467,12 @@ impl WatchtowerStore for Store {
             ]
             .concat(),
         );
-        self.cleanup_unused_watch_preimages_locked(
+        let removed_preimages = self.cleanup_unused_watch_preimages_locked(
             &node_id,
             WatchtowerPreimageCleanupTarget::ExactSet(&payment_hashes),
             || {},
         );
+        counts.dec_preimages(&node_id, removed_preimages);
         true
     }
 
@@ -2300,9 +2512,16 @@ impl WatchtowerStore for Store {
             }
             channel_data.remote_settlement_data = remote_settlement_data;
             channel_data.revocation_data = Some(revocation_data);
+            let superseded_key = [
+                &[WATCHTOWER_SUPERSEDED_SETTLEMENT_PREFIX],
+                node_id.as_ref(),
+                channel_id.as_ref(),
+            ]
+            .concat();
             let mut batch = self.batch();
             let kv = KeyValue::WatchtowerChannel(node_id, channel_id, channel_data);
             batch.put(kv.key(), kv.value());
+            batch.delete(superseded_key);
             batch.commit();
         } else {
             tracing::warn!(
@@ -2361,23 +2580,32 @@ impl WatchtowerStore for Store {
             let kv = KeyValue::WatchtowerChannel(node_id, channel_id, channel_data);
             batch.put(kv.key(), kv.value());
             if keep_previous {
-                const MAX_SUPERSEDED: usize = 2;
+                const MAX_SUPERSEDED: usize = 32;
                 let mut superseded: Vec<SettlementData> = self
                     .get(superseded_key.clone())
                     .map(|value| {
                         deserialize_from(value.as_ref(), "WATCHTOWER_SUPERSEDED_SETTLEMENT_PREFIX")
                     })
                     .unwrap_or_default();
+                let mut changed = false;
                 if !superseded.contains(&previous) {
-                    if superseded.len() >= MAX_SUPERSEDED {
-                        superseded.remove(0);
+                    if superseded.len() < MAX_SUPERSEDED {
+                        superseded.push(previous);
+                        changed = true;
+                    } else {
+                        tracing::warn!(
+                            %channel_id,
+                            max = MAX_SUPERSEDED,
+                            "superseded remote settlement snapshot cap reached; preserving earliest unrevoked snapshots"
+                        );
                     }
-                    superseded.push(previous);
                 }
-                batch.put(
-                    superseded_key,
-                    serialize_to_vec(&superseded, "WATCHTOWER_SUPERSEDED_SETTLEMENT_PREFIX"),
-                );
+                if changed {
+                    batch.put(
+                        superseded_key,
+                        serialize_to_vec(&superseded, "WATCHTOWER_SUPERSEDED_SETTLEMENT_PREFIX"),
+                    );
+                }
             }
             batch.commit();
         }
@@ -2433,14 +2661,17 @@ impl WatchtowerStore for Store {
     }
 
     fn insert_watch_preimage(&self, node_id: NodeId, payment_hash: Hash256, preimage: Hash256) {
-        let lock = self.watchtower_write_lock(&node_id);
-        let _guard = lock.lock();
-        let mut batch = self.batch();
-        let kv = KeyValue::WatchtowerPreimage(payment_hash, node_id.clone(), preimage);
-        batch.put(kv.key(), kv.value());
-        let kv = KeyValue::WatchtowerNodePaymentHash(node_id, payment_hash);
-        batch.put(kv.key(), kv.value());
-        batch.commit();
+        let _ = self.insert_watch_preimage_inner(node_id, payment_hash, preimage, None);
+    }
+
+    fn insert_watch_preimage_checked(
+        &self,
+        node_id: NodeId,
+        payment_hash: Hash256,
+        preimage: Hash256,
+        quotas: &crate::lsp_config::WatchtowerQuotas,
+    ) -> Result<(), String> {
+        self.insert_watch_preimage_inner(node_id, payment_hash, preimage, Some(quotas))
     }
 
     fn remove_watch_preimage(&self, node_id: NodeId, payment_hash: Hash256) {
@@ -2480,6 +2711,29 @@ impl WatchtowerStore for Store {
         self.get(key)
             .map(|v| deserialize_from(v.as_ref(), "WatchtowerSignerState"))
             .unwrap_or(WatchtowerSignerState::Internal)
+    }
+
+    fn watchtower_fee_hold_stats(&self, node_id: &NodeId) -> (usize, usize, u64) {
+        let node_prefix = [&[WATCHTOWER_SIGNER_PREFIX], node_id.as_ref()].concat();
+        let mut node_active = 0usize;
+        let mut global_active = 0usize;
+        let mut node_retry_after_ms = 0u64;
+        for (raw_key, raw_val) in self.prefix_iterator(vec![WATCHTOWER_SIGNER_PREFIX]) {
+            if raw_key.len() <= 32 || raw_key.first() != Some(&WATCHTOWER_SIGNER_PREFIX) {
+                continue;
+            }
+            let state: WatchtowerSignerState =
+                deserialize_from(raw_val.as_ref(), "WatchtowerSignerState");
+            if let WatchtowerSignerState::External(ext) = state {
+                let active = ext.pending_requests.len() + ext.signed_signatures.len();
+                global_active = global_active.saturating_add(active);
+                if raw_key.len() == node_prefix.len() + 32 && raw_key.starts_with(&node_prefix) {
+                    node_active = node_active.saturating_add(active);
+                    node_retry_after_ms = node_retry_after_ms.max(ext.retry_after_ms);
+                }
+            }
+        }
+        (node_active, global_active, node_retry_after_ms)
     }
 
     fn put_watchtower_signer(

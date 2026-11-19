@@ -188,6 +188,7 @@ trait WatchtowerRpc {
 pub struct WatchtowerRpcServerImpl<S> {
     store: S,
     signing_events: crate::signing::SigningEvents,
+    quotas: crate::lsp_config::WatchtowerQuotas,
 }
 
 #[cfg(feature = "watchtower")]
@@ -196,11 +197,17 @@ impl<S> WatchtowerRpcServerImpl<S> {
         Self {
             store,
             signing_events: Default::default(),
+            quotas: Default::default(),
         }
     }
 
     pub(crate) fn with_signing_events(mut self, events: crate::signing::SigningEvents) -> Self {
         self.signing_events = events;
+        self
+    }
+
+    pub(crate) fn with_quotas(mut self, quotas: crate::lsp_config::WatchtowerQuotas) -> Self {
+        self.quotas = quotas;
         self
     }
 }
@@ -217,15 +224,33 @@ fn authorized_watchtower_node_id(ctx: &RpcContext) -> Result<NodeId, ErrorObject
 }
 
 #[cfg(feature = "watchtower")]
+const MAX_WATCHTOWER_SCRIPT_ARGS_BYTES: usize = 1024;
+#[cfg(feature = "watchtower")]
+const MAX_WATCHTOWER_OUTPUT_DATA_BYTES: usize = 1024;
+
+#[cfg(feature = "watchtower")]
+fn validate_script_size(
+    script: &ckb_types::packed::Script,
+    field: &str,
+) -> Result<(), ErrorObjectOwned> {
+    if script.args().raw_data().len() > MAX_WATCHTOWER_SCRIPT_ARGS_BYTES {
+        return Err(rpc_error(format!(
+            "{field} args exceeds maximum size ({MAX_WATCHTOWER_SCRIPT_ARGS_BYTES} bytes)"
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "watchtower")]
 fn validate_update_signing_keys<S: WatchtowerStore>(
     store: &S,
     node_id: &NodeId,
     channel_id: &fiber_types::Hash256,
     settlement: &fiber_types::SettlementData,
 ) -> Result<(), ErrorObjectOwned> {
-    if settlement.tlcs.len() > usize::from(u8::MAX) {
+    if settlement.tlcs.len() > fiber_types::MAX_WITNESS_TLC_COUNT {
         return Err(rpc_error(
-            "TLC count exceeds witness encoding limit (max 255)",
+            "TLC count exceeds witness encoding limit (max 254)",
         ));
     }
     if let Some(channel) = store.get_watch_channel(node_id, channel_id) {
@@ -280,8 +305,16 @@ where
         let remote_funding_pubkey = Pubkey::try_from(params.remote_funding_pubkey).rpc_err()?;
         validate_channel_features(params.channel_features.0)?;
         // Move fields out of params last, after all borrows of params are done.
-        let funding_udt_type_script = params.funding_udt_type_script;
-        let payout_lock_script = params.payout_lock_script;
+        let funding_udt_type_script: Option<ckb_types::packed::Script> =
+            params.funding_udt_type_script.map(Into::into);
+        if let Some(ref script) = funding_udt_type_script {
+            validate_script_size(script, "funding_udt_type_script")?;
+        }
+        let payout_lock_script: Option<ckb_types::packed::Script> =
+            params.payout_lock_script.map(Into::into);
+        if let Some(ref script) = payout_lock_script {
+            validate_script_size(script, "payout_lock_script")?;
+        }
         let settlement_data: fiber_types::SettlementData = params
             .settlement_data
             .try_into()
@@ -291,20 +324,36 @@ where
             .map_err(rpc_error)?;
         let signing_scope = self.signing_events.watchtower(&node_id);
         let signing_update = signing_scope.prepare_created(channel_id);
-        self.store.insert_watch_channel(
-            node_id,
-            channel_id,
-            funding_udt_type_script.map(Into::into),
-            WatchChannelKeys {
-                local_settlement,
-                remote_settlement: remote_settlement_key,
-                local_funding: local_funding_pubkey,
-                remote_funding: remote_funding_pubkey,
-            },
-            settlement_data,
-            fiber_types::ChannelFeatures::V2,
-            payout_lock_script.map(Into::into),
-        );
+        let keys = WatchChannelKeys {
+            local_settlement,
+            remote_settlement: remote_settlement_key,
+            local_funding: local_funding_pubkey,
+            remote_funding: remote_funding_pubkey,
+        };
+        if ctx.tenant_scoped || node_id != NodeId::local() {
+            self.store
+                .insert_watch_channel_checked(
+                    node_id,
+                    channel_id,
+                    funding_udt_type_script,
+                    keys,
+                    settlement_data,
+                    fiber_types::ChannelFeatures::V2,
+                    payout_lock_script,
+                    &self.quotas,
+                )
+                .map_err(rpc_error)?;
+        } else {
+            self.store.insert_watch_channel(
+                node_id,
+                channel_id,
+                funding_udt_type_script,
+                keys,
+                settlement_data,
+                fiber_types::ChannelFeatures::V2,
+                payout_lock_script,
+            );
+        }
         signing_update.publish();
         Ok(())
     }
@@ -335,6 +384,18 @@ where
             .revocation_data
             .try_into()
             .map_err(|e: String| rpc_error(e))?;
+        if revocation_data.output_data.raw_data().len() > MAX_WATCHTOWER_OUTPUT_DATA_BYTES {
+            return Err(rpc_error(format!(
+                "revocation_data.output_data exceeds maximum size ({MAX_WATCHTOWER_OUTPUT_DATA_BYTES} bytes)"
+            )));
+        }
+        validate_script_size(
+            &revocation_data.output.lock(),
+            "revocation_data.output.lock",
+        )?;
+        if let Some(type_script) = revocation_data.output.type_().to_opt() {
+            validate_script_size(&type_script, "revocation_data.output.type")?;
+        }
         let settlement_data: fiber_types::SettlementData = params
             .settlement_data
             .try_into()
@@ -396,8 +457,14 @@ where
         {
             return Err(rpc_error("Wrong preimage"));
         }
-        self.store
-            .insert_watch_preimage(node_id, payment_hash, preimage);
+        if ctx.tenant_scoped || node_id != NodeId::local() {
+            self.store
+                .insert_watch_preimage_checked(node_id, payment_hash, preimage, &self.quotas)
+                .map_err(rpc_error)?;
+        } else {
+            self.store
+                .insert_watch_preimage(node_id, payment_hash, preimage);
+        }
         Ok(())
     }
     async fn remove_preimage(
@@ -501,6 +568,10 @@ where
                     signature,
                 )
                 .map_err(rpc_error)?;
+                external.pending_request_created_at_ms.remove(&request_id);
+                external
+                    .signed_signature_created_at_ms
+                    .insert(request_id, crate::now_timestamp_as_millis_u64());
                 external.last_applied = Some(LastAppliedWatchtowerSignature {
                     request_id,
                     signature,

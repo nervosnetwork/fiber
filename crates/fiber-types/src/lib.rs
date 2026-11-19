@@ -55,6 +55,7 @@ pub use watchtower::{
     settlement_tlc_local_pubkey_hash, settlement_tlc_to_witness, settlement_witness_hash,
     ChannelData, LastAppliedWatchtowerSignature, RevocationData, SettlementData, SettlementKey,
     SettlementTlc, WatchChannelKeys, WatchtowerExternalSignerState, WatchtowerSignerState,
+    MAX_WITNESS_TLC_COUNT,
 };
 
 pub mod watchtower;

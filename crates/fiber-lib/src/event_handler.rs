@@ -154,6 +154,7 @@ pub fn forward_event_to_watchtower_store<S: crate::watchtower::WatchtowerStore>(
     event: NetworkServiceEvent,
     store: &S,
     node_id: fiber_types::NodeId,
+    quotas: &crate::lsp_config::WatchtowerQuotas,
 ) {
     use fiber_types::HashAlgorithm;
 
@@ -217,7 +218,18 @@ pub fn forward_event_to_watchtower_store<S: crate::watchtower::WatchtowerStore>(
                 .iter()
                 .any(|algorithm| payment_hash == algorithm.hash(preimage).into()) =>
         {
-            store.insert_watch_preimage(node_id, payment_hash, preimage);
+            if node_id == fiber_types::NodeId::local() {
+                store.insert_watch_preimage(node_id, payment_hash, preimage);
+            } else if let Err(error) =
+                store.insert_watch_preimage_checked(node_id.clone(), payment_hash, preimage, quotas)
+            {
+                tracing::warn!(
+                    node_id = %node_id,
+                    %payment_hash,
+                    %error,
+                    "skipping hosted watchtower preimage registration: quota exceeded"
+                );
+            }
         }
         // remove_preimage: drop a preimage that is no longer live.
         NetworkServiceEvent::PreimageRemoved(payment_hash) => {
@@ -265,6 +277,7 @@ mod tests {
             ),
             &store,
             node_id.clone(),
+            &Default::default(),
         );
 
         let channel = store

@@ -49,6 +49,7 @@ impl ChannelActorState {
             pending_remove_effects_v2: 0,
             pending_payment_notifications: Default::default(),
             replayed_tlc_updates_v2: 0,
+            resigning_outgoing_v2: false,
         }
     }
 }

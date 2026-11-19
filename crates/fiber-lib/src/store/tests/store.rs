@@ -843,6 +843,236 @@ fn test_store_external_watch_channel_contains_no_private_keys() {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
+fn test_store_watchtower_quotas_enforced_per_node_and_globally() {
+    use crate::lsp_config::WatchtowerQuotas;
+    use fiber_types::SettlementKey;
+
+    let path = TempDir::new("test-watchtower-quotas");
+    let store = open_store(path).expect("created store failed");
+    let quotas = WatchtowerQuotas {
+        max_channels_per_node: 2,
+        max_channels_total: 3,
+        max_preimages_per_node: 2,
+        max_preimages_total: 3,
+    };
+    let node_a = NodeId::from_bytes(PeerId::random().into_bytes());
+    let node_b = NodeId::from_bytes(PeerId::random().into_bytes());
+    let settlement = SettlementData {
+        local_amount: 100,
+        remote_amount: 200,
+        tlcs: vec![],
+    };
+    let keys = || WatchChannelKeys {
+        local_settlement: SettlementKey::external(Privkey::from(&[1; 32]).pubkey()),
+        remote_settlement: Privkey::from(&[2; 32]).pubkey(),
+        local_funding: Privkey::from(&[3; 32]).pubkey(),
+        remote_funding: Privkey::from(&[4; 32]).pubkey(),
+    };
+
+    let ch_a1 = gen_rand_sha256_hash();
+    let ch_a2 = gen_rand_sha256_hash();
+    let ch_a3 = gen_rand_sha256_hash();
+    let ch_b1 = gen_rand_sha256_hash();
+    let ch_b2 = gen_rand_sha256_hash();
+
+    store
+        .insert_watch_channel_checked(
+            node_a.clone(),
+            ch_a1,
+            None,
+            keys(),
+            settlement.clone(),
+            fiber_types::ChannelFeatures::V2,
+            None,
+            &quotas,
+        )
+        .expect("a1");
+    store
+        .insert_watch_channel_checked(
+            node_a.clone(),
+            ch_a2,
+            None,
+            keys(),
+            settlement.clone(),
+            fiber_types::ChannelFeatures::V2,
+            None,
+            &quotas,
+        )
+        .expect("a2");
+    // Re-inserting an existing channel is idempotent even at the per-node limit.
+    store
+        .insert_watch_channel_checked(
+            node_a.clone(),
+            ch_a1,
+            None,
+            keys(),
+            settlement.clone(),
+            fiber_types::ChannelFeatures::V2,
+            None,
+            &quotas,
+        )
+        .expect("a1 idempotent");
+    let err = store
+        .insert_watch_channel_checked(
+            node_a.clone(),
+            ch_a3,
+            None,
+            keys(),
+            settlement.clone(),
+            fiber_types::ChannelFeatures::V2,
+            None,
+            &quotas,
+        )
+        .unwrap_err();
+    assert!(err.contains("quota exceeded for node"), "{err}");
+
+    store
+        .insert_watch_channel_checked(
+            node_b.clone(),
+            ch_b1,
+            None,
+            keys(),
+            settlement.clone(),
+            fiber_types::ChannelFeatures::V2,
+            None,
+            &quotas,
+        )
+        .expect("b1");
+    let err = store
+        .insert_watch_channel_checked(
+            node_b.clone(),
+            ch_b2,
+            None,
+            keys(),
+            settlement,
+            fiber_types::ChannelFeatures::V2,
+            None,
+            &quotas,
+        )
+        .unwrap_err();
+    assert!(err.contains("global watchtower channel quota"), "{err}");
+
+    // Same enforcement for preimages.
+    let h_a1 = gen_rand_sha256_hash();
+    let h_a2 = gen_rand_sha256_hash();
+    let h_a3 = gen_rand_sha256_hash();
+    let h_b1 = gen_rand_sha256_hash();
+    let h_b2 = gen_rand_sha256_hash();
+    let preimage = gen_rand_sha256_hash();
+
+    store
+        .insert_watch_preimage_checked(node_a.clone(), h_a1, preimage, &quotas)
+        .expect("preimage a1");
+    store
+        .insert_watch_preimage_checked(node_a.clone(), h_a2, preimage, &quotas)
+        .expect("preimage a2");
+    store
+        .insert_watch_preimage_checked(node_a.clone(), h_a1, preimage, &quotas)
+        .expect("preimage a1 idempotent");
+    let err = store
+        .insert_watch_preimage_checked(node_a, h_a3, preimage, &quotas)
+        .unwrap_err();
+    assert!(err.contains("preimage quota exceeded for node"), "{err}");
+
+    store
+        .insert_watch_preimage_checked(node_b.clone(), h_b1, preimage, &quotas)
+        .expect("preimage b1");
+    let err = store
+        .insert_watch_preimage_checked(node_b.clone(), h_b2, preimage, &quotas)
+        .unwrap_err();
+    assert!(err.contains("global watchtower preimage quota"), "{err}");
+
+    // Removing a channel or preimage updates the cached counters and frees quota immediately.
+    assert!(store.remove_watch_channel(node_b.clone(), ch_b1));
+    store
+        .insert_watch_channel_checked(
+            node_b.clone(),
+            ch_b2,
+            None,
+            keys(),
+            SettlementData {
+                local_amount: 100,
+                remote_amount: 200,
+                tlcs: vec![],
+            },
+            fiber_types::ChannelFeatures::V2,
+            None,
+            &quotas,
+        )
+        .expect("b2 succeeds after removing b1");
+    store.remove_watch_preimage(node_b.clone(), h_b1);
+    store
+        .insert_watch_preimage_checked(node_b, h_b2, preimage, &quotas)
+        .expect("preimage b2 succeeds after removing b1");
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_store_watchtower_superseded_preserved_and_cleared_on_revocation() {
+    use fiber_types::SettlementKey;
+
+    let path = TempDir::new("test-watchtower-superseded-clear");
+    let store = open_store(path).expect("created store failed");
+    let node_id = NodeId::from_bytes(PeerId::random().into_bytes());
+    let channel_id = gen_rand_sha256_hash();
+    let initial = SettlementData {
+        local_amount: 1000,
+        remote_amount: 0,
+        tlcs: vec![],
+    };
+    store.insert_watch_channel(
+        node_id.clone(),
+        channel_id,
+        None,
+        WatchChannelKeys {
+            local_settlement: SettlementKey::external(Privkey::from(&[1; 32]).pubkey()),
+            remote_settlement: Privkey::from(&[2; 32]).pubkey(),
+            local_funding: Privkey::from(&[3; 32]).pubkey(),
+            remote_funding: Privkey::from(&[4; 32]).pubkey(),
+        },
+        initial,
+        fiber_types::ChannelFeatures::V2,
+        None,
+    );
+
+    let variants: Vec<SettlementData> = (1..=5u128)
+        .map(|i| SettlementData {
+            local_amount: 1000 - i * 10,
+            remote_amount: i * 10,
+            tlcs: vec![],
+        })
+        .collect();
+    for v in &variants {
+        store.update_pending_remote_settlement(node_id.clone(), channel_id, v.clone());
+    }
+    let superseded = store.get_superseded_remote_settlements(&node_id, &channel_id);
+    assert_eq!(
+        superseded,
+        variants[..4].to_vec(),
+        "earliest unrevoked same-number snapshots must not be evicted"
+    );
+
+    store.update_revocation(
+        node_id.clone(),
+        channel_id,
+        RevocationData {
+            commitment_number: 1,
+            aggregated_signature: CompactSignature::from_bytes(&[0u8; 64]).unwrap(),
+            output: CellOutput::default(),
+            output_data: Bytes::default(),
+        },
+        variants[4].clone(),
+    );
+    assert!(
+        store
+            .get_superseded_remote_settlements(&node_id, &channel_id)
+            .is_empty(),
+        "advancing revocation must clear superseded snapshots"
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
 fn test_store_watchtower_v2_registration_round_trip() {
     let path = TempDir::new("test-watchtower-v2-store");
     let store = open_store(path).expect("created store failed");
@@ -1274,6 +1504,7 @@ fn test_store_watchtower_signer_roundtrip() {
         pending_requests: pending,
         signed_signatures: signed,
         last_applied,
+        ..Default::default()
     });
 
     store.put_watchtower_signer(&node_id, &channel_id, new_state.clone());
@@ -1976,6 +2207,7 @@ fn test_channel_actor_state_store() {
         pending_remove_effects_v2: 0,
         pending_payment_notifications: Default::default(),
         replayed_tlc_updates_v2: 0,
+        resigning_outgoing_v2: false,
     };
 
     let bincode_encoded = bincode::serialize(&state).unwrap();
@@ -2118,6 +2350,7 @@ fn sample_channel_actor_state(
         pending_remove_effects_v2: 0,
         pending_payment_notifications: Default::default(),
         replayed_tlc_updates_v2: 0,
+        resigning_outgoing_v2: false,
     }
 }
 

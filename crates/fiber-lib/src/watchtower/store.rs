@@ -42,6 +42,30 @@ pub trait WatchtowerStore {
         channel_features: ChannelFeatures,
         payout_lock_script: Option<Script>,
     );
+    /// Insert a watched channel while atomically enforcing per-node and global quotas.
+    #[allow(clippy::too_many_arguments)]
+    fn insert_watch_channel_checked(
+        &self,
+        node_id: NodeId,
+        channel_id: Hash256,
+        funding_udt_type_script: Option<Script>,
+        keys: WatchChannelKeys,
+        settlement_data: SettlementData,
+        channel_features: ChannelFeatures,
+        payout_lock_script: Option<Script>,
+        _quotas: &crate::lsp_config::WatchtowerQuotas,
+    ) -> Result<(), String> {
+        self.insert_watch_channel(
+            node_id,
+            channel_id,
+            funding_udt_type_script,
+            keys,
+            settlement_data,
+            channel_features,
+            payout_lock_script,
+        );
+        Ok(())
+    }
     /// Stop monitoring a channel. Returns false if removal is refused for a live channel.
     fn remove_watch_channel(&self, node_id: NodeId, channel_id: Hash256) -> bool;
 
@@ -90,6 +114,18 @@ pub trait WatchtowerStore {
     /// Insert a watch preimage into the store, the payment hash should be a 32 bytes hash result of the preimage after `HashAlgorithm` is applied.
     fn insert_watch_preimage(&self, node_id: NodeId, payment_hash: Hash256, preimage: Hash256);
 
+    /// Insert a watch preimage while atomically enforcing per-node and global quotas.
+    fn insert_watch_preimage_checked(
+        &self,
+        node_id: NodeId,
+        payment_hash: Hash256,
+        preimage: Hash256,
+        _quotas: &crate::lsp_config::WatchtowerQuotas,
+    ) -> Result<(), String> {
+        self.insert_watch_preimage(node_id, payment_hash, preimage);
+        Ok(())
+    }
+
     /// Remove a watch preimage from the store.
     fn remove_watch_preimage(&self, node_id: NodeId, payment_hash: Hash256);
 
@@ -117,6 +153,27 @@ pub trait WatchtowerStore {
         channel_id: &Hash256,
         update: impl FnOnce(&mut WatchtowerSignerState) -> Result<R, E>,
     ) -> Result<R, E>;
+
+    /// Return `(node_active_requests, global_active_requests, node_retry_after_ms)`
+    /// across all external signer states without deserializing full `ChannelData` rows.
+    fn watchtower_fee_hold_stats(&self, node_id: &NodeId) -> (usize, usize, u64) {
+        let mut node_active = 0usize;
+        let mut global_active = 0usize;
+        let mut node_retry_after_ms = 0u64;
+        for (owner, channel) in self.get_watch_channels_with_nodes() {
+            if let WatchtowerSignerState::External(ext) =
+                self.get_watchtower_signer(&owner, &channel.channel_id)
+            {
+                let active = ext.pending_requests.len() + ext.signed_signatures.len();
+                global_active = global_active.saturating_add(active);
+                if owner == *node_id {
+                    node_active = node_active.saturating_add(active);
+                    node_retry_after_ms = node_retry_after_ms.max(ext.retry_after_ms);
+                }
+            }
+        }
+        (node_active, global_active, node_retry_after_ms)
+    }
 
     /// Get a watch preimage owned by the given node.
     fn get_watch_preimage(&self, node_id: &NodeId, payment_hash: &Hash256) -> Option<Hash256>;

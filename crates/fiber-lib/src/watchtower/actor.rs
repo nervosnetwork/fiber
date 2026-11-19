@@ -293,36 +293,14 @@ fn run_periodic_check<S>(
         rpc_url.clone(),
     );
     let channels = store.get_watch_channels_with_nodes();
-    // Restore and renew reservations before processing any other channel. These
-    // requests survive a restart, unlike the process-local held-cell registry.
-    for (node, channel) in &channels {
-        if let fiber_types::WatchtowerSignerState::External(external) =
-            store.get_watchtower_signer(node, &channel.channel_id)
-        {
-            for content in external.pending_requests.values().chain(
-                external
-                    .signed_signatures
-                    .values()
-                    .map(|(content, _)| content),
-            ) {
-                crate::ckb::held_cells::hold_for_watchtower(
-                    content
-                        .transaction
-                        .raw()
-                        .inputs()
-                        .into_iter()
-                        .skip(1)
-                        .map(|input| input.previous_output()),
-                    crate::now_timestamp_as_millis_u64(),
-                );
-            }
-        }
-    }
+    let now_ms = crate::now_timestamp_as_millis_u64();
+    // Restore active reservations without extending their original TTL, and expire
+    // unsigned pending requests past WATCHTOWER_HOLD_MS so a non-signing tenant
+    // cannot pin operator fee cells indefinitely.
+    sync_external_fee_holds(events, &store, &channels, now_ms);
     // Not the cells an opening put in its funding, nor those of this watchtower's own
     // transactions still in the pool (`held_cells`).
-    if let Err(err) =
-        crate::ckb::held_cells::lock_held(&mut cell_collector, crate::now_timestamp_as_millis_u64())
-    {
+    if let Err(err) = crate::ckb::held_cells::lock_held(&mut cell_collector, now_ms) {
         error!("Failed to lock held cells: {:?}", err);
     }
 
@@ -333,188 +311,328 @@ fn run_periodic_check<S>(
     })
     .expect("create ckb rpc client should not fail");
     for (channel_node_id, channel_data) in channels {
-        let tx_hash = match crate::ckb::client::find_first_input_tx_hash(
-            &ckb_client,
-            &channel_data_funding_tx_lock(&channel_data),
-        ) {
-            Ok(Some(tx_hash)) => tx_hash,
-            Ok(None) => continue,
-            Err(err) => {
-                error!("Failed to get transactions: {:?}", err);
-                continue;
+        let channel_id = channel_data.channel_id;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            check_watch_channel(
+                events,
+                &store,
+                &signer,
+                &ckb_client,
+                &mut cell_collector,
+                channel_node_id,
+                channel_data,
+            );
+        }));
+        if let Err(payload) = result {
+            let msg = payload
+                .downcast_ref::<&str>()
+                .copied()
+                .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+                .unwrap_or("<non-string panic>");
+            error!(
+                channel_id = %channel_id,
+                "Watchtower periodic check panicked while processing channel: {}",
+                msg
+            );
+        }
+    }
+}
+
+fn check_watch_channel<S: WatchtowerStore>(
+    events: &crate::signing::SigningEvents,
+    store: &S,
+    signer: &LocalSigner,
+    ckb_client: &CkbRpcClient,
+    cell_collector: &mut impl CellCollector,
+    channel_node_id: NodeId,
+    channel_data: ChannelData,
+) {
+    let tx_hash = match crate::ckb::client::find_first_input_tx_hash(
+        ckb_client,
+        &channel_data_funding_tx_lock(&channel_data),
+    ) {
+        Ok(Some(tx_hash)) => tx_hash,
+        Ok(None) => return,
+        Err(err) => {
+            error!("Failed to get transactions: {:?}", err);
+            return;
+        }
+    };
+    match ckb_client.get_transaction(tx_hash.clone()) {
+        Ok(Some(tx_with_status)) => {
+            if tx_with_status.tx_status.status != Status::Committed {
+                error!(
+                    "Cannot find the commitment tx: {:?}, status is {:?}, maybe ckb indexer bug?",
+                    tx_with_status.tx_status.status, tx_hash
+                );
+                return;
             }
-        };
-        match ckb_client.get_transaction(tx_hash.clone()) {
-            Ok(Some(tx_with_status)) => {
-                if tx_with_status.tx_status.status != Status::Committed {
-                    error!("Cannot find the commitment tx: {:?}, status is {:?}, maybe ckb indexer bug?", tx_with_status.tx_status.status, tx_hash);
-                    continue;
-                }
 
-                let Some(first_commitment_block_number) = tx_with_status
-                    .tx_status
-                    .block_number
-                    .as_ref()
-                    .map(|block_number| block_number.value())
-                else {
-                    error!(
-                        "Cannot find the commitment tx block number: {:?}, maybe ckb indexer bug?",
-                        tx_hash
-                    );
-                    continue;
-                };
+            let Some(first_commitment_block_number) = tx_with_status
+                .tx_status
+                .block_number
+                .as_ref()
+                .map(|block_number| block_number.value())
+            else {
+                error!(
+                    "Cannot find the commitment tx block number: {:?}, maybe ckb indexer bug?",
+                    tx_hash
+                );
+                return;
+            };
 
-                if let Some(tx) = tx_with_status.transaction {
-                    match tx.inner {
-                        Either::Left(tx) => {
-                            let tx: Transaction = tx.inner.into();
-                            if tx.raw().outputs().len() == 1 {
-                                let first_commitment_tx_out_point =
-                                    OutPoint::new(tx.calc_tx_hash(), 0);
-                                let output = tx.raw().outputs().get(0).expect("get output 0 of tx");
-                                let commitment_lock = output.lock();
-                                let lock_args = commitment_lock.args().raw_data();
-                                if !valid_v2_commitment_args(&lock_args)
-                                    || commitment_lock
-                                        != get_script_by_contract(
-                                            Contract::CommitmentLock,
-                                            &lock_args,
-                                        )
-                                {
-                                    warn!(%channel_data.channel_id, "ignoring non-V2 commitment output");
-                                    continue;
-                                }
-                                let pub_key_hash: [u8; 20] =
-                                    lock_args[0..20].try_into().expect("checked length");
-                                let commitment_number = u64::from_be_bytes(
-                                    lock_args[28..36].try_into().expect("u64 from slice"),
-                                );
+            if let Some(tx) = tx_with_status.transaction {
+                match tx.inner {
+                    Either::Left(tx) => {
+                        let tx: Transaction = tx.inner.into();
+                        if tx.raw().outputs().len() == 1 {
+                            let first_commitment_tx_out_point = OutPoint::new(tx.calc_tx_hash(), 0);
+                            let output = tx.raw().outputs().get(0).expect("get output 0 of tx");
+                            let commitment_lock = output.lock();
+                            let lock_args = commitment_lock.args().raw_data();
+                            if !valid_v2_commitment_args(&lock_args)
+                                || commitment_lock
+                                    != get_script_by_contract(Contract::CommitmentLock, &lock_args)
+                            {
+                                warn!(%channel_data.channel_id, "ignoring non-V2 commitment output");
+                                return;
+                            }
+                            let pub_key_hash: [u8; 20] =
+                                lock_args[0..20].try_into().expect("checked length");
+                            let commitment_number = u64::from_be_bytes(
+                                lock_args[28..36].try_into().expect("u64 from slice"),
+                            );
 
-                                let x_only_aggregated_pubkey =
-                                    channel_data_x_only_aggregated_pubkey(&channel_data, false);
-                                if blake160(&x_only_aggregated_pubkey).0 == pub_key_hash {
-                                    match channel_data.revocation_data.clone() {
-                                        Some(revocation_data)
-                                            if revocation_data.commitment_number
-                                                >= commitment_number =>
-                                        {
-                                            match ckb_client.get_live_cell(
-                                                first_commitment_tx_out_point.clone().into(),
-                                                false,
-                                            ) {
-                                                Ok(cell_with_status) => {
-                                                    if cell_with_status.status == "live" {
-                                                        warn!("Found an old version commitment tx submitted by remote: {:#x}", tx.calc_tx_hash());
-                                                        let stored_commitment_number =
-                                                            revocation_data.commitment_number;
-                                                        let output_data_len = revocation_data
-                                                            .output_data
-                                                            .raw_data()
-                                                            .len();
-                                                        match build_revocation_tx(
-                                                            first_commitment_tx_out_point,
-                                                            revocation_data,
-                                                            x_only_aggregated_pubkey,
-                                                            &signer,
-                                                            &mut cell_collector,
-                                                        ) {
-                                                            Ok(tx) => {
-                                                                match ckb_client.send_transaction(
-                                                                    tx.data().into(),
-                                                                    None,
-                                                                ) {
-                                                                    Ok(tx_hash) => {
-                                                                        info!("Revocation tx: {:?} sent, tx_hash: {:?}", tx, tx_hash);
-                                                                        hold_sent(
-                                                                            &tx,
-                                                                            &mut cell_collector,
-                                                                        );
-                                                                    }
-                                                                    Err(err) => {
-                                                                        crate::ckb::held_cells::release_for_watchtower(tx.input_pts_iter());
-                                                                        error!(
-                                                                            channel_id = %channel_data.channel_id,
-                                                                            stored_commitment_number,
-                                                                            on_chain_commitment_number = commitment_number,
-                                                                            output_data_len,
-                                                                            "Failed to send revocation tx: {:?}, error: {:?}",
-                                                                            tx,
-                                                                            err
-                                                                        );
-                                                                    }
+                            let x_only_aggregated_pubkey =
+                                channel_data_x_only_aggregated_pubkey(&channel_data, false);
+                            if blake160(&x_only_aggregated_pubkey).0 == pub_key_hash {
+                                match channel_data.revocation_data.clone() {
+                                    Some(revocation_data)
+                                        if revocation_data.commitment_number
+                                            >= commitment_number =>
+                                    {
+                                        match ckb_client.get_live_cell(
+                                            first_commitment_tx_out_point.clone().into(),
+                                            false,
+                                        ) {
+                                            Ok(cell_with_status) => {
+                                                if cell_with_status.status == "live" {
+                                                    warn!("Found an old version commitment tx submitted by remote: {:#x}", tx.calc_tx_hash());
+                                                    let stored_commitment_number =
+                                                        revocation_data.commitment_number;
+                                                    let output_data_len = revocation_data
+                                                        .output_data
+                                                        .raw_data()
+                                                        .len();
+                                                    match build_revocation_tx(
+                                                        first_commitment_tx_out_point,
+                                                        revocation_data,
+                                                        x_only_aggregated_pubkey,
+                                                        signer,
+                                                        cell_collector,
+                                                    ) {
+                                                        Ok(tx) => {
+                                                            match ckb_client.send_transaction(
+                                                                tx.data().into(),
+                                                                None,
+                                                            ) {
+                                                                Ok(tx_hash) => {
+                                                                    info!("Revocation tx: {:?} sent, tx_hash: {:?}", tx, tx_hash);
+                                                                    hold_sent(&tx, cell_collector);
+                                                                }
+                                                                Err(err) => {
+                                                                    crate::ckb::held_cells::release_for_watchtower(tx.input_pts_iter());
+                                                                    error!(
+                                                                        channel_id = %channel_data.channel_id,
+                                                                        stored_commitment_number,
+                                                                        on_chain_commitment_number = commitment_number,
+                                                                        output_data_len,
+                                                                        "Failed to send revocation tx: {:?}, error: {:?}",
+                                                                        tx,
+                                                                        err
+                                                                    );
                                                                 }
                                                             }
-                                                            Err(err) => {
-                                                                error!(
-                                                                    channel_id = %channel_data.channel_id,
-                                                                    stored_commitment_number,
-                                                                    on_chain_commitment_number = commitment_number,
-                                                                    output_data_len,
-                                                                    "Failed to build revocation tx: {:?}",
-                                                                    err
-                                                                );
-                                                            }
+                                                        }
+                                                        Err(err) => {
+                                                            error!(
+                                                                channel_id = %channel_data.channel_id,
+                                                                stored_commitment_number,
+                                                                on_chain_commitment_number = commitment_number,
+                                                                output_data_len,
+                                                                "Failed to build revocation tx: {:?}",
+                                                                err
+                                                            );
                                                         }
                                                     }
                                                 }
-                                                Err(err) => {
-                                                    error!("Failed to get live cell: {:?}", err);
-                                                }
+                                            }
+                                            Err(err) => {
+                                                error!("Failed to get live cell: {:?}", err);
                                             }
                                         }
-                                        _ => {
-                                            try_settle_commitment_tx(
-                                                events,
-                                                commitment_lock,
-                                                first_commitment_tx_out_point,
-                                                &ckb_client,
-                                                channel_data,
-                                                true,
-                                                &signer,
-                                                &mut cell_collector,
-                                                &store,
-                                                channel_node_id.clone(),
-                                                first_commitment_block_number,
-                                            );
-                                        }
                                     }
-                                } else {
-                                    try_settle_commitment_tx(
-                                        events,
-                                        commitment_lock,
-                                        first_commitment_tx_out_point,
-                                        &ckb_client,
-                                        channel_data,
-                                        false,
-                                        &signer,
-                                        &mut cell_collector,
-                                        &store,
-                                        channel_node_id.clone(),
-                                        first_commitment_block_number,
-                                    );
+                                    _ => {
+                                        try_settle_commitment_tx(
+                                            events,
+                                            commitment_lock,
+                                            first_commitment_tx_out_point,
+                                            ckb_client,
+                                            channel_data,
+                                            true,
+                                            signer,
+                                            cell_collector,
+                                            store,
+                                            channel_node_id.clone(),
+                                            first_commitment_block_number,
+                                        );
+                                    }
                                 }
                             } else {
-                                // there may be a race condition that PeriodicCheck is triggered before the remove_channel fn is called
-                                // it's a close channel tx, ignore
+                                try_settle_commitment_tx(
+                                    events,
+                                    commitment_lock,
+                                    first_commitment_tx_out_point,
+                                    ckb_client,
+                                    channel_data,
+                                    false,
+                                    signer,
+                                    cell_collector,
+                                    store,
+                                    channel_node_id.clone(),
+                                    first_commitment_block_number,
+                                );
                             }
-                        }
-                        Either::Right(_tx) => {
-                            // unreachable, ignore
+                        } else {
+                            // there may be a race condition that PeriodicCheck is triggered before the remove_channel fn is called
+                            // it's a close channel tx, ignore
                         }
                     }
-                } else {
-                    error!("Cannot find the commitment tx: {:?}, transaction is none, maybe ckb indexer bug?", tx_hash);
+                    Either::Right(_tx) => {
+                        // unreachable, ignore
+                    }
                 }
+            } else {
+                error!("Cannot find the commitment tx: {:?}, transaction is none, maybe ckb indexer bug?", tx_hash);
             }
-            Ok(None) => {
-                error!(
-                    "Cannot find the commitment tx: {:?}, maybe ckb indexer bug?",
-                    tx_hash
-                );
-            }
-            Err(err) => {
-                error!("Failed to get commitment tx: {:?}", err);
-            }
+        }
+        Ok(None) => {
+            error!(
+                "Cannot find the commitment tx: {:?}, maybe ckb indexer bug?",
+                tx_hash
+            );
+        }
+        Err(err) => {
+            error!("Failed to get commitment tx: {:?}", err);
+        }
+    }
+}
+
+/// Extract the non-commitment fee inputs (all inputs after index 0) from an on-chain signing request.
+fn fee_inputs(content: &fiber_types::OnchainSigningContent) -> Vec<OutPoint> {
+    content
+        .transaction
+        .raw()
+        .inputs()
+        .into_iter()
+        .skip(1)
+        .map(|input| input.previous_output())
+        .collect()
+}
+
+/// Maximum concurrent fee-holding external signing requests (pending + signed) per channel.
+const MAX_PENDING_FEE_REQUESTS_PER_CHANNEL: usize = 4;
+/// Maximum concurrent fee-holding external signing requests (pending + signed) per node/tenant.
+const MAX_PENDING_FEE_REQUESTS_PER_NODE: usize = 16;
+/// Maximum concurrent fee-holding external signing requests (pending + signed) globally across all nodes.
+const MAX_PENDING_FEE_REQUESTS_GLOBAL: usize = 64;
+/// Initial retry backoff (5 minutes) after an external watchtower request expires or fails broadcast.
+const WATCHTOWER_EXPIRED_BACKOFF_BASE_MS: u64 = 5 * 60 * 1000;
+/// Maximum retry backoff (60 minutes) after repeated expired or failed external requests.
+const WATCHTOWER_EXPIRED_BACKOFF_MAX_MS: u64 = 2 * crate::ckb::held_cells::WATCHTOWER_HOLD_MS;
+
+fn arm_external_retry_backoff(ext: &mut fiber_types::WatchtowerExternalSignerState, now_ms: u64) {
+    ext.consecutive_expired_requests = ext.consecutive_expired_requests.saturating_add(1);
+    let exp = ext.consecutive_expired_requests.saturating_sub(1).min(5);
+    let backoff = WATCHTOWER_EXPIRED_BACKOFF_BASE_MS
+        .saturating_mul(1u64 << exp)
+        .min(WATCHTOWER_EXPIRED_BACKOFF_MAX_MS);
+    ext.retry_after_ms = ext.retry_after_ms.max(now_ms.saturating_add(backoff));
+}
+
+fn expire_and_collect_holds<T>(
+    requests: &mut std::collections::BTreeMap<Hash256, T>,
+    timestamps: &mut std::collections::BTreeMap<Hash256, u64>,
+    content_of: impl Fn(&T) -> &fiber_types::OnchainSigningContent,
+    now_ms: u64,
+    active_holds: &mut Vec<(Vec<OutPoint>, u64)>,
+) -> usize {
+    let mut expired = 0usize;
+    requests.retain(|id, entry| {
+        let created_at_ms = *timestamps.entry(*id).or_insert(now_ms);
+        if now_ms >= created_at_ms.saturating_add(crate::ckb::held_cells::WATCHTOWER_HOLD_MS) {
+            timestamps.remove(id);
+            crate::ckb::held_cells::release_for_watchtower(fee_inputs(content_of(entry)));
+            expired += 1;
+            false
+        } else {
+            active_holds.push((fee_inputs(content_of(entry)), created_at_ms));
+            true
+        }
+    });
+    expired
+}
+
+/// Restores process-local watchtower fee-cell holds using each request's original
+/// creation timestamp (without renewing its TTL), and expires pending or unbroadcast
+/// signed requests whose hold window (`WATCHTOWER_HOLD_MS`) has elapsed.
+pub(crate) fn sync_external_fee_holds<S: WatchtowerStore>(
+    events: &crate::signing::SigningEvents,
+    store: &S,
+    channels: &[(NodeId, ChannelData)],
+    now_ms: u64,
+) {
+    for (node, channel) in channels {
+        if !matches!(
+            store.get_watchtower_signer(node, &channel.channel_id),
+            fiber_types::WatchtowerSignerState::External(_)
+        ) {
+            continue;
+        }
+        let scope = events.watchtower(node);
+        let mut notification = scope.prepare_update();
+        let active_holds = store
+            .update_watchtower_signer(node, &channel.channel_id, |state| {
+                let mut holds = Vec::new();
+                if let fiber_types::WatchtowerSignerState::External(ext) = state {
+                    let expired_pending = expire_and_collect_holds(
+                        &mut ext.pending_requests,
+                        &mut ext.pending_request_created_at_ms,
+                        |content| content,
+                        now_ms,
+                        &mut holds,
+                    );
+                    let expired_signed = expire_and_collect_holds(
+                        &mut ext.signed_signatures,
+                        &mut ext.signed_signature_created_at_ms,
+                        |(content, _)| content,
+                        now_ms,
+                        &mut holds,
+                    );
+                    let total_expired = expired_pending + expired_signed;
+                    if total_expired > 0 {
+                        for _ in 0..total_expired {
+                            arm_external_retry_backoff(ext, now_ms);
+                        }
+                        notification.watchtower_state(channel.channel_id, state);
+                    }
+                }
+                Ok::<_, std::convert::Infallible>(holds)
+            })
+            .expect("infallible signer update");
+        notification.publish();
+        for (inputs, created_at_ms) in active_holds {
+            crate::ckb::held_cells::hold_for_watchtower(inputs, created_at_ms);
         }
     }
 }
@@ -880,9 +998,67 @@ fn try_settle_commitment_tx<S: WatchtowerStore>(
                             Ok(tx_hash) => {
                                 info!("Settlement tx: {:?} sent, tx_hash: {:#x}", tx, tx_hash);
                                 hold_sent(&tx, cell_collector);
+                                if channel_data.local_settlement_key.is_none() {
+                                    let _ = store.update_watchtower_signer(
+                                        &self_node_id,
+                                        &channel_data.channel_id,
+                                        |state| {
+                                            if let fiber_types::WatchtowerSignerState::External(
+                                                ext,
+                                            ) = state
+                                            {
+                                                ext.consecutive_expired_requests = 0;
+                                                ext.retry_after_ms = 0;
+                                            }
+                                            Ok::<_, std::convert::Infallible>(())
+                                        },
+                                    );
+                                }
+                            }
+                            Err(ckb_sdk::RpcError::Rpc(ref e)) if e.code.code() == -1107 => {
+                                tracing::debug!(
+                                    "Settlement tx {:#x} already in mempool",
+                                    tx.hash()
+                                );
                             }
                             Err(err) => {
                                 crate::ckb::held_cells::release_for_watchtower(tx.input_pts_iter());
+                                if channel_data.local_settlement_key.is_none() {
+                                    let failed_raw = tx.data().raw();
+                                    let now_ms = crate::now_timestamp_as_millis_u64();
+                                    let scope = events.watchtower(&self_node_id);
+                                    let mut notification = scope.prepare_update();
+                                    let _ = store.update_watchtower_signer(
+                                        &self_node_id,
+                                        &channel_data.channel_id,
+                                        |state| {
+                                            if let fiber_types::WatchtowerSignerState::External(
+                                                ext,
+                                            ) = state
+                                            {
+                                                let before = ext.signed_signatures.len();
+                                                ext.signed_signatures.retain(|id, (content, _)| {
+                                                    let keep = content.transaction.raw().as_slice()
+                                                        != failed_raw.as_slice();
+                                                    if !keep {
+                                                        ext.signed_signature_created_at_ms
+                                                            .remove(id);
+                                                    }
+                                                    keep
+                                                });
+                                                if ext.signed_signatures.len() != before {
+                                                    arm_external_retry_backoff(ext, now_ms);
+                                                    notification.watchtower_state(
+                                                        channel_data.channel_id,
+                                                        state,
+                                                    );
+                                                }
+                                            }
+                                            Ok::<_, std::convert::Infallible>(())
+                                        },
+                                    );
+                                    notification.publish();
+                                }
                                 error!("Failed to send settlement tx: {:?}, error: {:?}", tx, err);
                             }
                         },
@@ -1139,30 +1315,16 @@ fn prune_dead_fee_signing_requests<S: WatchtowerStore>(
                     if !dead.contains(id) {
                         return true;
                     }
-                    crate::ckb::held_cells::release_for_watchtower(
-                        content
-                            .transaction
-                            .raw()
-                            .inputs()
-                            .into_iter()
-                            .skip(1)
-                            .map(|input| input.previous_output()),
-                    );
+                    external.pending_request_created_at_ms.remove(id);
+                    crate::ckb::held_cells::release_for_watchtower(fee_inputs(content));
                     false
                 });
                 external.signed_signatures.retain(|id, (content, _)| {
                     if !dead.contains(id) {
                         return true;
                     }
-                    crate::ckb::held_cells::release_for_watchtower(
-                        content
-                            .transaction
-                            .raw()
-                            .inputs()
-                            .into_iter()
-                            .skip(1)
-                            .map(|input| input.previous_output()),
-                    );
+                    external.signed_signature_created_at_ms.remove(id);
+                    crate::ckb::held_cells::release_for_watchtower(fee_inputs(content));
                     false
                 });
                 notification.watchtower_state(*channel_id, state);
@@ -1197,24 +1359,24 @@ fn prune_spent_signing_requests<S: WatchtowerStore>(
                         .into_iter()
                         .all(|input| !spent_inputs.contains(&input.previous_output()));
                     if !unspent {
-                        crate::ckb::held_cells::release_for_watchtower(
-                            content
-                                .transaction
-                                .raw()
-                                .inputs()
-                                .into_iter()
-                                .skip(1)
-                                .map(|input| input.previous_output()),
-                        );
+                        crate::ckb::held_cells::release_for_watchtower(fee_inputs(content));
                     }
                     unspent
                 };
-                external
-                    .pending_requests
-                    .retain(|_, content| is_unspent(content));
-                external
-                    .signed_signatures
-                    .retain(|_, (content, _)| is_unspent(content));
+                external.pending_requests.retain(|id, content| {
+                    let keep = is_unspent(content);
+                    if !keep {
+                        external.pending_request_created_at_ms.remove(id);
+                    }
+                    keep
+                });
+                external.signed_signatures.retain(|id, (content, _)| {
+                    let keep = is_unspent(content);
+                    if !keep {
+                        external.signed_signature_created_at_ms.remove(id);
+                    }
+                    keep
+                });
                 // Preserve last_applied as an idempotent submission receipt.
                 if count != external.pending_requests.len() + external.signed_signatures.len() {
                     signing_update.watchtower_state(*channel_id, state);
@@ -1931,6 +2093,46 @@ fn build_settlement_tx<S: WatchtowerStore>(
                     signer,
                 );
             }
+            let now_ms = crate::now_timestamp_as_millis_u64();
+            let channel_active = external.pending_requests.len() + external.signed_signatures.len();
+            if channel_active >= MAX_PENDING_FEE_REQUESTS_PER_CHANNEL {
+                warn!(
+                    channel_id = %channel_data.channel_id,
+                    channel_active,
+                    "skipping new watchtower fee-holding request: per-channel cap reached"
+                );
+                return Ok(None);
+            }
+            let (node_active, global_active, node_retry_after_ms) =
+                store.watchtower_fee_hold_stats(self_node_id);
+            let effective_retry_after_ms = external.retry_after_ms.max(node_retry_after_ms);
+            if now_ms < effective_retry_after_ms {
+                warn!(
+                    node_id = %self_node_id,
+                    channel_id = %channel_data.channel_id,
+                    retry_after_ms = effective_retry_after_ms,
+                    "skipping new watchtower fee-holding request during retry backoff"
+                );
+                return Ok(None);
+            }
+            if node_active >= MAX_PENDING_FEE_REQUESTS_PER_NODE {
+                warn!(
+                    node_id = %self_node_id,
+                    channel_id = %channel_data.channel_id,
+                    node_active,
+                    "skipping new watchtower fee-holding request: per-node cap reached"
+                );
+                return Ok(None);
+            }
+            if global_active >= MAX_PENDING_FEE_REQUESTS_GLOBAL {
+                warn!(
+                    node_id = %self_node_id,
+                    channel_id = %channel_data.channel_id,
+                    global_active,
+                    "skipping new watchtower fee-holding request: global cap reached"
+                );
+                return Ok(None);
+            }
         }
     }
 
@@ -2417,28 +2619,20 @@ fn build_signed_settlement_tx<S: WatchtowerStore>(
             request_id,
             content: awaiting,
         } => {
-            crate::ckb::held_cells::hold_for_watchtower(
-                awaiting
-                    .transaction
-                    .raw()
-                    .inputs()
-                    .into_iter()
-                    .skip(1)
-                    .map(|input| input.previous_output()),
-                crate::now_timestamp_as_millis_u64(),
-            );
+            let now_ms = crate::now_timestamp_as_millis_u64();
+            let fee_inputs = fee_inputs(&awaiting);
             let signing_scope = events.watchtower(node_id);
             let mut signing_update = signing_scope.prepare_update();
-            let signature = store.update_watchtower_signer(
+            let (signature, newly_inserted) = store.update_watchtower_signer(
                 node_id,
                 &channel_id,
-                |state| -> Result<Option<[u8; 65]>, std::convert::Infallible> {
+                |state| -> Result<(Option<[u8; 65]>, bool), std::convert::Infallible> {
                     let fiber_types::WatchtowerSignerState::External(external) = state else {
                         warn!(
                             channel_id = %channel_id,
                             "watchtower settlement has no local key and no external signer state"
                         );
-                        return Ok(None);
+                        return Ok((None, false));
                     };
 
                     if let Some((signed_content, signature)) =
@@ -2452,9 +2646,10 @@ fn build_signed_settlement_tx<S: WatchtowerStore>(
                                     signature,
                                 });
                             signing_update.watchtower_state(channel_id, state);
-                            return Ok(Some(signature));
+                            return Ok((Some(signature), false));
                         }
                         external.signed_signatures.remove(&request_id);
+                        external.signed_signature_created_at_ms.remove(&request_id);
                         if external
                             .last_applied
                             .as_ref()
@@ -2465,10 +2660,17 @@ fn build_signed_settlement_tx<S: WatchtowerStore>(
                     }
 
                     if external.pending_requests.get(&request_id) == Some(&awaiting) {
-                        return Ok(None);
+                        external
+                            .pending_request_created_at_ms
+                            .entry(request_id)
+                            .or_insert(now_ms);
+                        return Ok((None, false));
                     }
 
                     external.pending_requests.insert(request_id, awaiting);
+                    external
+                        .pending_request_created_at_ms
+                        .insert(request_id, now_ms);
                     if external
                         .last_applied
                         .as_ref()
@@ -2477,9 +2679,12 @@ fn build_signed_settlement_tx<S: WatchtowerStore>(
                         external.last_applied = None;
                     }
                     signing_update.watchtower_state(channel_id, state);
-                    Ok(None)
+                    Ok((None, true))
                 },
             )?;
+            if newly_inserted || signature.is_some() {
+                crate::ckb::held_cells::hold_for_watchtower(fee_inputs, now_ms);
+            }
             signing_update.publish();
             // Only signer-state mutation holds the lock; transaction construction
             // and broadcasting must not block other signer submissions.

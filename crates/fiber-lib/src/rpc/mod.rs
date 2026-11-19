@@ -466,10 +466,23 @@ pub mod server {
 
             #[cfg(feature = "watchtower")]
             if config.is_module_enabled("watchtower") {
+                #[cfg(not(target_arch = "wasm32"))]
+                let watchtower_quotas = match lsp_actor.as_ref() {
+                    Some(actor) => {
+                        ractor::call!(actor, crate::lsp::LspServiceMessage::GetWatchtowerQuotas)
+                            .map_err(|err| {
+                                anyhow::anyhow!("Failed to query LSP watchtower quotas: {err}")
+                            })?
+                    }
+                    None => Default::default(),
+                };
+                #[cfg(target_arch = "wasm32")]
+                let watchtower_quotas = crate::lsp_config::WatchtowerQuotas::default();
                 modules
                     .merge(
                         WatchtowerRpcServerImpl::new(store.clone())
                             .with_signing_events(signing_events.clone())
+                            .with_quotas(watchtower_quotas)
                             .into_rpc(),
                     )
                     .unwrap();

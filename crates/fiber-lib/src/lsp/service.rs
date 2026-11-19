@@ -80,6 +80,7 @@ pub struct TenantSubscriptionContext {
 /// Commands accepted by the LSP service container.
 pub enum LspServiceMessage {
     GetStatus(RpcReplyPort<LspServiceStatus>),
+    GetWatchtowerQuotas(RpcReplyPort<crate::lsp_config::WatchtowerQuotas>),
     RegisterAuthenticatedTenant {
         payload: TenantRegistryPayload,
         signature: TenantRegistrySignature,
@@ -430,6 +431,9 @@ impl Actor for LspService {
                     registered_tenants,
                     active_tenants: state.supervisor.active_count(),
                 });
+            }
+            LspServiceMessage::GetWatchtowerQuotas(reply) => {
+                let _ = reply.send(state.config.watchtower_quotas());
             }
             LspServiceMessage::RegisterAuthenticatedTenant {
                 payload,

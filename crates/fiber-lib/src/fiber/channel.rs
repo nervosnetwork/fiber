@@ -5634,7 +5634,7 @@ pub fn settlement_data_to_witness(
         local_settlement_key,
         remote_settlement_key,
     )
-    .expect("TLC count exceeds witness encoding limit (max 255)")
+    .expect("TLC count exceeds witness encoding limit (max 254)")
 }
 
 #[derive(Clone, Debug)]
@@ -5759,6 +5759,11 @@ pub struct ChannelActorState {
     #[doc = "skip_store"]
     pub replayed_tlc_updates_v2: usize,
 
+    /// True while re-signing an abandoned same-number V2 commitment so no new
+    /// local TLC updates can mutate `pending_replay_updates` before re-signing finishes.
+    #[doc = "skip_store"]
+    pub resigning_outgoing_v2: bool,
+
     #[doc = "skip_store"]
     pub ephemeral_config: ChannelEphemeralConfig,
 
@@ -5867,6 +5872,7 @@ impl From<ChannelActorData> for ChannelActorState {
             pending_remove_effects_v2: 0,
             pending_payment_notifications: Default::default(),
             replayed_tlc_updates_v2: 0,
+            resigning_outgoing_v2: false,
         };
         state.hydrate_external_funding_runtime();
         state
@@ -6866,6 +6872,7 @@ impl ChannelActorState {
     pub(crate) fn mark_reestablishing_offline(&mut self) {
         self.recovery_peer_v2 = None;
         self.replayed_tlc_updates_v2 = 0;
+        self.resigning_outgoing_v2 = false;
         self.clear_waiting_peer_response();
         self.reestablishing = true;
         // Preserve the remaining online recovery budget across reconnects.
@@ -6880,6 +6887,7 @@ impl ChannelActorState {
 
     pub(crate) fn mark_watching_chain_offline(&mut self) {
         self.replayed_tlc_updates_v2 = 0;
+        self.resigning_outgoing_v2 = false;
         self.clear_waiting_peer_response();
         self.reestablishing = false;
         self.reestablish_timer = None;
@@ -7234,6 +7242,7 @@ impl ChannelActorState {
             pending_remove_effects_v2: 0,
             pending_payment_notifications: Default::default(),
             replayed_tlc_updates_v2: 0,
+            resigning_outgoing_v2: false,
         };
         if let Some(nonce) = remote_channel_announcement_nonce {
             state.update_remote_channel_announcement_nonce(&nonce);
@@ -7363,6 +7372,7 @@ impl ChannelActorState {
             pending_remove_effects_v2: 0,
             pending_payment_notifications: Default::default(),
             replayed_tlc_updates_v2: 0,
+            resigning_outgoing_v2: false,
         };
         if let Some(material) = public_material {
             state.apply_open_signer_material(material, public)?;
@@ -8695,7 +8705,7 @@ impl ChannelActorState {
     }
 
     pub fn is_waiting_tlc_ack(&self) -> bool {
-        if self.signing_context.is_awaiting_signature() {
+        if self.signing_context.is_awaiting_signature() || self.resigning_outgoing_v2 {
             return true;
         }
         self.tlc_state.waiting_ack
@@ -12264,9 +12274,17 @@ where
             .await?;
         }
         state.finish_recovery_v2(myself);
-        if resign_outstanding_cs && !state.reestablishing {
-            // Recovery no longer owes an ACK, so this is an ordinary CS exchange again.
-            self.handle_commitment_signed_command(myself, state).await?;
+        if resign_outstanding_cs {
+            state.resigning_outgoing_v2 = true;
+            if !state.reestablishing {
+                // Recovery no longer owes an ACK, so this is an ordinary CS exchange again.
+                if let Err(err) = self.handle_commitment_signed_command(myself, state).await {
+                    state.resigning_outgoing_v2 = false;
+                    return Err(err);
+                }
+            }
+        } else {
+            state.resigning_outgoing_v2 = false;
         }
         if let Some(close) = state.session.closing.as_ref() {
             if !close.superseded_by_force_close {
@@ -12449,6 +12467,7 @@ where
             return Err(invalid("V2 signing waits for reestablishment obligations"));
         }
         if state.tlc_state.waiting_ack {
+            state.resigning_outgoing_v2 = false;
             return Ok(());
         }
         let flags = match state.state {
@@ -12487,6 +12506,7 @@ where
             state.set_waiting_ack(myself, true);
         }
         state.last_was_revoke = false;
+        state.resigning_outgoing_v2 = false;
         let replayed = std::mem::take(&mut state.replayed_tlc_updates_v2);
         self.store.insert_channel_actor_state(state.clone());
         // Publish only after IDs, contents and the exact signing intent are durable.
@@ -13065,6 +13085,7 @@ mod tests {
             pending_remove_effects_v2: 0,
             pending_payment_notifications: Default::default(),
             replayed_tlc_updates_v2: 0,
+            resigning_outgoing_v2: false,
         }
     }
 

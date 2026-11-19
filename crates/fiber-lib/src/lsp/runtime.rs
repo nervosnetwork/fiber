@@ -208,6 +208,7 @@ impl<C: CkbChainClient + Clone + Send + Sync + 'static> TenantRuntimeFactory
             let events = self.events.clone();
             let watchtower_store = self.tenant_store.clone();
             let tenant_node_id = super::tenant_watchtower_node_id(&tenant_pubkey);
+            let watchtower_quotas = self.lsp_config.watchtower_quotas();
             tokio::spawn(async move {
                 while let Some(event) = event_receiver.recv().await {
                     crate::event_handler::forward_event_to_watchtower_store(
@@ -215,6 +216,7 @@ impl<C: CkbChainClient + Clone + Send + Sync + 'static> TenantRuntimeFactory
                         event,
                         &watchtower_store,
                         tenant_node_id.clone(),
+                        &watchtower_quotas,
                     );
                 }
             });

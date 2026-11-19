@@ -1136,3 +1136,195 @@ fn external_ckb_and_udt_settlement_uses_separate_payout_and_fee_sponsor_locks() 
         assert!(sponsor_change < 100_000_000_000u64);
     }
 }
+
+#[test]
+fn external_pending_request_expires_after_ttl_releases_fee_cell_and_enforces_backoff() {
+    #[derive(Clone, Default)]
+    struct LockTracker {
+        locked: std::collections::HashSet<OutPoint>,
+    }
+
+    #[async_trait::async_trait]
+    impl CellCollector for LockTracker {
+        async fn collect_live_cells_async(
+            &mut self,
+            _query: &CellQueryOptions,
+            _apply_changes: bool,
+        ) -> Result<(Vec<LiveCell>, u64), CellCollectorError> {
+            Ok((vec![], 0))
+        }
+        fn lock_cell(&mut self, out_point: OutPoint, _: u64) -> Result<(), CellCollectorError> {
+            self.locked.insert(out_point);
+            Ok(())
+        }
+        fn apply_tx(&mut self, _: Transaction, _: u64) -> Result<(), CellCollectorError> {
+            Ok(())
+        }
+        fn reset(&mut self) {}
+    }
+
+    let fixture = Fixture::with_features(false, false, false, false, ChannelFeatures::V2);
+
+    let first = fixture.build().expect("build settlement");
+    assert!(first.is_none(), "external signer pauses for signature");
+
+    let channels = fixture.store.get_watch_channels_with_nodes();
+    let (request_id, created_at_ms, fee_outpoint) = match fixture
+        .store
+        .get_watchtower_signer(&fixture.node_id, &fixture.channel.channel_id)
+    {
+        fiber_types::WatchtowerSignerState::External(ext) => {
+            assert_eq!(ext.pending_requests.len(), 1);
+            let (&id, content) = ext.pending_requests.iter().next().expect("pending request");
+            let created_at = *ext
+                .pending_request_created_at_ms
+                .get(&id)
+                .expect("created_at_ms recorded");
+            let fee_input = content
+                .transaction
+                .raw()
+                .inputs()
+                .get(1)
+                .expect("fee input")
+                .previous_output();
+            (id, created_at, fee_input)
+        }
+        other => panic!("expected external signer state, got {other:?}"),
+    };
+
+    // Mid-TTL sync must NOT renew created_at_ms or drop the request.
+    let mid_ttl = created_at_ms + crate::ckb::held_cells::WATCHTOWER_HOLD_MS / 2;
+    crate::watchtower::actor::sync_external_fee_holds(
+        &fixture.events,
+        &fixture.store,
+        &channels,
+        mid_ttl,
+    );
+    match fixture
+        .store
+        .get_watchtower_signer(&fixture.node_id, &fixture.channel.channel_id)
+    {
+        fiber_types::WatchtowerSignerState::External(ext) => {
+            assert!(ext.pending_requests.contains_key(&request_id));
+            assert_eq!(
+                ext.pending_request_created_at_ms.get(&request_id),
+                Some(&created_at_ms)
+            );
+            assert_eq!(ext.consecutive_expired_requests, 0);
+        }
+        other => panic!("expected external signer state, got {other:?}"),
+    }
+
+    // Past TTL: unsigned request must expire, release its fee cell, and arm backoff.
+    let expired_at = created_at_ms + crate::ckb::held_cells::WATCHTOWER_HOLD_MS;
+    crate::watchtower::actor::sync_external_fee_holds(
+        &fixture.events,
+        &fixture.store,
+        &channels,
+        expired_at,
+    );
+    match fixture
+        .store
+        .get_watchtower_signer(&fixture.node_id, &fixture.channel.channel_id)
+    {
+        fiber_types::WatchtowerSignerState::External(ext) => {
+            assert!(ext.pending_requests.is_empty());
+            assert!(ext.pending_request_created_at_ms.is_empty());
+            assert_eq!(ext.consecutive_expired_requests, 1);
+            assert!(ext.retry_after_ms > expired_at);
+        }
+        other => panic!("expected external signer state, got {other:?}"),
+    }
+
+    // Fee cell is no longer held after expiry.
+    let mut tracker = LockTracker::default();
+    crate::ckb::held_cells::lock_held(&mut tracker, expired_at).expect("lock held");
+    assert!(
+        !tracker.locked.contains(&fee_outpoint),
+        "expired request must release its fee cell"
+    );
+
+    // While in retry backoff (set into the future relative to real clock), build_settlement_tx
+    // must refuse to create a new fee-holding request.
+    fixture
+        .store
+        .update_watchtower_signer(&fixture.node_id, &fixture.channel.channel_id, |state| {
+            if let fiber_types::WatchtowerSignerState::External(ext) = state {
+                ext.retry_after_ms = crate::now_timestamp_as_millis_u64() + 60_000;
+            }
+            Ok::<_, std::convert::Infallible>(())
+        })
+        .unwrap();
+    assert!(fixture.build().expect("build during backoff").is_none());
+    match fixture
+        .store
+        .get_watchtower_signer(&fixture.node_id, &fixture.channel.channel_id)
+    {
+        fiber_types::WatchtowerSignerState::External(ext) => {
+            assert!(
+                ext.pending_requests.is_empty(),
+                "channel in backoff must not create a new pending fee-holding request"
+            );
+        }
+        other => panic!("expected external signer state, got {other:?}"),
+    }
+
+    // Signed-but-unbroadcast signatures must also expire after WATCHTOWER_HOLD_MS and release their fee cell.
+    let signed_id = Hash256::from([0xab; 32]);
+    let signed_created_at = expired_at + 10_000;
+    let signed_fee_outpoint = OutPoint::new(Byte32::from([0xcd; 32]), 0);
+    let signed_tx = TransactionBuilder::default()
+        .input(CellInput::new(OutPoint::new(Byte32::from([1; 32]), 0), 0))
+        .input(CellInput::new(signed_fee_outpoint.clone(), 0))
+        .build()
+        .data();
+    fixture
+        .store
+        .update_watchtower_signer(&fixture.node_id, &fixture.channel.channel_id, |state| {
+            if let fiber_types::WatchtowerSignerState::External(ext) = state {
+                ext.signed_signatures.insert(
+                    signed_id,
+                    (
+                        fiber_types::OnchainSigningContent {
+                            key_purpose: fiber_types::OnchainKeyPurpose::Settlement,
+                            transaction: signed_tx,
+                        },
+                        [0u8; 65],
+                    ),
+                );
+                ext.signed_signature_created_at_ms
+                    .insert(signed_id, signed_created_at);
+            }
+            Ok::<_, std::convert::Infallible>(())
+        })
+        .unwrap();
+    crate::watchtower::actor::sync_external_fee_holds(
+        &fixture.events,
+        &fixture.store,
+        &channels,
+        signed_created_at + crate::ckb::held_cells::WATCHTOWER_HOLD_MS,
+    );
+    match fixture
+        .store
+        .get_watchtower_signer(&fixture.node_id, &fixture.channel.channel_id)
+    {
+        fiber_types::WatchtowerSignerState::External(ext) => {
+            assert!(
+                ext.signed_signatures.is_empty(),
+                "expired signed_signature must be evicted"
+            );
+            assert!(ext.signed_signature_created_at_ms.is_empty());
+        }
+        other => panic!("expected external signer state, got {other:?}"),
+    }
+    let mut tracker2 = LockTracker::default();
+    crate::ckb::held_cells::lock_held(
+        &mut tracker2,
+        signed_created_at + crate::ckb::held_cells::WATCHTOWER_HOLD_MS,
+    )
+    .expect("lock held");
+    assert!(
+        !tracker2.locked.contains(&signed_fee_outpoint),
+        "expired signed_signature must release its fee cell"
+    );
+}

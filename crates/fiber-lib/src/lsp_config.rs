@@ -13,8 +13,40 @@ pub const DEFAULT_MAX_ACTIVE_TENANTS: usize = 64;
 pub const DEFAULT_MAX_PENDING_DELIVERIES: usize = 1_024;
 /// Default per-tenant bound for non-final hosted deliveries.
 pub const DEFAULT_MAX_PENDING_DELIVERIES_PER_TENANT: usize = 64;
+/// Default maximum watched channels owned by one tenant/node.
+pub const DEFAULT_MAX_WATCH_CHANNELS_PER_TENANT: usize = 64;
+/// Default global maximum watched channels across all nodes.
+pub const DEFAULT_MAX_WATCH_CHANNELS: usize = 4_096;
+/// Default maximum watchtower preimages owned by one tenant/node.
+pub const DEFAULT_MAX_WATCH_PREIMAGES_PER_TENANT: usize = 256;
+/// Default global maximum watchtower preimages across all nodes.
+pub const DEFAULT_MAX_WATCH_PREIMAGES: usize = 16_384;
 /// Default lifetime of a hosted tenant access token: thirty days.
 pub const DEFAULT_LSP_TOKEN_TTL_SECS: u64 = 30 * 24 * 60 * 60;
+
+/// Per-node and global bounds for Watchtower channel and preimage records.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WatchtowerQuotas {
+    /// Maximum watched channels owned by a single node/tenant.
+    pub max_channels_per_node: usize,
+    /// Maximum watched channels stored globally across all nodes.
+    pub max_channels_total: usize,
+    /// Maximum watchtower preimages owned by a single node/tenant.
+    pub max_preimages_per_node: usize,
+    /// Maximum watchtower preimages stored globally across all nodes.
+    pub max_preimages_total: usize,
+}
+
+impl Default for WatchtowerQuotas {
+    fn default() -> Self {
+        Self {
+            max_channels_per_node: DEFAULT_MAX_WATCH_CHANNELS_PER_TENANT,
+            max_channels_total: DEFAULT_MAX_WATCH_CHANNELS,
+            max_preimages_per_node: DEFAULT_MAX_WATCH_PREIMAGES_PER_TENANT,
+            max_preimages_total: DEFAULT_MAX_WATCH_PREIMAGES,
+        }
+    }
+}
 
 /// Configuration for the multi-tenant LSP service hosted by a Fiber node.
 #[derive(ClapSerde, Debug, Clone)]
@@ -73,9 +105,58 @@ pub struct LspConfig {
         help = "maximum number of pending hosted deliveries per tenant"
     )]
     pub max_pending_deliveries_per_tenant: usize,
+
+    /// Maximum number of watchtower channels owned by one tenant/node.
+    #[default(DEFAULT_MAX_WATCH_CHANNELS_PER_TENANT)]
+    #[arg(
+        name = "LSP_MAX_WATCH_CHANNELS_PER_TENANT",
+        long = "lsp-max-watch-channels-per-tenant",
+        env,
+        help = "maximum number of watchtower channels per tenant"
+    )]
+    pub max_watch_channels_per_tenant: usize,
+
+    /// Maximum number of watchtower channels stored across all tenants.
+    #[default(DEFAULT_MAX_WATCH_CHANNELS)]
+    #[arg(
+        name = "LSP_MAX_WATCH_CHANNELS",
+        long = "lsp-max-watch-channels",
+        env,
+        help = "maximum number of watchtower channels globally"
+    )]
+    pub max_watch_channels: usize,
+
+    /// Maximum number of watchtower preimages owned by one tenant/node.
+    #[default(DEFAULT_MAX_WATCH_PREIMAGES_PER_TENANT)]
+    #[arg(
+        name = "LSP_MAX_WATCH_PREIMAGES_PER_TENANT",
+        long = "lsp-max-watch-preimages-per-tenant",
+        env,
+        help = "maximum number of watchtower preimages per tenant"
+    )]
+    pub max_watch_preimages_per_tenant: usize,
+
+    /// Maximum number of watchtower preimages stored across all tenants.
+    #[default(DEFAULT_MAX_WATCH_PREIMAGES)]
+    #[arg(
+        name = "LSP_MAX_WATCH_PREIMAGES",
+        long = "lsp-max-watch-preimages",
+        env,
+        help = "maximum number of watchtower preimages globally"
+    )]
+    pub max_watch_preimages: usize,
 }
 
 impl LspConfig {
+    /// Return the configured Watchtower per-node and global quotas.
+    pub fn watchtower_quotas(&self) -> WatchtowerQuotas {
+        WatchtowerQuotas {
+            max_channels_per_node: self.max_watch_channels_per_tenant,
+            max_channels_total: self.max_watch_channels,
+            max_preimages_per_node: self.max_watch_preimages_per_tenant,
+            max_preimages_total: self.max_watch_preimages,
+        }
+    }
     /// Return the configured LSP base directory.
     pub fn base_dir(&self) -> &Path {
         self.base_dir.as_deref().expect("have set LSP base dir")
@@ -117,6 +198,22 @@ impl LspConfig {
         if self.max_pending_deliveries_per_tenant == 0 {
             return Err(
                 "LSP max_pending_deliveries_per_tenant must be greater than zero".to_string(),
+            );
+        }
+        if self.max_watch_channels_per_tenant == 0 || self.max_watch_channels == 0 {
+            return Err("LSP watchtower channel quotas must be greater than zero".to_string());
+        }
+        if self.max_watch_channels_per_tenant > self.max_watch_channels {
+            return Err(
+                "LSP max_watch_channels_per_tenant cannot exceed max_watch_channels".to_string(),
+            );
+        }
+        if self.max_watch_preimages_per_tenant == 0 || self.max_watch_preimages == 0 {
+            return Err("LSP watchtower preimage quotas must be greater than zero".to_string());
+        }
+        if self.max_watch_preimages_per_tenant > self.max_watch_preimages {
+            return Err(
+                "LSP max_watch_preimages_per_tenant cannot exceed max_watch_preimages".to_string(),
             );
         }
         Ok(())

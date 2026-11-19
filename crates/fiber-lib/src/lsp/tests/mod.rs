@@ -63,6 +63,10 @@ fn lsp_config(base_dir: PathBuf) -> LspConfig {
         max_buffer_duration_ms: MAX_LSP_BUFFER_DURATION_MS,
         max_pending_deliveries: 1_024,
         max_pending_deliveries_per_tenant: 64,
+        max_watch_channels_per_tenant: crate::lsp_config::DEFAULT_MAX_WATCH_CHANNELS_PER_TENANT,
+        max_watch_channels: crate::lsp_config::DEFAULT_MAX_WATCH_CHANNELS,
+        max_watch_preimages_per_tenant: crate::lsp_config::DEFAULT_MAX_WATCH_PREIMAGES_PER_TENANT,
+        max_watch_preimages: crate::lsp_config::DEFAULT_MAX_WATCH_PREIMAGES,
     }
 }
 

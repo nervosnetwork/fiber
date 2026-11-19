@@ -350,7 +350,7 @@ impl CommitmentState {
                 "commitment version disagrees with local nonce counter",
             ));
         }
-        if snapshot.data.tlcs.len() > 255 {
+        if snapshot.data.tlcs.len() > fiber_types::MAX_WITNESS_TLC_COUNT {
             return Err(invalid("too many TLCs"));
         }
         // Reject missing keys before witness construction (which expects a local public key).

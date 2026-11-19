@@ -214,6 +214,12 @@ pub fn settlement_tlc_witness(tlc: &SettlementTlc, for_remote: bool) -> Vec<u8> 
     bytes
 }
 
+/// Maximum number of TLC entries encodable in a commitment witness.
+///
+/// Indices `0..254` (`0x00..=0xFD`) address TLCs, while `0xFE` and `0xFF` are
+/// reserved as final-settlement unlock sentinels.
+pub const MAX_WITNESS_TLC_COUNT: usize = 0xfe;
+
 /// Encode the settlement snapshot committed by the commitment-lock args.
 pub fn settlement_data_witness(
     data: &SettlementData,
@@ -222,8 +228,10 @@ pub fn settlement_data_witness(
     remote: Pubkey,
 ) -> Result<Vec<u8>, String> {
     data.validate_signing_keys(false)?;
-    let len = u8::try_from(data.tlcs.len())
-        .map_err(|_| "TLC count exceeds witness encoding limit (max 255)")?;
+    if data.tlcs.len() > MAX_WITNESS_TLC_COUNT {
+        return Err("TLC count exceeds witness encoding limit (max 254)".to_owned());
+    }
+    let len = data.tlcs.len() as u8;
     let mut bytes = vec![len];
     for tlc in &data.tlcs {
         bytes.extend_from_slice(&settlement_tlc_witness(tlc, for_remote));
@@ -244,8 +252,8 @@ impl SettlementData {
     /// Validate witness bounds and TLC signing metadata before persisting a snapshot.
     /// External channels must contain public-only keys and derivation indices.
     pub fn validate_signing_keys(&self, external: bool) -> Result<(), String> {
-        if self.tlcs.len() > usize::from(u8::MAX) {
-            return Err("TLC count exceeds witness encoding limit (max 255)".to_owned());
+        if self.tlcs.len() > MAX_WITNESS_TLC_COUNT {
+            return Err("TLC count exceeds witness encoding limit (max 254)".to_owned());
         }
         for tlc in &self.tlcs {
             if external && tlc.local_key.is_some() {
@@ -335,6 +343,18 @@ pub struct WatchtowerExternalSignerState {
     /// Last signature that successfully resumed this watch channel (kept simple for persistence).
     #[serde(default)]
     pub last_applied: Option<LastAppliedWatchtowerSignature>,
+    /// Creation timestamps (Unix ms) for outstanding `pending_requests`, used to bound fee-cell holds.
+    #[serde(default)]
+    pub pending_request_created_at_ms: BTreeMap<Hash256, u64>,
+    /// Creation timestamps (Unix ms) for `signed_signatures`, used to bound fee-cell holds if broadcast fails.
+    #[serde(default)]
+    pub signed_signature_created_at_ms: BTreeMap<Hash256, u64>,
+    /// Consecutive expired or failed external requests for retry backoff.
+    #[serde(default)]
+    pub consecutive_expired_requests: u32,
+    /// Earliest Unix ms timestamp before which this channel will not create new fee-holding requests.
+    #[serde(default)]
+    pub retry_after_ms: u64,
 }
 
 impl WatchtowerExternalSignerState {
@@ -464,7 +484,7 @@ pub fn settlement_data_to_witness(
         local_settlement_key,
         remote_settlement_key,
     )
-    .expect("TLC count exceeds witness encoding limit (max 255)")
+    .expect("TLC count exceeds witness encoding limit (max 254)")
 }
 
 /// Hash of a settlement witness, as committed in CommitmentLock args `[36..56]`.
@@ -852,7 +872,7 @@ mod key_material_tests {
             local_key_commitment_number: Some(7),
             remote_key: key(2).pubkey(),
         };
-        data.tlcs = vec![entry; 255];
+        data.tlcs = vec![entry; MAX_WITNESS_TLC_COUNT];
         let (local, remote) = (key(1).pubkey(), key(2).pubkey());
         assert!(data.validate_signing_keys(true).is_ok());
         assert!(settlement_data_witness(&data, false, local, remote).is_ok());
@@ -860,7 +880,7 @@ mod key_material_tests {
         assert!(data
             .validate_signing_keys(true)
             .unwrap_err()
-            .contains("max 255"));
+            .contains("max 254"));
         assert!(settlement_data_witness(&data, false, local, remote).is_err());
         // A malformed persisted snapshot must be a mismatch, not a panic.
         let mut args = [0; 58];
