@@ -1328,3 +1328,242 @@ fn external_pending_request_expires_after_ttl_releases_fee_cell_and_enforces_bac
         "expired signed_signature must release its fee cell"
     );
 }
+
+#[test]
+fn external_fee_hold_caps_and_cross_channel_per_node_backoff() {
+    let fixture = Fixture::with_features(false, false, false, false, ChannelFeatures::V2);
+    let now_ms = crate::now_timestamp_as_millis_u64();
+
+    let dummy_content = |seed: u8| OnchainSigningContent {
+        key_purpose: OnchainKeyPurpose::Settlement,
+        transaction: TransactionBuilder::default()
+            .input(CellInput::new(
+                OutPoint::new(Byte32::from([seed; 32]), 0),
+                0,
+            ))
+            .input(CellInput::new(
+                OutPoint::new(Byte32::from([seed.wrapping_add(1); 32]), 0),
+                0,
+            ))
+            .build()
+            .data(),
+    };
+
+    let insert_extra_external_channel = |store: &Store, node_id: &NodeId, channel_seed: u8| {
+        let channel_id = Hash256::from([channel_seed; 32]);
+        let base_key = Privkey::from([42; 32]);
+        store.insert_watch_channel(
+            node_id.clone(),
+            channel_id,
+            None,
+            WatchChannelKeys {
+                local_settlement: SettlementKey::external(base_key.pubkey()),
+                remote_settlement: Privkey::from([10; 32]).pubkey(),
+                local_funding: Privkey::from([11; 32]).pubkey(),
+                remote_funding: Privkey::from([12; 32]).pubkey(),
+            },
+            SettlementData {
+                local_amount: 1,
+                remote_amount: 1,
+                tlcs: Vec::new(),
+            },
+            ChannelFeatures::V2,
+            None,
+        );
+        channel_id
+    };
+
+    let pending_len = |store: &Store, node_id: &NodeId, channel_id: &Hash256| -> usize {
+        match store.get_watchtower_signer(node_id, channel_id) {
+            WatchtowerSignerState::External(ext) => ext.pending_requests.len(),
+            other => panic!("expected external signer state, got {other:?}"),
+        }
+    };
+
+    // 1. Per-channel cap (4): 2 pending + 2 signed on the same channel blocks new requests.
+    fixture
+        .store
+        .update_watchtower_signer(&fixture.node_id, &fixture.channel.channel_id, |state| {
+            if let WatchtowerSignerState::External(ext) = state {
+                for i in 0..2u8 {
+                    let id = Hash256::from([10 + i; 32]);
+                    ext.pending_requests.insert(id, dummy_content(10 + i));
+                    ext.pending_request_created_at_ms.insert(id, now_ms);
+                }
+                for i in 0..2u8 {
+                    let id = Hash256::from([20 + i; 32]);
+                    ext.signed_signatures
+                        .insert(id, (dummy_content(20 + i), [0u8; 65]));
+                    ext.signed_signature_created_at_ms.insert(id, now_ms);
+                }
+            }
+            Ok::<_, std::convert::Infallible>(())
+        })
+        .unwrap();
+    assert!(fixture.build().expect("build at per-channel cap").is_none());
+    assert_eq!(
+        pending_len(
+            &fixture.store,
+            &fixture.node_id,
+            &fixture.channel.channel_id
+        ),
+        2,
+        "per-channel cap (pending + signed == 4) must block new fee-holding requests"
+    );
+
+    // Clear fixture channel state for subsequent checks.
+    fixture
+        .store
+        .update_watchtower_signer(&fixture.node_id, &fixture.channel.channel_id, |state| {
+            if let WatchtowerSignerState::External(ext) = state {
+                ext.pending_requests.clear();
+                ext.pending_request_created_at_ms.clear();
+                ext.signed_signatures.clear();
+                ext.signed_signature_created_at_ms.clear();
+                ext.retry_after_ms = 0;
+            }
+            Ok::<_, std::convert::Infallible>(())
+        })
+        .unwrap();
+
+    // 2. Cross-channel per-node backoff: backoff armed on sibling channel blocks fixture channel.
+    let sibling_channel = insert_extra_external_channel(&fixture.store, &fixture.node_id, 0x70);
+    fixture
+        .store
+        .update_watchtower_signer(&fixture.node_id, &sibling_channel, |state| {
+            if let WatchtowerSignerState::External(ext) = state {
+                ext.retry_after_ms = now_ms + 60_000;
+            }
+            Ok::<_, std::convert::Infallible>(())
+        })
+        .unwrap();
+    assert!(fixture
+        .build()
+        .expect("build during sibling backoff")
+        .is_none());
+    assert_eq!(
+        pending_len(
+            &fixture.store,
+            &fixture.node_id,
+            &fixture.channel.channel_id
+        ),
+        0,
+        "backoff on sibling channel of same node_id must block new requests"
+    );
+
+    // Clear sibling backoff; backoff on an unrelated node_id must NOT block fixture channel.
+    fixture
+        .store
+        .update_watchtower_signer(&fixture.node_id, &sibling_channel, |state| {
+            if let WatchtowerSignerState::External(ext) = state {
+                ext.retry_after_ms = 0;
+            }
+            Ok::<_, std::convert::Infallible>(())
+        })
+        .unwrap();
+    let other_node = NodeId::from_bytes(Privkey::from([88; 32]).pubkey().serialize().to_vec());
+    let other_channel = insert_extra_external_channel(&fixture.store, &other_node, 0x71);
+    fixture
+        .store
+        .update_watchtower_signer(&other_node, &other_channel, |state| {
+            if let WatchtowerSignerState::External(ext) = state {
+                ext.retry_after_ms = now_ms + 60_000;
+            }
+            Ok::<_, std::convert::Infallible>(())
+        })
+        .unwrap();
+
+    // 3. Per-node cap (16): 16 active holds on sibling channel blocks fixture channel.
+    fixture
+        .store
+        .update_watchtower_signer(&fixture.node_id, &sibling_channel, |state| {
+            if let WatchtowerSignerState::External(ext) = state {
+                for i in 0..8u8 {
+                    let id = Hash256::from([40 + i; 32]);
+                    ext.pending_requests.insert(id, dummy_content(40 + i));
+                    ext.pending_request_created_at_ms.insert(id, now_ms);
+                }
+                for i in 0..8u8 {
+                    let id = Hash256::from([50 + i; 32]);
+                    ext.signed_signatures
+                        .insert(id, (dummy_content(50 + i), [0u8; 65]));
+                    ext.signed_signature_created_at_ms.insert(id, now_ms);
+                }
+            }
+            Ok::<_, std::convert::Infallible>(())
+        })
+        .unwrap();
+    assert!(fixture.build().expect("build at per-node cap").is_none());
+    assert_eq!(
+        pending_len(
+            &fixture.store,
+            &fixture.node_id,
+            &fixture.channel.channel_id
+        ),
+        0,
+        "per-node cap (16) must block new requests across channels of the same node"
+    );
+
+    // Clear sibling holds for global cap test.
+    fixture
+        .store
+        .update_watchtower_signer(&fixture.node_id, &sibling_channel, |state| {
+            if let WatchtowerSignerState::External(ext) = state {
+                ext.pending_requests.clear();
+                ext.pending_request_created_at_ms.clear();
+                ext.signed_signatures.clear();
+                ext.signed_signature_created_at_ms.clear();
+            }
+            Ok::<_, std::convert::Infallible>(())
+        })
+        .unwrap();
+
+    // 4. Global cap (64): 64 holds on another node blocks fixture channel; 63 allows it.
+    fixture
+        .store
+        .update_watchtower_signer(&other_node, &other_channel, |state| {
+            if let WatchtowerSignerState::External(ext) = state {
+                for i in 0..64u8 {
+                    let id = Hash256::from([100 + i; 32]);
+                    ext.pending_requests.insert(id, dummy_content(100 + i));
+                    ext.pending_request_created_at_ms.insert(id, now_ms);
+                }
+            }
+            Ok::<_, std::convert::Infallible>(())
+        })
+        .unwrap();
+    assert!(fixture.build().expect("build at global cap").is_none());
+    assert_eq!(
+        pending_len(
+            &fixture.store,
+            &fixture.node_id,
+            &fixture.channel.channel_id
+        ),
+        0,
+        "global cap (64) must block new requests from any node"
+    );
+
+    // Free 1 global slot (63 active) -> fixture channel can now create a pending request
+    // (also confirming other_node's backoff does not affect fixture.node_id).
+    fixture
+        .store
+        .update_watchtower_signer(&other_node, &other_channel, |state| {
+            if let WatchtowerSignerState::External(ext) = state {
+                let first_id = Hash256::from([100; 32]);
+                ext.pending_requests.remove(&first_id);
+                ext.pending_request_created_at_ms.remove(&first_id);
+            }
+            Ok::<_, std::convert::Infallible>(())
+        })
+        .unwrap();
+    assert!(fixture.build().expect("build below global cap").is_none());
+    assert_eq!(
+        pending_len(
+            &fixture.store,
+            &fixture.node_id,
+            &fixture.channel.channel_id
+        ),
+        1,
+        "once below global cap and outside own-node backoff, new fee-holding request succeeds"
+    );
+}

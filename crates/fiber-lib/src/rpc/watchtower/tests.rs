@@ -112,3 +112,174 @@ async fn tenant_watch_channel_rejects_oversized_snapshot_without_writing() {
         "{err}"
     );
 }
+
+#[tokio::test]
+async fn tenant_watch_channel_and_preimage_quotas_enforced_and_host_exempt() {
+    use crate::lsp_config::WatchtowerQuotas;
+
+    let (store, _dir) = generate_store();
+    let quotas = WatchtowerQuotas {
+        max_channels_per_node: 2,
+        max_channels_total: 3,
+        max_preimages_per_node: 2,
+        max_preimages_total: 3,
+    };
+    let server = WatchtowerRpcServerImpl::new(store.clone()).with_quotas(quotas);
+
+    let tenant_a = NodeId::from_bytes(Privkey::from([10; 32]).pubkey().serialize().to_vec());
+    let tenant_b = NodeId::from_bytes(Privkey::from([11; 32]).pubkey().serialize().to_vec());
+    let ctx_a = RpcContext {
+        node_id: tenant_a.to_string(),
+        tenant_scoped: true,
+    };
+    let ctx_b = RpcContext {
+        node_id: tenant_b.to_string(),
+        tenant_scoped: true,
+    };
+    let ctx_host = RpcContext {
+        node_id: NodeId::local().to_string(),
+        tenant_scoped: false,
+    };
+
+    let channel_params = |channel_byte: u8, local_key: bool| CreateWatchChannelParams {
+        channel_id: Hash256::from([channel_byte; 32]).into(),
+        funding_udt_type_script: None,
+        local_settlement_key: local_key.then(|| Privkey::from([1; 32]).into()),
+        local_settlement_key_pubkey: (!local_key).then(|| Privkey::from([1; 32]).pubkey().into()),
+        remote_settlement_key: Privkey::from([2; 32]).pubkey().into(),
+        local_funding_pubkey: Privkey::from([5; 32]).pubkey().into(),
+        remote_funding_pubkey: Privkey::from([6; 32]).pubkey().into(),
+        settlement_data: snapshot(1).into(),
+        channel_features: Default::default(),
+        payout_lock_script: None,
+    };
+
+    // Tenant A fills per-node channel quota (2).
+    server
+        .create_watch_channel(ctx_a.clone(), channel_params(1, false))
+        .await
+        .unwrap();
+    server
+        .create_watch_channel(ctx_a.clone(), channel_params(2, false))
+        .await
+        .unwrap();
+    // Updating an existing channel_id must still succeed at quota boundary.
+    server
+        .create_watch_channel(ctx_a.clone(), channel_params(1, false))
+        .await
+        .unwrap();
+    // 3rd channel for Tenant A is rejected.
+    let err = server
+        .create_watch_channel(ctx_a.clone(), channel_params(3, false))
+        .await
+        .unwrap_err();
+    assert!(err.message().contains("quota exceeded"), "{err}");
+    assert!(store
+        .get_watch_channel(&tenant_a, &Hash256::from([3; 32]))
+        .is_none());
+
+    // Tenant B can add 1 channel (total = 3), then hits the global cap.
+    server
+        .create_watch_channel(ctx_b.clone(), channel_params(4, false))
+        .await
+        .unwrap();
+    let err = server
+        .create_watch_channel(ctx_b.clone(), channel_params(5, false))
+        .await
+        .unwrap_err();
+    assert!(err.message().contains("quota exceeded"), "{err}");
+
+    // Removing one channel from Tenant A frees global capacity for Tenant B.
+    server
+        .remove_watch_channel(
+            ctx_a.clone(),
+            RemoveWatchChannelParams {
+                channel_id: Hash256::from([2; 32]).into(),
+            },
+        )
+        .await
+        .unwrap();
+    server
+        .create_watch_channel(ctx_b.clone(), channel_params(5, false))
+        .await
+        .unwrap();
+
+    // Host (NodeId::local()) bypasses tenant channel quotas.
+    server
+        .create_watch_channel(ctx_host.clone(), channel_params(6, true))
+        .await
+        .unwrap();
+    assert!(store
+        .get_watch_channel(&NodeId::local(), &Hash256::from([6; 32]))
+        .is_some());
+
+    // Preimage RPC quotas: per-node (2), global (3), removal frees slot, host exempt.
+    let preimage_params = |seed: u8| {
+        let preimage = Hash256::from([seed; 32]);
+        let payment_hash: Hash256 = HashAlgorithm::Sha256.hash(preimage.as_ref()).into();
+        CreatePreimageParams {
+            payment_hash: payment_hash.into(),
+            preimage: preimage.into(),
+        }
+    };
+
+    let p1 = preimage_params(21);
+    let p2 = preimage_params(22);
+    let p3 = preimage_params(23);
+    let p4 = preimage_params(24);
+    let p5 = preimage_params(25);
+    let p6 = preimage_params(26);
+
+    server
+        .create_preimage(ctx_a.clone(), p1.clone())
+        .await
+        .unwrap();
+    server
+        .create_preimage(ctx_a.clone(), p2.clone())
+        .await
+        .unwrap();
+    // Overwriting existing payment_hash succeeds at quota boundary.
+    server
+        .create_preimage(ctx_a.clone(), p1.clone())
+        .await
+        .unwrap();
+    // 3rd preimage for Tenant A fails.
+    let err = server
+        .create_preimage(ctx_a.clone(), p3.clone())
+        .await
+        .unwrap_err();
+    assert!(err.message().contains("quota exceeded"), "{err}");
+
+    // Tenant B adds 1 (total = 3), then hits global cap.
+    server
+        .create_preimage(ctx_b.clone(), p4.clone())
+        .await
+        .unwrap();
+    let err = server
+        .create_preimage(ctx_b.clone(), p5.clone())
+        .await
+        .unwrap_err();
+    assert!(err.message().contains("quota exceeded"), "{err}");
+
+    // Removing one preimage from Tenant A frees a slot for Tenant B.
+    server
+        .remove_preimage(
+            ctx_a.clone(),
+            RemovePreimageParams {
+                payment_hash: p2.payment_hash,
+            },
+        )
+        .await
+        .unwrap();
+    server
+        .create_preimage(ctx_b.clone(), p5.clone())
+        .await
+        .unwrap();
+
+    // Host bypasses tenant preimage quotas.
+    server.create_preimage(ctx_host, p6.clone()).await.unwrap();
+    assert_eq!(
+        store.get_watch_preimage(&NodeId::local(), &p6.payment_hash.into()),
+        Some(p6.preimage.into())
+    );
+}
