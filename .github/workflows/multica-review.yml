@@ -7,6 +7,8 @@ on:
     types: [created]
   pull_request_review_comment:
     types: [created]
+  repository_dispatch:
+    types: [multica-review-result]
 
 jobs:
   dispatch:
@@ -93,4 +95,35 @@ jobs:
           # PR conversation comments use the issues API; inline review comments use the pulls API.
           resource = "pulls" if os.environ["GITHUB_EVENT_NAME"] == "pull_request_review_comment" else "issues"
           github_post(f"{resource}/comments/{comment_id}/reactions", "content=eyes")
+          PY
+
+  reply:
+    if: github.event_name == 'repository_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Comment as github-actions
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          NUMBER: ${{ github.event.client_payload.number }}
+          BODY: ${{ github.event.client_payload.body }}
+        run: |
+          python3 << 'PY'
+          import os, subprocess, sys
+          number = os.environ.get("NUMBER", "").strip()
+          body = os.environ.get("BODY") or ""
+          if not number or not body.strip():
+              print("Missing number or body.")
+              sys.exit(1)
+          marker = "<!-- multica-review-result -->"
+          if marker not in body:
+              body = body.rstrip() + "\n\n" + marker + "\n"
+          subprocess.run(
+              ["gh", "api", f"repos/{os.environ['REPO']}/issues/{number}/comments", "-f", f"body={body}"],
+              check=True,
+          )
           PY
