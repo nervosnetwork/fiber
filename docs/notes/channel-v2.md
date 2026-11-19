@@ -164,8 +164,15 @@ before confirming the migration. Unknown layouts (including unpublished PR
 intermediate epochs), corrupt records and nonempty unversioned stores are refused.
 
 The shared `fiber_types::channel_v2_validation::decode_channel_actor_data` codec
-requires an exact current record, feature byte `1` and a V2 session marker. It
-does not synthesize missing fields or accept an old suffix. Store getters,
+requires an exact current record and feature byte `1`. It does not synthesize
+missing fields or accept an old suffix.
+
+Two layouts exist while upgrading: released `v0.10.0-rc2` ..= `v0.10.1` appended
+`Option<ChannelSessionV2>` to the rc1 record and prefixed that session with the
+four-byte marker `0x56320001`; the current layout stores `ChannelSessionV2`
+without the marker. The admission migration reads the released layout explicitly
+(validating the marker) and converts it, while every reopen uses the current
+layout only. Store getters,
 channel iteration and raw `fiber_types::deserialize::<ChannelActorData>` calls
 share that codec, without revalidating all cryptographic snapshots on every read.
 Opening a current database validates every channel's retained signing intents,

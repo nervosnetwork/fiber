@@ -125,13 +125,35 @@ fn convert_channel_actor_data(
     Ok(channel)
 }
 
+/// Released v0.10.0-rc2 ..= v0.10.1 wrote a session marker in front of the session, which this
+/// layout no longer stores. Reading the pair `(marker, session)` consumes exactly those released
+/// bytes and drops the marker.
+const RELEASED_SESSION_MARKER: u32 = 0x56320001;
+
+struct ReleasedSessionV2(ChannelSessionV2);
+
+impl<'de> serde::Deserialize<'de> for ReleasedSessionV2 {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let (marker, session) = <(u32, ChannelSessionV2)>::deserialize(deserializer)?;
+        if marker != RELEASED_SESSION_MARKER {
+            return Err(serde::de::Error::custom("Invalid V2 session marker"));
+        }
+        Ok(Self(session))
+    }
+}
+
 fn released_channel(
     value: &[u8],
 ) -> Result<(OldChannelActorData, Option<ChannelSessionV2>), String> {
     // develop appended session_v2 to rc1's unchanged binary prefix. Tuples and
     // structs have no framing bytes in bincode; published rc1 has no suffix.
-    decode_exact(value)
-        .or_else(|_| decode_exact::<OldChannelActorData>(value).map(|channel| (channel, None)))
+    if let Ok(channel) = decode_exact::<OldChannelActorData>(value) {
+        return Ok((channel, None));
+    }
+    // Everything with a suffix was written by v0.10.0-rc2 ..= v0.10.1, so its error is the one
+    // that explains the record (an invalid marker, a broken session) rather than "trailing bytes".
+    decode_exact::<(OldChannelActorData, Option<ReleasedSessionV2>)>(value)
+        .map(|(channel, session)| (channel, session.map(|session| session.0)))
 }
 
 fn channel_record(value: &[u8], version: &str) -> Result<ChannelRecord, String> {

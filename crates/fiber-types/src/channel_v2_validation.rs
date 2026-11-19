@@ -1,6 +1,5 @@
 //! Validation of the actual current persisted channel schema before database writes.
-use std::io::Cursor;
-
+use bincode::Options;
 use ckb_types::{packed, prelude::*};
 use molecule::prelude::Entity;
 use musig2::{
@@ -11,20 +10,19 @@ use crate::{
     ChannelActorData, Hash256, NoncePurposeV2, Privkey, Pubkey, RevocationContextV2, SigningNonceV2,
 };
 
-/// Decode an exact persisted V2 channel and check its session marker.
+/// Decode an exact persisted V2 channel.
+///
+/// Decoding reads the slice, not a stream: a record of another layout puts a length prefix where
+/// this layout expects something else, and a stream reader would reserve that length before
+/// noticing it has run out of input. The slice reader and the explicit limit turn such a record
+/// into an error instead.
 pub fn decode_channel_actor_data(bytes: &[u8]) -> Result<ChannelActorData, String> {
-    let mut cursor = Cursor::new(bytes);
-    let channel: ChannelActorData =
-        bincode::deserialize_from(&mut cursor).map_err(|e| e.to_string())?;
-    check(
-        cursor.position() == bytes.len() as u64,
-        "Trailing bytes in channel record",
-    )?;
-    check(
-        channel.session.marker == 0x56320001,
-        "Missing or invalid V2 session",
-    )?;
-    Ok(channel)
+    bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .with_limit(bytes.len() as u64)
+        .reject_trailing_bytes()
+        .deserialize::<ChannelActorData>(bytes)
+        .map_err(|e| e.to_string())
 }
 
 /// Decode a compatible stored channel and fully validate retained signing intents.
@@ -263,10 +261,6 @@ fn commitment_snapshot(
 /// Bound-but-unsigned records are legitimate crash-recovery intents.
 pub fn validate_channel_v2(channel: &ChannelActorData) -> Result<(), String> {
     let session = &channel.session;
-    check(
-        session.marker == 0x56320001,
-        "Invalid V2 feature/session marker",
-    )?;
     let funded = matches!(
         channel.state,
         crate::ChannelState::ChannelReady
