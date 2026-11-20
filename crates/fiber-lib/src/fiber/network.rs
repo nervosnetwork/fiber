@@ -69,7 +69,7 @@ use super::gossip::{
 use super::graph::{NetworkGraph, NetworkGraphStateStore, OwnedChannelUpdateEvent};
 use super::types::{
     BroadcastMessageWithTimestamp, FiberMessage, ForwardTlcResult, GossipMessage, Init,
-    OpenChannelV2,
+    JitChannelRegister, OpenChannelV2,
 };
 use super::{
     FiberConfig, InFlightCkbTxActor, InFlightCkbTxActorArguments, InFlightCkbTxActorMessage,
@@ -1720,13 +1720,8 @@ where
             FiberMessage::Init(init_message) => {
                 state.on_init_msg(myself, peer_pubkey, init_message).await?;
             }
-            FiberMessage::JitChannelRegister(_) => {
-                // Registration is handled in a later stage. Decode and drop so older
-                // peers that do not advertise JIT_CHANNEL still accept the wire ID.
-                debug!(
-                    peer = format!("{peer_pubkey:?}"),
-                    "Ignoring JitChannelRegister"
-                );
+            FiberMessage::JitChannelRegister(register) => {
+                state.on_jit_channel_register(peer_pubkey, register);
             }
             // We should process OpenChannel message here because there is no channel corresponding
             // to the channel id in the message yet.
@@ -5927,6 +5922,8 @@ pub struct NetworkActorState<S, C> {
     // The features of the node, used to indicate the capabilities of the node.
     features: FeatureVector,
     jit: super::JitChannelConfig,
+    jit_registrations: HashMap<Pubkey, JitChannelRegister>,
+    pending_jit_registers: HashMap<Pubkey, JitChannelRegister>,
     channel_ephemeral_config: ChannelEphemeralConfig,
 
     // Inflight payment actors
@@ -7111,6 +7108,99 @@ where
         Ok(())
     }
 
+    fn on_jit_channel_register(&mut self, peer_pubkey: Pubkey, register: JitChannelRegister) {
+        if self
+            .peer_session_map
+            .get(&peer_pubkey)
+            .and_then(|peer| peer.features.as_ref())
+            .is_none()
+        {
+            self.pending_jit_registers.insert(peer_pubkey, register);
+            return;
+        }
+        self.apply_jit_channel_register(peer_pubkey, register);
+    }
+
+    fn apply_jit_channel_register(&mut self, peer_pubkey: Pubkey, register: JitChannelRegister) {
+        if !self.jit.service_enabled {
+            debug!(
+                peer = format!("{peer_pubkey:?}"),
+                "Rejecting JitChannelRegister: service disabled"
+            );
+            debug_event!(self.network, "JitChannelRegisterRejected");
+            return;
+        }
+        let Some(peer) = self.peer_session_map.get(&peer_pubkey) else {
+            debug_event!(self.network, "JitChannelRegisterRejected");
+            return;
+        };
+        let Some(features) = peer.features.as_ref() else {
+            debug_event!(self.network, "JitChannelRegisterRejected");
+            return;
+        };
+        if !features.supports_jit_channel() || !self.features.supports_jit_channel() {
+            debug!(
+                peer = format!("{peer_pubkey:?}"),
+                "Rejecting JitChannelRegister: missing JIT_CHANNEL feature"
+            );
+            debug_event!(self.network, "JitChannelRegisterRejected");
+            return;
+        }
+        if register.funding_udt_type_script.is_some() {
+            debug!(
+                peer = format!("{peer_pubkey:?}"),
+                "Rejecting JitChannelRegister: UDT channels are not supported"
+            );
+            debug_event!(self.network, "JitChannelRegisterRejected");
+            return;
+        }
+        self.jit_registrations.insert(peer_pubkey, register);
+        debug_event!(self.network, "JitChannelRegistered");
+    }
+
+    async fn maybe_send_jit_channel_register(&self, peer_pubkey: Pubkey) {
+        let Some(lsp) = self.jit.lsp_pubkey else {
+            return;
+        };
+        if lsp != peer_pubkey {
+            return;
+        }
+        let Some(peer) = self.peer_session_map.get(&peer_pubkey) else {
+            return;
+        };
+        let Some(features) = peer.features.as_ref() else {
+            return;
+        };
+        if !features.supports_jit_channel() || !self.features.supports_jit_channel() {
+            debug!(
+                peer = format!("{peer_pubkey:?}"),
+                "Skipping JitChannelRegister: peer or local node does not advertise JIT_CHANNEL"
+            );
+            return;
+        }
+        match self
+            .send_fiber_message_to_pubkey(
+                &peer_pubkey,
+                FiberMessage::jit_channel_register(JitChannelRegister {
+                    funding_udt_type_script: None,
+                    max_amount: u128::MAX,
+                }),
+            )
+            .await
+        {
+            Ok(()) => {
+                debug_event!(self.network, "JitChannelRegisterSent");
+            }
+            Err(err) => {
+                error!(
+                    peer = format!("{peer_pubkey:?}"),
+                    %err,
+                    "Failed to send JitChannelRegister"
+                );
+            }
+        }
+    }
+
     async fn send_fiber_message_to_pubkey(
         &self,
         pubkey: &Pubkey,
@@ -7550,6 +7640,10 @@ where
         }
 
         self.peer_session_map.remove(&pubkey);
+        self.pending_jit_registers.remove(&pubkey);
+        if self.jit_registrations.remove(&pubkey).is_some() {
+            debug_event!(self.network, "JitChannelUnregistered");
+        }
         self.peer_message_policy
             .lock()
             .expect("peer message policy lock")
@@ -7901,6 +7995,10 @@ where
             )));
         }
         debug_event!(myself, "PeerInit");
+        self.maybe_send_jit_channel_register(peer_pubkey).await;
+        if let Some(register) = self.pending_jit_registers.remove(&peer_pubkey) {
+            self.apply_jit_channel_register(peer_pubkey, register);
+        }
         if let Some(channels) = self.peer_channel_index.get_channels(&peer_pubkey) {
             let channel_ids = channels.into_iter().collect::<Vec<_>>();
             if !channel_ids.is_empty() {
@@ -8657,6 +8755,8 @@ where
             requested_disconnect_peers: Default::default(),
             features,
             jit: config.jit_channel_config(),
+            jit_registrations: Default::default(),
+            pending_jit_registers: Default::default(),
             channel_ephemeral_config: ChannelEphemeralConfig {
                 funding_timeout_seconds: config.funding_timeout_seconds,
                 external_funding_timeout_seconds: config.external_funding_timeout_seconds,

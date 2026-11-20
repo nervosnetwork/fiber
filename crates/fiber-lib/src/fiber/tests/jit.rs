@@ -1,6 +1,9 @@
 use clap_serde_derive::ClapSerde;
 
+use crate::fiber::network::PeerDisconnectReason;
 use crate::fiber::types::Privkey;
+use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
+use crate::test_utils::{NetworkNode, NetworkNodeConfigBuilder};
 use crate::FiberConfig;
 
 fn sample_pubkey_hex() -> (String, crate::fiber::types::Pubkey) {
@@ -59,4 +62,76 @@ fn test_jit_config_pubkey_accepts_0x_prefix() {
         serde_yaml::from_str(&format!("jit_lsp_pubkey: 0x{hex_pk}")).expect("parse fiber config");
     let config = FiberConfig::from(opt);
     assert_eq!(config.jit_lsp_pubkey(), Some(pubkey));
+}
+
+async fn start_jit_lsp() -> NetworkNode {
+    NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .node_name(Some("jit-lsp".to_string()))
+            .fiber_config_updater(|config| {
+                config.jit_service_enabled = Some(true);
+            })
+            .build(),
+    )
+    .await
+}
+
+async fn start_jit_receiver(lsp_pubkey: crate::fiber::types::Pubkey) -> NetworkNode {
+    let hex_pk = hex::encode(lsp_pubkey.serialize());
+    NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .node_name(Some("jit-receiver".to_string()))
+            .fiber_config_updater(move |config| {
+                config.jit_lsp_pubkey = Some(hex_pk);
+            })
+            .build(),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn test_jit_register_on_connect() {
+    let mut lsp = start_jit_lsp().await;
+    let mut receiver = start_jit_receiver(lsp.pubkey).await;
+    receiver.connect_to(&mut lsp).await;
+    receiver.expect_debug_event("JitChannelRegisterSent").await;
+    lsp.expect_debug_event("JitChannelRegistered").await;
+}
+
+#[tokio::test]
+async fn test_jit_register_rejected_when_service_disabled() {
+    let mut lsp = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .node_name(Some("jit-lsp-disabled".to_string()))
+            .build(),
+    )
+    .await;
+    let mut features = lsp.node_info().await.features;
+    features.set_jit_channel_optional();
+    lsp.update_node_features_and_wait(features).await;
+
+    let mut receiver = start_jit_receiver(lsp.pubkey).await;
+    receiver.connect_to(&mut lsp).await;
+    receiver.expect_debug_event("JitChannelRegisterSent").await;
+    lsp.expect_debug_event("JitChannelRegisterRejected").await;
+}
+
+#[tokio::test]
+async fn test_jit_unregister_on_disconnect() {
+    let mut lsp = start_jit_lsp().await;
+    let mut receiver = start_jit_receiver(lsp.pubkey).await;
+    receiver.connect_to(&mut lsp).await;
+    receiver.expect_debug_event("JitChannelRegisterSent").await;
+    lsp.expect_debug_event("JitChannelRegistered").await;
+
+    lsp.network_actor
+        .send_message(NetworkActorMessage::new_command(
+            NetworkActorCommand::DisconnectPeer(
+                receiver.pubkey,
+                PeerDisconnectReason::Requested,
+                None,
+            ),
+        ))
+        .expect("lsp alive");
+    lsp.expect_debug_event("JitChannelUnregistered").await;
 }
