@@ -227,6 +227,12 @@ struct TxCompleteV2 {
     initial_commitment_nonce: PubNonce,
 }
 
+// Session-scoped JIT registration. Empty `funding_udt_type_script` means CKB.
+table JitChannelRegister {
+    funding_udt_type_script: ScriptOpt,
+    max_amount: Uint128,
+}
+
 // Removed V1 message IDs remain reserved; never renumber the wire protocol.
 union FiberMessage {
     Init: 0,
@@ -248,6 +254,7 @@ union FiberMessage {
     ShutdownV2: 25,
     ClosingSignedV2: 26,
     TxCompleteV2: 27,
+    JitChannelRegister: 28,
 }
 
 option PaymentPreimageOpt (Byte32);

@@ -1720,6 +1720,14 @@ where
             FiberMessage::Init(init_message) => {
                 state.on_init_msg(myself, peer_pubkey, init_message).await?;
             }
+            FiberMessage::JitChannelRegister(_) => {
+                // Registration is handled in a later stage. Decode and drop so older
+                // peers that do not advertise JIT_CHANNEL still accept the wire ID.
+                debug!(
+                    peer = format!("{peer_pubkey:?}"),
+                    "Ignoring JitChannelRegister"
+                );
+            }
             // We should process OpenChannel message here because there is no channel corresponding
             // to the channel id in the message yet.
             FiberMessage::ChannelInitializationV2(open_channel) => {

@@ -13140,6 +13140,278 @@ impl molecule::prelude::Builder for TxCompleteV2Builder {
     }
 }
 #[derive(Clone)]
+pub struct JitChannelRegister(molecule::bytes::Bytes);
+impl ::core::fmt::LowerHex for JitChannelRegister {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        use molecule::hex_string;
+        if f.alternate() {
+            write!(f, "0x")?;
+        }
+        write!(f, "{}", hex_string(self.as_slice()))
+    }
+}
+impl ::core::fmt::Debug for JitChannelRegister {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{}({:#x})", Self::NAME, self)
+    }
+}
+impl ::core::fmt::Display for JitChannelRegister {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{} {{ ", Self::NAME)?;
+        write!(
+            f,
+            "{}: {}",
+            "funding_udt_type_script",
+            self.funding_udt_type_script()
+        )?;
+        write!(f, ", {}: {}", "max_amount", self.max_amount())?;
+        let extra_count = self.count_extra_fields();
+        if extra_count != 0 {
+            write!(f, ", .. ({} fields)", extra_count)?;
+        }
+        write!(f, " }}")
+    }
+}
+impl ::core::default::Default for JitChannelRegister {
+    fn default() -> Self {
+        let v = molecule::bytes::Bytes::from_static(&Self::DEFAULT_VALUE);
+        JitChannelRegister::new_unchecked(v)
+    }
+}
+impl JitChannelRegister {
+    const DEFAULT_VALUE: [u8; 28] = [
+        28, 0, 0, 0, 12, 0, 0, 0, 12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
+    pub const FIELD_COUNT: usize = 2;
+    pub fn total_size(&self) -> usize {
+        molecule::unpack_number(self.as_slice()) as usize
+    }
+    pub fn field_count(&self) -> usize {
+        if self.total_size() == molecule::NUMBER_SIZE {
+            0
+        } else {
+            (molecule::unpack_number(&self.as_slice()[molecule::NUMBER_SIZE..]) as usize / 4) - 1
+        }
+    }
+    pub fn count_extra_fields(&self) -> usize {
+        self.field_count() - Self::FIELD_COUNT
+    }
+    pub fn has_extra_fields(&self) -> bool {
+        Self::FIELD_COUNT != self.field_count()
+    }
+    pub fn funding_udt_type_script(&self) -> ScriptOpt {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[4..]) as usize;
+        let end = molecule::unpack_number(&slice[8..]) as usize;
+        ScriptOpt::new_unchecked(self.0.slice(start..end))
+    }
+    pub fn max_amount(&self) -> Uint128 {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[8..]) as usize;
+        if self.has_extra_fields() {
+            let end = molecule::unpack_number(&slice[12..]) as usize;
+            Uint128::new_unchecked(self.0.slice(start..end))
+        } else {
+            Uint128::new_unchecked(self.0.slice(start..))
+        }
+    }
+    pub fn as_reader<'r>(&'r self) -> JitChannelRegisterReader<'r> {
+        JitChannelRegisterReader::new_unchecked(self.as_slice())
+    }
+}
+impl molecule::prelude::Entity for JitChannelRegister {
+    type Builder = JitChannelRegisterBuilder;
+    const NAME: &'static str = "JitChannelRegister";
+    fn new_unchecked(data: molecule::bytes::Bytes) -> Self {
+        JitChannelRegister(data)
+    }
+    fn as_bytes(&self) -> molecule::bytes::Bytes {
+        self.0.clone()
+    }
+    fn as_slice(&self) -> &[u8] {
+        &self.0[..]
+    }
+    fn from_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
+        JitChannelRegisterReader::from_slice(slice).map(|reader| reader.to_entity())
+    }
+    fn from_compatible_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
+        JitChannelRegisterReader::from_compatible_slice(slice).map(|reader| reader.to_entity())
+    }
+    fn new_builder() -> Self::Builder {
+        ::core::default::Default::default()
+    }
+    fn as_builder(self) -> Self::Builder {
+        Self::new_builder()
+            .funding_udt_type_script(self.funding_udt_type_script())
+            .max_amount(self.max_amount())
+    }
+}
+#[derive(Clone, Copy)]
+pub struct JitChannelRegisterReader<'r>(&'r [u8]);
+impl<'r> ::core::fmt::LowerHex for JitChannelRegisterReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        use molecule::hex_string;
+        if f.alternate() {
+            write!(f, "0x")?;
+        }
+        write!(f, "{}", hex_string(self.as_slice()))
+    }
+}
+impl<'r> ::core::fmt::Debug for JitChannelRegisterReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{}({:#x})", Self::NAME, self)
+    }
+}
+impl<'r> ::core::fmt::Display for JitChannelRegisterReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{} {{ ", Self::NAME)?;
+        write!(
+            f,
+            "{}: {}",
+            "funding_udt_type_script",
+            self.funding_udt_type_script()
+        )?;
+        write!(f, ", {}: {}", "max_amount", self.max_amount())?;
+        let extra_count = self.count_extra_fields();
+        if extra_count != 0 {
+            write!(f, ", .. ({} fields)", extra_count)?;
+        }
+        write!(f, " }}")
+    }
+}
+impl<'r> JitChannelRegisterReader<'r> {
+    pub const FIELD_COUNT: usize = 2;
+    pub fn total_size(&self) -> usize {
+        molecule::unpack_number(self.as_slice()) as usize
+    }
+    pub fn field_count(&self) -> usize {
+        if self.total_size() == molecule::NUMBER_SIZE {
+            0
+        } else {
+            (molecule::unpack_number(&self.as_slice()[molecule::NUMBER_SIZE..]) as usize / 4) - 1
+        }
+    }
+    pub fn count_extra_fields(&self) -> usize {
+        self.field_count() - Self::FIELD_COUNT
+    }
+    pub fn has_extra_fields(&self) -> bool {
+        Self::FIELD_COUNT != self.field_count()
+    }
+    pub fn funding_udt_type_script(&self) -> ScriptOptReader<'r> {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[4..]) as usize;
+        let end = molecule::unpack_number(&slice[8..]) as usize;
+        ScriptOptReader::new_unchecked(&self.as_slice()[start..end])
+    }
+    pub fn max_amount(&self) -> Uint128Reader<'r> {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[8..]) as usize;
+        if self.has_extra_fields() {
+            let end = molecule::unpack_number(&slice[12..]) as usize;
+            Uint128Reader::new_unchecked(&self.as_slice()[start..end])
+        } else {
+            Uint128Reader::new_unchecked(&self.as_slice()[start..])
+        }
+    }
+}
+impl<'r> molecule::prelude::Reader<'r> for JitChannelRegisterReader<'r> {
+    type Entity = JitChannelRegister;
+    const NAME: &'static str = "JitChannelRegisterReader";
+    fn to_entity(&self) -> Self::Entity {
+        Self::Entity::new_unchecked(self.as_slice().to_owned().into())
+    }
+    fn new_unchecked(slice: &'r [u8]) -> Self {
+        JitChannelRegisterReader(slice)
+    }
+    fn as_slice(&self) -> &'r [u8] {
+        self.0
+    }
+    fn verify(slice: &[u8], compatible: bool) -> molecule::error::VerificationResult<()> {
+        use molecule::verification_error as ve;
+        let slice_len = slice.len();
+        if slice_len < molecule::NUMBER_SIZE {
+            return ve!(Self, HeaderIsBroken, molecule::NUMBER_SIZE, slice_len);
+        }
+        let total_size = molecule::unpack_number(slice) as usize;
+        if slice_len != total_size {
+            return ve!(Self, TotalSizeNotMatch, total_size, slice_len);
+        }
+        if slice_len < molecule::NUMBER_SIZE * 2 {
+            return ve!(Self, HeaderIsBroken, molecule::NUMBER_SIZE * 2, slice_len);
+        }
+        let offset_first = molecule::unpack_number(&slice[molecule::NUMBER_SIZE..]) as usize;
+        if offset_first % molecule::NUMBER_SIZE != 0 || offset_first < molecule::NUMBER_SIZE * 2 {
+            return ve!(Self, OffsetsNotMatch);
+        }
+        if slice_len < offset_first {
+            return ve!(Self, HeaderIsBroken, offset_first, slice_len);
+        }
+        let field_count = offset_first / molecule::NUMBER_SIZE - 1;
+        if field_count < Self::FIELD_COUNT {
+            return ve!(Self, FieldCountNotMatch, Self::FIELD_COUNT, field_count);
+        } else if !compatible && field_count > Self::FIELD_COUNT {
+            return ve!(Self, FieldCountNotMatch, Self::FIELD_COUNT, field_count);
+        };
+        let mut offsets: Vec<usize> = slice[molecule::NUMBER_SIZE..offset_first]
+            .chunks_exact(molecule::NUMBER_SIZE)
+            .map(|x| molecule::unpack_number(x) as usize)
+            .collect();
+        offsets.push(total_size);
+        if offsets.windows(2).any(|i| i[0] > i[1]) {
+            return ve!(Self, OffsetsNotMatch);
+        }
+        ScriptOptReader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
+        Uint128Reader::verify(&slice[offsets[1]..offsets[2]], compatible)?;
+        Ok(())
+    }
+}
+#[derive(Clone, Debug, Default)]
+pub struct JitChannelRegisterBuilder {
+    pub(crate) funding_udt_type_script: ScriptOpt,
+    pub(crate) max_amount: Uint128,
+}
+impl JitChannelRegisterBuilder {
+    pub const FIELD_COUNT: usize = 2;
+    pub fn funding_udt_type_script(mut self, v: ScriptOpt) -> Self {
+        self.funding_udt_type_script = v;
+        self
+    }
+    pub fn max_amount(mut self, v: Uint128) -> Self {
+        self.max_amount = v;
+        self
+    }
+}
+impl molecule::prelude::Builder for JitChannelRegisterBuilder {
+    type Entity = JitChannelRegister;
+    const NAME: &'static str = "JitChannelRegisterBuilder";
+    fn expected_length(&self) -> usize {
+        molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1)
+            + self.funding_udt_type_script.as_slice().len()
+            + self.max_amount.as_slice().len()
+    }
+    fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
+        let mut total_size = molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1);
+        let mut offsets = Vec::with_capacity(Self::FIELD_COUNT);
+        offsets.push(total_size);
+        total_size += self.funding_udt_type_script.as_slice().len();
+        offsets.push(total_size);
+        total_size += self.max_amount.as_slice().len();
+        writer.write_all(&molecule::pack_number(total_size as molecule::Number))?;
+        for offset in offsets.into_iter() {
+            writer.write_all(&molecule::pack_number(offset as molecule::Number))?;
+        }
+        writer.write_all(self.funding_udt_type_script.as_slice())?;
+        writer.write_all(self.max_amount.as_slice())?;
+        Ok(())
+    }
+    fn build(&self) -> Self::Entity {
+        let mut inner = Vec::with_capacity(self.expected_length());
+        self.write(&mut inner)
+            .unwrap_or_else(|_| panic!("{} build should be ok", Self::NAME));
+        JitChannelRegister::new_unchecked(inner.into())
+    }
+}
+#[derive(Clone)]
 pub struct FiberMessage(molecule::bytes::Bytes);
 impl ::core::fmt::LowerHex for FiberMessage {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
@@ -13173,7 +13445,7 @@ impl FiberMessage {
         0, 0, 0, 0, 48, 0, 0, 0, 12, 0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     ];
-    pub const ITEMS_COUNT: usize = 19;
+    pub const ITEMS_COUNT: usize = 20;
     pub fn item_id(&self) -> molecule::Number {
         molecule::unpack_number(self.as_slice())
     }
@@ -13199,6 +13471,7 @@ impl FiberMessage {
             25 => ShutdownV2::new_unchecked(inner).into(),
             26 => ClosingSignedV2::new_unchecked(inner).into(),
             27 => TxCompleteV2::new_unchecked(inner).into(),
+            28 => JitChannelRegister::new_unchecked(inner).into(),
             _ => panic!("{}: invalid data", Self::NAME),
         }
     }
@@ -13255,7 +13528,7 @@ impl<'r> ::core::fmt::Display for FiberMessageReader<'r> {
     }
 }
 impl<'r> FiberMessageReader<'r> {
-    pub const ITEMS_COUNT: usize = 19;
+    pub const ITEMS_COUNT: usize = 20;
     pub fn item_id(&self) -> molecule::Number {
         molecule::unpack_number(self.as_slice())
     }
@@ -13281,6 +13554,7 @@ impl<'r> FiberMessageReader<'r> {
             25 => ShutdownV2Reader::new_unchecked(inner).into(),
             26 => ClosingSignedV2Reader::new_unchecked(inner).into(),
             27 => TxCompleteV2Reader::new_unchecked(inner).into(),
+            28 => JitChannelRegisterReader::new_unchecked(inner).into(),
             _ => panic!("{}: invalid data", Self::NAME),
         }
     }
@@ -13325,6 +13599,7 @@ impl<'r> molecule::prelude::Reader<'r> for FiberMessageReader<'r> {
             25 => ShutdownV2Reader::verify(inner_slice, compatible),
             26 => ClosingSignedV2Reader::verify(inner_slice, compatible),
             27 => TxCompleteV2Reader::verify(inner_slice, compatible),
+            28 => JitChannelRegisterReader::verify(inner_slice, compatible),
             _ => ve!(Self, UnknownItem, Self::ITEMS_COUNT, item_id),
         }?;
         Ok(())
@@ -13333,7 +13608,7 @@ impl<'r> molecule::prelude::Reader<'r> for FiberMessageReader<'r> {
 #[derive(Clone, Debug, Default)]
 pub struct FiberMessageBuilder(pub(crate) FiberMessageUnion);
 impl FiberMessageBuilder {
-    pub const ITEMS_COUNT: usize = 19;
+    pub const ITEMS_COUNT: usize = 20;
     pub fn set<I>(mut self, v: I) -> Self
     where
         I: ::core::convert::Into<FiberMessageUnion>,
@@ -13380,6 +13655,7 @@ pub enum FiberMessageUnion {
     ShutdownV2(ShutdownV2),
     ClosingSignedV2(ClosingSignedV2),
     TxCompleteV2(TxCompleteV2),
+    JitChannelRegister(JitChannelRegister),
 }
 #[derive(Debug, Clone, Copy)]
 pub enum FiberMessageUnionReader<'r> {
@@ -13402,6 +13678,7 @@ pub enum FiberMessageUnionReader<'r> {
     ShutdownV2(ShutdownV2Reader<'r>),
     ClosingSignedV2(ClosingSignedV2Reader<'r>),
     TxCompleteV2(TxCompleteV2Reader<'r>),
+    JitChannelRegister(JitChannelRegisterReader<'r>),
 }
 impl ::core::default::Default for FiberMessageUnion {
     fn default() -> Self {
@@ -13480,6 +13757,9 @@ impl ::core::fmt::Display for FiberMessageUnion {
             FiberMessageUnion::TxCompleteV2(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, TxCompleteV2::NAME, item)
             }
+            FiberMessageUnion::JitChannelRegister(ref item) => {
+                write!(f, "{}::{}({})", Self::NAME, JitChannelRegister::NAME, item)
+            }
         }
     }
 }
@@ -13555,6 +13835,9 @@ impl<'r> ::core::fmt::Display for FiberMessageUnionReader<'r> {
             FiberMessageUnionReader::TxCompleteV2(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, TxCompleteV2::NAME, item)
             }
+            FiberMessageUnionReader::JitChannelRegister(ref item) => {
+                write!(f, "{}::{}({})", Self::NAME, JitChannelRegister::NAME, item)
+            }
         }
     }
 }
@@ -13580,6 +13863,7 @@ impl FiberMessageUnion {
             FiberMessageUnion::ShutdownV2(ref item) => write!(f, "{}", item),
             FiberMessageUnion::ClosingSignedV2(ref item) => write!(f, "{}", item),
             FiberMessageUnion::TxCompleteV2(ref item) => write!(f, "{}", item),
+            FiberMessageUnion::JitChannelRegister(ref item) => write!(f, "{}", item),
         }
     }
 }
@@ -13605,6 +13889,7 @@ impl<'r> FiberMessageUnionReader<'r> {
             FiberMessageUnionReader::ShutdownV2(ref item) => write!(f, "{}", item),
             FiberMessageUnionReader::ClosingSignedV2(ref item) => write!(f, "{}", item),
             FiberMessageUnionReader::TxCompleteV2(ref item) => write!(f, "{}", item),
+            FiberMessageUnionReader::JitChannelRegister(ref item) => write!(f, "{}", item),
         }
     }
 }
@@ -13703,6 +13988,11 @@ impl ::core::convert::From<TxCompleteV2> for FiberMessageUnion {
         FiberMessageUnion::TxCompleteV2(item)
     }
 }
+impl ::core::convert::From<JitChannelRegister> for FiberMessageUnion {
+    fn from(item: JitChannelRegister) -> Self {
+        FiberMessageUnion::JitChannelRegister(item)
+    }
+}
 impl<'r> ::core::convert::From<InitReader<'r>> for FiberMessageUnionReader<'r> {
     fn from(item: InitReader<'r>) -> Self {
         FiberMessageUnionReader::Init(item)
@@ -13798,6 +14088,11 @@ impl<'r> ::core::convert::From<TxCompleteV2Reader<'r>> for FiberMessageUnionRead
         FiberMessageUnionReader::TxCompleteV2(item)
     }
 }
+impl<'r> ::core::convert::From<JitChannelRegisterReader<'r>> for FiberMessageUnionReader<'r> {
+    fn from(item: JitChannelRegisterReader<'r>) -> Self {
+        FiberMessageUnionReader::JitChannelRegister(item)
+    }
+}
 impl FiberMessageUnion {
     pub const NAME: &'static str = "FiberMessageUnion";
     pub fn as_bytes(&self) -> molecule::bytes::Bytes {
@@ -13821,6 +14116,7 @@ impl FiberMessageUnion {
             FiberMessageUnion::ShutdownV2(item) => item.as_bytes(),
             FiberMessageUnion::ClosingSignedV2(item) => item.as_bytes(),
             FiberMessageUnion::TxCompleteV2(item) => item.as_bytes(),
+            FiberMessageUnion::JitChannelRegister(item) => item.as_bytes(),
         }
     }
     pub fn as_slice(&self) -> &[u8] {
@@ -13844,6 +14140,7 @@ impl FiberMessageUnion {
             FiberMessageUnion::ShutdownV2(item) => item.as_slice(),
             FiberMessageUnion::ClosingSignedV2(item) => item.as_slice(),
             FiberMessageUnion::TxCompleteV2(item) => item.as_slice(),
+            FiberMessageUnion::JitChannelRegister(item) => item.as_slice(),
         }
     }
     pub fn item_id(&self) -> molecule::Number {
@@ -13867,6 +14164,7 @@ impl FiberMessageUnion {
             FiberMessageUnion::ShutdownV2(_) => 25,
             FiberMessageUnion::ClosingSignedV2(_) => 26,
             FiberMessageUnion::TxCompleteV2(_) => 27,
+            FiberMessageUnion::JitChannelRegister(_) => 28,
         }
     }
     pub fn item_name(&self) -> &str {
@@ -13890,6 +14188,7 @@ impl FiberMessageUnion {
             FiberMessageUnion::ShutdownV2(_) => "ShutdownV2",
             FiberMessageUnion::ClosingSignedV2(_) => "ClosingSignedV2",
             FiberMessageUnion::TxCompleteV2(_) => "TxCompleteV2",
+            FiberMessageUnion::JitChannelRegister(_) => "JitChannelRegister",
         }
     }
     pub fn as_reader<'r>(&'r self) -> FiberMessageUnionReader<'r> {
@@ -13913,6 +14212,7 @@ impl FiberMessageUnion {
             FiberMessageUnion::ShutdownV2(item) => item.as_reader().into(),
             FiberMessageUnion::ClosingSignedV2(item) => item.as_reader().into(),
             FiberMessageUnion::TxCompleteV2(item) => item.as_reader().into(),
+            FiberMessageUnion::JitChannelRegister(item) => item.as_reader().into(),
         }
     }
 }
@@ -13939,6 +14239,7 @@ impl<'r> FiberMessageUnionReader<'r> {
             FiberMessageUnionReader::ShutdownV2(item) => item.as_slice(),
             FiberMessageUnionReader::ClosingSignedV2(item) => item.as_slice(),
             FiberMessageUnionReader::TxCompleteV2(item) => item.as_slice(),
+            FiberMessageUnionReader::JitChannelRegister(item) => item.as_slice(),
         }
     }
     pub fn item_id(&self) -> molecule::Number {
@@ -13962,6 +14263,7 @@ impl<'r> FiberMessageUnionReader<'r> {
             FiberMessageUnionReader::ShutdownV2(_) => 25,
             FiberMessageUnionReader::ClosingSignedV2(_) => 26,
             FiberMessageUnionReader::TxCompleteV2(_) => 27,
+            FiberMessageUnionReader::JitChannelRegister(_) => 28,
         }
     }
     pub fn item_name(&self) -> &str {
@@ -13985,6 +14287,7 @@ impl<'r> FiberMessageUnionReader<'r> {
             FiberMessageUnionReader::ShutdownV2(_) => "ShutdownV2",
             FiberMessageUnionReader::ClosingSignedV2(_) => "ClosingSignedV2",
             FiberMessageUnionReader::TxCompleteV2(_) => "TxCompleteV2",
+            FiberMessageUnionReader::JitChannelRegister(_) => "JitChannelRegister",
         }
     }
 }
@@ -14080,6 +14383,11 @@ impl From<ClosingSignedV2> for FiberMessage {
 }
 impl From<TxCompleteV2> for FiberMessage {
     fn from(value: TxCompleteV2) -> Self {
+        Self::new_builder().set(value).build()
+    }
+}
+impl From<JitChannelRegister> for FiberMessage {
+    fn from(value: JitChannelRegister) -> Self {
         Self::new_builder().set(value).build()
     }
 }

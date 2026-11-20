@@ -1,6 +1,7 @@
 use crate::fiber::FeatureVector;
 use fiber_types::feature_bits::{
     CHANNEL_V2_OPTIONAL, CHANNEL_V2_REQUIRED, GOSSIP_QUERIES_OPTIONAL, GOSSIP_QUERIES_REQUIRED,
+    JIT_CHANNEL_OPTIONAL, JIT_CHANNEL_REQUIRED,
 };
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
@@ -133,6 +134,8 @@ fn test_feature_default() {
     assert!(vector.requires_basic_mpp());
     assert!(vector.requires_trampoline_routing());
     assert!(vector.supports_trampoline_routing());
+    assert!(!vector.supports_jit_channel());
+    assert!(!vector.requires_jit_channel());
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
@@ -215,6 +218,24 @@ fn test_channel_v2_feature_bit() {
     assert!(vector.supports_feature(GOSSIP_QUERIES_OPTIONAL));
     assert_eq!(CHANNEL_V2_OPTIONAL, 7);
     assert_eq!(CHANNEL_V2_REQUIRED, 6);
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_jit_channel_feature_bit() {
+    let mut vector = FeatureVector::default();
+    assert!(!vector.supports_jit_channel());
+    vector.set_jit_channel_optional();
+    assert!(vector.supports_jit_channel());
+    assert!(!vector.requires_jit_channel());
+    vector.set_jit_channel_required();
+    assert!(vector.requires_jit_channel());
+    vector.unset_jit_channel_required();
+    vector.unset_jit_channel_optional();
+    assert!(!vector.supports_jit_channel());
+    assert!(!vector.requires_jit_channel());
+    assert_eq!(JIT_CHANNEL_OPTIONAL, 9);
+    assert_eq!(JIT_CHANNEL_REQUIRED, 8);
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

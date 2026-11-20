@@ -42,9 +42,16 @@ not reassigned to other messages. Remaining messages retain their existing IDs:
 | 25 | ShutdownV2 |
 | 26 | ClosingSignedV2 |
 | 27 | TxCompleteV2 |
+| 28 | JitChannelRegister |
 
 Malformed messages, including removed wire IDs, are rejected before dispatch.
 The onion/trampoline packet version is independent of the channel protocol.
+
+`JitChannelRegister` is a session-scoped message, not a channel operation. A
+receiver sends it after `Init` to a peer that advertised the optional
+`JIT_CHANNEL` feature (bit 9). `funding_udt_type_script` is empty for CKB;
+`max_amount` is the largest inbound amount the receiver wants on a just-in-time
+channel. The message is ignored until both sides enable JIT channel service.
 
 ## Channel establishment
 
