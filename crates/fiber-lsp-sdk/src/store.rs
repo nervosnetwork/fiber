@@ -57,8 +57,13 @@ pub struct MemoryStore {
     entries: Arc<Mutex<BTreeMap<Vec<u8>, Vec<u8>>>>,
 }
 
+#[cfg(any(test, feature = "test-apis"))]
 impl MemoryStore {
     /// Serialize all store entries so restart recovery can be tested.
+    ///
+    /// # Security Warning
+    /// Test-only helper. Rolling back signer state in production causes V2
+    /// MuSig2 nonce reuse and private key compromise.
     pub fn snapshot(&self) -> Result<Vec<u8>, MemoryStoreError> {
         let entries = self
             .entries
@@ -69,6 +74,10 @@ impl MemoryStore {
     }
 
     /// Restore an in-memory store from a previous snapshot.
+    ///
+    /// # Security Warning
+    /// Test-only helper. Rolling back signer state in production causes V2
+    /// MuSig2 nonce reuse and private key compromise.
     pub fn from_snapshot(snapshot: &[u8]) -> Result<Self, MemoryStoreError> {
         let entries = bincode::deserialize(snapshot)
             .map_err(|error| MemoryStoreError::InvalidSnapshot(error.to_string()))?;

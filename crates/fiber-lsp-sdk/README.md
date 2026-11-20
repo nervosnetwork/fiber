@@ -16,10 +16,8 @@ let root_key_backup = created.root_key_backup.expose_secret();
 let channel = created.root_signer.create_channel().await?;
 let channel_key_id = channel.channel_key_id();
 
-// Existing signer: restore the store, then supply the same root key.
-let snapshot = store.snapshot().expect("snapshot memory store");
-let restored_store = MemoryStore::from_snapshot(&snapshot).expect("restore memory store");
-let root_signer = RootSigner::open(RootKey::import(root_key_backup)?, restored_store).await?;
+// Existing signer: reopen against the same durable store and root key.
+let root_signer = RootSigner::open(RootKey::import(root_key_backup)?, store).await?;
 let _identity = root_signer.identity_public_key();
 let _channel_signer = root_signer.open_channel(channel_key_id).await?;
 # Ok(())
@@ -31,6 +29,12 @@ owns record encoding and only asks the backend to read, replace, delete, or
 atomically compare-and-swap opaque byte values. An IndexedDB implementation can
 therefore live in a browser integration crate without adding browser
 dependencies here.
+
+> **Warning (no state rollback)**: Never snapshot and roll back a signer store
+> in production. Restoring stale signer state can reuse a V2 MuSig2 nonce and
+> leak the channel funding private key. `MemoryStore::snapshot` and
+> `MemoryStore::from_snapshot` are gated behind the `test-apis` feature for
+> restart-recovery tests only.
 
 Call `HostedSession::open_tenant_channel` with trusted network configuration,
 a `TenantOpeningRpc` transport, an independent `FundingVerifier`, and durable

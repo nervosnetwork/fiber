@@ -1085,6 +1085,13 @@ fn try_into_pub_nonce(bytes: Vec<u8>) -> Result<PubNonce, String> {
 fn try_into_channel_open_signer_material(
     material: fiber_json_types::ChannelOpenSignerMaterial,
 ) -> Result<ChannelOpenSignerMaterial, String> {
+    if material.v2_nonces.len() > fiber_types::channel_v2_validation::MAX_V2_NONCE_BATCH {
+        return Err(format!(
+            "v2_nonces batch size {} exceeds maximum ({})",
+            material.v2_nonces.len(),
+            fiber_types::channel_v2_validation::MAX_V2_NONCE_BATCH
+        ));
+    }
     Ok(ChannelOpenSignerMaterial {
         v2_nonces: material
             .v2_nonces
@@ -1110,6 +1117,22 @@ fn try_into_channel_open_signer_material(
 fn try_into_next_channel_signer_material(
     material: fiber_json_types::NextChannelSignerMaterial,
 ) -> Result<NextChannelSignerMaterial, String> {
+    if material.v2_nonces.len() > fiber_types::channel_v2_validation::MAX_V2_NONCE_BATCH {
+        return Err(format!(
+            "v2_nonces batch size {} exceeds maximum ({})",
+            material.v2_nonces.len(),
+            fiber_types::channel_v2_validation::MAX_V2_NONCE_BATCH
+        ));
+    }
+    if material.commitment_points.len()
+        > fiber_types::channel_v2_validation::MAX_V2_COMMITMENT_POINT_BATCH
+    {
+        return Err(format!(
+            "commitment_points batch size {} exceeds maximum ({})",
+            material.commitment_points.len(),
+            fiber_types::channel_v2_validation::MAX_V2_COMMITMENT_POINT_BATCH
+        ));
+    }
     Ok(NextChannelSignerMaterial {
         v2_nonces: material
             .v2_nonces
@@ -1409,5 +1432,60 @@ mod signing_snapshot_tests {
         };
         let err = to_rpc_musig2_signing_content(content).unwrap_err();
         assert!(err.contains("invalid cell_dep dep_type"), "{err}");
+    }
+
+    #[test]
+    fn v2_signer_material_rpc_enforces_batch_bounds() {
+        let pk = Privkey::from(&[1; 32]).pubkey();
+        let nonce_bytes = musig2::SecNonce::build([2; 32])
+            .build()
+            .public_nonce()
+            .serialize()
+            .to_vec();
+
+        let open_too_many_nonces = fiber_json_types::ChannelOpenSignerMaterial {
+            v2_nonces: vec![
+                nonce_bytes.clone();
+                fiber_types::channel_v2_validation::MAX_V2_NONCE_BATCH + 1
+            ],
+            base_public_keys: fiber_json_types::ChannelBasePublicKeys {
+                funding_pubkey: pk.into(),
+                tlc_base_key: pk.into(),
+            },
+            first_commitment_point: pk.into(),
+            second_commitment_point: pk.into(),
+            commitment_nonce: nonce_bytes.clone(),
+            next_commitment_nonce: nonce_bytes.clone(),
+            revocation_nonce: nonce_bytes.clone(),
+            channel_announcement_nonce: None,
+        };
+        let err = super::try_into_channel_open_signer_material(open_too_many_nonces).unwrap_err();
+        assert!(err.contains("v2_nonces batch size"), "{err}");
+
+        let next_too_many_nonces = fiber_json_types::NextChannelSignerMaterial {
+            v2_nonces: vec![
+                nonce_bytes;
+                fiber_types::channel_v2_validation::MAX_V2_NONCE_BATCH + 1
+            ],
+            commitment_points: vec![],
+            next_commitment_point: None,
+            next_commitment_nonce: None,
+            next_revocation_nonce: None,
+        };
+        let err = try_into_next_channel_signer_material(next_too_many_nonces).unwrap_err();
+        assert!(err.contains("v2_nonces batch size"), "{err}");
+
+        let next_too_many_points = fiber_json_types::NextChannelSignerMaterial {
+            v2_nonces: vec![],
+            commitment_points: (0
+                ..=fiber_types::channel_v2_validation::MAX_V2_COMMITMENT_POINT_BATCH as u64)
+                .map(|n| (n, pk.into()))
+                .collect(),
+            next_commitment_point: None,
+            next_commitment_nonce: None,
+            next_revocation_nonce: None,
+        };
+        let err = try_into_next_channel_signer_material(next_too_many_points).unwrap_err();
+        assert!(err.contains("commitment_points batch size"), "{err}");
     }
 }

@@ -40,8 +40,7 @@ pub fn musig2_from_rpc(content: JsonMusig2SigningContent) -> Result<Musig2Signin
             commitment_number: content.slot.commitment_number,
         },
         commitment_counter: content.commitment_counter.map(commitment_counter_from_rpc),
-        key_agg_ctx: KeyAggContext::from_bytes(&content.key_agg_ctx)
-            .map_err(|error| error.to_string())?,
+        key_agg_ctx: parse_key_agg_ctx_checked(&content.key_agg_ctx)?,
         agg_nonce: AggNonce::from_bytes(&content.agg_nonce).map_err(|error| error.to_string())?,
         content: musig2_signable_from_rpc(content.content)?,
     })
@@ -200,6 +199,37 @@ pub fn settlement_binding<'a>(
         remote_settlement_key,
         for_remote: Some(for_remote),
     }
+}
+
+fn parse_key_agg_ctx_checked(bytes: &[u8]) -> Result<KeyAggContext, String> {
+    // Pre-validate `musig2::KeyAggContext::from_bytes` wire layout so malformed
+    // input cannot panic on `n_pubkey == 0` or `n_pubkey * 33` overflow on wasm32.
+    if bytes.len() < 38 {
+        return Err("invalid key_agg_ctx: too short".to_string());
+    }
+    let has_tweak = (bytes[0] & 0b10) != 0;
+    let cursor = if has_tweak { 1 + 32 } else { 1 };
+    let count_end = cursor + 4;
+    if bytes.len() < count_end {
+        return Err("invalid key_agg_ctx: truncated pubkey count".to_string());
+    }
+    let n_pubkey = u32::from_be_bytes([
+        bytes[cursor],
+        bytes[cursor + 1],
+        bytes[cursor + 2],
+        bytes[cursor + 3],
+    ]);
+    if n_pubkey == 0 {
+        return Err("invalid key_agg_ctx: pubkey count must be non-zero".to_string());
+    }
+    let expected_remaining = u64::from(n_pubkey)
+        .checked_mul(33)
+        .ok_or_else(|| "invalid key_agg_ctx: pubkey length overflow".to_string())?;
+    let actual_remaining = (bytes.len() - count_end) as u64;
+    if expected_remaining != actual_remaining {
+        return Err("invalid key_agg_ctx: pubkey byte length mismatch".to_string());
+    }
+    KeyAggContext::from_bytes(bytes).map_err(|error| error.to_string())
 }
 
 fn nonce_purpose_from_rpc(purpose: fiber_json_types::NoncePurpose) -> NoncePurpose {
@@ -443,5 +473,59 @@ mod tests {
         assert!(for_remote);
         assert_eq!(data.tlcs[0].payment_hash, payment_hash);
         assert!(matches!(data.tlcs[0].tlc_id, TLCId::Received(42)));
+    }
+
+    #[test]
+    fn parse_key_agg_ctx_checked_rejects_malformed_and_overflow_counts() {
+        // Too short (< 38 bytes).
+        assert!(parse_key_agg_ctx_checked(&[]).is_err());
+        assert!(parse_key_agg_ctx_checked(&[0u8; 37]).is_err());
+
+        // n_pubkey == 0 (would panic inside KeyAggContext::new if unchecked).
+        let mut zero_pubkeys = vec![0u8; 38];
+        zero_pubkeys[1..5].copy_from_slice(&0u32.to_be_bytes());
+        let err = parse_key_agg_ctx_checked(&zero_pubkeys).unwrap_err();
+        assert!(err.contains("non-zero"), "{err}");
+
+        // n_pubkey = 0x07c1_f07d (0x07c1_f07d * 33 wraps around 2^32 on wasm32).
+        let mut overflow_no_tweak = vec![0u8; 38];
+        overflow_no_tweak[0] = 0b00;
+        overflow_no_tweak[1..5].copy_from_slice(&0x07c1_f07du32.to_be_bytes());
+        let err = parse_key_agg_ctx_checked(&overflow_no_tweak).unwrap_err();
+        assert!(err.contains("length mismatch"), "{err}");
+
+        // Same overflow payload with tweak flag set (header_byte & 0b10 != 0).
+        let mut overflow_with_tweak = vec![0u8; 1 + 32 + 4 + 33];
+        overflow_with_tweak[0] = 0b10;
+        overflow_with_tweak[33..37].copy_from_slice(&0x07c1_f07du32.to_be_bytes());
+        let err = parse_key_agg_ctx_checked(&overflow_with_tweak).unwrap_err();
+        assert!(err.contains("length mismatch"), "{err}");
+
+        // Valid KeyAggContext round-trips cleanly (with and without tweak).
+        let pk1 = Pubkey::from(PublicKey::from_secret_key(
+            SECP256K1,
+            &SecretKey::from_byte_array(&[3u8; 32]).expect("pk1"),
+        ));
+        let pk2 = Pubkey::from(PublicKey::from_secret_key(
+            SECP256K1,
+            &SecretKey::from_byte_array(&[4u8; 32]).expect("pk2"),
+        ));
+        let ctx = KeyAggContext::new([pk1, pk2]).expect("key agg");
+        let serialized = ctx.serialize();
+        let parsed = parse_key_agg_ctx_checked(&serialized).expect("valid key agg");
+        assert_eq!(parsed.serialize(), serialized);
+
+        // Trailing garbage byte rejected.
+        let mut trailing = serialized.clone();
+        trailing.push(0);
+        assert!(parse_key_agg_ctx_checked(&trailing).is_err());
+
+        // Tweaked KeyAggContext also round-trips cleanly.
+        let tweak = SecretKey::from_byte_array(&[9u8; 32]).expect("tweak");
+        let tweaked = ctx.with_plain_tweak(tweak).expect("tweaked");
+        let tweaked_bytes = tweaked.serialize();
+        let parsed_tweaked =
+            parse_key_agg_ctx_checked(&tweaked_bytes).expect("valid tweaked key agg");
+        assert_eq!(parsed_tweaked.serialize(), tweaked_bytes);
     }
 }

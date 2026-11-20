@@ -30,7 +30,7 @@ getrandom = { version = "0.3", features = ["wasm_js"] }
 default = ["json"]
 # JSON-RPC conversions for `get_channel_signing_status` / `submit_channel_signature`.
 json = ["dep:fiber-json-types", "dep:ckb-jsonrpc-types"]
-# Exposes `SigningPolicy::Always` for test fixtures.
+# Exposes test-only helpers (`SigningPolicy::Always`, `MemoryStore::snapshot`/`from_snapshot`).
 test-apis = []
 
 [dev-dependencies]

@@ -159,25 +159,28 @@ fn context(
     Ok(())
 }
 
+/// Maximum number of V2 public nonces accepted in a single RPC request.
+pub const MAX_V2_NONCE_BATCH: usize = 128;
+/// Maximum number of V2 commitment points accepted in a single RPC request.
+pub const MAX_V2_COMMITMENT_POINT_BATCH: usize = 16;
+/// Maximum number of unused V2 public nonces persisted in a channel's pool.
+pub const MAX_V2_NONCE_POOL_SIZE: usize = 256;
+
 fn external_allocations(channel: &ChannelActorData, key: &ValidationKey<'_>) -> Result<(), String> {
     let allocations = &channel.signing_context.v2_allocations;
     let pool = &channel.signing_context.v2_nonce_pool;
-    for (index, public) in pool.iter().enumerate() {
-        check(
-            !pool[..index].contains(public)
-                && !allocations.iter().any(|r| &r.public_nonce == public),
-            "Duplicate or already allocated external V2 pool nonce",
-        )?;
-    }
-    for (index, record) in allocations.iter().enumerate() {
+    check(
+        pool.len() <= MAX_V2_NONCE_POOL_SIZE,
+        "External V2 nonce pool exceeds maximum size",
+    )?;
+    let mut allocated_nonces = std::collections::HashSet::with_capacity(allocations.len());
+    for record in allocations {
         check(
             record.seed == [0; 32] && record.channel_id == channel.id,
             "External V2 allocation contains secret material or wrong channel",
         )?;
         check(
-            !allocations[..index]
-                .iter()
-                .any(|r| r.public_nonce == record.public_nonce),
+            allocated_nonces.insert(record.public_nonce.serialize()),
             "Duplicate external V2 allocation",
         )?;
         check(
@@ -217,12 +220,25 @@ fn external_allocations(channel: &ChannelActorData, key: &ValidationKey<'_>) -> 
             .map_err(|_| "Invalid external V2 message")?;
         context(record, key, keys, message, None, true)?;
     }
-    for (index, (number, point)) in channel
-        .signing_context
-        .v2_commitment_points
-        .iter()
-        .enumerate()
-    {
+    let mut seen_pool = std::collections::HashSet::with_capacity(pool.len());
+    for public in pool {
+        let encoded = public.serialize();
+        check(
+            !allocated_nonces.contains(&encoded) && seen_pool.insert(encoded),
+            "Duplicate or already allocated external V2 pool nonce",
+        )?;
+    }
+    let mut seen_points = std::collections::HashMap::with_capacity(
+        channel.signing_context.v2_commitment_points.len(),
+    );
+    for (number, point) in &channel.signing_context.v2_commitment_points {
+        if let Some(existing) = seen_points.get(number) {
+            check(
+                existing == point,
+                "Conflicting external V2 commitment points",
+            )?;
+            continue;
+        }
         check(
             crate::channel::is_tlc_key_derivation_safe(
                 &channel.local_channel_public_keys.tlc_base_key,
@@ -230,12 +246,7 @@ fn external_allocations(channel: &ChannelActorData, key: &ValidationKey<'_>) -> 
             ),
             "Unsafe external V2 commitment point",
         )?;
-        check(
-            !channel.signing_context.v2_commitment_points[..index]
-                .iter()
-                .any(|(n, p)| n == number && p != point),
-            "Conflicting external V2 commitment points",
-        )?;
+        seen_points.insert(*number, *point);
     }
     Ok(())
 }

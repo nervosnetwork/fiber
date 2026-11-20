@@ -9632,6 +9632,10 @@ impl ChannelActorState {
 
         self.remote_commitment_points
             .retain(|(number, _)| points.contains(number));
+        let local_commitment_number = self.get_local_commitment_number();
+        self.signing_context
+            .v2_commitment_points
+            .retain(|(number, _)| *number >= local_commitment_number || points.contains(number));
     }
 
     pub fn is_tx_final(&self, tx: &Transaction) -> Result<bool, ProcessingChannelError> {
@@ -13677,46 +13681,72 @@ impl ChannelActorState {
         nonces: Vec<PubNonce>,
         points: Vec<(u64, Pubkey)>,
     ) -> ProcessingChannelResult {
-        let mut fresh = Vec::new();
-        for nonce in nonces {
-            if fresh.contains(&nonce)
-                || self.signing_context.v2_nonce_pool.contains(&nonce)
-                || self
-                    .signing_context
+        // Opening material appends 3 legacy nonces on top of the RPC v2_nonces batch.
+        const MAX_INSTALL_NONCE_BATCH: usize =
+            fiber_types::channel_v2_validation::MAX_V2_NONCE_BATCH + 3;
+        if nonces.len() > MAX_INSTALL_NONCE_BATCH {
+            return Err(invalid("External V2 nonce batch exceeds maximum size"));
+        }
+        if points.len() > fiber_types::channel_v2_validation::MAX_V2_COMMITMENT_POINT_BATCH {
+            return Err(invalid(
+                "External V2 commitment point batch exceeds maximum size",
+            ));
+        }
+        if self
+            .signing_context
+            .v2_nonce_pool
+            .len()
+            .saturating_add(nonces.len())
+            > fiber_types::channel_v2_validation::MAX_V2_NONCE_POOL_SIZE
+        {
+            return Err(invalid("External V2 nonce pool exceeds maximum size"));
+        }
+
+        let mut existing_nonces: HashSet<[u8; 66]> = self
+            .signing_context
+            .v2_nonce_pool
+            .iter()
+            .map(PubNonce::serialize)
+            .chain(
+                self.signing_context
                     .v2_allocations
                     .iter()
-                    .any(|r| r.public_nonce == nonce)
-            {
+                    .map(|r| r.public_nonce.serialize()),
+            )
+            .collect();
+        let mut fresh = Vec::with_capacity(nonces.len());
+        for nonce in nonces {
+            if !existing_nonces.insert(nonce.serialize()) {
                 return Err(invalid(
                     "External V2 nonce was already allocated or published",
                 ));
             }
             fresh.push(nonce);
         }
-        for (number, point) in &points {
-            if points.iter().any(|(n, p)| n == number && p != point) {
-                return Err(invalid(
-                    "Conflicting external V2 commitment points in refill",
-                ));
+
+        let mut existing_points: HashMap<u64, Pubkey> = self
+            .signing_context
+            .v2_commitment_points
+            .iter()
+            .copied()
+            .collect();
+        let mut new_points = Vec::with_capacity(points.len());
+        for (number, point) in points {
+            if let Some(&existing) = existing_points.get(&number) {
+                if existing != point {
+                    return Err(invalid("Conflicting external V2 commitment point"));
+                }
+                continue;
             }
-            if !is_tlc_key_derivation_safe(&self.local_channel_public_keys.tlc_base_key, point) {
+            if !is_tlc_key_derivation_safe(&self.local_channel_public_keys.tlc_base_key, &point) {
                 return Err(invalid("Unsafe external V2 commitment point"));
             }
-            if self
-                .signing_context
-                .v2_commitment_points
-                .iter()
-                .any(|(n, p)| n == number && p != point)
-            {
-                return Err(invalid("Conflicting external V2 commitment point"));
-            }
+            existing_points.insert(number, point);
+            new_points.push((number, point));
         }
+
         self.signing_context.v2_nonce_pool.extend(fresh);
-        for point in points {
-            if !self.signing_context.v2_commitment_points.contains(&point) {
-                self.signing_context.v2_commitment_points.push(point);
-            }
-        }
+        self.signing_context.v2_commitment_points.extend(new_points);
         Ok(())
     }
 

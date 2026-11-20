@@ -132,7 +132,7 @@ metrics = ["dep:metrics", "tentacle/metrics", "tokio-metrics", "metrics-exporter
 pprof = ["dep:pprof"]
 
 [dev-dependencies]
-fiber-lsp-sdk = { path = "../fiber-lsp-sdk" }
+fiber-lsp-sdk = { path = "../fiber-lsp-sdk", features = ["test-apis"] }
 jsonrpc-core = "18"
 ciborium = "0.2.2"
 ckb-testtool = "1"
