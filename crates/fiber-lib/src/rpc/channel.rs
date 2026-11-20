@@ -132,6 +132,7 @@ fn pending_accept_channel_to_rpc(pending: PendingAcceptChannel) -> Channel {
         enabled: false,
         tlc_expiry_delta: 0,
         tlc_fee_proportional_millionths: 0,
+        commitment_delay_epoch: Some(pending.commitment_delay_epoch.into()),
         shutdown_transaction_hash: None,
         failure_detail: None,
     }
@@ -379,6 +380,7 @@ where
                 tlc_fee_proportional_millionths: state
                     .local_tlc_info
                     .tlc_fee_proportional_millionths,
+                commitment_delay_epoch: Some(state.commitment_delay_epoch.into()),
                 shutdown_transaction_hash: state.shutdown_transaction_hash.clone(),
                 failure_detail,
             });
@@ -462,6 +464,7 @@ where
                     enabled: false,
                     tlc_expiry_delta: 0,
                     tlc_fee_proportional_millionths: 0,
+                    commitment_delay_epoch: None,
                     shutdown_transaction_hash: None,
                     failure_detail: record.failure_detail,
                 });
