@@ -11,6 +11,7 @@ use clap_serde_derive::{
     ClapSerde,
 };
 use fiber_types::protocol::AnnouncedNodeName;
+use fiber_types::Pubkey;
 pub use fiber_types::DEFAULT_FINAL_TLC_EXPIRY_DELTA;
 #[cfg(not(any(test, feature = "bench")))]
 use once_cell::sync::OnceCell;
@@ -196,6 +197,51 @@ pub struct FiberConfig {
         help = "whether to accept open channel requests with ckb funding amount automatically, unit: shannons [default: 10000000000 shannons], if this is set to zero, it means to disable auto accept"
     )]
     pub auto_accept_channel_ckb_funding_amount: Option<u64>,
+
+    /// Hex pubkey of the liquidity node this receiver registers with for JIT channels.
+    #[arg(
+        name = "FIBER_JIT_LSP_PUBKEY",
+        long = "fiber-jit-lsp-pubkey",
+        env,
+        help = "Hex pubkey of the liquidity node this receiver registers with for JIT channels"
+    )]
+    pub jit_lsp_pubkey: Option<String>,
+
+    /// Enable serving just-in-time channels to registered receivers.
+    #[arg(
+        name = "FIBER_JIT_SERVICE_ENABLED",
+        long = "fiber-jit-service-enabled",
+        env,
+        help = "Enable serving just-in-time channels to registered receivers [default: false]"
+    )]
+    pub jit_service_enabled: Option<bool>,
+
+    /// Fee, in the channel asset, charged for opening a JIT channel.
+    #[arg(
+        name = "FIBER_JIT_OPEN_FEE",
+        long = "fiber-jit-open-fee",
+        env,
+        help = "Fee charged for opening a JIT channel, in the channel asset [default: 0]"
+    )]
+    pub jit_open_fee: Option<u128>,
+
+    /// Smallest payment this node will open a JIT channel for.
+    #[arg(
+        name = "FIBER_JIT_MIN_AMOUNT",
+        long = "fiber-jit-min-amount",
+        env,
+        help = "Smallest payment this node will open a JIT channel for [default: 0]"
+    )]
+    pub jit_min_amount: Option<u128>,
+
+    /// Largest CKB funding amount this node will put into a JIT channel, in shannons.
+    #[arg(
+        name = "FIBER_JIT_MAX_FUNDING",
+        long = "fiber-jit-max-funding",
+        env,
+        help = "Largest CKB funding amount this node will put into a JIT channel, in shannons [default: 0]"
+    )]
+    pub jit_max_funding: Option<u128>,
 
     /// The expiry delta to forward a tlc, in milliseconds. [default: 86400000 (1 day)]
     #[arg(
@@ -581,6 +627,44 @@ impl FiberConfig {
             .unwrap_or(DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT)
     }
 
+    /// Parsed liquidity-node pubkey this receiver registers with, if configured.
+    pub fn jit_lsp_pubkey(&self) -> Option<Pubkey> {
+        self.jit_lsp_pubkey
+            .as_deref()
+            .map(|raw| parse_jit_pubkey(raw).expect("invalid fiber-jit-lsp-pubkey"))
+    }
+
+    pub fn jit_service_enabled(&self) -> bool {
+        self.jit_service_enabled.unwrap_or(false)
+    }
+
+    pub fn jit_open_fee(&self) -> u128 {
+        self.jit_open_fee.unwrap_or(0)
+    }
+
+    pub fn jit_min_amount(&self) -> u128 {
+        self.jit_min_amount.unwrap_or(0)
+    }
+
+    pub fn jit_max_funding(&self) -> u128 {
+        self.jit_max_funding.unwrap_or(0)
+    }
+
+    /// True when this node should advertise `JIT_CHANNEL`.
+    pub fn jit_channel_advertised(&self) -> bool {
+        self.jit_lsp_pubkey().is_some() || self.jit_service_enabled()
+    }
+
+    pub fn jit_channel_config(&self) -> JitChannelConfig {
+        JitChannelConfig {
+            lsp_pubkey: self.jit_lsp_pubkey(),
+            service_enabled: self.jit_service_enabled(),
+            open_fee: self.jit_open_fee(),
+            min_amount: self.jit_min_amount(),
+            max_funding: self.jit_max_funding(),
+        }
+    }
+
     pub fn tlc_expiry_delta(&self) -> u64 {
         self.tlc_expiry_delta.unwrap_or(DEFAULT_TLC_EXPIRY_DELTA)
     }
@@ -650,8 +734,30 @@ impl FiberConfig {
         let mut fv = FeatureVector::default();
         // Channel V2 combines independent nonce sessions and full on-chain hashes.
         fv.set_channel_v2_required();
+        if self.jit_channel_advertised() {
+            fv.set_jit_channel_optional();
+        }
         fv
     }
+}
+
+/// Runtime JIT channel settings copied onto the network actor.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct JitChannelConfig {
+    pub lsp_pubkey: Option<Pubkey>,
+    pub service_enabled: bool,
+    pub open_fee: u128,
+    pub min_amount: u128,
+    pub max_funding: u128,
+}
+
+fn parse_jit_pubkey(raw: &str) -> std::result::Result<Pubkey, String> {
+    let hex_str = raw
+        .strip_prefix("0x")
+        .or_else(|| raw.strip_prefix("0X"))
+        .unwrap_or(raw);
+    let bytes = hex::decode(hex_str).map_err(|err| err.to_string())?;
+    Pubkey::from_slice(&bytes).map_err(|err| err.to_string())
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Eq, PartialEq, Hash)]

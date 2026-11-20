@@ -5926,6 +5926,7 @@ pub struct NetworkActorState<S, C> {
     requested_disconnect_peers: HashSet<Pubkey>,
     // The features of the node, used to indicate the capabilities of the node.
     features: FeatureVector,
+    jit: super::JitChannelConfig,
     channel_ephemeral_config: ChannelEphemeralConfig,
 
     // Inflight payment actors
@@ -8655,6 +8656,7 @@ where
             peer_reconnect_backoff_attempts: Default::default(),
             requested_disconnect_peers: Default::default(),
             features,
+            jit: config.jit_channel_config(),
             channel_ephemeral_config: ChannelEphemeralConfig {
                 funding_timeout_seconds: config.funding_timeout_seconds,
                 external_funding_timeout_seconds: config.external_funding_timeout_seconds,
@@ -8671,6 +8673,14 @@ where
             #[cfg(test)]
             test_held_fiber_messages: Default::default(),
         };
+        debug!(
+            lsp = ?state.jit.lsp_pubkey,
+            service = state.jit.service_enabled,
+            open_fee = state.jit.open_fee,
+            min_amount = state.jit.min_amount,
+            max_funding = state.jit.max_funding,
+            "JIT channel config"
+        );
 
         if let Some(node_announcement) = state.get_or_create_new_node_announcement_message() {
             let mut graph = self.network_graph.write().await;

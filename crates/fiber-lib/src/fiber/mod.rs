@@ -23,7 +23,7 @@ pub(crate) mod proxy;
 pub(crate) mod session;
 mod settle_tlc_set_command;
 
-pub use config::FiberConfig;
+pub use config::{FiberConfig, JitChannelConfig};
 pub use fiber_types::*;
 pub use in_flight_ckb_tx_actor::{
     InFlightCkbTxActor, InFlightCkbTxActorArguments, InFlightCkbTxActorMessage, InFlightCkbTxKind,
