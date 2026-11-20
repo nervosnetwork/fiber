@@ -16,8 +16,7 @@ use jsonrpsee::{
 #[cfg(feature = "lsp")]
 use crate::lsp::LspServiceMessage;
 use crate::rpc::{
-    biscuit::extract_tenant_id, middleware::RpcAuthorization, server::RpcServerStore,
-    tenant::scoped_rpc_node_id,
+    middleware::RpcAuthorization, server::RpcServerStore, tenant::scoped_rpc_node_id,
 };
 
 use service::{EventStream, Source, SubscriptionService};
@@ -262,14 +261,14 @@ impl<S: RpcServerStore + Clone + Send + Sync + 'static> SubscriptionRpcServerImp
         extensions: &Extensions,
         topic: SubscriptionTopic,
         options: SubscriptionOptions,
-    ) -> Result<EventStream> {
+    ) -> Result<(EventStream, Option<transport::RevocationWatch>)> {
         // The middleware has already checked write("subscriptions"). Only the
         // selected topic's read policy and scope are resolved here, once.
         let method = match topic {
             SubscriptionTopic::ChannelSigning => "get_channel_signing_status",
             SubscriptionTopic::WatchtowerSigning => "get_watchtower_signing_status",
         };
-        let (tenant, node) = {
+        let (tenant, node, revocation) = {
             let authorization = extensions
                 .get::<RpcAuthorization>()
                 .ok_or_else(|| anyhow!("RPC authorization missing"))?;
@@ -277,15 +276,25 @@ impl<S: RpcServerStore + Clone + Send + Sync + 'static> SubscriptionRpcServerImp
                 .authorize(method)
                 .map_err(|_| anyhow!("Unauthorized"))?
             {
-                Some((biscuit, _)) => (
-                    extract_tenant_id(&biscuit)?,
-                    if topic == SubscriptionTopic::WatchtowerSigning {
+                Some((biscuit, _)) => {
+                    let meta = crate::rpc::biscuit::extract_token_metadata(&biscuit)?;
+                    let node = if topic == SubscriptionTopic::WatchtowerSigning {
                         scoped_rpc_node_id(&biscuit)?
                     } else {
                         NodeId::local()
-                    },
-                ),
-                None => (None, NodeId::local()),
+                    };
+                    let revocation = meta.tenant_id.as_ref().and_then(|tenant_id| {
+                        authorization.auth.tenant_token_epochs().map(|epochs| {
+                            transport::RevocationWatch::new(
+                                tenant_id.clone(),
+                                meta.token_epoch.unwrap_or(0),
+                                epochs.clone(),
+                            )
+                        })
+                    });
+                    (meta.tenant_id, node, revocation)
+                }
+                None => (None, NodeId::local(), None),
             }
         };
         #[cfg(not(feature = "lsp"))]
@@ -307,7 +316,7 @@ impl<S: RpcServerStore + Clone + Send + Sync + 'static> SubscriptionRpcServerImp
             if topic == SubscriptionTopic::WatchtowerSigning && node != context.node_id {
                 bail!("watchtower identity does not match tenant");
             }
-            return self
+            let stream = self
                 .service
                 .clone()
                 .subscribe_async(
@@ -322,9 +331,11 @@ impl<S: RpcServerStore + Clone + Send + Sync + 'static> SubscriptionRpcServerImp
                     topic,
                     options,
                 )
-                .await;
+                .await?;
+            return Ok((stream, revocation));
         }
-        self.service
+        let stream = self
+            .service
             .clone()
             .subscribe_async(
                 Source {
@@ -338,7 +349,8 @@ impl<S: RpcServerStore + Clone + Send + Sync + 'static> SubscriptionRpcServerImp
                 topic,
                 options,
             )
-            .await
+            .await?;
+        Ok((stream, revocation))
     }
 }
 
@@ -356,8 +368,8 @@ impl<S: RpcServerStore + Clone + Send + Sync + 'static> SubscriptionRpcServer
         let stream = self
             .stream(extensions, topic, options.unwrap_or_default())
             .await;
-        let stream = match stream {
-            Ok(stream) => stream,
+        let (stream, revocation) = match stream {
+            Ok(pair) => pair,
             Err(error) => {
                 pending
                     .reject(ErrorObjectOwned::owned(
@@ -371,7 +383,7 @@ impl<S: RpcServerStore + Clone + Send + Sync + 'static> SubscriptionRpcServer
         };
         // Credentials and RPC extensions are not retained by the event stream.
         let sink = pending.accept().await?;
-        transport::forward(sink, stream)
+        transport::forward(sink, stream, revocation)
             .await
             .map_err(|error| error.to_string().into())
     }

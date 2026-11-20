@@ -206,9 +206,15 @@ pub mod server {
         // To keep the server running the `server_handle`
         // must be kept and it can also be used to stop the server.
 
+        const MAX_CONCURRENT_CONNECTIONS: usize = 1024;
+        const MAX_BATCH_REQUESTS: u32 = 32;
+
         let mut server_config = jsonrpsee::server::ServerConfig::builder()
             .max_subscriptions_per_connection(32)
             .set_message_buffer_capacity(64)
+            .set_batch_request_config(jsonrpsee::server::BatchRequestConfig::Limit(
+                MAX_BATCH_REQUESTS,
+            ))
             .enable_ws_ping(jsonrpsee::server::PingConfig::default());
         if config.ws_only {
             server_config = server_config.ws_only();
@@ -224,6 +230,7 @@ pub mod server {
                 .to_service_builder(),
         };
 
+        let conn_slots = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
         tokio::spawn(async move {
             loop {
                 // accept connection or stop
@@ -239,6 +246,11 @@ pub mod server {
                     }
                     _ = per_conn.stop_handle.clone().shutdown() => break,
                 };
+                let Ok(conn_permit) = conn_slots.clone().try_acquire_owned() else {
+                    tracing::warn!("RPC connection limit ({MAX_CONCURRENT_CONNECTIONS}) reached; dropping incoming connection");
+                    drop(sock);
+                    continue;
+                };
 
                 let per_conn2 = per_conn.clone();
                 let auth = auth.clone();
@@ -251,11 +263,18 @@ pub mod server {
                             svc_builder,
                         } = per_conn2.clone();
 
-                        let browser_protocol =
-                            if browser_ws && jsonrpsee::server::ws::is_upgrade_request(&req) {
-                                prepare_browser_websocket(req.headers_mut())
+                        let is_ws_upgrade = jsonrpsee::server::ws::is_upgrade_request(&req);
+                        let browser_protocol = if browser_ws && is_ws_upgrade {
+                            prepare_browser_websocket(req.headers_mut())
+                        } else {
+                            Ok(false)
+                        };
+                        let ws_auth_result =
+                            if enable_auth && is_ws_upgrade && browser_protocol.is_ok() {
+                                crate::rpc::middleware::extract_bearer_token(req.headers())
+                                    .and_then(|token| auth.validate_token_for_ws_upgrade(&token))
                             } else {
-                                Ok(false)
+                                Ok(())
                             };
                         let headers = req.headers().clone();
                         let auth = auth.clone();
@@ -282,6 +301,16 @@ pub mod server {
                                     return Ok(response);
                                 }
                             };
+                            if let Err(err) = ws_auth_result {
+                                tracing::debug!(
+                                    "Rejecting unauthenticated WebSocket upgrade: {err}"
+                                );
+                                let mut response = hyper::Response::new(
+                                    jsonrpsee::server::HttpBody::from("Unauthorized".to_owned()),
+                                );
+                                *response.status_mut() = hyper::StatusCode::UNAUTHORIZED;
+                                return Ok(response);
+                            }
                             svc.call(req).await.map(|mut response| {
                                 if browser_protocol
                                     && response.status() == hyper::StatusCode::SWITCHING_PROTOCOLS
@@ -329,11 +358,14 @@ pub mod server {
                     tower::ServiceBuilder::new().service(svc).boxed_clone()
                 };
 
-                tokio::spawn(serve_with_graceful_shutdown(
-                    sock,
-                    svc,
-                    stop_handle.clone().shutdown(),
-                ));
+                use futures::FutureExt;
+                tokio::spawn(
+                    serve_with_graceful_shutdown(sock, svc, stop_handle.clone().shutdown()).map(
+                        move |_| {
+                            drop(conn_permit);
+                        },
+                    ),
+                );
             }
         });
     }

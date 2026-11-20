@@ -400,16 +400,15 @@ impl Actor for LspService {
         myself.send_interval(Duration::from_secs(5), || {
             LspServiceMessage::ReconcileInFlightDeliveries
         });
-        let token_epochs: crate::rpc::biscuit::TenantTokenEpochs =
-            std::sync::Arc::new(parking_lot::RwLock::new(
-                registry
-                    .list()
-                    .map_err(anyhow::Error::msg)?
-                    .into_iter()
-                    .filter(|record| record.token_epoch > 0)
-                    .map(|record| (record.tenant_id, record.token_epoch))
-                    .collect(),
-            ));
+        let token_epochs = crate::rpc::biscuit::TenantTokenEpochs::from_map(
+            registry
+                .list()
+                .map_err(anyhow::Error::msg)?
+                .into_iter()
+                .filter(|record| record.token_epoch > 0)
+                .map(|record| (record.tenant_id, record.token_epoch))
+                .collect(),
+        );
         Ok(LspServiceState {
             config: args.config,
             public_node_id: args.public_node_id,
@@ -471,7 +470,7 @@ impl Actor for LspService {
                     .registry
                     .revoke_tenant_tokens(&tenant_id)
                     .inspect(|&epoch| {
-                        state.token_epochs.write().insert(tenant_id, epoch);
+                        state.token_epochs.set(tenant_id, epoch);
                     });
                 let _ = reply.send(result);
             }

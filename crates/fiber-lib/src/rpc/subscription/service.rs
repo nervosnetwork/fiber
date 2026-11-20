@@ -22,13 +22,32 @@ use crate::{
 };
 
 const MAX_SUBSCRIPTIONS: usize = 16_384;
+const MAX_SUBSCRIPTIONS_PER_TENANT: usize = 32;
 const MAX_FILTER_CHANNELS: usize = 256;
 
 pub(super) type EventStream = BoxStream<'static, Result<SubscriptionEvent>>;
 
+struct TenantSubGuard {
+    counts: Arc<parking_lot::Mutex<HashMap<String, usize>>>,
+    tenant: String,
+}
+
+impl Drop for TenantSubGuard {
+    fn drop(&mut self) {
+        let mut counts = self.counts.lock();
+        if let Some(count) = counts.get_mut(&self.tenant) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                counts.remove(&self.tenant);
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct SubscriptionService {
     slots: Arc<Semaphore>,
+    per_tenant_counts: Arc<parking_lot::Mutex<HashMap<String, usize>>>,
     channels_enabled: bool,
     watchtower_enabled: bool,
 }
@@ -37,6 +56,7 @@ impl SubscriptionService {
     pub(super) fn new(channels_enabled: bool, watchtower_enabled: bool) -> Self {
         Self {
             slots: Arc::new(Semaphore::new(MAX_SUBSCRIPTIONS)),
+            per_tenant_counts: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             channels_enabled,
             watchtower_enabled,
         }
@@ -73,6 +93,20 @@ impl SubscriptionService {
         {
             bail!("too many channel filters");
         }
+        let tenant_guard = if let Some(tenant) = &source.tenant {
+            let mut counts = self.per_tenant_counts.lock();
+            let count = counts.entry(tenant.clone()).or_default();
+            if *count >= MAX_SUBSCRIPTIONS_PER_TENANT {
+                bail!("tenant subscription limit reached");
+            }
+            *count += 1;
+            Some(TenantSubGuard {
+                counts: self.per_tenant_counts.clone(),
+                tenant: tenant.clone(),
+            })
+        } else {
+            None
+        };
         let permit = self
             .slots
             .clone()
@@ -95,6 +129,7 @@ impl SubscriptionService {
             previous: initial,
             pending,
             _permit: permit,
+            _tenant_guard: tenant_guard,
         };
         // State owns no source or database handle after the initial read.
         Ok(stream::try_unfold(state, |mut state| async move {
@@ -153,6 +188,7 @@ struct State {
     previous: HashMap<Hash256, SubscriptionEvent>,
     pending: VecDeque<SubscriptionEvent>,
     _permit: OwnedSemaphorePermit,
+    _tenant_guard: Option<TenantSubGuard>,
 }
 
 pub(super) struct Source<S> {

@@ -210,8 +210,45 @@ fn build_rules() -> HashMap<&'static str, AuthRule> {
     b.0
 }
 
-/// Shared runtime map of each hosted tenant's minimum valid token epoch (`> 0`).
-pub type TenantTokenEpochs = std::sync::Arc<parking_lot::RwLock<HashMap<TenantId, u64>>>;
+/// Shared runtime map of each hosted tenant's minimum valid token epoch (`> 0`),
+/// paired with a `watch` notification channel so active WebSocket subscriptions
+/// terminate immediately on `lsp_revoke_tenant_tokens`.
+#[derive(Clone, Debug)]
+pub struct TenantTokenEpochs {
+    epochs: std::sync::Arc<parking_lot::RwLock<HashMap<TenantId, u64>>>,
+    revocation_tx: std::sync::Arc<tokio::sync::watch::Sender<u64>>,
+}
+
+impl Default for TenantTokenEpochs {
+    fn default() -> Self {
+        Self::from_map(HashMap::new())
+    }
+}
+
+impl TenantTokenEpochs {
+    pub fn from_map(map: HashMap<TenantId, u64>) -> Self {
+        let (tx, _) = tokio::sync::watch::channel(0u64);
+        Self {
+            epochs: std::sync::Arc::new(parking_lot::RwLock::new(map)),
+            revocation_tx: std::sync::Arc::new(tx),
+        }
+    }
+
+    pub fn get(&self, tenant_id: &TenantId) -> u64 {
+        self.epochs.read().get(tenant_id).copied().unwrap_or(0)
+    }
+
+    pub fn set(&self, tenant_id: TenantId, epoch: u64) {
+        self.epochs.write().insert(tenant_id, epoch);
+        self.revocation_tx.send_modify(|gen| {
+            *gen = gen.wrapping_add(1);
+        });
+    }
+
+    pub fn subscribe_revocations(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.revocation_tx.subscribe()
+    }
+}
 
 pub struct BiscuitAuth {
     pubkey: Option<PublicKey>,
@@ -255,6 +292,40 @@ impl BiscuitAuth {
     pub fn with_tenant_token_epochs(mut self, epochs: TenantTokenEpochs) -> Self {
         self.tenant_token_epochs = Some(epochs);
         self
+    }
+
+    pub(crate) fn tenant_token_epochs(&self) -> Option<&TenantTokenEpochs> {
+        self.tenant_token_epochs.as_ref()
+    }
+
+    /// Validate a Bearer token before upgrading an HTTP request to WebSocket:
+    /// checks signature, revocation list, runtime `lsp_enabled`, and `token_epoch`.
+    pub(crate) fn validate_token_for_ws_upgrade(&self, token: &str) -> Result<()> {
+        let b = self.extract_biscuit(token)?;
+        if b.revocation_identifiers()
+            .iter()
+            .any(|rev_id| self.revocation_list.contains(rev_id))
+        {
+            return Err(anyhow::anyhow!("Token is in revocation list"));
+        }
+        let meta = extract_token_metadata(&b)?;
+        if let Some(tenant_id) = meta.tenant_id {
+            if !cfg!(feature = "lsp") || !self.lsp_enabled {
+                return Err(anyhow::anyhow!(
+                    "tenant token rejected because hosted LSP service is not enabled"
+                ));
+            }
+            if let Some(epochs) = &self.tenant_token_epochs {
+                let current_epoch = epochs.get(&tenant_id);
+                let token_epoch = meta.token_epoch.unwrap_or(0);
+                if token_epoch < current_epoch {
+                    return Err(anyhow::anyhow!(
+                        "tenant token has been revoked (epoch {token_epoch} < {current_epoch})"
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     pub fn get_rule(&self, method: &str) -> Result<&AuthRule> {
@@ -304,15 +375,16 @@ impl BiscuitAuth {
         }
         // Reject tenant tokens when hosted LSP is not enabled at runtime, or when
         // the tenant's token epoch has advanced past this token's epoch.
-        if let Some(tenant_id) = extract_tenant_id(&b)? {
+        let meta = extract_token_metadata(&b)?;
+        if let Some(tenant_id) = meta.tenant_id {
             if !cfg!(feature = "lsp") || !self.lsp_enabled {
                 return Err(anyhow::anyhow!(
                     "tenant token cannot call {method} because hosted LSP service is not enabled"
                 ));
             }
             if let Some(epochs) = &self.tenant_token_epochs {
-                let current_epoch = epochs.read().get(&tenant_id).copied().unwrap_or(0);
-                let token_epoch = extract_token_epoch(&b)?.unwrap_or(0);
+                let current_epoch = epochs.get(&tenant_id);
+                let token_epoch = meta.token_epoch.unwrap_or(0);
                 if token_epoch < current_epoch {
                     return Err(anyhow::anyhow!(
                         "tenant token has been revoked (epoch {token_epoch} < {current_epoch})"
@@ -333,6 +405,60 @@ impl BiscuitAuth {
     pub fn check_permission(&self, method: &str, token: &str) -> Result<(Biscuit, &AuthRule)> {
         self.check_permission_with_time(method, token, now_timestamp_as_millis_u64())
     }
+}
+
+/// Authority-block metadata extracted from a Biscuit token in a single `Authorizer` pass.
+pub(crate) struct TokenMetadata {
+    pub(crate) tenant_id: Option<TenantId>,
+    pub(crate) token_epoch: Option<u64>,
+    pub(crate) node_id: Option<NodeId>,
+}
+
+/// Extract `tenant`, `token_epoch`, and `node` authority facts using one `Authorizer`.
+pub(crate) fn extract_token_metadata(token: &Biscuit) -> Result<TokenMetadata> {
+    let mut authorizer = build_authorizer(token)?;
+
+    let tenants: Vec<(String,)> = authorizer.query("data($id) <- tenant($id)")?;
+    let tenant_id = match tenants.as_slice() {
+        [] => None,
+        [(tenant_id,)] => Some(TenantId::new(tenant_id.clone()).map_err(anyhow::Error::msg)?),
+        _ => {
+            return Err(anyhow!(
+                "token authority block must contain at most one tenant fact"
+            ))
+        }
+    };
+
+    let epochs: Vec<(i64,)> = authorizer.query("data($epoch) <- token_epoch($epoch)")?;
+    let token_epoch = match epochs.as_slice() {
+        [] => None,
+        [(epoch,)] => Some(
+            u64::try_from(*epoch)
+                .map_err(|_| anyhow!("token authority block contains negative token_epoch"))?,
+        ),
+        _ => {
+            return Err(anyhow!(
+                "token authority block must contain at most one token_epoch fact"
+            ))
+        }
+    };
+
+    let nodes: Vec<(String,)> = authorizer.query("data($id) <- node($id)")?;
+    let node_id = match nodes.as_slice() {
+        [] => None,
+        [(id,)] => Some(NodeId::from_str(id.as_str())?),
+        _ => {
+            return Err(anyhow!(
+                "token authority block must contain at most one node fact"
+            ))
+        }
+    };
+
+    Ok(TokenMetadata {
+        tenant_id,
+        token_epoch,
+        node_id,
+    })
 }
 
 /// Extract node id from token
@@ -1152,7 +1278,7 @@ mod tests {
         // Revoke in DB and update shared epochs map -> epoch 0 and legacy tokens are immediately rejected.
         let new_epoch = registry.revoke_tenant_tokens(&tenant_id).unwrap();
         assert_eq!(new_epoch, 1);
-        epochs.write().insert(tenant_id, new_epoch);
+        epochs.set(tenant_id, new_epoch);
         assert!(auth
             .check_permission("new_invoice", &token_epoch_0)
             .err()

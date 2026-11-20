@@ -13,12 +13,10 @@ use hyper::HeaderMap;
 use jsonrpsee::core::middleware::{Batch, BatchEntry, BatchEntryErr, Notification};
 use jsonrpsee::server::middleware::rpc::RpcServiceT;
 use jsonrpsee::types::{ErrorObject, ErrorObjectOwned, Id, Request};
-use jsonrpsee::{Extensions, MethodResponse};
+use jsonrpsee::MethodResponse;
 
-use crate::rpc::biscuit::extract_tenant_id;
-use crate::rpc::tenant::{
-    enforce_tenant_method_allowlist, scoped_rpc_node_id, AuthenticatedTenant,
-};
+use crate::rpc::biscuit::extract_token_metadata;
+use crate::rpc::tenant::{enforce_tenant_method_allowlist, AuthenticatedTenant};
 
 use fiber_json_types::RpcContext;
 use fiber_types::NodeId;
@@ -96,17 +94,20 @@ pub struct BiscuitAuthMiddleware<S> {
     pub enable_auth: bool,
 }
 
+pub(super) fn extract_bearer_token(headers: &HeaderMap) -> Result<String> {
+    let auth_str = headers
+        .get(AUTHORIZATION)
+        .ok_or_else(|| anyhow!("no authorization header"))?
+        .to_str()?;
+    let token = auth_str
+        .strip_prefix(BEARER_PREFIX)
+        .ok_or_else(|| anyhow!("invalid authorization header"))?;
+    Ok(token.to_string())
+}
+
 impl<S> BiscuitAuthMiddleware<S> {
     fn auth_token(&self) -> Result<String> {
-        let auth_str = self
-            .headers
-            .get(AUTHORIZATION)
-            .ok_or_else(|| anyhow!("no authorization header"))?
-            .to_str()?;
-        let token = auth_str
-            .strip_prefix(BEARER_PREFIX)
-            .ok_or_else(|| anyhow!("invalid authorization header"))?;
-        Ok(token.to_string())
+        extract_bearer_token(&self.headers)
     }
 
     fn extract_params(&self, params: serde_json::Value) -> Option<serde_json::Value> {
@@ -127,17 +128,6 @@ impl<S> BiscuitAuthMiddleware<S> {
         tracing::trace!("Injected req params {:?}", &req.params);
     }
 
-    fn inject_authenticated_tenant(
-        &self,
-        extensions: &mut Extensions,
-        token: &biscuit_auth::Biscuit,
-    ) -> Result<()> {
-        if let Some(tenant_id) = extract_tenant_id(token)? {
-            extensions.insert(AuthenticatedTenant(tenant_id));
-        }
-        Ok(())
-    }
-
     fn authorization(&self) -> Result<RpcAuthorization> {
         Ok(RpcAuthorization {
             auth: self.auth.clone(),
@@ -149,12 +139,24 @@ impl<S> BiscuitAuthMiddleware<S> {
     fn auth_call(&self, req: &mut Request<'_>) -> Result<()> {
         let authorization = self.authorization()?;
         if let Some((token, rule)) = authorization.authorize(&req.method)? {
-            self.inject_authenticated_tenant(req.extensions_mut(), &token)?;
+            let meta = extract_token_metadata(&token)?;
+            let tenant_scoped = meta.tenant_id.is_some();
+            if let Some(tenant_id) = meta.tenant_id {
+                req.extensions_mut().insert(AuthenticatedTenant(tenant_id));
+            }
             if rule.require_rpc_context {
-                let node_id = scoped_rpc_node_id(&token)?;
+                let node_id = match (tenant_scoped, meta.node_id) {
+                    (true, Some(node_id)) if node_id != NodeId::local() => node_id,
+                    (true, Some(_)) => {
+                        bail!("tenant token cannot access the host watchtower namespace")
+                    }
+                    (true, None) => bail!("tenant token is missing a node fact"),
+                    (false, Some(node_id)) => node_id,
+                    (false, None) => NodeId::local(),
+                };
                 let ctx = RpcContext {
                     node_id: node_id.to_string(),
-                    tenant_scoped: extract_tenant_id(&token)?.is_some(),
+                    tenant_scoped,
                 };
                 self.inject_rpc_context(req, ctx);
             }
@@ -187,7 +189,11 @@ impl<S> BiscuitAuthMiddleware<S> {
     fn auth_notify(&self, notify: &mut Notification<'_>) -> Result<()> {
         let authorization = self.authorization()?;
         if let Some((token, _)) = authorization.authorize(notify.method_name())? {
-            self.inject_authenticated_tenant(notify.extensions_mut(), &token)?;
+            if let Some(tenant_id) = extract_token_metadata(&token)?.tenant_id {
+                notify
+                    .extensions_mut()
+                    .insert(AuthenticatedTenant(tenant_id));
+            }
         }
         notify.extensions_mut().insert(authorization);
         Ok(())
