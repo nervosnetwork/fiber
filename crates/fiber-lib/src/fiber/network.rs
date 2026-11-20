@@ -765,6 +765,8 @@ pub struct PendingAcceptChannel {
     pub funding_amount: u128,
     /// UDT type script, if this is a UDT channel.
     pub udt_type_script: Option<Script>,
+    /// The commitment delay the initiator chose, as an EpochNumberWithFraction in u64 format.
+    pub commitment_delay_epoch: u64,
     /// Timestamp (milliseconds since UNIX epoch) when this channel request was received.
     pub created_at: u64,
 }
@@ -3683,6 +3685,9 @@ where
                                 .open_channel
                                 .funding_udt_type_script
                                 .clone(),
+                            commitment_delay_epoch: pending_open
+                                .open_channel
+                                .commitment_delay_epoch,
                             created_at: state
                                 .store
                                 .get_channel_open_record(channel_id)
