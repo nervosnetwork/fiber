@@ -451,35 +451,38 @@ impl<S: SignerStore> HostedSession<S> {
         self.decide(pending, now_ms).await
     }
 
-    /// Handle one `get_watchtower_signing_status` result. Does not submit.
-    pub async fn handle_watchtower_status(
-        &mut self,
-        channel_id: Hash256,
-        status: WatchtowerSigningStatus,
-    ) -> Result<ProcessOutcome, SessionError> {
-        let Some(pending) = self
-            .pending_from_watchtower_status(channel_id, status)
-            .await?
-        else {
-            return Ok(ProcessOutcome::Idle);
-        };
-        self.decide(pending, 0).await
-    }
-
     /// Handle a full `get_watchtower_signing_status` (or `watchtower_signing` subscription)
-    /// payload, reporting structured [`WatchtowerHealthStatus`] (TTL / backoff) to `handler`
-    /// alongside the signing [`ProcessOutcome`]. Does not submit.
-    pub async fn handle_watchtower_status_result(
-        &mut self,
+    /// payload with trusted chain verification and wallet-approved on-chain spending terms,
+    /// reporting structured [`WatchtowerHealthStatus`] (TTL / backoff) to `handler` alongside
+    /// the verified signing [`ProcessOutcome`]. Does not submit.
+    pub async fn handle_watchtower_status_result<C: crate::ChainVerifier>(
+        &self,
         result: GetWatchtowerSigningStatusResult,
         now_ms: u64,
+        authorization: Option<crate::OnchainSpendAuthorization>,
+        chain: &C,
         handler: &mut impl WatchtowerEventHandler,
     ) -> Result<(WatchtowerHealthStatus, ProcessOutcome), SessionError> {
         let health = evaluate_watchtower_status(&result, now_ms);
         handler.on_status_update(&health);
-        let outcome = self
-            .handle_watchtower_status(result.channel_id.into(), result.status)
-            .await?;
+        let outcome = match result.status {
+            WatchtowerSigningStatus::SignatureRequired { .. } => {
+                let auth = authorization.ok_or_else(|| {
+                    SessionError::Invalid(
+                        "on-chain watchtower signing requires OnchainSpendAuthorization".into(),
+                    )
+                })?;
+                self.handle_watchtower_status_verified(
+                    result.channel_id.into(),
+                    result.status,
+                    auth,
+                    chain,
+                )
+                .await?
+            }
+            WatchtowerSigningStatus::NoSignatureRequired
+            | WatchtowerSigningStatus::Backoff { .. } => ProcessOutcome::Idle,
+        };
         Ok((health, outcome))
     }
 
@@ -728,38 +731,6 @@ impl<S: SignerStore> HostedSession<S> {
             channel_id: pending.channel_id.into(),
             request_id: pending.request_id.into(),
             signature: signature.signature.to_vec(),
-        }))
-    }
-
-    async fn pending_from_watchtower_status(
-        &self,
-        channel_id: Hash256,
-        status: WatchtowerSigningStatus,
-    ) -> Result<Option<PendingRequest>, SessionError> {
-        let WatchtowerSigningStatus::SignatureRequired {
-            request_id,
-            content,
-            ..
-        } = status
-        else {
-            return Ok(None);
-        };
-        let key_id = self
-            .state
-            .bindings
-            .get(&channel_id)
-            .copied()
-            .ok_or(SessionError::ChannelNotInDirectory)?;
-        let signer = self.root.open_channel(key_id).await?;
-        let prepared = signer
-            .prepare(ChannelSigningContent::Onchain(onchain_from_rpc(content)))
-            .await?;
-        Ok(Some(PendingRequest {
-            channel_id,
-            request_id: request_id.into(),
-            prepared,
-            settlement: None,
-            kind: RequestKind::Watchtower,
         }))
     }
 
@@ -1088,20 +1059,59 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn auto_rejects_watchtower_without_verified_chain_context() {
-        let (mut session, channel_id, _, _) = bound_session_with_inbound().await;
+    async fn watchtower_status_result_rejects_missing_onchain_authorization() {
+        struct UnreachableChain;
+
+        #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+        impl crate::ChainVerifier for UnreachableChain {
+            async fn live_cell(
+                &self,
+                _out_point: &ckb_types::packed::OutPoint,
+            ) -> Result<crate::VerifiedCell, crate::SignerError> {
+                unreachable!("authorization check runs before chain queries")
+            }
+
+            async fn verify_commitment_lineage(
+                &self,
+                _source: Hash256,
+                _outpoint: &ckb_types::packed::OutPoint,
+            ) -> Result<(), crate::SignerError> {
+                unreachable!("authorization check runs before chain queries")
+            }
+
+            async fn verify_maturity(
+                &self,
+                _inputs: &[ckb_types::packed::CellInput],
+            ) -> Result<(), crate::SignerError> {
+                unreachable!("authorization check runs before chain queries")
+            }
+
+            async fn median_time_ms(&self) -> Result<u64, crate::SignerError> {
+                unreachable!("authorization check runs before chain queries")
+            }
+        }
+
+        let (session, channel_id, _, _) = bound_session_with_inbound().await;
+        let result = GetWatchtowerSigningStatusResult {
+            channel_id: channel_id.into(),
+            status: watchtower_required_status(),
+        };
+        let mut handler = crate::NoopWatchtowerEventHandler;
         assert!(session
-            .handle_watchtower_status(channel_id, watchtower_required_status())
+            .handle_watchtower_status_result(
+                result.clone(),
+                0,
+                None,
+                &UnreachableChain,
+                &mut handler,
+            )
             .await
             .is_err());
-    }
 
-    #[tokio::test]
-    async fn manual_cannot_bypass_missing_chain_context() {
-        let (session, channel_id, _, _) = bound_session_with_inbound().await;
-        let mut session = session.with_policy(SigningPolicy::Manual);
-        assert!(session
-            .handle_watchtower_status(channel_id, watchtower_required_status())
+        let manual = session.with_policy(SigningPolicy::Manual);
+        assert!(manual
+            .handle_watchtower_status_result(result, 0, None, &UnreachableChain, &mut handler)
             .await
             .is_err());
     }

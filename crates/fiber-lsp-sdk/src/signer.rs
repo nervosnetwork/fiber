@@ -56,6 +56,12 @@ struct StoredNonce {
     bound_content: Option<[u8; 32]>,
 }
 
+impl Drop for StoredNonce {
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.seed);
+    }
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 struct StoredSigningState {
     format_version: u16,
@@ -890,8 +896,35 @@ impl<S: SignerStore> ChannelSigner<S> {
             .revocations)
     }
 
+    /// Return whether the channel has a locally verified, completely signed opening
+    /// commitment transaction on the local lane. Wallets MUST verify this returns `true`
+    /// before signing or broadcasting the external funding transaction.
+    pub async fn has_verified_opening_exit(&self) -> Result<bool, SignerError> {
+        let (_, state) = self.load_signing_state().await?;
+        let Some(commitment) = state.commitment.as_ref() else {
+            return Ok(false);
+        };
+        Ok(commitment.lifecycle.commitments.iter().any(|record| {
+            !record.reference.for_remote
+                && record.reference.version == 1
+                && record.complete_signature.is_some()
+        }))
+    }
+
+    /// Return the channel's on-chain recovery safety margin (2/3 of the commitment delay
+    /// epoch in milliseconds), or `None` if opening terms have not been persisted yet.
+    pub async fn safety_margin_ms(&self) -> Result<Option<u64>, SignerError> {
+        let (_, state) = self.load_signing_state().await?;
+        state
+            .commitment
+            .as_ref()
+            .map(|commitment| commitment.parameters.safety_margin_ms())
+            .transpose()
+    }
+
     /// Check and durably record permission to release a preimage at the current wallet time.
-    /// The application must release immediately; the trusted chain source verifies live funding.
+    /// The application must release immediately; the trusted chain source verifies live funding
+    /// and on-chain median time so a lagging local clock cannot weaken the TLC safety window.
     /// This API neither transmits nor persists the preimage.
     pub async fn authorize_preimage_release<C: crate::ChainVerifier>(
         &self,
@@ -906,6 +939,8 @@ impl<S: SignerStore> ChannelSigner<S> {
             .await?
             .ok_or(SignerError::ChannelNotBound)?;
         let live = chain.live_cell(&binding.funding_outpoint).await?;
+        let chain_time_ms = chain.median_time_ms().await?;
+        let effective_now_ms = now_ms.max(chain_time_ms);
         let commitment = state
             .commitment
             .as_mut()
@@ -915,7 +950,7 @@ impl<S: SignerStore> ChannelSigner<S> {
                 "funding is not live with approved asset and capacity",
             ));
         }
-        let reference = commitment.release_preimage(hash, preimage, now_ms)?;
+        let reference = commitment.release_preimage(hash, preimage, effective_now_ms)?;
         state.revision = state
             .revision
             .checked_add(1)

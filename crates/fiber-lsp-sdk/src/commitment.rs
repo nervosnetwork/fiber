@@ -48,7 +48,8 @@ pub struct CommitmentParameters {
 }
 
 impl CommitmentParameters {
-    pub(crate) fn safety_margin_ms(&self) -> Result<u64, SignerError> {
+    /// Safety margin (2/3 of the commitment delay epoch) reserved for on-chain recovery.
+    pub fn safety_margin_ms(&self) -> Result<u64, SignerError> {
         let since = u64::from_le_bytes(self.delay_epoch);
         if since >> 56 != 0xa0 || self.epoch_duration_ms == 0 {
             return Err(invalid(
@@ -428,7 +429,10 @@ impl CommitmentState {
                     previous_local_amount: previous.local_amount,
                     local_amount: previous.local_amount,
                     remote_amount: previous.remote_amount,
-                    has_outbound_changes: tlcs.iter().any(|t| !t.inbound),
+                    // Rotating to a different V2 nonce for an already-signed version must not
+                    // auto-sign silently, or a malicious LSP could bloat `SignerStore` in a loop.
+                    has_outbound_changes: content_hash != previous.content_hash
+                        || tlcs.iter().any(|t| !t.inbound),
                 });
             }
             if previous.version.checked_add(1) != Some(version) {

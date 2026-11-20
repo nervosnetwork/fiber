@@ -1,5 +1,13 @@
+//! TEST-ONLY file-backed `SignerStore` for `fiber-lsp-sdk-agent`.
+//!
+//! Do NOT copy this implementation into production wallets: it has no cross-process
+//! file locking (`flock`) and rewrites a full snapshot file on every mutation.
+//! Production wallets should use a durable transactional store (e.g. SQLite WAL with
+//! `PRAGMA synchronous = FULL`, or IndexedDB + Web Locks API `navigator.locks`).
+
 use std::{
     fs,
+    io::Write,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -49,8 +57,14 @@ impl FileSignerStore {
     fn persist(&self) -> Result<(), MemoryStoreError> {
         let snapshot = self.inner.snapshot()?;
         let tmp = self.snapshot_path.with_extension("bin.tmp");
-        fs::write(&tmp, snapshot).map_err(|error| {
+        let mut file = fs::File::create(&tmp).map_err(|error| {
+            MemoryStoreError::InvalidSnapshot(format!("create {}: {error}", tmp.display()))
+        })?;
+        file.write_all(&snapshot).map_err(|error| {
             MemoryStoreError::InvalidSnapshot(format!("write {}: {error}", tmp.display()))
+        })?;
+        file.sync_all().map_err(|error| {
+            MemoryStoreError::InvalidSnapshot(format!("sync {}: {error}", tmp.display()))
         })?;
         fs::rename(&tmp, &self.snapshot_path).map_err(|error| {
             MemoryStoreError::InvalidSnapshot(format!(
@@ -75,7 +89,10 @@ impl SignerStore for FileSignerStore {
         let _guard = self.persist_lock.lock().await;
         let inserted = self.inner.insert_if_absent(key, value).await?;
         if inserted {
-            self.persist()?;
+            if let Err(err) = self.persist() {
+                let _ = self.inner.delete(key).await;
+                return Err(err);
+            }
         }
         Ok(inserted)
     }
@@ -87,20 +104,43 @@ impl SignerStore for FileSignerStore {
         replacement: &[u8],
     ) -> Result<bool, Self::Error> {
         let _guard = self.persist_lock.lock().await;
+        let previous = self.inner.get(key).await?;
         let swapped = self
             .inner
             .compare_and_swap(key, expected, replacement)
             .await?;
         if swapped {
-            self.persist()?;
+            if let Err(err) = self.persist() {
+                match previous {
+                    Some(old) => {
+                        let _ = self.inner.put(key, &old).await;
+                    }
+                    None => {
+                        let _ = self.inner.delete(key).await;
+                    }
+                }
+                return Err(err);
+            }
         }
         Ok(swapped)
     }
 
     async fn put(&self, key: &[u8], value: &[u8]) -> Result<(), Self::Error> {
         let _guard = self.persist_lock.lock().await;
+        let previous = self.inner.get(key).await?;
         self.inner.put(key, value).await?;
-        self.persist()
+        if let Err(err) = self.persist() {
+            match previous {
+                Some(old) => {
+                    let _ = self.inner.put(key, &old).await;
+                }
+                None => {
+                    let _ = self.inner.delete(key).await;
+                }
+            }
+            return Err(err);
+        }
+        Ok(())
     }
 
     async fn delete(&self, key: &[u8]) -> Result<(), Self::Error> {

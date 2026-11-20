@@ -148,8 +148,9 @@ impl WatchtowerHealthStatus {
     }
 
     /// Return whether the client should fall back to self-broadcasting a settlement
-    /// transaction from its local recovery record because the watchtower is in backoff
-    /// or its pending request has already expired near `dispute_deadline_ms`.
+    /// transaction from its local recovery record because the dispute safety cutoff
+    /// has been reached (never trusting an LSP-reported `Healthy` or future-TTL status
+    /// past the cutoff) or the watchtower's backoff extends into the safety cutoff.
     pub fn needs_self_broadcast(
         &self,
         dispute_deadline_ms: u64,
@@ -157,14 +158,13 @@ impl WatchtowerHealthStatus {
         safety_margin_ms: u64,
     ) -> bool {
         let safe_cutoff = dispute_deadline_ms.saturating_sub(safety_margin_ms);
+        if now_ms >= safe_cutoff {
+            return true;
+        }
         match self {
             Self::Healthy { .. } => false,
-            Self::InBackoff { retry_after_ms, .. } => {
-                now_ms >= safe_cutoff || *retry_after_ms >= safe_cutoff
-            }
-            Self::PendingSignature { remaining_ms, .. } => {
-                *remaining_ms == 0 && now_ms >= safe_cutoff
-            }
+            Self::InBackoff { retry_after_ms, .. } => *retry_after_ms >= safe_cutoff,
+            Self::PendingSignature { .. } => false,
         }
     }
 }
@@ -396,5 +396,12 @@ mod tests {
         // Expired pending request near dispute deadline -> trigger self-broadcast.
         let expired_pending = evaluate_watchtower_status(&pending_rpc, 2_100);
         assert!(expired_pending.needs_self_broadcast(2_500, 2_100, 500));
+
+        // Even if an untrusted LSP reports Healthy or a future-TTL PendingSignature,
+        // reaching the dispute safety cutoff MUST still trigger self-broadcast.
+        let healthy = WatchtowerHealthStatus::Healthy { channel_id };
+        assert!(!healthy.needs_self_broadcast(2_500, 1_200, 500));
+        assert!(healthy.needs_self_broadcast(2_500, 2_000, 500));
+        assert!(pending.needs_self_broadcast(2_500, 2_000, 500));
     }
 }

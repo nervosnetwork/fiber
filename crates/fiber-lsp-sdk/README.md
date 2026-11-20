@@ -210,7 +210,7 @@ The LSP watchtower enforces per-tenant and global resource limits to protect ope
 
 - [`WatchtowerLimitPolicy`]: defaults to `FailClosed` (recommended). `PruneAndRetry` allows pruning closed channels or settled/expired preimages and retrying once for **tenant-scoped** limits, while still failing closed on **global** limits.
 - [`WatchtowerEventHandler`]: receives `on_quota_exceeded(&WatchtowerQuotaError, WatchtowerQuotaAction)` and `on_status_update(&WatchtowerHealthStatus)`.
-- [`HostedSession::handle_watchtower_status_result`]: evaluates `GetWatchtowerSigningStatusResult` (`NoSignatureRequired`, `SignatureRequired { request_id, content, expires_at_ms }`, or `Backoff { retry_after_ms, consecutive_expired_requests }`), notifies `WatchtowerEventHandler`, and returns `(WatchtowerHealthStatus, ProcessOutcome)`.
+- [`HostedSession::handle_watchtower_status_result`]: evaluates `GetWatchtowerSigningStatusResult` (`NoSignatureRequired`, `SignatureRequired { request_id, content, expires_at_ms }`, or `Backoff { retry_after_ms, consecutive_expired_requests }`), notifies `WatchtowerEventHandler`, and validates any `SignatureRequired` against trusted `ChainVerifier` + `OnchainSpendAuthorization`.
 - [`HostedSession::handle_watchtower_rpc_error`]: classifies watchtower RPC quota errors and invokes `on_quota_exceeded` with the recommended [`WatchtowerQuotaAction`].
 
 ### 1. Watchtower channel quota (`create_watch_channel`)
@@ -239,7 +239,7 @@ The LSP watchtower enforces per-tenant and global resource limits to protect ope
   - **Non-renewing 30-minute TTL**: each pending or signed-but-unconfirmed request holds operator fee cells for at most 30 minutes (`WATCHTOWER_HOLD_MS`) from creation.
   - **Per-node exponential backoff**: if a request expires unsigned or fails CKB broadcast (excluding `-1107` already-in-mempool), the watchtower evicts it, releases the fee cells, and pauses new fee-holding requests across **all channels of that `node_id`** starting at 5 minutes and doubling up to 60 minutes. A successful broadcast resets the channel's backoff state.
 - **Status feedback & safe client handling**:
-  1. **Feed full status results into `HostedSession::handle_watchtower_status_result`**: inspect the reported [`WatchtowerHealthStatus`] (`Healthy`, `PendingSignature { expires_at_ms, remaining_ms, .. }`, or `InBackoff { retry_after_ms, remaining_backoff_ms, consecutive_expired_requests }`).
+  1. **Feed full status results into `HostedSession::handle_watchtower_status_result`**: inspect the reported [`WatchtowerHealthStatus`] (`Healthy`, `PendingSignature { expires_at_ms, remaining_ms, .. }`, or `InBackoff { retry_after_ms, remaining_backoff_ms, consecutive_expired_requests }`) and pass a trusted `ChainVerifier` + `OnchainSpendAuthorization` (with the operator's `fee_sponsor_lock` set in production).
   2. **Sign promptly within TTL**: keep `watchtower_signing` subscriptions (or `get_watchtower_signing_status` polling) responsive and submit verified signatures well before `expires_at_ms`.
   3. **Verify before signing**: only submit signatures that pass `HostedSession` / `ChainVerifier` checks; repeatedly submitting invalid or unspendable transactions triggers per-node backoff across all of the tenant's channels.
   4. **Respect backoff**: when `WatchtowerHealthStatus::InBackoff` is reported, avoid tight-loop polling and wait until `retry_after_ms`.
@@ -250,3 +250,11 @@ The LSP watchtower enforces per-tenant and global resource limits to protect ope
 - **TLC cap**: at most **254** TLCs per settlement snapshot (`MAX_WITNESS_TLC_COUNT = 0xfe`).
 - **Script / output data cap**: at most **1024 bytes** for `funding_udt_type_script` args, `payout_lock_script` args, and `revocation_data.output_data`.
 - Clients should enforce these bounds locally before sending watchtower RPCs.
+
+## Wallet Integration Security Checklist
+
+1. **Opening order**: Never sign or broadcast `unsigned_funding_tx` immediately after `HostedSession::open_tenant_channel`. First drive the initial commitment exchange and verify `channel_signer.has_verified_opening_exit().await? == true` so the wallet holds a complete local exit transaction before locking funds in the 2-of-2 funding script.
+2. **Hold invoices only**: When receiving payments via a hosted LSP, create **hold invoices** (send only `payment_hash` to the LSP; never pass `payment_preimage` upfront). Release the preimage only after `ChannelSigner::authorize_preimage_release` succeeds against an independent `ChainVerifier`.
+3. **Backup & storage durability**: `RootKeyBackup` alone **cannot** recover channel funds if `SignerStore` (channel bindings, nonce state, recovery records) is lost. Never copy the test-only `FileSignerStore` into production, never roll back signer snapshots, and in multi-tab browser wallets serialize `SignerStore` + `OpeningPersistence` writes with Web Locks (`navigator.locks`).
+4. **Independent chain verification**: Treat LSP-supplied network parameters and watchtower health statuses as untrusted. Hardcode trusted `OpeningNetwork` contract hashes/deps in the wallet, and monitor force-closes + `dispute_deadline_ms` via an independent CKB RPC / light client so `needs_self_broadcast` triggers even if a malicious LSP reports `Healthy`.
+5. **Token expiry & revocation**: In addition to polling `is_token_near_expiry`, handle RPC authentication errors (HTTP 401 / revoked token) by running `begin_registration` + `replace_token` and reconnecting WebSockets.
