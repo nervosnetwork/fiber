@@ -4033,7 +4033,13 @@ where
             FiberActorCommand::ReconcileBufferedTrampolineSettlement { session_key, reply } => {
                 let result = match state.store.get_payment_session(session_key) {
                     Some(session) if session.status.is_final() => {
-                        state.settle_trampoline_payment(&session, None, None).await
+                        match state.settle_trampoline_payment(&session, None, None).await {
+                            Ok(true) => Ok(()),
+                            Ok(false) => Err(format!(
+                                "upstream trampoline settlement dispatched for {session_key}; awaiting channel persistence"
+                            )),
+                            Err(err) => Err(err),
+                        }
                     }
                     Some(_) => Err(format!(
                         "hosted payment {session_key} is not ready for upstream settlement"
@@ -5972,8 +5978,10 @@ where
         session.last_error_code = Some(error_code);
         session.last_updated_at = now;
         state.store.insert_payment_session(session.clone());
-        let settlement = state.settle_trampoline_payment(&session, None, None).await;
-        if settlement.is_ok() {
+        let settled_in_store = state
+            .settle_trampoline_payment(&session, None, None)
+            .await?;
+        if settled_in_store {
             if let Some(port) = delivery_port {
                 port.report_settled_payment(SettledPaymentOutcome {
                     session_key,
@@ -5982,7 +5990,6 @@ where
                 });
             }
         }
-        settlement?;
         Ok(true)
     }
 
@@ -9671,7 +9678,7 @@ where
         }
 
         #[cfg(not(target_arch = "wasm32"))]
-        if session.status.is_final() {
+        if session.status.is_final() && session_key.upstream_tlc_key.is_some() {
             if let Some(port) = self.delivery_port.clone() {
                 // The delivery service itself calls NetworkActor during recovery and
                 // tenant activation. Await its decision outside this handler so those
@@ -9742,29 +9749,39 @@ where
         let settlement = self
             .settle_trampoline_payment(session, last_error_packet, None)
             .await;
-        if let Err(error) = &settlement {
-            warn!(%payment_hash, %error, "Failed to settle upstream trampoline payment");
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        if session.status.is_final() && settlement.is_ok() {
-            if let Some(port) = self.delivery_port.as_ref() {
-                port.report_settled_payment(SettledPaymentOutcome {
-                    session_key: session.session_key(),
-                    payment_status: session.status,
-                    failure: session.last_error.clone(),
-                });
+        match settlement {
+            Err(error) => {
+                warn!(%payment_hash, %error, "Failed to settle upstream trampoline payment");
+            }
+            Ok(settled_in_store) => {
+                #[cfg(not(target_arch = "wasm32"))]
+                if session.status.is_final() && settled_in_store {
+                    if let Some(port) = self.delivery_port.as_ref() {
+                        port.report_settled_payment(SettledPaymentOutcome {
+                            session_key: session.session_key(),
+                            payment_status: session.status,
+                            failure: session.last_error.clone(),
+                        });
+                    }
+                }
+                #[cfg(target_arch = "wasm32")]
+                let _ = settled_in_store;
             }
         }
     }
 
+    /// Dispatch any still-unsettled upstream trampoline `RemoveTlc` commands.
+    /// Returns `Ok(true)` only when every upstream TLC is already persisted as
+    /// removed/queued in the store; returns `Ok(false)` when at least one
+    /// command was just dispatched to a live `ChannelActor` and awaits persistence.
     async fn settle_trampoline_payment(
         &mut self,
         session: &PaymentSession,
         last_error_packet: Option<&TlcErrPacket>,
         channel_filter: Option<Hash256>,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         let Some(context) = session.request.trampoline_context.as_ref() else {
-            return Ok(());
+            return Ok(true);
         };
         let payment_hash = session.request.payment_hash;
         let has_successful_attempt = session.attempts().any(|attempt| attempt.is_success());
@@ -9794,6 +9811,7 @@ where
         }
 
         let mut settlement_errors = Vec::new();
+        let mut dispatched_any = false;
         for previous_tlc in &context.previous_tlcs {
             if channel_filter.is_some_and(|channel_id| channel_id != previous_tlc.prev_channel_id)
                 || !self
@@ -9855,10 +9873,12 @@ where
                     previous_tlc.prev_tlc_id,
                     error
                 ));
+                continue;
             }
+            dispatched_any = true;
         }
         if settlement_errors.is_empty() {
-            Ok(())
+            Ok(!dispatched_any)
         } else {
             Err(settlement_errors.join("; "))
         }

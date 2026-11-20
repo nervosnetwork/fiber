@@ -1940,7 +1940,7 @@ async fn biscuit_tenant_context_routes_standard_rpc_to_hosted_runtime() {
     let registration = public_t
         .store
         .namespaced(NodeNamespace::lsp_metadata())
-        .get_lsp_invoice(payment_hash)
+        .get_lsp_invoice(&expected_tenant.tenant_pubkey, payment_hash)
         .expect("read hosted invoice registration")
         .expect("tenant new_invoice should register the hosted invoice");
     assert_eq!(registration.tenant_id, tenant_id);
@@ -2236,7 +2236,7 @@ async fn hosted_payment_buffers_offline_private_channel_and_resumes_via_rpc() {
     let stored_registration = public_t
         .store
         .namespaced(NodeNamespace::lsp_metadata())
-        .get_lsp_invoice(&payment_hash)
+        .get_lsp_invoice(&tenant.pubkey, &payment_hash)
         .expect("read hosted invoice registration")
         .expect("hosted invoice should be persisted");
     assert_eq!(stored_registration, registration);
@@ -2368,7 +2368,7 @@ async fn hosted_tenant_new_invoice_rejects_mpp_before_registration() {
     assert!(public_t
         .store
         .namespaced(NodeNamespace::lsp_metadata())
-        .get_lsp_invoice(&rejected_payment_hash)
+        .get_lsp_invoice(&tenant.node.pubkey, &rejected_payment_hash)
         .expect("read rejected hosted invoice registration")
         .is_none());
 
@@ -2405,7 +2405,7 @@ async fn hosted_tenant_new_invoice_rejects_mpp_before_registration() {
     assert!(public_t
         .store
         .namespaced(NodeNamespace::lsp_metadata())
-        .get_lsp_invoice(&accepted_payment_hash)
+        .get_lsp_invoice(&tenant.node.pubkey, &accepted_payment_hash)
         .expect("read accepted hosted invoice registration")
         .is_some());
 
@@ -2656,7 +2656,7 @@ async fn hosted_tenant_pays_ordinary_node_through_lsp_with_mpp() {
     assert!(public_t
         .store
         .namespaced(NodeNamespace::lsp_metadata())
-        .get_lsp_invoice(&payment_hash)
+        .get_lsp_invoice(&receiver.pubkey, &payment_hash)
         .expect("read LSP invoice registrations")
         .is_none());
 

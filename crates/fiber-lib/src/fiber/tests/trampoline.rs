@@ -4986,6 +4986,9 @@ async fn assert_trampoline_success_drains_remaining_tlc(restart: bool) {
     let attempts = node_b.store.get_attempts(payment_hash);
     assert_eq!(attempts.len(), 2);
     if restart {
+        // Model a malicious C that cancels/fails the remaining shard instead of
+        // letting honest H12 recovery settle the remaining shard on reconnect.
+        node_c.cancel_invoice(&payment_hash);
         node_b.stop().await;
         node_c.discard_held_fiber_messages().await;
         node_b.start().await;

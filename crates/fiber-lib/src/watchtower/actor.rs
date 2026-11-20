@@ -621,9 +621,9 @@ pub(crate) fn sync_external_fee_holds<S: WatchtowerStore>(
                     );
                     let total_expired = expired_pending + expired_signed;
                     if total_expired > 0 {
-                        for _ in 0..total_expired {
-                            arm_external_retry_backoff(ext, now_ms);
-                        }
+                        // Advance backoff at most once per maintenance tick so multiple
+                        // concurrent expirations in the same tick do not jump straight to max.
+                        arm_external_retry_backoff(ext, now_ms);
                         notification.watchtower_state(channel.channel_id, state);
                     }
                 }

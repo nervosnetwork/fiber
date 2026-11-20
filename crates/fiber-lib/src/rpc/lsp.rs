@@ -76,12 +76,16 @@ trait LspRpc {
 /// JSON-RPC adapter for an active hosted LSP service actor.
 pub struct LspRpcServerImpl {
     actor: ActorRef<LspServiceMessage>,
+    public_node_id: tokio::sync::OnceCell<crate::fiber_types::Pubkey>,
 }
 
 impl LspRpcServerImpl {
     /// Construct an LSP RPC server backed by `actor`.
     pub fn new(actor: ActorRef<LspServiceMessage>) -> Self {
-        Self { actor }
+        Self {
+            actor,
+            public_node_id: tokio::sync::OnceCell::new(),
+        }
     }
 }
 
@@ -103,9 +107,14 @@ impl LspRpcServer for LspRpcServerImpl {
         let signature_bytes = hex::decode(params.signature.trim_start_matches("0x")).rpc_err()?;
         let signature =
             crate::fiber_types::TenantRegistrySignature::from_slice(&signature_bytes).rpc_err()?;
-        let status = call!(self.actor, LspServiceMessage::GetStatus).rpc_err()?;
+        let public_node_id = *self
+            .public_node_id
+            .get_or_try_init(|| async {
+                call!(self.actor, LspServiceMessage::GetPublicNodeId).rpc_err()
+            })
+            .await?;
         let payload = crate::fiber_types::TenantRegistryPayload::new(
-            status.public_node_id,
+            public_node_id,
             root_signer_pubkey,
             request_id.into(),
             params.signed_at,

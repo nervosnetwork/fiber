@@ -101,28 +101,46 @@ pub struct LspInvoiceRegistration {
 pub trait LspInvoiceStore: Clone + Send + Sync + 'static {
     fn get_lsp_invoice(
         &self,
+        tenant_pubkey: &Pubkey,
         payment_hash: &Hash256,
     ) -> Result<Option<LspInvoiceRegistration>, String>;
-    fn put_lsp_invoice(&self, registration: &LspInvoiceRegistration) -> Result<(), String>;
+    fn put_lsp_invoice(
+        &self,
+        tenant_pubkey: &Pubkey,
+        registration: &LspInvoiceRegistration,
+    ) -> Result<(), String>;
 }
 
-fn registration_key(payment_hash: &Hash256) -> Vec<u8> {
-    [INVOICE_REGISTRATION_PREFIX, payment_hash.as_ref()].concat()
+fn registration_key(tenant_pubkey: &Pubkey, payment_hash: &Hash256) -> Vec<u8> {
+    [
+        INVOICE_REGISTRATION_PREFIX,
+        tenant_pubkey.serialize().as_slice(),
+        payment_hash.as_ref(),
+    ]
+    .concat()
 }
 
 impl LspInvoiceStore for Store {
     fn get_lsp_invoice(
         &self,
+        tenant_pubkey: &Pubkey,
         payment_hash: &Hash256,
     ) -> Result<Option<LspInvoiceRegistration>, String> {
-        self.get(registration_key(payment_hash))
+        self.get(registration_key(tenant_pubkey, payment_hash))
             .map(|bytes| deserialize(&bytes).map_err(|error| error.to_string()))
             .transpose()
     }
 
-    fn put_lsp_invoice(&self, registration: &LspInvoiceRegistration) -> Result<(), String> {
+    fn put_lsp_invoice(
+        &self,
+        tenant_pubkey: &Pubkey,
+        registration: &LspInvoiceRegistration,
+    ) -> Result<(), String> {
         let bytes = serialize(registration).map_err(|error| error.to_string())?;
-        self.put(registration_key(registration.invoice.payment_hash()), bytes);
+        self.put(
+            registration_key(tenant_pubkey, registration.invoice.payment_hash()),
+            bytes,
+        );
         Ok(())
     }
 }
@@ -150,8 +168,12 @@ impl<S: LspInvoiceStore> LspInvoiceRegistry<S> {
         }
     }
 
-    pub fn get(&self, payment_hash: &Hash256) -> Result<Option<LspInvoiceRegistration>, String> {
-        self.store.get_lsp_invoice(payment_hash)
+    pub fn get(
+        &self,
+        tenant_pubkey: &Pubkey,
+        payment_hash: &Hash256,
+    ) -> Result<Option<LspInvoiceRegistration>, String> {
+        self.store.get_lsp_invoice(tenant_pubkey, payment_hash)
     }
 
     pub fn register(
@@ -226,13 +248,16 @@ impl<S: LspInvoiceStore> LspInvoiceRegistry<S> {
             hint,
         };
 
-        if let Some(existing) = self.get(registration.invoice.payment_hash())? {
+        if let Some(existing) =
+            self.get(&tenant.tenant_pubkey, registration.invoice.payment_hash())?
+        {
             if existing == registration {
                 return Ok(existing);
             }
             return Err("payment hash is already registered to another hosted invoice".to_string());
         }
-        self.store.put_lsp_invoice(&registration)?;
+        self.store
+            .put_lsp_invoice(&tenant.tenant_pubkey, &registration)?;
         Ok(registration)
     }
 }

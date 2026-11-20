@@ -2323,6 +2323,7 @@ where
         }
 
         state.align_force_close_commitment_numbers();
+        state.signing_context.cancel_request();
 
         if let Some(close) = state.session.closing.as_mut() {
             close.superseded_by_force_close = true;
@@ -11744,11 +11745,6 @@ where
                 "V2 shutdown fee does not allow automatic acceptance",
             ));
         }
-        state.remote_shutdown_info = Some(fiber_types::ShutdownInfo {
-            close_script: message.close_script,
-            fee_rate: message.fee_rate,
-            signature: None,
-        });
         if auto_accept {
             self.advertise_close_v2(
                 state,
@@ -11757,6 +11753,11 @@ where
                 Some(packed.clone()),
             )?;
         }
+        state.remote_shutdown_info = Some(fiber_types::ShutdownInfo {
+            close_script: message.close_script,
+            fee_rate: message.fee_rate,
+            signature: None,
+        });
         state
             .session
             .closing
@@ -12737,6 +12738,11 @@ where
         ack: RevokeAndAckV2,
     ) -> ProcessingChannelResult {
         state.ensure_v2_not_quarantined()?;
+        if state.is_closed()
+            || matches!(state.state, ChannelState::ShuttingDown(flags) if flags.contains(ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION))
+        {
+            return Err(invalid("Cannot process V2 RevokeAndAck after force-close"));
+        }
         // A reconnect can replay an ACK we already processed. Its bytes match `last_ack`, so it
         // is an idempotent duplicate: ignore it instead of trying to verify it again.
         let packed_ack: fiber_types::gen::fiber::RevokeAndAckV2 = ack.clone().into();

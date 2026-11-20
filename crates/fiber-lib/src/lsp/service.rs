@@ -80,6 +80,7 @@ pub struct TenantSubscriptionContext {
 /// Commands accepted by the LSP service container.
 pub enum LspServiceMessage {
     GetStatus(RpcReplyPort<LspServiceStatus>),
+    GetPublicNodeId(RpcReplyPort<Pubkey>),
     GetWatchtowerQuotas(RpcReplyPort<crate::lsp_config::WatchtowerQuotas>),
     GetTenantTokenEpochs(RpcReplyPort<crate::rpc::biscuit::TenantTokenEpochs>),
     RevokeTenantTokens(TenantId, RpcReplyPort<Result<u64, String>>),
@@ -459,6 +460,9 @@ impl Actor for LspService {
                     active_tenants: state.supervisor.active_count(),
                 });
             }
+            LspServiceMessage::GetPublicNodeId(reply) => {
+                let _ = reply.send(state.public_node_id);
+            }
             LspServiceMessage::GetWatchtowerQuotas(reply) => {
                 let _ = reply.send(state.config.watchtower_quotas());
             }
@@ -613,7 +617,10 @@ impl Actor for LspService {
                 let _ = reply.send(state.delivery_manager.get_by_payment_hash(&payment_hash));
             }
             LspServiceMessage::AcceptTrampolineDelivery(request, reply) => {
-                let result = match state.invoice_registry.get(&request.payment_hash) {
+                let result = match state
+                    .invoice_registry
+                    .get(&request.next_node_id, &request.payment_hash)
+                {
                     Ok(None) => Ok(DeliveryDecision::NotHosted),
                     Ok(Some(registration)) => match state.registry.get(&registration.tenant_id) {
                         Ok(Some(_)) if registration.hint.payload.buffer_duration_ms == 0 => {

@@ -171,16 +171,36 @@ pub fn forward_event_to_watchtower_store<S: crate::watchtower::WatchtowerStore>(
         ) => {
             let signing_scope = events.watchtower(&node_id);
             let signing_update = signing_scope.prepare_created(channel_id);
-            store.insert_watch_channel(
-                node_id,
+            if node_id == fiber_types::NodeId::local() {
+                store.insert_watch_channel(
+                    node_id,
+                    channel_id,
+                    funding_udt_type_script,
+                    keys,
+                    settlement_data,
+                    commitment_contract_features,
+                    None,
+                );
+                signing_update.publish();
+            } else if let Err(error) = store.insert_watch_channel_checked(
+                node_id.clone(),
                 channel_id,
                 funding_udt_type_script,
                 keys,
                 settlement_data,
                 commitment_contract_features,
                 None,
-            );
-            signing_update.publish();
+                quotas,
+            ) {
+                tracing::warn!(
+                    node_id = %node_id,
+                    %channel_id,
+                    %error,
+                    "skipping hosted watchtower channel registration: quota exceeded"
+                );
+            } else {
+                signing_update.publish();
+            }
         }
         // remove_watch_channel: stop scanning a closed or aborted channel.
         NetworkServiceEvent::ChannelClosed(_, channel_id, _)

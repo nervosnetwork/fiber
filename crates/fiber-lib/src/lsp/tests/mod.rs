@@ -749,7 +749,10 @@ fn hosted_invoice_registration_is_signed_and_persistent() {
     assert_eq!(registration.hint.trampoline_hops(), [lsp_key.pubkey()]);
 
     let reopened = LspInvoiceRegistry::new(store);
-    assert_eq!(reopened.get(&payment_hash).unwrap(), Some(registration));
+    assert_eq!(
+        reopened.get(&tenant.tenant_pubkey, &payment_hash).unwrap(),
+        Some(registration)
+    );
 }
 
 #[test]
