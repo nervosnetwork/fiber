@@ -431,3 +431,64 @@ async fn watchtower_signing_status_exposes_backoff_and_pending_ttl() {
         }
     );
 }
+
+#[tokio::test]
+async fn watchtower_rejects_tenant_calls_when_lsp_disabled() {
+    let (store, _dir) = generate_store();
+    let server = WatchtowerRpcServerImpl::new(store.clone()).with_lsp_enabled(false);
+    let tenant = NodeId::from_bytes(Privkey::from([51; 32]).pubkey().serialize().to_vec());
+    let tenant_ctx = RpcContext {
+        node_id: tenant.to_string(),
+        tenant_scoped: true,
+    };
+    let host_ctx = RpcContext {
+        node_id: NodeId::local().to_string(),
+        tenant_scoped: false,
+    };
+    let ch = Hash256::from([61; 32]);
+
+    let err = server
+        .create_watch_channel(
+            tenant_ctx,
+            CreateWatchChannelParams {
+                channel_id: ch.into(),
+                funding_udt_type_script: None,
+                local_settlement_key: None,
+                local_settlement_key_pubkey: Some(Privkey::from([1; 32]).pubkey().into()),
+                remote_settlement_key: Privkey::from([2; 32]).pubkey().into(),
+                local_funding_pubkey: Privkey::from([5; 32]).pubkey().into(),
+                remote_funding_pubkey: Privkey::from([6; 32]).pubkey().into(),
+                settlement_data: snapshot(1).into(),
+                channel_features: Default::default(),
+                payout_lock_script: None,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        err.message().contains("hosted LSP service is not enabled"),
+        "{err}"
+    );
+    assert!(store.get_watch_channel(&tenant, &ch).is_none());
+
+    // Host (non-tenant) watchtower calls remain allowed when LSP is disabled.
+    server
+        .create_watch_channel(
+            host_ctx,
+            CreateWatchChannelParams {
+                channel_id: ch.into(),
+                funding_udt_type_script: None,
+                local_settlement_key: Some(Privkey::from([1; 32]).into()),
+                local_settlement_key_pubkey: None,
+                remote_settlement_key: Privkey::from([2; 32]).pubkey().into(),
+                local_funding_pubkey: Privkey::from([5; 32]).pubkey().into(),
+                remote_funding_pubkey: Privkey::from([6; 32]).pubkey().into(),
+                settlement_data: snapshot(1).into(),
+                channel_features: Default::default(),
+                payout_lock_script: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(store.get_watch_channel(&NodeId::local(), &ch).is_some());
+}

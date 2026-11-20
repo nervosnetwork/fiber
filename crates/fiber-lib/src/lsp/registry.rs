@@ -423,4 +423,18 @@ impl<S: TenantRegistryStore> TenantRegistry<S> {
             .get(&tenant_id)?
             .filter(|record| record.root_signer_pubkey.as_ref() == Some(root_signer_pubkey)))
     }
+
+    /// Increment and persist `tenant_id`'s token epoch so all previously issued tokens are revoked.
+    pub fn revoke_tenant_tokens(&self, tenant_id: &TenantId) -> Result<u64, String> {
+        let _guard = self
+            .registration_lock
+            .lock()
+            .map_err(|_| "tenant registration lock poisoned".to_string())?;
+        let mut record = self
+            .get(tenant_id)?
+            .ok_or_else(|| format!("tenant {tenant_id} is not registered"))?;
+        record.token_epoch = record.token_epoch.saturating_add(1);
+        self.store.put_tenant(&record)?;
+        Ok(record.token_epoch)
+    }
 }

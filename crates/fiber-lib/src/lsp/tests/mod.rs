@@ -117,6 +117,7 @@ fn tenant_registry_is_persistent_and_idempotent() {
         root_signer_pubkey: None,
         tenant_pubkey: Privkey::from(&[1; 32]).pubkey(),
         created_at: 42,
+        token_epoch: 0,
     };
 
     assert_eq!(registry.register(record.clone()).unwrap(), record);
@@ -126,6 +127,7 @@ fn tenant_registry_is_persistent_and_idempotent() {
         root_signer_pubkey: None,
         tenant_pubkey: record.tenant_pubkey,
         created_at: 43,
+        token_epoch: 0,
     };
     assert_eq!(
         registry.register(duplicate_key).unwrap_err(),
@@ -150,6 +152,7 @@ fn tenant_registry_finds_by_key_after_a_reopen() {
             root_signer_pubkey: (i == 3).then_some(root_signer),
             tenant_pubkey: Privkey::from(&[i; 32]).pubkey(),
             created_at: i as u64,
+            token_epoch: 0,
         })
         .collect();
     for record in &records {
@@ -217,6 +220,7 @@ fn tenant_registry_binds_multiple_channels_with_assets() {
         root_signer_pubkey: None,
         tenant_pubkey: Privkey::from(&[1; 32]).pubkey(),
         created_at: 42,
+        token_epoch: 0,
     };
     registry.register(record.clone()).unwrap();
 
@@ -306,6 +310,7 @@ fn ensure_hosted_watch_skips_an_existing_row() {
         root_signer_pubkey: None,
         tenant_pubkey: Privkey::from(&[1; 32]).pubkey(),
         created_at: 42,
+        token_epoch: 0,
     };
     let channel_id = Hash256::from([9u8; 32]);
     let node_id = crate::lsp::tenant_watchtower_node_id(&record.tenant_pubkey);
@@ -351,6 +356,7 @@ fn authenticated_tenant_registry_consumes_and_persists_request_ids() {
         root_signer_pubkey: Some(root_signer_pubkey),
         tenant_pubkey: Privkey::from(&[8; 32]).pubkey(),
         created_at: 42,
+        token_epoch: 0,
     };
     let first = [1; 32];
     let second = [2; 32];
@@ -399,6 +405,7 @@ fn authenticated_tenant_registry_consumes_and_persists_request_ids() {
         root_signer_pubkey: Some(other_root),
         tenant_pubkey: Privkey::from(&[10; 32]).pubkey(),
         created_at: 43,
+        token_epoch: 0,
     };
     assert_eq!(
         reopened
@@ -546,6 +553,7 @@ impl TenantRuntimeFactory for BusyRuntimeFactory {
             root_signer_pubkey: None,
             tenant_pubkey: Privkey::from(&[4; 32]).pubkey(),
             created_at: 42,
+            token_epoch: 0,
         })
     }
 
@@ -574,6 +582,7 @@ impl TenantRuntimeFactory for RestartableRuntimeFactory {
             root_signer_pubkey: None,
             tenant_pubkey: Privkey::from(&[5; 32]).pubkey(),
             created_at: 42,
+            token_epoch: 0,
         })
     }
 
@@ -600,6 +609,7 @@ impl TenantRuntimeFactory for FakeRuntimeFactory {
             root_signer_pubkey: None,
             tenant_pubkey: Privkey::from(&[secret; 32]).pubkey(),
             created_at: 42,
+            token_epoch: 0,
         })
     }
 
@@ -720,6 +730,7 @@ fn hosted_invoice_registration_is_signed_and_persistent() {
         root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
         created_at: 42,
+        token_epoch: 0,
     };
     let payment_hash = Hash256::from([7; 32]);
     let invoice = signed_invoice(&tenant_key, payment_hash);
@@ -755,6 +766,7 @@ fn hosted_invoice_route_hint_must_match_public_t() {
         root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
         created_at: 42,
+        token_epoch: 0,
     };
     let invoice = InvoiceBuilder::new(Currency::Fibd)
         .amount(Some(1_000))
@@ -787,6 +799,7 @@ fn hosted_invoice_hint_detects_tampering_and_expiry() {
         root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
         created_at: 42,
+        token_epoch: 0,
     };
     let mut hint = invoices
         .register(
@@ -824,6 +837,7 @@ fn hosted_invoice_buffer_duration_is_capped_at_seven_days() {
         root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
         created_at: 42,
+        token_epoch: 0,
     };
 
     let result = invoices.register(
@@ -857,6 +871,7 @@ fn hosted_invoice_buffer_duration_is_shortened_by_operator_policy() {
         root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
         created_at: 42,
+        token_epoch: 0,
     };
 
     let registration = invoices
@@ -886,6 +901,7 @@ fn hosted_invoice_must_be_signed_by_registered_tenant() {
         root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
         created_at: 42,
+        token_epoch: 0,
     };
 
     let result = invoices.register(
@@ -947,6 +963,7 @@ fn payment_delivery_deadline_preserves_downstream_expiry_budget() {
         root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
         created_at: 42,
+        token_epoch: 0,
     };
     let payment_hash = Hash256::from([11; 32]);
     let registration = invoices
@@ -989,6 +1006,7 @@ fn payment_delivery_uses_selected_tenant_channel_and_rejects_asset_mismatch() {
         root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
         created_at: 42,
+        token_epoch: 0,
     };
     let payment_hash = Hash256::from([31; 32]);
     let registration = invoices
@@ -1050,6 +1068,7 @@ fn payment_delivery_uses_incoming_tlc_as_primary_key() {
         root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
         created_at: 42,
+        token_epoch: 0,
     };
     let payment_hash = Hash256::from([29; 32]);
     let registration = invoices
@@ -1241,6 +1260,7 @@ fn in_flight_delivery_is_not_reverted_by_buffer_deadline() {
         root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
         created_at: 42,
+        token_epoch: 0,
     };
     let payment_hash = Hash256::from([12; 32]);
     let registration = invoices
@@ -1333,6 +1353,7 @@ fn payment_delivery_accepts_downstream_mpp_and_rejects_invalid_state_transition(
         root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
         created_at: 42,
+        token_epoch: 0,
     };
     let payment_hash = Hash256::from([17; 32]);
     let registration = invoices
@@ -1410,6 +1431,7 @@ fn payment_delivery_enforces_per_tenant_pending_limit() {
         root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
         created_at: 42,
+        token_epoch: 0,
     };
     let now = crate::now_timestamp_as_millis_u64();
     for (index, payment_hash) in [Hash256::from([18; 32]), Hash256::from([19; 32])]
@@ -2245,6 +2267,7 @@ impl BufferedDeliveryTest {
             root_signer_pubkey: None,
             tenant_pubkey: tenant_key.pubkey(),
             created_at: 42,
+            token_epoch: 0,
         };
         let request =
             hosted_forwarding_request(&tenant, payment_hash, crate::now_timestamp_as_millis_u64());
@@ -2523,6 +2546,7 @@ async fn cold_tenant_delivery_dispatches_only_after_channel_online() {
         root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
         created_at: 42,
+        token_epoch: 0,
     };
     let now = crate::now_timestamp_as_millis_u64();
 
@@ -2642,12 +2666,14 @@ async fn offline_tenant_does_not_block_an_online_tenant() {
         root_signer_pubkey: None,
         tenant_pubkey: u1_key.pubkey(),
         created_at: 42,
+        token_epoch: 0,
     };
     let u2 = HostedTenantRecord {
         tenant_id: u2_id.clone(),
         root_signer_pubkey: None,
         tenant_pubkey: u2_key.pubkey(),
         created_at: 42,
+        token_epoch: 0,
     };
     let now = crate::now_timestamp_as_millis_u64();
     ractor::call!(service, |reply| {
@@ -2742,6 +2768,7 @@ async fn cold_tenant_delivery_fails_at_buffer_deadline() {
         root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
         created_at: 42,
+        token_epoch: 0,
     };
     let now = crate::now_timestamp_as_millis_u64();
     let mut request = hosted_forwarding_request(&tenant, payment_hash, now);
@@ -2807,6 +2834,7 @@ async fn settling_delivery_resumes_upstream_failure_after_restart_marker() {
         root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
         created_at: 42,
+        token_epoch: 0,
     };
     let now = crate::now_timestamp_as_millis_u64();
     ractor::call!(service, |reply| {
@@ -2901,6 +2929,7 @@ async fn restart_fails_deferred_delivery_after_upstream_tlc_removal() {
         root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
         created_at: 42,
+        token_epoch: 0,
     };
     let now = crate::now_timestamp_as_millis_u64();
     ractor::call!(service, |reply| {
@@ -2992,6 +3021,7 @@ async fn zero_buffer_hint_keeps_immediate_trampoline_behavior() {
         root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
         created_at: 42,
+        token_epoch: 0,
     };
 
     assert_eq!(
@@ -3054,6 +3084,7 @@ async fn tenant_with_pending_delivery_cannot_be_evicted() {
         root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
         created_at: 42,
+        token_epoch: 0,
     };
     ractor::call!(service, |reply| {
         LspServiceMessage::AcceptTrampolineDelivery(
@@ -3112,6 +3143,7 @@ async fn transient_dispatch_failure_returns_to_deferred_and_retries() {
         root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
         created_at: 42,
+        token_epoch: 0,
     };
 
     ractor::call!(service, |reply| {
@@ -3177,6 +3209,7 @@ async fn permanent_dispatch_failure_fails_upstream_without_retrying() {
         root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
         created_at: 42,
+        token_epoch: 0,
     };
 
     ractor::call!(service, |reply| {
@@ -3244,6 +3277,7 @@ async fn transient_payment_outcome_retries_delivery_before_deadline() {
         root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
         created_at: 42,
+        token_epoch: 0,
     };
 
     ractor::call!(service, |reply| {
@@ -3370,6 +3404,7 @@ async fn permanent_payment_outcomes_settle_upstream_without_redispatch() {
         root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
         created_at: 42,
+        token_epoch: 0,
     };
     let cases = [
         (
@@ -3526,6 +3561,7 @@ async fn downstream_outcome_is_persisted_before_upstream_settlement() {
         root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
         created_at: 42,
+        token_epoch: 0,
     };
     ractor::call!(service, |reply| {
         LspServiceMessage::AcceptTrampolineDelivery(
@@ -3673,6 +3709,7 @@ async fn check_settling_delivery_reconciliation(code: TlcErrorCode, status: Paym
         root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
         created_at: 42,
+        token_epoch: 0,
     };
     let payment_hash = Hash256::from([11; 32]);
     let registration = LspInvoiceRegistry::new(store.clone())
@@ -3834,6 +3871,7 @@ async fn payment_outcome_notification_allows_network_queries_before_settlement()
         root_signer_pubkey: None,
         tenant_pubkey: Privkey::from(&[3; 32]).pubkey(),
         created_at: 42,
+        token_epoch: 0,
     };
     let payment_hash = Hash256::from([91; 32]);
     let request =
@@ -3903,6 +3941,7 @@ async fn delayed_payment_outcome_does_not_settle_replacement_execution() {
         root_signer_pubkey: None,
         tenant_pubkey: Privkey::from(&[3; 32]).pubkey(),
         created_at: 42,
+        token_epoch: 0,
     };
     let payment_hash = Hash256::from([92; 32]);
     let request =

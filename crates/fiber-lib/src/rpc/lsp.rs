@@ -15,7 +15,7 @@ pub use fiber_json_types::{
     GetInvoiceResult, GetPaymentCommandResult, ListLspTenantsResult, LspPaymentDelivery,
     LspPaymentDeliveryStatus, LspPaymentHashParams, LspServiceStatus, LspTenantChannel,
     LspTenantParams, LspTenantRuntimeStatus, LspTenantStatus, RegisterLspTenantParams,
-    RegisterLspTenantResult,
+    RegisterLspTenantResult, RevokeLspTenantTokensResult,
 };
 
 /// RPC module for hosted LSP tenant and payment-delivery administration.
@@ -50,6 +50,13 @@ trait LspRpc {
         &self,
         params: LspTenantParams,
     ) -> Result<LspTenantStatus, ErrorObjectOwned>;
+
+    /// Revokes all previously issued access tokens for a hosted tenant by advancing its token epoch.
+    #[method(name = "lsp_revoke_tenant_tokens")]
+    async fn lsp_revoke_tenant_tokens(
+        &self,
+        params: LspTenantParams,
+    ) -> Result<RevokeLspTenantTokensResult, ErrorObjectOwned>;
 
     /// Lists all persistently registered hosted tenants.
     #[method(name = "lsp_list_tenants")]
@@ -139,6 +146,24 @@ impl LspRpcServer for LspRpcServerImpl {
             .rpc_err()?
             .rpc_err()
             .map(Into::into)
+    }
+
+    async fn lsp_revoke_tenant_tokens(
+        &self,
+        params: LspTenantParams,
+    ) -> Result<RevokeLspTenantTokensResult, ErrorObjectOwned> {
+        let tenant_id = TenantId::new(params.tenant_id).rpc_err()?;
+        let token_epoch = call!(
+            self.actor,
+            LspServiceMessage::RevokeTenantTokens,
+            tenant_id.clone()
+        )
+        .rpc_err()?
+        .rpc_err()?;
+        Ok(RevokeLspTenantTokensResult {
+            tenant_id: tenant_id.to_string(),
+            token_epoch,
+        })
     }
 
     async fn lsp_list_tenants(&self) -> Result<ListLspTenantsResult, ErrorObjectOwned> {

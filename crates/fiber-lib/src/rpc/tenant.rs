@@ -176,6 +176,7 @@ pub(crate) const OPERATOR_ONLY_METHODS: &[&str] = &[
     "lsp_get_status",
     "lsp_list_tenants",
     "lsp_register_tenant",
+    "lsp_revoke_tenant_tokens",
     "node_info",
     "open_channel",
     "parse_invoice",

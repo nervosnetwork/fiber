@@ -149,6 +149,7 @@ fn build_rules() -> HashMap<&'static str, AuthRule> {
     b.rule("lsp_register_tenant", r#"allow if write("lsp");"#);
     b.rule("lsp_ensure_tenant", r#"allow if write("lsp");"#);
     b.rule("lsp_evict_tenant", r#"allow if write("lsp");"#);
+    b.rule("lsp_revoke_tenant_tokens", r#"allow if write("lsp");"#);
     b.rule("lsp_list_tenants", r#"allow if read("lsp");"#);
     b.rule("lsp_get_payment_delivery", r#"allow if read("lsp");"#);
 
@@ -209,10 +210,15 @@ fn build_rules() -> HashMap<&'static str, AuthRule> {
     b.0
 }
 
+/// Shared runtime map of each hosted tenant's minimum valid token epoch (`> 0`).
+pub type TenantTokenEpochs = std::sync::Arc<parking_lot::RwLock<HashMap<TenantId, u64>>>;
+
 pub struct BiscuitAuth {
     pubkey: Option<PublicKey>,
     revocation_list: HashSet<Vec<u8>>,
     rules: HashMap<&'static str, AuthRule>,
+    lsp_enabled: bool,
+    tenant_token_epochs: Option<TenantTokenEpochs>,
 }
 
 impl BiscuitAuth {
@@ -224,6 +230,8 @@ impl BiscuitAuth {
             pubkey: Some(pubkey),
             rules,
             revocation_list,
+            lsp_enabled: cfg!(feature = "lsp"),
+            tenant_token_epochs: None,
         })
     }
 
@@ -234,7 +242,19 @@ impl BiscuitAuth {
             pubkey: None,
             rules,
             revocation_list,
+            lsp_enabled: cfg!(feature = "lsp"),
+            tenant_token_epochs: None,
         }
+    }
+
+    pub fn with_lsp_enabled(mut self, enabled: bool) -> Self {
+        self.lsp_enabled = enabled;
+        self
+    }
+
+    pub fn with_tenant_token_epochs(mut self, epochs: TenantTokenEpochs) -> Self {
+        self.tenant_token_epochs = Some(epochs);
+        self
     }
 
     pub fn get_rule(&self, method: &str) -> Result<&AuthRule> {
@@ -281,6 +301,24 @@ impl BiscuitAuth {
         {
             tracing::debug!("revoked token: {token}");
             return Err(anyhow::anyhow!("Token is in revocation list: {token}"));
+        }
+        // Reject tenant tokens when hosted LSP is not enabled at runtime, or when
+        // the tenant's token epoch has advanced past this token's epoch.
+        if let Some(tenant_id) = extract_tenant_id(&b)? {
+            if !cfg!(feature = "lsp") || !self.lsp_enabled {
+                return Err(anyhow::anyhow!(
+                    "tenant token cannot call {method} because hosted LSP service is not enabled"
+                ));
+            }
+            if let Some(epochs) = &self.tenant_token_epochs {
+                let current_epoch = epochs.read().get(&tenant_id).copied().unwrap_or(0);
+                let token_epoch = extract_token_epoch(&b)?.unwrap_or(0);
+                if token_epoch < current_epoch {
+                    return Err(anyhow::anyhow!(
+                        "tenant token has been revoked (epoch {token_epoch} < {current_epoch})"
+                    ));
+                }
+            }
         }
         // check permission
         let rule = self.get_rule(method)?;
@@ -335,6 +373,22 @@ pub fn extract_tenant_id(token: &Biscuit) -> Result<Option<TenantId>> {
     }
 }
 
+/// Extract the revocation `token_epoch` fact from the token authority block.
+pub fn extract_token_epoch(token: &Biscuit) -> Result<Option<u64>> {
+    const QUERY: &str = "data($epoch) <- token_epoch($epoch)";
+    let mut authorizer = build_authorizer(token)?;
+    let epochs: Vec<(i64,)> = authorizer.query(QUERY)?;
+    match epochs.as_slice() {
+        [] => Ok(None),
+        [(epoch,)] => u64::try_from(*epoch)
+            .map(Some)
+            .map_err(|_| anyhow!("token authority block contains negative token_epoch")),
+        _ => Err(anyhow!(
+            "token authority block must contain at most one token_epoch fact"
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -367,6 +421,7 @@ mod tests {
                 &TenantId::new("u1".to_string()).unwrap(),
                 &node_id,
                 crate::now_timestamp_as_millis_u64() / 1_000 + 3_600,
+                0,
             )
             .unwrap();
         let auth = BiscuitAuth::from_pubkey(root.public().to_string()).unwrap();
@@ -996,5 +1051,120 @@ mod tests {
         let node_id = extract_node_id(&b).unwrap();
         assert!(!node_id.as_ref().is_empty());
         println!("node_id: {node_id:?}");
+    }
+
+    #[cfg(feature = "lsp")]
+    #[test]
+    fn test_runtime_lsp_disabled_rejects_tenant_token_but_allows_operator() {
+        let root = KeyPair::new();
+        let issuer = BiscuitTokenIssuer::from_private_key(
+            &root.private().to_prefixed_string(),
+            &root.public().to_string(),
+        )
+        .unwrap();
+        let tenant_id = TenantId::new("tenant-runtime-off").unwrap();
+        let node_id = NodeId::from_bytes(vec![9, 8, 7]);
+        let tenant_token = issuer
+            .issue_tenant_token(
+                &tenant_id,
+                &node_id,
+                crate::now_timestamp_as_millis_u64() / 1_000 + 3_600,
+                0,
+            )
+            .unwrap();
+        let operator_token = biscuit!(r#"write("watchtower");"#)
+            .build(&root)
+            .unwrap()
+            .to_base64()
+            .unwrap();
+
+        let auth = BiscuitAuth::from_pubkey(root.public().to_string())
+            .unwrap()
+            .with_lsp_enabled(false);
+        let err = auth
+            .check_permission("create_watch_channel", &tenant_token)
+            .err()
+            .expect("tenant token must be rejected when LSP is disabled");
+        assert!(
+            err.to_string()
+                .contains("hosted LSP service is not enabled"),
+            "{err}"
+        );
+        assert!(auth
+            .check_permission("create_watch_channel", &operator_token)
+            .is_ok());
+    }
+
+    #[cfg(feature = "lsp")]
+    #[test]
+    fn test_tenant_token_epoch_revocation() {
+        use crate::lsp::{HostedTenantRecord, TenantRegistry};
+
+        let (store, _dir) = crate::generate_store();
+        let registry = TenantRegistry::new(store);
+        let root = KeyPair::new();
+        let issuer = BiscuitTokenIssuer::from_private_key(
+            &root.private().to_prefixed_string(),
+            &root.public().to_string(),
+        )
+        .unwrap();
+        let tenant_id = TenantId::new("tenant-revoke").unwrap();
+        let tenant_pubkey = fiber_types::Privkey::from([7u8; 32]).pubkey();
+        let node_id = NodeId::from_bytes(tenant_pubkey.serialize().to_vec());
+        registry
+            .register(HostedTenantRecord {
+                tenant_id: tenant_id.clone(),
+                root_signer_pubkey: None,
+                tenant_pubkey,
+                created_at: 1,
+                token_epoch: 0,
+            })
+            .unwrap();
+        let expires = crate::now_timestamp_as_millis_u64() / 1_000 + 3_600;
+
+        let token_epoch_0 = issuer
+            .issue_tenant_token(&tenant_id, &node_id, expires, 0)
+            .unwrap();
+        let token_epoch_1 = issuer
+            .issue_tenant_token(&tenant_id, &node_id, expires, 1)
+            .unwrap();
+        // Legacy token without an explicit token_epoch fact defaults to epoch 0.
+        let legacy_token = biscuit!(
+            r#"
+            tenant("tenant-revoke");
+            write("invoices");
+            "#
+        )
+        .build(&root)
+        .unwrap()
+        .to_base64()
+        .unwrap();
+
+        let epochs: super::TenantTokenEpochs = Default::default();
+        let auth = BiscuitAuth::from_pubkey(root.public().to_string())
+            .unwrap()
+            .with_lsp_enabled(true)
+            .with_tenant_token_epochs(epochs.clone());
+
+        assert!(auth.check_permission("new_invoice", &token_epoch_0).is_ok());
+        assert!(auth.check_permission("new_invoice", &legacy_token).is_ok());
+
+        // Revoke in DB and update shared epochs map -> epoch 0 and legacy tokens are immediately rejected.
+        let new_epoch = registry.revoke_tenant_tokens(&tenant_id).unwrap();
+        assert_eq!(new_epoch, 1);
+        epochs.write().insert(tenant_id, new_epoch);
+        assert!(auth
+            .check_permission("new_invoice", &token_epoch_0)
+            .err()
+            .expect("epoch 0 token must be revoked")
+            .to_string()
+            .contains("revoked"));
+        assert!(auth
+            .check_permission("new_invoice", &legacy_token)
+            .err()
+            .expect("legacy token must be revoked")
+            .to_string()
+            .contains("revoked"));
+        assert!(auth.check_permission("new_invoice", &token_epoch_1).is_ok());
     }
 }

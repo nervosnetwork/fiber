@@ -189,6 +189,7 @@ pub struct WatchtowerRpcServerImpl<S> {
     store: S,
     signing_events: crate::signing::SigningEvents,
     quotas: crate::lsp_config::WatchtowerQuotas,
+    lsp_enabled: bool,
 }
 
 #[cfg(feature = "watchtower")]
@@ -198,6 +199,7 @@ impl<S> WatchtowerRpcServerImpl<S> {
             store,
             signing_events: Default::default(),
             quotas: Default::default(),
+            lsp_enabled: true,
         }
     }
 
@@ -209,6 +211,18 @@ impl<S> WatchtowerRpcServerImpl<S> {
     pub(crate) fn with_quotas(mut self, quotas: crate::lsp_config::WatchtowerQuotas) -> Self {
         self.quotas = quotas;
         self
+    }
+
+    pub(crate) fn with_lsp_enabled(mut self, enabled: bool) -> Self {
+        self.lsp_enabled = enabled;
+        self
+    }
+
+    fn authorized_node_id(&self, ctx: &RpcContext) -> Result<NodeId, ErrorObjectOwned> {
+        if ctx.tenant_scoped && !self.lsp_enabled {
+            return Err(rpc_error("hosted LSP service is not enabled"));
+        }
+        authorized_watchtower_node_id(ctx)
     }
 }
 
@@ -272,7 +286,7 @@ where
         ctx: RpcContext,
         params: CreateWatchChannelParams,
     ) -> Result<(), ErrorObjectOwned> {
-        let node_id = authorized_watchtower_node_id(&ctx)?;
+        let node_id = self.authorized_node_id(&ctx)?;
         let channel_id = params.channel_id.into();
         let local_settlement_key = params
             .local_settlement_key
@@ -363,7 +377,7 @@ where
         ctx: RpcContext,
         params: RemoveWatchChannelParams,
     ) -> Result<(), ErrorObjectOwned> {
-        let node_id = authorized_watchtower_node_id(&ctx)?;
+        let node_id = self.authorized_node_id(&ctx)?;
         let channel_id = params.channel_id.into();
         let signing_scope = self.signing_events.watchtower(&node_id);
         let signing_update = signing_scope.prepare_removed(channel_id);
@@ -378,7 +392,7 @@ where
         ctx: RpcContext,
         params: UpdateRevocationParams,
     ) -> Result<(), ErrorObjectOwned> {
-        let node_id = authorized_watchtower_node_id(&ctx)?;
+        let node_id = self.authorized_node_id(&ctx)?;
         let channel_id = params.channel_id.into();
         let revocation_data: fiber_types::RevocationData = params
             .revocation_data
@@ -411,7 +425,7 @@ where
         ctx: RpcContext,
         params: UpdatePendingRemoteSettlementParams,
     ) -> Result<(), ErrorObjectOwned> {
-        let node_id = authorized_watchtower_node_id(&ctx)?;
+        let node_id = self.authorized_node_id(&ctx)?;
         let channel_id = params.channel_id.into();
         let settlement_data: fiber_types::SettlementData = params
             .settlement_data
@@ -428,7 +442,7 @@ where
         ctx: RpcContext,
         params: UpdateLocalSettlementParams,
     ) -> Result<(), ErrorObjectOwned> {
-        let node_id = authorized_watchtower_node_id(&ctx)?;
+        let node_id = self.authorized_node_id(&ctx)?;
         let channel_id = params.channel_id.into();
         let settlement_data: fiber_types::SettlementData = params
             .settlement_data
@@ -447,7 +461,7 @@ where
     ) -> Result<(), ErrorObjectOwned> {
         use fiber_types::HashAlgorithm;
 
-        let node_id = authorized_watchtower_node_id(&ctx)?;
+        let node_id = self.authorized_node_id(&ctx)?;
         let payment_hash = params.payment_hash.into();
         let preimage = params.preimage.into();
 
@@ -472,7 +486,7 @@ where
         ctx: RpcContext,
         params: RemovePreimageParams,
     ) -> Result<(), ErrorObjectOwned> {
-        let node_id = authorized_watchtower_node_id(&ctx)?;
+        let node_id = self.authorized_node_id(&ctx)?;
         let payment_hash = params.payment_hash.into();
         self.store.remove_watch_preimage(node_id, payment_hash);
         Ok(())
@@ -483,7 +497,7 @@ where
         ctx: RpcContext,
         params: GetWatchtowerSigningStatusParams,
     ) -> Result<GetWatchtowerSigningStatusResult, ErrorObjectOwned> {
-        let node_id = authorized_watchtower_node_id(&ctx)?;
+        let node_id = self.authorized_node_id(&ctx)?;
         let channel_id: fiber_types::Hash256 = params.channel_id.into();
         if self
             .store
@@ -511,7 +525,7 @@ where
     ) -> Result<SubmitWatchtowerSignatureResult, ErrorObjectOwned> {
         use fiber_types::{LastAppliedWatchtowerSignature, WatchtowerSignerState};
 
-        let node_id = authorized_watchtower_node_id(&ctx)?;
+        let node_id = self.authorized_node_id(&ctx)?;
         let channel_id: fiber_types::Hash256 = params.channel_id.into();
         let request_id: fiber_types::Hash256 = params.request_id.into();
         let signature: [u8; 65] = params

@@ -54,6 +54,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
         * [Method `lsp_register_tenant`](#lsp-lsp_register_tenant)
         * [Method `lsp_ensure_tenant`](#lsp-lsp_ensure_tenant)
         * [Method `lsp_evict_tenant`](#lsp-lsp_evict_tenant)
+        * [Method `lsp_revoke_tenant_tokens`](#lsp-lsp_revoke_tenant_tokens)
         * [Method `lsp_list_tenants`](#lsp-lsp_list_tenants)
         * [Method `lsp_get_payment_delivery`](#lsp-lsp_get_payment_delivery)
     * [Module Payment](#module-payment)
@@ -966,6 +967,24 @@ Stops a tenant execution context while retaining its persistent state and keys.
 * `channels` - <em>Vec<[LspTenantChannel](#type-lsptenantchannel)></em>, All private channels currently bound to this tenant.
 * `created_at` - <em>`u64`</em>, Tenant creation timestamp in milliseconds since Unix epoch.
 * `runtime_status` - <em>[LspTenantRuntimeStatus](#type-lsptenantruntimestatus)</em>, Whether the tenant execution context is currently resident in this process.
+
+---
+
+
+
+<a id="lsp-lsp_revoke_tenant_tokens"></a>
+#### Method `lsp_revoke_tenant_tokens`
+
+Revokes all previously issued access tokens for a hosted tenant by advancing its token epoch.
+
+##### Params
+
+* `tenant_id` - <em>`String`</em>, Stable operator-facing tenant identifier.
+
+##### Returns
+
+* `tenant_id` - <em>`String`</em>, Tenant whose previous access tokens were revoked.
+* `token_epoch` - <em>`u64`</em>, New minimum valid token epoch for this tenant.
 
 ---
 

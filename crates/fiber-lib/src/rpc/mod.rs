@@ -395,9 +395,24 @@ pub mod server {
             }
         }
 
+        let lsp_enabled = lsp_actor.is_some();
+        #[cfg(feature = "lsp")]
+        let tenant_token_epochs = match lsp_actor.as_ref() {
+            Some(actor) => Some(
+                ractor::call!(actor, crate::lsp::LspServiceMessage::GetTenantTokenEpochs).map_err(
+                    |err| anyhow::anyhow!("Failed to query LSP tenant token epochs: {err}"),
+                )?,
+            ),
+            None => None,
+        };
         let auth = match config.biscuit_public_key.as_ref() {
             Some(key) => {
-                let auth = BiscuitAuth::from_pubkey(key.to_string())?;
+                let mut auth =
+                    BiscuitAuth::from_pubkey(key.to_string())?.with_lsp_enabled(lsp_enabled);
+                #[cfg(feature = "lsp")]
+                if let Some(epochs) = tenant_token_epochs {
+                    auth = auth.with_tenant_token_epochs(epochs);
+                }
                 tracing::info!("Enable RPC auth");
                 Some(auth)
             }
@@ -483,6 +498,7 @@ pub mod server {
                         WatchtowerRpcServerImpl::new(store.clone())
                             .with_signing_events(signing_events.clone())
                             .with_quotas(watchtower_quotas)
+                            .with_lsp_enabled(lsp_enabled)
                             .into_rpc(),
                     )
                     .unwrap();

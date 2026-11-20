@@ -81,6 +81,8 @@ pub struct TenantSubscriptionContext {
 pub enum LspServiceMessage {
     GetStatus(RpcReplyPort<LspServiceStatus>),
     GetWatchtowerQuotas(RpcReplyPort<crate::lsp_config::WatchtowerQuotas>),
+    GetTenantTokenEpochs(RpcReplyPort<crate::rpc::biscuit::TenantTokenEpochs>),
+    RevokeTenantTokens(TenantId, RpcReplyPort<Result<u64, String>>),
     RegisterAuthenticatedTenant {
         payload: TenantRegistryPayload,
         signature: TenantRegistrySignature,
@@ -151,6 +153,7 @@ pub struct LspServiceState {
     #[cfg(feature = "watchtower")]
     signing_events: crate::signing::SigningEvents,
     pub ready_tenants: HashMap<TenantId, HashSet<Hash256>>,
+    pub token_epochs: crate::rpc::biscuit::TenantTokenEpochs,
     // Deduplicates in-flight/settling reconciliation timers so periodic ticks
     // never amplify per-delivery retry loops.
     reconciling_deliveries: HashSet<LspPaymentDeliveryKey>,
@@ -239,6 +242,7 @@ impl LspServiceState {
                 &record.tenant_id,
                 &tenant_watchtower_node_id(&record.tenant_pubkey),
                 expires_at_ms / 1_000,
+                record.token_epoch,
             )
             .map_err(|error| error.to_string())?;
         Ok((access_token, expires_at_ms))
@@ -396,6 +400,16 @@ impl Actor for LspService {
         myself.send_interval(Duration::from_secs(5), || {
             LspServiceMessage::ReconcileInFlightDeliveries
         });
+        let token_epochs: crate::rpc::biscuit::TenantTokenEpochs =
+            std::sync::Arc::new(parking_lot::RwLock::new(
+                registry
+                    .list()
+                    .map_err(anyhow::Error::msg)?
+                    .into_iter()
+                    .filter(|record| record.token_epoch > 0)
+                    .map(|record| (record.tenant_id, record.token_epoch))
+                    .collect(),
+            ));
         Ok(LspServiceState {
             config: args.config,
             public_node_id: args.public_node_id,
@@ -411,6 +425,7 @@ impl Actor for LspService {
             #[cfg(feature = "watchtower")]
             signing_events: args.signing_events,
             ready_tenants: HashMap::new(),
+            token_epochs,
             reconciling_deliveries: HashSet::new(),
         })
     }
@@ -447,6 +462,18 @@ impl Actor for LspService {
             }
             LspServiceMessage::GetWatchtowerQuotas(reply) => {
                 let _ = reply.send(state.config.watchtower_quotas());
+            }
+            LspServiceMessage::GetTenantTokenEpochs(reply) => {
+                let _ = reply.send(state.token_epochs.clone());
+            }
+            LspServiceMessage::RevokeTenantTokens(tenant_id, reply) => {
+                let result = state
+                    .registry
+                    .revoke_tenant_tokens(&tenant_id)
+                    .inspect(|&epoch| {
+                        state.token_epochs.write().insert(tenant_id, epoch);
+                    });
+                let _ = reply.send(result);
             }
             LspServiceMessage::RegisterAuthenticatedTenant {
                 payload,

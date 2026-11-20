@@ -111,6 +111,9 @@ pub enum InvoiceError {
     /// Description is too long.
     #[error("Description with length of {0} is too long, max length is 639")]
     DescriptionTooLong(usize),
+    /// Fallback address is too long.
+    #[error("Fallback address length {len} exceeds max length {max}")]
+    FallbackAddressTooLong { len: usize, max: usize },
     /// Invoice not found.
     #[error("Invoice not found")]
     InvoiceNotFound,
@@ -148,6 +151,9 @@ pub const SIGNATURE_U5_SIZE: usize = 104;
 
 /// Maximum allowed length for an invoice description.
 pub const MAX_DESCRIPTION_LENGTH: usize = 639;
+
+/// Maximum allowed length for an invoice fallback address.
+pub const MAX_FALLBACK_ADDRESS_LENGTH: usize = 512;
 
 /// Maximum decompressed molecule payload accepted by the invoice parser.
 ///
@@ -601,6 +607,15 @@ pub struct InvoiceData {
     pub payment_hash: Hash256,
     /// The attributes of the invoice, e.g. description, expiry time, etc.
     pub attrs: Vec<Attribute>,
+}
+
+impl InvoiceData {
+    /// Returns the uncompressed Molecule-encoded byte length of this invoice data.
+    pub fn encoded_data_len(&self) -> usize {
+        gen_invoice::RawInvoiceData::from(self.clone())
+            .as_slice()
+            .len()
+    }
 }
 
 /// Represents a syntactically and semantically correct Fiber invoice.

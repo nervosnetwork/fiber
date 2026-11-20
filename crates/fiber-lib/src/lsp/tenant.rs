@@ -32,6 +32,9 @@ pub struct HostedTenantRecord {
     /// addressing; it is never announced as a gossip-routable node identity.
     pub tenant_pubkey: Pubkey,
     pub created_at: u64,
+    /// Monotonically increasing revocation epoch; tokens carrying an older epoch are rejected.
+    #[serde(default)]
+    pub token_epoch: u64,
 }
 
 /// One private channel bound to a hosted tenant.

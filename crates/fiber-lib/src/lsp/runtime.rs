@@ -162,6 +162,7 @@ impl<C: CkbChainClient + Clone + Send + Sync + 'static> TenantRuntimeFactory
             root_signer_pubkey: None,
             tenant_pubkey,
             created_at: crate::now_timestamp_as_millis_u64(),
+            token_epoch: 0,
         })
     }
 

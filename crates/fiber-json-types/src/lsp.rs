@@ -96,6 +96,18 @@ pub struct RegisterLspTenantResult {
     pub expires_at_ms: u64,
 }
 
+/// Result of revoking all previously issued access tokens for a hosted tenant.
+#[serde_as]
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
+pub struct RevokeLspTenantTokensResult {
+    /// Tenant whose previous access tokens were revoked.
+    pub tenant_id: String,
+    /// New minimum valid token epoch for this tenant.
+    #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub token_epoch: u64,
+}
+
 /// Result of listing hosted tenants.
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 pub struct ListLspTenantsResult {

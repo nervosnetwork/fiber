@@ -57,13 +57,16 @@ impl BiscuitTokenIssuer {
 
     /// Build an unpadded base64url tenant token, suitable for HTTP and browser WebSockets.
     /// `expires_at_secs` is an exclusive Unix timestamp enforced by an authority check.
+    /// `token_epoch` binds the token to the tenant's current revocation epoch.
     /// This is the only token-minting implementation.
     pub fn issue_tenant_token(
         &self,
         tenant_id: &TenantId,
         node_id: &NodeId,
         expires_at_secs: u64,
+        token_epoch: u64,
     ) -> Result<String> {
+        let epoch_i64 = i64::try_from(token_epoch).context("tenant token epoch exceeds i64")?;
         let mut expiration = Check::try_from("check if time($now), $now < {expires_at}")?;
         expiration.set("expires_at", Term::Date(expires_at_secs))?;
         let mut builder = Biscuit::builder()
@@ -75,6 +78,10 @@ impl BiscuitTokenIssuer {
             .fact(Fact::new(
                 "node".to_string(),
                 &[Term::Str(node_id.to_string())],
+            ))?
+            .fact(Fact::new(
+                "token_epoch".to_string(),
+                &[Term::Integer(epoch_i64)],
             ))?;
         for (operation, resource) in TENANT_CAPABILITIES {
             builder = builder.fact(Fact::new(

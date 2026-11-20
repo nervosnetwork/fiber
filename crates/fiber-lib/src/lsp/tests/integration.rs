@@ -1192,6 +1192,7 @@ pub(super) async fn create_lsp_test_network_inner(
             root_signer_pubkey: Some(root_signer.pubkey()),
             tenant_pubkey: tenant.pubkey,
             created_at: crate::now_timestamp_as_millis_u64(),
+            token_epoch: 0,
         };
         runtimes_by_lsp.entry(*lsp_node_index).or_default().insert(
             tenant_id.clone(),
@@ -2081,6 +2082,7 @@ async fn hosted_payment_buffers_offline_private_channel_and_resumes_via_rpc() {
         root_signer_pubkey: Some(root_signer.pubkey()),
         tenant_pubkey: tenant.pubkey,
         created_at: crate::now_timestamp_as_millis_u64(),
+        token_epoch: 0,
     };
     let runtime_factory = Arc::new(ExistingRuntimeFactory::single(
         tenant_record,
