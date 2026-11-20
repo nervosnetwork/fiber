@@ -6955,7 +6955,13 @@ impl ChannelActorState {
                 // An outstanding external intent pins its exact nonce and peer inputs across
                 // reconnects. Never erase the staged evidence needed to resume its signature.
                 if !self.signing_context.is_awaiting_signature() {
-                    if !initial_unaccepted && !ready_advertised {
+                    // External signers have a finite V2 nonce pool: avoid burning fresh nonces
+                    // on repeated peer reconnects when `session.own` is still unused for the
+                    // current commitment number.
+                    let needs_rotation = self.channel_signer.local_material().is_some()
+                        || self.session.own.context.is_some()
+                        || self.session.own.number != number;
+                    if !initial_unaccepted && !ready_advertised && needs_rotation {
                         match self.refresh_own_nonce_v2(number) {
                             Ok(fresh) => {
                                 let previous = std::mem::replace(&mut self.session.own, fresh);
@@ -11343,12 +11349,13 @@ impl ChannelActorState {
                 ChannelSigningTransition::SendRevokeAndAck,
                 None,
             )?;
-            self.increment_remote_commitment_number();
-            session.own = self.allocate_v2(
+            let next_own = self.allocate_v2(
                 *self.get_local_funding_pubkey(),
                 next_number,
                 NoncePurposeV2::Commitment,
             )?;
+            self.increment_remote_commitment_number();
+            session.own = next_own;
             session.own_retired.clear();
             let response = RevokeAndAckV2 {
                 channel_id: self.id,

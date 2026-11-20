@@ -1586,16 +1586,16 @@ where
                 )
             })?;
             let max_fee = session.retry_fee_amount(attempt);
-            let channel_stats = {
+            let (source, channel_stats) = {
                 let graph = self.network_graph.read().await;
-                graph.channel_stats()
+                (graph.get_source_pubkey(), graph.channel_stats())
             };
 
             let channel_stats = GraphChannelStat::new(Some(channel_stats));
             let payment_state =
                 SendPaymentState::with_channel_stats(session.request.clone(), channel_stats);
             #[cfg(not(target_arch = "wasm32"))]
-            let hops = self
+            let mut hops = self
                 .build_route_in_spawn_task(amount, None, max_fee, payment_state)
                 .await
                 .map_err(|e| {
@@ -1603,12 +1603,21 @@ where
                 })?;
 
             #[cfg(target_arch = "wasm32")]
-            let hops = self
+            let mut hops = self
                 .build_route(amount, None, max_fee, payment_state)
                 .await
                 .map_err(|e| {
                     Error::BuildPaymentRouteError(format!("Failed to build route, {}", e))
                 })?;
+
+            if let Some(trampoline) = &session.request.trampoline_context {
+                if let Some(last_hop) = hops.last_mut() {
+                    last_hop.set_trampoline_onion(trampoline.remaining_trampoline_onion.clone());
+                }
+                let mut retry_max_fee = max_fee;
+                self.apply_trampoline_forwarding_fee(session, source, &hops, &mut retry_max_fee)
+                    .await?;
+            }
 
             check_trampoline_outgoing_tlc_expiry(session, &hops)?;
             attempt.update_route(hops);

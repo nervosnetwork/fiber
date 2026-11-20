@@ -82,10 +82,26 @@ struct WatchtowerQuotaCounts {
     channels_per_node: HashMap<NodeId, usize>,
     preimages_total: usize,
     preimages_per_node: HashMap<NodeId, usize>,
+    /// Per-node backoff floor preserved across `remove_watch_channel` so deleting a
+    /// watched channel cannot reset an active `retry_after_ms` backoff window.
+    node_retry_after_ms: HashMap<NodeId, u64>,
 }
 
 #[cfg(feature = "watchtower")]
 impl WatchtowerQuotaCounts {
+    fn record_retry_after(&mut self, node_id: &NodeId, retry_after_ms: u64) {
+        if retry_after_ms > 0 {
+            let entry = self.node_retry_after_ms.entry(node_id.clone()).or_default();
+            *entry = (*entry).max(retry_after_ms);
+        }
+    }
+
+    fn retry_after(&self, node_id: &NodeId) -> u64 {
+        self.node_retry_after_ms
+            .get(node_id)
+            .copied()
+            .unwrap_or_default()
+    }
     fn inc_channel(&mut self, node_id: &NodeId) {
         if self.initialized {
             self.channels_total = self.channels_total.saturating_add(1);
@@ -2494,14 +2510,43 @@ impl WatchtowerStore for Store {
         if existed {
             counts.dec_channel(&node_id);
         }
-        self.delete(
-            [
-                &[WATCHTOWER_SIGNER_PREFIX],
-                node_id.as_ref(),
-                channel_id.as_ref(),
-            ]
-            .concat(),
-        );
+        let signer_key = [
+            &[WATCHTOWER_SIGNER_PREFIX],
+            node_id.as_ref(),
+            channel_id.as_ref(),
+        ]
+        .concat();
+        if let Some(raw_signer) = self.get(signer_key.clone()) {
+            let signer_state: WatchtowerSignerState =
+                deserialize_from(raw_signer.as_ref(), "WatchtowerSignerState");
+            if let WatchtowerSignerState::External(ext) = signer_state {
+                // Release any fee-sponsor UTXOs held by this channel's pending or signed
+                // requests so deleting the channel cannot leak 30-minute held-cell locks,
+                // and preserve any active per-node backoff floor across deletion.
+                let fee_inputs: Vec<OutPoint> = ext
+                    .pending_requests
+                    .values()
+                    .map(|content| &content.transaction)
+                    .chain(
+                        ext.signed_signatures
+                            .values()
+                            .map(|(content, _)| &content.transaction),
+                    )
+                    .flat_map(|tx| {
+                        tx.raw()
+                            .inputs()
+                            .into_iter()
+                            .skip(1)
+                            .map(|input| input.previous_output())
+                    })
+                    .collect();
+                if !fee_inputs.is_empty() {
+                    crate::ckb::held_cells::release_for_watchtower(fee_inputs);
+                }
+                counts.record_retry_after(&node_id, ext.retry_after_ms);
+            }
+        }
+        self.delete(signer_key);
         self.delete(
             [
                 &[WATCHTOWER_SUPERSEDED_SETTLEMENT_PREFIX],
@@ -2776,6 +2821,8 @@ impl WatchtowerStore for Store {
                 }
             }
         }
+        let retained_retry_after_ms = self.watchtower_quota_counts.lock().retry_after(node_id);
+        node_retry_after_ms = node_retry_after_ms.max(retained_retry_after_ms);
         (node_active, global_active, node_retry_after_ms)
     }
 

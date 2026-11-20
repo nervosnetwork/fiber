@@ -153,6 +153,20 @@ where
             return self.skip_all();
         }
 
+        // For an already-Received invoice with a known preimage (e.g. crash recovery or retry
+        // after some MPP parts were already fulfilled and removed from payment_hold_tlcs), the
+        // remaining hold TLCs belong to an already-accepted set and must be fulfilled directly
+        // rather than re-checking whether the remaining subset alone meets `total_amount`.
+        if self.allow_received_invoice
+            && invoice_status == CkbInvoiceStatus::Received
+            && self.store.get_preimage(&self.payment_hash).is_some()
+        {
+            if self.tlcs.is_empty() {
+                return Vec::new();
+            }
+            return self.try_settle_all();
+        }
+
         let mut rejected = self.leave_just_fulfilled_tlcs(&invoice);
         if self.tlcs.is_empty() {
             return rejected;
