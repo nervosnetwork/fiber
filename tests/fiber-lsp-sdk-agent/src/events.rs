@@ -47,7 +47,7 @@ impl EventStream {
                     result = receive(url.as_str(), headers.clone(), &sender) => result,
                 };
                 if let Err(error) = &result {
-                    if error.downcast_ref::<jsonrpsee::core::ClientError>().is_some_and(|error| matches!(error, jsonrpsee::core::ClientError::Call(error) if error.message() == "Unauthorized")) {
+                    if is_unauthorized_error(error) {
                         tracing::warn!("subscription credentials rejected; stopping signer reader");
                         return;
                     }
@@ -78,6 +78,19 @@ impl Drop for EventStream {
     fn drop(&mut self) {
         self.task.abort();
     }
+}
+
+fn is_unauthorized_error(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<jsonrpsee::core::ClientError>()
+        .is_some_and(|client_err| match client_err {
+            jsonrpsee::core::ClientError::Call(err) => err.message() == "Unauthorized",
+            jsonrpsee::core::ClientError::Transport(err) => {
+                let msg = err.to_string();
+                msg.contains("401") || msg.contains("Unauthorized")
+            }
+            _ => false,
+        })
 }
 
 async fn deliver(sender: &mpsc::Sender<EventDelivery>, event: SubscriptionEvent) -> Result<()> {
@@ -255,5 +268,37 @@ mod tests {
             .is_none());
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         handle.stop().unwrap();
+    }
+
+    #[tokio::test]
+    async fn subscription_reader_stops_on_ws_handshake_http_401() {
+        use std::time::Duration;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let observed = attempts.clone();
+        let server_task = tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                observed.fetch_add(1, Ordering::SeqCst);
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf).await;
+                let _ = stream
+                    .write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n")
+                    .await;
+                let _ = stream.shutdown().await;
+            }
+        });
+
+        let mut reader =
+            EventStream::connect(&format!("ws://{addr}"), "revoked-token".into()).unwrap();
+        assert!(tokio::time::timeout(Duration::from_secs(5), reader.next())
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        server_task.abort();
     }
 }

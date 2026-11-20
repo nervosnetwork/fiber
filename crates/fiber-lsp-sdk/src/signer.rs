@@ -480,9 +480,9 @@ impl<S: SignerStore> ChannelSigner<S> {
     /// Obtain and record a Fiber-compatible public nonce for a typed nonce slot.
     pub async fn get_musig2_nonce(&self, slot: NonceSlot) -> Result<Musig2Nonce, SignerError> {
         validate_nonce_slot(slot)?;
-        let mut seed = [0; 32];
-        getrandom::fill(&mut seed).map_err(|e| SignerError::Random(e.to_string()))?;
-        let public_nonce = SecNonceBuilder::new(seed)
+        let mut seed = zeroize::Zeroizing::new([0u8; 32]);
+        getrandom::fill(seed.as_mut()).map_err(|e| SignerError::Random(e.to_string()))?;
+        let public_nonce = SecNonceBuilder::new(*seed)
             .with_seckey(&self.key_material.funding_key)
             .build()
             .public_nonce();
@@ -492,7 +492,7 @@ impl<S: SignerStore> ChannelSigner<S> {
                 return Err(crate::commitment::invalid("duplicate random V2 nonce"));
             }
             state.nonces.push(StoredNonce {
-                seed,
+                seed: *seed,
                 public_nonce: public_nonce.clone(),
                 bound_content: None,
             });
@@ -1369,13 +1369,14 @@ impl<S: SignerStore> ChannelSigner<S> {
 
     async fn load_signing_state(
         &self,
-    ) -> Result<(Option<Vec<u8>>, StoredSigningState), SignerError> {
+    ) -> Result<(Option<zeroize::Zeroizing<Vec<u8>>>, StoredSigningState), SignerError> {
         let encoded = self
             .store
             .get(&signing_state_store_key(self.channel_key_id))
             .await
-            .map_err(store_error)?;
-        let state = match encoded.as_deref() {
+            .map_err(store_error)?
+            .map(zeroize::Zeroizing::new);
+        let state = match encoded.as_deref().map(Vec::as_slice) {
             Some(bytes) => {
                 let version = bytes
                     .get(..2)
@@ -1395,14 +1396,15 @@ impl<S: SignerStore> ChannelSigner<S> {
 
     async fn store_signing_state(
         &self,
-        expected: Option<&[u8]>,
+        expected: Option<&Vec<u8>>,
         state: &StoredSigningState,
     ) -> Result<bool, SignerError> {
+        let encoded = zeroize::Zeroizing::new(encode(state)?);
         self.store
             .compare_and_swap(
                 &signing_state_store_key(self.channel_key_id),
-                expected,
-                &encode(state)?,
+                expected.map(Vec::as_slice),
+                &encoded,
             )
             .await
             .map_err(store_error)

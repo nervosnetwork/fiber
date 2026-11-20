@@ -82,6 +82,7 @@ impl SignerStore for FileSignerStore {
     type Error = MemoryStoreError;
 
     async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, Self::Error> {
+        let _guard = self.persist_lock.lock().await;
         self.inner.get(key).await
     }
 
@@ -145,8 +146,15 @@ impl SignerStore for FileSignerStore {
 
     async fn delete(&self, key: &[u8]) -> Result<(), Self::Error> {
         let _guard = self.persist_lock.lock().await;
+        let previous = self.inner.get(key).await?;
         self.inner.delete(key).await?;
-        self.persist()
+        if let Err(err) = self.persist() {
+            if let Some(old) = previous {
+                let _ = self.inner.put(key, &old).await;
+            }
+            return Err(err);
+        }
+        Ok(())
     }
 }
 

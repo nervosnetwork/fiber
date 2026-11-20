@@ -9629,27 +9629,36 @@ impl ChannelActorState {
     /// Drop remote commitment points that no live TLC (nor the current commitment numbers) can
     /// reference any more.
     pub(crate) fn prune_remote_commitment_points(&mut self) {
+        let local_commitment_number = self.get_local_commitment_number();
+        let remote_commitment_number = self.get_remote_commitment_number();
         let points: HashSet<u64> = self
             .tlc_state
             .all_tlcs()
             .flat_map(|x| [x.created_at.get_local(), x.created_at.get_remote()])
-            .chain(iter::once(self.get_local_commitment_number()))
-            .chain(iter::once(self.get_remote_commitment_number()))
+            .chain(iter::once(local_commitment_number))
+            .chain(iter::once(remote_commitment_number))
+            .collect();
+        let remote_tlc_points: HashSet<u64> = self
+            .tlc_state
+            .all_tlcs()
+            .map(|x| x.created_at.get_remote())
             .collect();
 
         self.remote_commitment_points
             .retain(|(number, _)| points.contains(number));
-        let remote_commitment_number = self.get_remote_commitment_number();
         self.signing_context
             .v2_commitment_points
-            .retain(|(number, _)| *number >= remote_commitment_number || points.contains(number));
+            .retain(|(number, _)| {
+                *number >= remote_commitment_number || remote_tlc_points.contains(number)
+            });
 
         // Prune historical V2 nonce allocations that can no longer be referenced by the active
         // round, pending/accepted signing requests, or channel announcement / closing flows.
-        let min_active_commitment = self
-            .get_local_commitment_number()
-            .min(remote_commitment_number)
-            .saturating_sub(1);
+        // Local-owned commitments advance with `remote_commitment_number`, while remote-owned
+        // commitments advance with `local_commitment_number`.
+        let local_funding_pubkey = self.local_channel_public_keys.funding_pubkey;
+        let local_owner_floor = remote_commitment_number.saturating_sub(1);
+        let remote_owner_floor = local_commitment_number.saturating_sub(1);
         let mut active_nonces: HashSet<[u8; 66]> = HashSet::new();
         let session = &self.session;
         active_nonces.insert(session.own.public_nonce.serialize());
@@ -9659,6 +9668,16 @@ impl ChannelActorState {
         if let Some(outgoing) = &session.outgoing {
             active_nonces.insert(outgoing.funding.public_nonce.serialize());
             if let Some(revocation) = &outgoing.revocation {
+                active_nonces.insert(revocation.public_nonce.serialize());
+            }
+        }
+        for incoming in session
+            .incoming
+            .iter()
+            .chain(session.pending_incoming.iter())
+        {
+            active_nonces.insert(incoming.funding.public_nonce.serialize());
+            if let Some(revocation) = &incoming.revocation {
                 active_nonces.insert(revocation.public_nonce.serialize());
             }
         }
@@ -9674,10 +9693,15 @@ impl ChannelActorState {
             active_nonces.insert(nonce.serialize());
         }
         self.signing_context.v2_allocations.retain(|record| {
+            let min_active = if record.owner == local_funding_pubkey {
+                local_owner_floor
+            } else {
+                remote_owner_floor
+            };
             matches!(
                 record.purpose,
                 NoncePurposeV2::ChannelAnnouncement | NoncePurposeV2::Closing
-            ) || record.number >= min_active_commitment
+            ) || record.number >= min_active
                 || active_nonces.contains(&record.public_nonce.serialize())
         });
     }
@@ -11584,7 +11608,10 @@ where
         state: &mut ChannelActorState,
         script: ckb_types::packed::Script,
         fee_rate: u64,
-        remote_shutdown: Option<fiber_types::gen::fiber::ShutdownV2>,
+        remote_shutdown: Option<(
+            fiber_types::gen::fiber::ShutdownV2,
+            fiber_types::ShutdownInfo,
+        )>,
     ) -> ProcessingChannelResult {
         let own = state.allocate_v2(
             state.local_channel_public_keys.funding_pubkey,
@@ -11597,17 +11624,24 @@ where
             fee_rate,
             closing_nonce: own.public_nonce.clone(),
         };
+        let (remote_shutdown_wire, remote_shutdown_info) = match remote_shutdown {
+            Some((wire, info)) => (Some(wire), Some(info)),
+            None => (None, None),
+        };
         state.local_shutdown_info = Some(fiber_types::ShutdownInfo {
             close_script: script,
             fee_rate,
             signature: None,
         });
+        if let Some(info) = remote_shutdown_info {
+            state.remote_shutdown_info = Some(info);
+        }
         state.session.closing = Some(fiber_types::ClosingSessionV2 {
             peer_wait_started_at: crate::now_timestamp_as_millis_u64(),
             superseded_by_force_close: false,
             own,
             shutdown: shutdown.clone().into(),
-            remote_shutdown: remote_shutdown.clone(),
+            remote_shutdown: remote_shutdown_wire.clone(),
             transaction: None,
             response: None,
             remote_response: None,
@@ -11619,7 +11653,7 @@ where
         state.update_state(ChannelState::ShuttingDown(
             flags
                 | fiber_types::ShuttingDownFlags::OUR_SHUTDOWN_SENT
-                | if remote_shutdown.is_some() {
+                | if remote_shutdown_wire.is_some() {
                     fiber_types::ShuttingDownFlags::THEIR_SHUTDOWN_SENT
                 } else {
                     fiber_types::ShuttingDownFlags::empty()
@@ -11745,25 +11779,27 @@ where
                 "V2 shutdown fee does not allow automatic acceptance",
             ));
         }
+        let remote_shutdown_info = fiber_types::ShutdownInfo {
+            close_script: message.close_script,
+            fee_rate: message.fee_rate,
+            signature: None,
+        };
         if auto_accept {
             self.advertise_close_v2(
                 state,
                 state.get_local_shutdown_script(),
                 0,
-                Some(packed.clone()),
+                Some((packed.clone(), remote_shutdown_info)),
             )?;
+        } else {
+            state.remote_shutdown_info = Some(remote_shutdown_info);
+            state
+                .session
+                .closing
+                .as_mut()
+                .expect("closing")
+                .remote_shutdown = Some(packed);
         }
-        state.remote_shutdown_info = Some(fiber_types::ShutdownInfo {
-            close_script: message.close_script,
-            fee_rate: message.fee_rate,
-            signature: None,
-        });
-        state
-            .session
-            .closing
-            .as_mut()
-            .expect("closing")
-            .remote_shutdown = Some(packed);
         let flags = match state.state {
             ChannelState::ShuttingDown(flags) => flags,
             _ => ShuttingDownFlags::empty(),

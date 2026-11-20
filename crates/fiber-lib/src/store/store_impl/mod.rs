@@ -90,7 +90,10 @@ struct WatchtowerQuotaCounts {
 #[cfg(feature = "watchtower")]
 impl WatchtowerQuotaCounts {
     fn record_retry_after(&mut self, node_id: &NodeId, retry_after_ms: u64) {
-        if retry_after_ms > 0 {
+        let now_ms = crate::now_timestamp_as_millis_u64();
+        self.node_retry_after_ms
+            .retain(|_, &mut expiry| expiry > now_ms);
+        if retry_after_ms > now_ms {
             let entry = self.node_retry_after_ms.entry(node_id.clone()).or_default();
             *entry = (*entry).max(retry_after_ms);
         }

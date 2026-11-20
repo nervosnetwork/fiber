@@ -299,7 +299,8 @@ impl BiscuitAuth {
     }
 
     /// Validate a Bearer token before upgrading an HTTP request to WebSocket:
-    /// checks signature, revocation list, runtime `lsp_enabled`, and `token_epoch`.
+    /// checks signature, revocation list, Datalog checks (including expiry time),
+    /// runtime `lsp_enabled`, and `token_epoch`.
     pub(crate) fn validate_token_for_ws_upgrade(&self, token: &str) -> Result<()> {
         let b = self.extract_biscuit(token)?;
         if b.revocation_identifiers()
@@ -308,6 +309,15 @@ impl BiscuitAuth {
         {
             return Err(anyhow::anyhow!("Token is in revocation list"));
         }
+        AuthorizerBuilder::new()
+            .code("allow if true;")?
+            .fact(Fact::new(
+                "time".to_string(),
+                &[Term::Date(crate::now_timestamp_as_millis_u64() / 1000)],
+            ))?
+            .build(&b)?
+            .authorize()
+            .context("token authorization check failed")?;
         let meta = extract_token_metadata(&b)?;
         if let Some(tenant_id) = meta.tenant_id {
             if !cfg!(feature = "lsp") || !self.lsp_enabled {

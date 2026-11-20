@@ -1617,6 +1617,16 @@ where
                 let mut retry_max_fee = max_fee;
                 self.apply_trampoline_forwarding_fee(session, source, &hops, &mut retry_max_fee)
                     .await?;
+                let route_fee = hops
+                    .first()
+                    .map(|hop| hop.amount.saturating_sub(amount))
+                    .unwrap_or(0);
+                if retry_max_fee.is_some_and(|rem| route_fee > rem) {
+                    session.last_error_code = Some(TlcErrorCode::FeeInsufficient);
+                    return Err(Error::SendPaymentError(
+                        TlcErrorCode::FeeInsufficient.as_ref().to_string(),
+                    ));
+                }
             }
 
             check_trampoline_outgoing_tlc_expiry(session, &hops)?;

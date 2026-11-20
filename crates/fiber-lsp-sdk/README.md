@@ -245,10 +245,11 @@ The LSP watchtower enforces per-tenant and global resource limits to protect ope
   4. **Respect backoff**: when `WatchtowerHealthStatus::InBackoff` is reported, avoid tight-loop polling and wait until `retry_after_ms`.
   5. **Emergency self-broadcast**: check `health.needs_self_broadcast(dispute_deadline_ms, now_ms, safety_margin_ms)`. When `true`, construct and broadcast the settlement transaction directly from the locally persisted recovery record using the wallet's own fee inputs.
 
-### 4. Input and witness bounds
+### 4. Input and witness bounds & UDT fee-sponsor limits
 
 - **TLC cap**: at most **254** TLCs per settlement snapshot (`MAX_WITNESS_TLC_COUNT = 0xfe`).
 - **Script / output data cap**: at most **1024 bytes** for `funding_udt_type_script` args, `payout_lock_script` args, and `revocation_data.output_data`.
+- **UDT `separate_fee_sponsor` restriction**: a hosted watchtower using a separate operator fee sponsor never subsidizes tenant UDT cell capacity from the operator's fee cells. It rejects UDT TLC unlocks (`unlock_type < 0xfe`) and any partial UDT settlement whose commitment cell lacks enough excess CKB to cover the settlement output's occupied capacity. Wallets holding UDT channels must monitor force-closes independently and self-broadcast UDT TLC settlements with their own CKB fee inputs.
 - Clients should enforce these bounds locally before sending watchtower RPCs.
 
 ## Wallet Integration Security Checklist
@@ -256,5 +257,5 @@ The LSP watchtower enforces per-tenant and global resource limits to protect ope
 1. **Opening order**: Never sign or broadcast `unsigned_funding_tx` immediately after `HostedSession::open_tenant_channel`. First drive the initial commitment exchange and verify `channel_signer.has_verified_opening_exit().await? == true` so the wallet holds a complete local exit transaction before locking funds in the 2-of-2 funding script.
 2. **Hold invoices only**: When receiving payments via a hosted LSP, create **hold invoices** (send only `payment_hash` to the LSP; never pass `payment_preimage` upfront). Release the preimage only after `ChannelSigner::authorize_preimage_release` succeeds against an independent `ChainVerifier`.
 3. **Backup & storage durability**: `RootKeyBackup` alone **cannot** recover channel funds if `SignerStore` (channel bindings, nonce state, recovery records) is lost. Never copy the test-only `FileSignerStore` into production, never roll back signer snapshots, and in multi-tab browser wallets serialize `SignerStore` + `OpeningPersistence` writes with Web Locks (`navigator.locks`).
-4. **Independent chain verification**: Treat LSP-supplied network parameters and watchtower health statuses as untrusted. Hardcode trusted `OpeningNetwork` contract hashes/deps in the wallet, and monitor force-closes + `dispute_deadline_ms` via an independent CKB RPC / light client so `needs_self_broadcast` triggers even if a malicious LSP reports `Healthy`.
-5. **Token expiry & revocation**: In addition to polling `is_token_near_expiry`, handle RPC authentication errors (HTTP 401 / revoked token) by running `begin_registration` + `replace_token` and reconnecting WebSockets.
+4. **Independent chain verification & UDT self-broadcast**: Treat LSP-supplied network parameters and watchtower health statuses as untrusted. Hardcode trusted `OpeningNetwork` contract hashes/deps in the wallet, monitor force-closes + `dispute_deadline_ms` via an independent CKB RPC / light client so `needs_self_broadcast` triggers even if a malicious LSP reports `Healthy`, and self-broadcast UDT TLC settlements (hosted watchtowers do not subsidize UDT TLC outputs).
+5. **Token expiry & revocation**: In addition to polling `is_token_near_expiry`, handle RPC authentication errors (HTTP 401 on HTTP or WebSocket upgrade / revoked token) by running `begin_registration` + `replace_token` and reconnecting WebSockets.

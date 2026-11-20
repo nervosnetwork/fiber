@@ -1785,3 +1785,119 @@ fn test_mpp_retains_queued_fulfill_tlc_during_settlement_retry() {
         Some(CkbInvoiceStatus::Received)
     );
 }
+
+#[test]
+fn test_received_hold_settle_rejects_overpaid_and_counts_already_fulfilling() {
+    use fiber_types::{RemoveTlcFulfill, RemoveTlcReason};
+
+    // Case 1: Hold MPP invoice already marked Received, then an extra overpaid TLC arrives
+    // before preimage reveal. Settling must fulfill only enough parts to cover the invoice
+    // and reject the overpaid TLC.
+    let preimage = gen_rand_sha256_hash();
+    let payment_hash = Hash256::from(ckb_hash::blake2b_256(preimage));
+    let ch0 = gen_rand_sha256_hash();
+    let ch1 = gen_rand_sha256_hash();
+    let ch2 = gen_rand_sha256_hash();
+
+    let store = MockStore::new()
+        .with_invoice(
+            create_test_invoice(payment_hash, Some(1000), true),
+            CkbInvoiceStatus::Received,
+        )
+        .with_preimage(payment_hash, preimage)
+        .with_channel_state(create_test_channel_state_with_tlc(
+            ch0,
+            0,
+            600,
+            payment_hash,
+            Some(1000),
+        ))
+        .with_channel_state(create_test_channel_state_with_tlc(
+            ch1,
+            1,
+            400,
+            payment_hash,
+            Some(1000),
+        ))
+        .with_channel_state(create_test_channel_state_with_tlc(
+            ch2,
+            2,
+            500,
+            payment_hash,
+            Some(1000),
+        ))
+        .with_hold_tlc(payment_hash, ch0, 0)
+        .with_hold_tlc(payment_hash, ch1, 1)
+        .with_hold_tlc(payment_hash, ch2, 2);
+
+    let settlements = SettleTlcSetCommand::new_received_hold_tlc_set(payment_hash, &store).run();
+    assert_eq!(settlements.len(), 3);
+    assert_eq!(
+        settlements
+            .iter()
+            .filter(|s| is_fulfill_settlement(s))
+            .count(),
+        2
+    );
+    assert_eq!(
+        settlements
+            .iter()
+            .filter(|s| get_error_code(s) == Some(TlcErrorCode::HoldTlcTimeout))
+            .count(),
+        1
+    );
+
+    // Case 2: One MPP part (600) is already fulfilling on ch0 (and removed from payment_hold_tlcs);
+    // ch1 (400) completes the invoice and ch2 (500) is rejected as overpaid.
+    let mut state_0 = create_test_channel_state_with_tlc(ch0, 0, 600, payment_hash, Some(1000));
+    state_0
+        .tlc_state
+        .received_tlcs
+        .tlcs
+        .iter_mut()
+        .find(|t| t.tlc_id == TLCId::Received(0))
+        .unwrap()
+        .removed_reason = Some(RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+        payment_preimage: preimage,
+    }));
+    let store2 = MockStore::new()
+        .with_invoice(
+            create_test_invoice(payment_hash, Some(1000), true),
+            CkbInvoiceStatus::Received,
+        )
+        .with_preimage(payment_hash, preimage)
+        .with_channel_state(state_0)
+        .with_channel_state(create_test_channel_state_with_tlc(
+            ch1,
+            1,
+            400,
+            payment_hash,
+            Some(1000),
+        ))
+        .with_channel_state(create_test_channel_state_with_tlc(
+            ch2,
+            2,
+            500,
+            payment_hash,
+            Some(1000),
+        ))
+        .with_hold_tlc(payment_hash, ch1, 1)
+        .with_hold_tlc(payment_hash, ch2, 2);
+
+    let settlements2 = SettleTlcSetCommand::new_received_hold_tlc_set(payment_hash, &store2).run();
+    assert_eq!(settlements2.len(), 2);
+    assert_eq!(
+        settlements2
+            .iter()
+            .filter(|s| is_fulfill_settlement(s))
+            .count(),
+        1
+    );
+    assert_eq!(
+        settlements2
+            .iter()
+            .filter(|s| get_error_code(s) == Some(TlcErrorCode::HoldTlcTimeout))
+            .count(),
+        1
+    );
+}

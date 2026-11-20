@@ -5963,9 +5963,14 @@ where
             }
             // A failed downstream session may still have pending upstream TLCs while
             // hosted delivery waits for a retry. Complete the failure handoff first.
-            state
+            let settled_in_store = state
                 .settle_trampoline_payment(&session, None, None)
                 .await?;
+            if !settled_in_store {
+                return Err(format!(
+                    "upstream trampoline settlement dispatched for {session_key:?}; awaiting channel persistence"
+                ));
+            }
             return Ok(true);
         }
 
@@ -5981,14 +5986,17 @@ where
         let settled_in_store = state
             .settle_trampoline_payment(&session, None, None)
             .await?;
-        if settled_in_store {
-            if let Some(port) = delivery_port {
-                port.report_settled_payment(SettledPaymentOutcome {
-                    session_key,
-                    payment_status: PaymentStatus::Failed,
-                    failure: session.last_error.clone(),
-                });
-            }
+        if !settled_in_store {
+            return Err(format!(
+                "upstream trampoline settlement dispatched for {session_key:?}; awaiting channel persistence"
+            ));
+        }
+        if let Some(port) = delivery_port {
+            port.report_settled_payment(SettledPaymentOutcome {
+                session_key,
+                payment_status: PaymentStatus::Failed,
+                failure: session.last_error.clone(),
+            });
         }
         Ok(true)
     }

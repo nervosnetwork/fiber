@@ -166,7 +166,9 @@ pub const MAX_V2_COMMITMENT_POINT_BATCH: usize = 16;
 /// Maximum number of unused V2 public nonces persisted in a channel's pool.
 pub const MAX_V2_NONCE_POOL_SIZE: usize = 256;
 /// Maximum number of V2 commitment points persisted on a channel.
-pub const MAX_V2_COMMITMENT_POINTS_SIZE: usize = 256;
+/// Must exceed `2 * MAX_TLC_NUMBER_IN_FLIGHT + 1 + MAX_V2_COMMITMENT_POINT_LOOKAHEAD` (267)
+/// so a channel at full bilateral TLC capacity can still install lookahead points to settle TLCs.
+pub const MAX_V2_COMMITMENT_POINTS_SIZE: usize = 512;
 /// Maximum lookahead beyond `remote_commitment_number` for pre-installed V2 commitment points.
 pub const MAX_V2_COMMITMENT_POINT_LOOKAHEAD: u64 = 16;
 
