@@ -1252,6 +1252,7 @@ The attributes of the invoice.
 * `hash_algorithm` - <em>[HashAlgorithm](#type-hashalgorithm)</em>, The hash algorithm of the invoice
 * `feature` - <em>`Vec<String>`</em>, The feature flags of the invoice
 * `payment_secret` - <em>`String`</em>, The payment secret of the invoice
+* `liquidity_provider` - <em>[Pubkey](#type-pubkey)</em>, The liquidity provider that can open a JIT channel for this invoice
 ---
 
 <a id="#type-cchinvoice"></a>

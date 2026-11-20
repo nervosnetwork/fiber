@@ -3,6 +3,9 @@ use clap_serde_derive::ClapSerde;
 use crate::fiber::network::PeerDisconnectReason;
 use crate::fiber::types::Privkey;
 use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
+use crate::gen_rand_sha256_hash;
+use crate::invoice::CkbInvoice;
+use crate::rpc::invoice::{InvoiceRpcServerImpl, NewInvoiceParams};
 use crate::test_utils::{NetworkNode, NetworkNodeConfigBuilder};
 use crate::FiberConfig;
 
@@ -134,4 +137,39 @@ async fn test_jit_unregister_on_disconnect() {
         ))
         .expect("lsp alive");
     lsp.expect_debug_event("JitChannelUnregistered").await;
+}
+
+#[tokio::test]
+async fn test_jit_new_invoice_embeds_liquidity_provider() {
+    let lsp = start_jit_lsp().await;
+    let receiver = start_jit_receiver(lsp.pubkey).await;
+    let rpc = InvoiceRpcServerImpl::new(
+        receiver.store.clone(),
+        Some(receiver.network_actor.clone()),
+        Some(receiver.fiber_config.clone()),
+    );
+    let result = rpc
+        .new_invoice(NewInvoiceParams {
+            amount: 1000,
+            description: Some("jit".to_string()),
+            currency: fiber_json_types::Currency::Fibd,
+            payment_preimage: Some(gen_rand_sha256_hash().into()),
+            payment_hash: None,
+            expiry: None,
+            fallback_address: None,
+            final_expiry_delta: None,
+            udt_type_script: None,
+            hash_algorithm: None,
+            allow_mpp: None,
+            allow_trampoline_routing: None,
+        })
+        .await
+        .expect("new invoice");
+
+    let invoice: CkbInvoice = result.invoice_address.parse().unwrap();
+    assert_eq!(
+        invoice.liquidity_provider().copied().map(Into::into),
+        Some(lsp.pubkey)
+    );
+    assert!(invoice.allow_trampoline_routing());
 }

@@ -76,6 +76,8 @@ pub enum Attribute {
     Feature(Vec<String>),
     /// The payment secret of the invoice
     PaymentSecret(String),
+    /// The liquidity provider that can open a JIT channel for this invoice
+    LiquidityProvider(Pubkey),
 }
 
 /// The metadata of the invoice.

@@ -94,6 +94,7 @@ impl InvoiceBuilder {
 
     attr_setter!(description, Description, String);
     attr_setter!(payee_pub_key, PayeePublicKey, PublicKey);
+    attr_setter!(liquidity_provider, LiquidityProvider, PublicKey);
     attr_setter!(expiry_time, ExpiryTime, Duration);
     attr_setter!(fallback_address, FallbackAddr, String);
     attr_setter!(final_expiry_delta, FinalHtlcMinimumExpiryDelta, u64);

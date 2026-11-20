@@ -74,6 +74,7 @@ pub struct InvoiceRpcServerImpl<S> {
     keypair: Option<(PublicKey, SecretKey)>,
     currency: Option<Currency>,
     node_features: Option<FeatureVector>,
+    jit_lsp_pubkey: Option<PublicKey>,
 }
 
 impl<S> InvoiceRpcServerImpl<S> {
@@ -82,7 +83,7 @@ impl<S> InvoiceRpcServerImpl<S> {
         network_actor: Option<ActorRef<NetworkActorMessage>>,
         config: Option<FiberConfig>,
     ) -> Self {
-        let (keypair, currency, node_features) = if let Some(config) = config {
+        let (keypair, currency, node_features, jit_lsp_pubkey) = if let Some(config) = config {
             let kp = config
                 .read_or_generate_secret_key()
                 .expect("read or generate secret key");
@@ -102,9 +103,10 @@ impl<S> InvoiceRpcServerImpl<S> {
                 Some(keypair),
                 Some(currency),
                 Some(config.gen_node_features()),
+                config.jit_lsp_pubkey().map(Into::into),
             )
         } else {
-            (None, None, None)
+            (None, None, None, None)
         };
         Self {
             store,
@@ -112,6 +114,7 @@ impl<S> InvoiceRpcServerImpl<S> {
             keypair,
             currency,
             node_features,
+            jit_lsp_pubkey,
         }
     }
 }
@@ -238,6 +241,14 @@ where
                 return error("Node does not support trampoline routing, please enable trampoline routing feature");
             }
         };
+
+        if params.udt_type_script.is_none() {
+            if let Some(lsp_pubkey) = self.jit_lsp_pubkey {
+                invoice_builder = invoice_builder
+                    .liquidity_provider(lsp_pubkey)
+                    .allow_trampoline_routing(true);
+            }
+        }
 
         let final_expiry_delta = params.final_expiry_delta.unwrap_or(MIN_TLC_EXPIRY_DELTA);
         if final_expiry_delta < MIN_TLC_EXPIRY_DELTA {

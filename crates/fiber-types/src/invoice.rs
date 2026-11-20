@@ -11,8 +11,8 @@ use ckb_types::packed::Script as PackedScript;
 use ckb_types::prelude::{Pack, Unpack};
 use gen_invoice::{
     Description, ExpiryTime, FallbackAddr, Feature, FinalHtlcMinimumExpiryDelta, FinalHtlcTimeout,
-    InvoiceAttr, InvoiceAttrUnion, InvoiceAttrsVec, PayeePublicKey, PaymentHash, PaymentSecret,
-    RawInvoiceDataBuilder, UdtScript,
+    InvoiceAttr, InvoiceAttrUnion, InvoiceAttrsVec, LiquidityProvider, PayeePublicKey, PaymentHash,
+    PaymentSecret, RawInvoiceDataBuilder, UdtScript,
 };
 use molecule::prelude::Byte;
 use molecule::prelude::{Builder, Entity};
@@ -132,6 +132,9 @@ pub enum InvoiceError {
     /// Invoice payee public key is malformed.
     #[error("Invalid payee public key")]
     InvalidPayeePublicKey,
+    /// Invoice liquidity provider public key is malformed.
+    #[error("Invalid liquidity provider public key")]
+    InvalidLiquidityProvider,
     /// Invoice signature contains malformed base32 data.
     #[error("Invalid signature encoding")]
     InvalidSignatureEncoding,
@@ -583,6 +586,8 @@ pub enum Attribute {
     Feature(FeatureVector),
     /// The payment secret of the invoice.
     PaymentSecret(Hash256),
+    /// The liquidity provider that can open a JIT channel for this invoice.
+    LiquidityProvider(PublicKey),
 }
 
 /// The metadata of the invoice.
@@ -828,6 +833,18 @@ impl CkbInvoice {
             .iter()
             .filter_map(|attr| match attr {
                 Attribute::PaymentSecret(val) => Some(val),
+                _ => None,
+            })
+            .next()
+    }
+
+    /// Returns the liquidity provider public key if set in the invoice attributes.
+    pub fn liquidity_provider(&self) -> Option<&PublicKey> {
+        self.data
+            .attrs
+            .iter()
+            .filter_map(|attr| match attr {
+                Attribute::LiquidityProvider(val) => Some(val),
                 _ => None,
             })
             .next()
@@ -1112,6 +1129,11 @@ impl From<Attribute> for InvoiceAttr {
                     .value(payment_secret.into())
                     .build(),
             ),
+            Attribute::LiquidityProvider(pubkey) => InvoiceAttrUnion::LiquidityProvider(
+                LiquidityProvider::new_builder()
+                    .value(pubkey.serialize().pack())
+                    .build(),
+            ),
         };
         InvoiceAttr::new_builder().set(a).build()
     }
@@ -1166,6 +1188,13 @@ impl TryFrom<InvoiceAttr> for Attribute {
                 Attribute::HashAlgorithm(hash_algorithm)
             }
             InvoiceAttrUnion::PaymentSecret(x) => Attribute::PaymentSecret(x.value().into()),
+            InvoiceAttrUnion::LiquidityProvider(x) => {
+                let value: Vec<u8> = x.value().unpack();
+                Attribute::LiquidityProvider(
+                    PublicKey::from_slice(&value)
+                        .map_err(|_| InvoiceError::InvalidLiquidityProvider)?,
+                )
+            }
         };
         Ok(attr)
     }

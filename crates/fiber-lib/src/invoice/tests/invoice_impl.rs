@@ -593,3 +593,25 @@ fn test_invoice_with_mpp_option() {
     let payment_secret = invoice.payment_secret();
     assert!(payment_secret.is_none());
 }
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_invoice_liquidity_provider_roundtrip() {
+    let (private_key, public_key) = gen_rand_secp256k1_keypair_tuple();
+    let invoice = InvoiceBuilder::new(Currency::Fibb)
+        .amount(Some(1280))
+        .payment_hash(gen_rand_sha256_hash())
+        .liquidity_provider(public_key)
+        .allow_trampoline_routing(true)
+        .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
+        .unwrap();
+
+    assert_eq!(invoice.liquidity_provider(), Some(&public_key));
+    assert!(invoice.allow_trampoline_routing());
+
+    let encoded = invoice.to_string();
+    let decoded = encoded.parse::<CkbInvoice>().unwrap();
+    assert_eq!(decoded, invoice);
+    assert_eq!(decoded.liquidity_provider(), Some(&public_key));
+    assert!(decoded.allow_trampoline_routing());
+}
