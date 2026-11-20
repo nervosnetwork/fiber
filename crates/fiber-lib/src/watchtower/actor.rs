@@ -2417,6 +2417,12 @@ fn build_settlement_tx<S: WatchtowerStore>(
 
         let outputs_capacity: u64 = if unlock.unlock_type >= 0xFE {
             if two_parties_all_settled {
+                let commitment_capacity = commitment_cell.output.capacity.value();
+                if commitment_capacity < settlement_output_occupied_capacity {
+                    return Err(Box::new(RpcError::Other(anyhow!(
+                        "Commitment cell capacity ({commitment_capacity}) is smaller than UDT settlement output occupied capacity ({settlement_output_occupied_capacity})"
+                    ))));
+                }
                 settlement_output = settlement_output
                     .as_builder()
                     .capacity(new_commitment_output.capacity())
@@ -2437,19 +2443,35 @@ fn build_settlement_tx<S: WatchtowerStore>(
                     .capacity(new_commitment_output_capacity)
                     .build();
 
-                let settlement_output_capacity: u64 = settlement_output.capacity().unpack();
-                let new_settlement_output_capacity = checked_add_u64(
-                    settlement_output_capacity,
-                    commitment_cell.output.capacity.value(),
-                    "settlement output capacity",
-                )
-                .and_then(|amount| {
-                    checked_sub_u64(
-                        amount,
+                let new_settlement_output_capacity = if separate_fee_sponsor {
+                    // Never subsidize tenant UDT cell capacity from the operator's fee sponsor:
+                    // the settlement output must be funded purely from excess commitment cell CKB.
+                    let excess_capacity = checked_sub_u64(
+                        commitment_cell.output.capacity.value(),
                         new_commitment_output_capacity,
                         "settlement output capacity",
+                    )?;
+                    if excess_capacity < settlement_output_occupied_capacity {
+                        return Err(Box::new(RpcError::Other(anyhow!(
+                            "Insufficient commitment cell excess capacity ({excess_capacity}) for UDT settlement output ({settlement_output_occupied_capacity}) without subsidizing from separate fee sponsor"
+                        ))));
+                    }
+                    excess_capacity
+                } else {
+                    let settlement_output_capacity: u64 = settlement_output.capacity().unpack();
+                    checked_add_u64(
+                        settlement_output_capacity,
+                        commitment_cell.output.capacity.value(),
+                        "settlement output capacity",
                     )
-                })?;
+                    .and_then(|amount| {
+                        checked_sub_u64(
+                            amount,
+                            new_commitment_output_capacity,
+                            "settlement output capacity",
+                        )
+                    })?
+                };
                 settlement_output = settlement_output
                     .as_builder()
                     .capacity(new_settlement_output_capacity)
@@ -2462,12 +2484,26 @@ fn build_settlement_tx<S: WatchtowerStore>(
                 )?
             }
         } else {
+            if separate_fee_sponsor {
+                // CommitmentLock requires UDT TLC unlocks to preserve the full commitment cell
+                // capacity, so creating a new UDT output would require donating CKB from the
+                // operator's fee sponsor to the tenant's payout_lock_script.
+                return Err(Box::new(RpcError::Other(anyhow!(
+                    "Cannot subsidize UDT TLC settlement output capacity from separate fee sponsor"
+                ))));
+            }
             checked_add_u64(
                 settlement_output_occupied_capacity,
                 commitment_cell.output.capacity.value(),
                 "outputs capacity",
             )?
         };
+        if separate_fee_sponsor && outputs_capacity > commitment_cell.output.capacity.value() {
+            return Err(Box::new(RpcError::Other(anyhow!(
+                "UDT settlement outputs capacity ({outputs_capacity}) exceeds commitment cell capacity ({}) under separate fee sponsor",
+                commitment_cell.output.capacity.value()
+            ))));
+        }
 
         if !two_parties_all_settled {
             tx_builder = tx_builder

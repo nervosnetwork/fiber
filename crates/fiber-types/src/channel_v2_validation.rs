@@ -165,6 +165,10 @@ pub const MAX_V2_NONCE_BATCH: usize = 128;
 pub const MAX_V2_COMMITMENT_POINT_BATCH: usize = 16;
 /// Maximum number of unused V2 public nonces persisted in a channel's pool.
 pub const MAX_V2_NONCE_POOL_SIZE: usize = 256;
+/// Maximum number of V2 commitment points persisted on a channel.
+pub const MAX_V2_COMMITMENT_POINTS_SIZE: usize = 256;
+/// Maximum lookahead beyond `remote_commitment_number` for pre-installed V2 commitment points.
+pub const MAX_V2_COMMITMENT_POINT_LOOKAHEAD: u64 = 16;
 
 fn external_allocations(channel: &ChannelActorData, key: &ValidationKey<'_>) -> Result<(), String> {
     let allocations = &channel.signing_context.v2_allocations;
@@ -172,6 +176,10 @@ fn external_allocations(channel: &ChannelActorData, key: &ValidationKey<'_>) -> 
     check(
         pool.len() <= MAX_V2_NONCE_POOL_SIZE,
         "External V2 nonce pool exceeds maximum size",
+    )?;
+    check(
+        channel.signing_context.v2_commitment_points.len() <= MAX_V2_COMMITMENT_POINTS_SIZE,
+        "External V2 commitment points exceed maximum size",
     )?;
     let mut allocated_nonces = std::collections::HashSet::with_capacity(allocations.len());
     for record in allocations {

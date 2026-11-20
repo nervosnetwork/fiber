@@ -1069,6 +1069,12 @@ fn external_ckb_and_udt_settlement_uses_separate_payout_and_fee_sponsor_locks() 
                 .args([0x01u8; 32].as_slice().pack())
                 .build()
         });
+        let mut settlement_data = fixture.channel.local_settlement_data.clone();
+        if is_udt {
+            // For UDT channels with a separate fee sponsor, test local balance settlement
+            // (funded from excess commitment cell CKB without any fee sponsor subsidy).
+            settlement_data.tlcs.clear();
+        }
         fixture
             .store
             .remove_watch_channel(fixture.node_id.clone(), fixture.channel.channel_id);
@@ -1082,7 +1088,7 @@ fn external_ckb_and_udt_settlement_uses_separate_payout_and_fee_sponsor_locks() 
                 local_funding: fixture.channel.local_funding_pubkey,
                 remote_funding: fixture.channel.remote_funding_pubkey,
             },
-            fixture.channel.local_settlement_data.clone(),
+            settlement_data,
             ChannelFeatures::V2,
             Some(tenant_payout_lock.clone()),
         );
@@ -1095,16 +1101,30 @@ fn external_ckb_and_udt_settlement_uses_separate_payout_and_fee_sponsor_locks() 
             Some(&tenant_payout_lock)
         );
         if let Some(udt) = udt_script.clone() {
+            let witness_bytes = settlement_data_to_witness(
+                &fixture.channel.local_settlement_data,
+                fixture.for_remote,
+                fixture.base_key.pubkey(),
+                fixture.channel.remote_settlement_key,
+            );
             let mut output: CellOutput = fixture.cell.output.clone().into();
+            let mut args = output.lock().args().raw_data().to_vec();
+            args[36..56].copy_from_slice(blake160(&witness_bytes).as_ref());
+            let lock = output.lock().as_builder().args(args.pack()).build();
+            // Provide enough excess CKB in the UDT commitment cell so the tenant's UDT
+            // settlement output is funded solely from the commitment cell without any
+            // subsidy from the operator's fee sponsor.
             output = output
                 .as_builder()
+                .lock(lock)
                 .type_(Some(udt).pack())
-                .capacity(20_000_000_000u64)
+                .capacity(40_000_000_000u64)
                 .build();
             fixture.cell.output = output.into();
             fixture.cell.output_data = Some(ckb_jsonrpc_types::JsonBytes::from_vec(
-                240_000_000_000u128.to_le_bytes().to_vec(),
+                200_000_000_000u128.to_le_bytes().to_vec(),
             ));
+            fixture.tracked.clear();
         }
 
         assert!(fixture.build_at(200_000).unwrap().is_none());
@@ -1124,7 +1144,7 @@ fn external_ckb_and_udt_settlement_uses_separate_payout_and_fee_sponsor_locks() 
             assert_eq!(outputs[1].type_().to_opt(), udt_script);
             assert_eq!(
                 outputs_data[1].raw_data().as_ref(),
-                20_000_000_000u128.to_le_bytes()
+                100_000_000_000u128.to_le_bytes()
             );
         } else {
             let cap: u64 = outputs[1].capacity().unpack();
@@ -1132,12 +1152,111 @@ fn external_ckb_and_udt_settlement_uses_separate_payout_and_fee_sponsor_locks() 
             assert!(outputs[1].type_().to_opt().is_none());
         }
         // Output 2: plain CKB fee sponsor change locked to fee_provider_lock_script.
+        // The operator only pays the transaction fee and never subsidizes tenant UDT outputs.
         assert_eq!(outputs[2].lock(), sponsor_lock);
         assert!(outputs[2].type_().to_opt().is_none());
         assert!(outputs_data[2].raw_data().is_empty());
         let sponsor_change: u64 = outputs[2].capacity().unpack();
         assert!(sponsor_change < 100_000_000_000u64);
+        assert!(
+            sponsor_change > 99_900_000_000u64,
+            "fee sponsor must only pay tx fee, got change={sponsor_change} (is_udt={is_udt})"
+        );
     }
+}
+
+#[test]
+fn external_udt_settlement_refuses_to_subsidize_from_separate_fee_sponsor() {
+    let tenant_payout_lock = get_script_by_contract(Contract::Secp256k1Lock, &[0xaa; 20]);
+    let mut fixture = Fixture::with_features(false, false, false, false, ChannelFeatures::V2);
+    let udt_script = Script::new_builder()
+        .code_hash(Byte32::from([0x77; 32]))
+        .args([0x01u8; 32].as_slice().pack())
+        .build();
+    fixture
+        .store
+        .remove_watch_channel(fixture.node_id.clone(), fixture.channel.channel_id);
+    fixture.store.insert_watch_channel(
+        fixture.node_id.clone(),
+        fixture.channel.channel_id,
+        Some(udt_script.clone()),
+        WatchChannelKeys {
+            local_settlement: SettlementKey::external(fixture.base_key.pubkey()),
+            remote_settlement: fixture.channel.remote_settlement_key,
+            local_funding: fixture.channel.local_funding_pubkey,
+            remote_funding: fixture.channel.remote_funding_pubkey,
+        },
+        fixture.channel.local_settlement_data.clone(),
+        ChannelFeatures::V2,
+        Some(tenant_payout_lock),
+    );
+    fixture.channel = fixture
+        .store
+        .get_watch_channel(&fixture.node_id, &fixture.channel.channel_id)
+        .expect("updated watch channel");
+    // Only 200 CKB in the commitment cell: not enough excess CKB to create a ~142 CKB UDT output
+    // without draining the separate fee sponsor.
+    let mut output: CellOutput = fixture.cell.output.clone().into();
+    output = output
+        .as_builder()
+        .type_(Some(udt_script).pack())
+        .capacity(20_000_000_000u64)
+        .build();
+    fixture.cell.output = output.into();
+    fixture.cell.output_data = Some(ckb_jsonrpc_types::JsonBytes::from_vec(
+        240_000_000_000u128.to_le_bytes().to_vec(),
+    ));
+    // 1. UDT TLC unlock: CommitmentLock preserves full commitment cell capacity, so creating a
+    // new UDT output would always drain the separate fee sponsor.
+    let err = fixture.build_at(200_000).unwrap_err().to_string();
+    assert!(
+        err.contains("separate fee sponsor"),
+        "expected separate fee sponsor refusal for TLC unlock, got: {err}"
+    );
+
+    // 2. UDT balance unlock with only 200 CKB in the commitment cell: not enough excess CKB to
+    // create a ~142 CKB UDT output without draining the separate fee sponsor.
+    let mut balance_only = fixture.channel.local_settlement_data.clone();
+    balance_only.tlcs.clear();
+    fixture
+        .store
+        .remove_watch_channel(fixture.node_id.clone(), fixture.channel.channel_id);
+    fixture.store.insert_watch_channel(
+        fixture.node_id.clone(),
+        fixture.channel.channel_id,
+        fixture.channel.funding_udt_type_script.clone(),
+        WatchChannelKeys {
+            local_settlement: SettlementKey::external(fixture.base_key.pubkey()),
+            remote_settlement: fixture.channel.remote_settlement_key,
+            local_funding: fixture.channel.local_funding_pubkey,
+            remote_funding: fixture.channel.remote_funding_pubkey,
+        },
+        balance_only,
+        ChannelFeatures::V2,
+        fixture.channel.payout_lock_script.clone(),
+    );
+    fixture.channel = fixture
+        .store
+        .get_watch_channel(&fixture.node_id, &fixture.channel.channel_id)
+        .expect("updated watch channel");
+    let witness_bytes = settlement_data_to_witness(
+        &fixture.channel.local_settlement_data,
+        fixture.for_remote,
+        fixture.base_key.pubkey(),
+        fixture.channel.remote_settlement_key,
+    );
+    let mut output: CellOutput = fixture.cell.output.clone().into();
+    let mut args = output.lock().args().raw_data().to_vec();
+    args[36..56].copy_from_slice(blake160(&witness_bytes).as_ref());
+    let lock = output.lock().as_builder().args(args.pack()).build();
+    output = output.as_builder().lock(lock).build();
+    fixture.cell.output = output.into();
+    fixture.tracked.clear();
+    let err = fixture.build_at(200_000).unwrap_err().to_string();
+    assert!(
+        err.contains("separate fee sponsor"),
+        "expected separate fee sponsor refusal for balance unlock, got: {err}"
+    );
 }
 
 #[test]

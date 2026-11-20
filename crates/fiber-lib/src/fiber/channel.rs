@@ -9632,10 +9632,47 @@ impl ChannelActorState {
 
         self.remote_commitment_points
             .retain(|(number, _)| points.contains(number));
-        let local_commitment_number = self.get_local_commitment_number();
+        let remote_commitment_number = self.get_remote_commitment_number();
         self.signing_context
             .v2_commitment_points
-            .retain(|(number, _)| *number >= local_commitment_number || points.contains(number));
+            .retain(|(number, _)| *number >= remote_commitment_number || points.contains(number));
+
+        // Prune historical V2 nonce allocations that can no longer be referenced by the active
+        // round, pending/accepted signing requests, or channel announcement / closing flows.
+        let min_active_commitment = self
+            .get_local_commitment_number()
+            .min(remote_commitment_number)
+            .saturating_sub(1);
+        let mut active_nonces: HashSet<[u8; 66]> = HashSet::new();
+        let session = &self.session;
+        active_nonces.insert(session.own.public_nonce.serialize());
+        for retired in &session.own_retired {
+            active_nonces.insert(retired.public_nonce.serialize());
+        }
+        if let Some(outgoing) = &session.outgoing {
+            active_nonces.insert(outgoing.funding.public_nonce.serialize());
+            if let Some(revocation) = &outgoing.revocation {
+                active_nonces.insert(revocation.public_nonce.serialize());
+            }
+        }
+        if let Some(closing) = &session.closing {
+            active_nonces.insert(closing.own.public_nonce.serialize());
+        }
+        if let Some(pending) = &self.signing_context.pending_signature {
+            if let Some(v2) = &pending.request.content().v2 {
+                active_nonces.insert(v2.public_nonce.serialize());
+            }
+        }
+        if let Some(nonce) = &self.signing_context.v2_announcement_nonce {
+            active_nonces.insert(nonce.serialize());
+        }
+        self.signing_context.v2_allocations.retain(|record| {
+            matches!(
+                record.purpose,
+                NoncePurposeV2::ChannelAnnouncement | NoncePurposeV2::Closing
+            ) || record.number >= min_active_commitment
+                || active_nonces.contains(&record.public_nonce.serialize())
+        });
     }
 
     pub fn is_tx_final(&self, tx: &Transaction) -> Result<bool, ProcessingChannelError> {
@@ -13724,6 +13761,9 @@ impl ChannelActorState {
             fresh.push(nonce);
         }
 
+        let max_point_number = self
+            .get_remote_commitment_number()
+            .saturating_add(fiber_types::channel_v2_validation::MAX_V2_COMMITMENT_POINT_LOOKAHEAD);
         let mut existing_points: HashMap<u64, Pubkey> = self
             .signing_context
             .v2_commitment_points
@@ -13732,6 +13772,11 @@ impl ChannelActorState {
             .collect();
         let mut new_points = Vec::with_capacity(points.len());
         for (number, point) in points {
+            if number > max_point_number {
+                return Err(invalid(
+                    "External V2 commitment point number exceeds lookahead window",
+                ));
+            }
             if let Some(&existing) = existing_points.get(&number) {
                 if existing != point {
                     return Err(invalid("Conflicting external V2 commitment point"));
@@ -13743,6 +13788,15 @@ impl ChannelActorState {
             }
             existing_points.insert(number, point);
             new_points.push((number, point));
+        }
+        if self
+            .signing_context
+            .v2_commitment_points
+            .len()
+            .saturating_add(new_points.len())
+            > fiber_types::channel_v2_validation::MAX_V2_COMMITMENT_POINTS_SIZE
+        {
+            return Err(invalid("External V2 commitment points exceed maximum size"));
         }
 
         self.signing_context.v2_nonce_pool.extend(fresh);

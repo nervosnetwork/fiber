@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use crate::{
     fiber::{
         channel::{ChannelActorStateStore, RemoveTlcCommand},
@@ -102,21 +104,19 @@ where
     }
 
     pub fn new_hold_tlc_set(payment_hash: Hash256, store: &'s S) -> Self {
-        Self::new_hold_tlc_set_with_received_invoice(payment_hash, store, false)
+        Self::new_hold_tlc_set_excluding(payment_hash, store, false, &HashSet::new())
     }
 
-    pub fn new_received_hold_tlc_set(payment_hash: Hash256, store: &'s S) -> Self {
-        Self::new_hold_tlc_set_with_received_invoice(payment_hash, store, true)
-    }
-
-    fn new_hold_tlc_set_with_received_invoice(
+    pub fn new_hold_tlc_set_excluding(
         payment_hash: Hash256,
         store: &'s S,
         allow_received_invoice: bool,
+        excluded_tlcs: &HashSet<(Hash256, u64)>,
     ) -> Self {
         let tlcs = store
             .get_payment_hold_tlcs(payment_hash)
             .iter()
+            .filter(|hold_tlc| !excluded_tlcs.contains(&(hold_tlc.channel_id, hold_tlc.tlc_id)))
             .filter_map(|hold_tlc| {
                 make_sttlement_context(hold_tlc.channel_id, hold_tlc.tlc_id, store)
             })
@@ -129,6 +129,10 @@ where
             is_hold_tlc_set: true,
             allow_received_invoice,
         }
+    }
+
+    pub fn new_received_hold_tlc_set(payment_hash: Hash256, store: &'s S) -> Self {
+        Self::new_hold_tlc_set_excluding(payment_hash, store, true, &HashSet::new())
     }
 
     pub fn run(mut self) -> Vec<TlcSettlement> {
@@ -445,6 +449,9 @@ fn make_sttlement_context<S: ChannelActorStateStore>(
     store: &S,
 ) -> Option<TlcSettlementContext> {
     let state = store.get_channel_actor_state(&channel_id)?;
+    if state.is_closed() {
+        return None;
+    }
     let tlc_id = TLCId::Received(tlc_id);
     state
         .get_received_tlc(tlc_id)
