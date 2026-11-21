@@ -244,6 +244,16 @@ where
 
         if params.udt_type_script.is_none() && params.allow_trampoline_routing != Some(false) {
             if let Some(lsp_pubkey) = self.jit_lsp_pubkey {
+                if params.allow_mpp == Some(true) {
+                    return error("JIT channel invoices do not support multi-part payments");
+                }
+                if !self
+                    .node_features
+                    .as_ref()
+                    .is_some_and(|features| features.supports_trampoline_routing())
+                {
+                    return error("Node does not support trampoline routing, please enable trampoline routing feature");
+                }
                 invoice_builder = invoice_builder
                     .liquidity_provider(lsp_pubkey)
                     .allow_trampoline_routing(true);

@@ -51,11 +51,15 @@ The onion/trampoline packet version is independent of the channel protocol.
 receiver sends it after `Init` to a peer that advertised the optional
 `JIT_CHANNEL` feature (bit 9). `funding_udt_type_script` is empty for CKB;
 `max_amount` is the largest inbound payment the receiver wants on a just-in-time
-channel. The liquidity node ignores the message unless JIT service is enabled,
-and it refuses to open a channel for a payment above `max_amount`. The receiver
-auto-accepts one private CKB open from that peer at a time, and only when the
-funder's inbound amount (the funding amount above reserved cell capacity) is
-within `max_amount`.
+channel. The liquidity node ignores the message unless JIT service is enabled.
+When it accepts, it sends the same `JitChannelRegister` back. Silence is a
+rejection. The receiver auto-accepts one private two-way CKB open from that
+peer at a time, and only after that acknowledgement, and only when the funder's
+inbound amount (the funding amount above reserved cell capacity) is within
+`max_amount`. One-way and externally funded opens are aborted. The liquidity
+node also refuses a payment above `max_amount`, a multi-part payment, or a new
+open once its pending-channel limit is reached. A receiver disconnect before
+the funding signatures are sent abandons the open and fails the payment.
 
 ## Channel establishment
 
