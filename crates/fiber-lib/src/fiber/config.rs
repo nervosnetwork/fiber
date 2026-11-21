@@ -246,14 +246,23 @@ pub struct FiberConfig {
     )]
     pub jit_max_funding: Option<u128>,
 
-    /// Largest payment amount this receiver will request on a JIT channel. Unset means no cap.
+    /// Largest payment amount this receiver will request on a JIT channel. Unset refuses JIT opens.
     #[arg(
         name = "FIBER_JIT_MAX_AMOUNT",
         long = "fiber-jit-max-amount",
         env,
-        help = "Largest payment amount this receiver will request on a JIT channel. Unset means no cap"
+        help = "Largest inbound JIT payment this receiver will accept. Unset refuses JIT opens"
     )]
     pub jit_max_amount: Option<u128>,
+
+    /// Largest open fee this receiver will quote on a JIT invoice. Unset accepts only 0.
+    #[arg(
+        name = "FIBER_JIT_MAX_OPEN_FEE",
+        long = "fiber-jit-max-open-fee",
+        env,
+        help = "Largest JIT open fee this receiver will quote. Unset accepts only 0"
+    )]
+    pub jit_max_open_fee: Option<u128>,
 
     /// Maximum number of JIT channels this node will open at the same time.
     #[arg(
@@ -677,9 +686,15 @@ impl FiberConfig {
             .unwrap_or(DEFAULT_JIT_MAX_INFLIGHT_OPENS)
     }
 
-    /// Receiver cap advertised in `JitChannelRegister`. `None` means no cap.
+    /// Receiver cap advertised in `JitChannelRegister`. `None` refuses JIT opens.
     pub fn jit_max_amount(&self) -> Option<u128> {
         self.jit_max_amount
+    }
+
+    /// Largest open fee this receiver will accept from its liquidity node.
+    /// `None` accepts only 0.
+    pub fn jit_max_open_fee(&self) -> Option<u128> {
+        self.jit_max_open_fee
     }
 
     pub fn jit_channel_advertised(&self) -> bool {
@@ -694,6 +709,7 @@ impl FiberConfig {
             min_amount: self.jit_min_amount(),
             max_funding: self.jit_max_funding(),
             max_amount: self.jit_max_amount(),
+            max_open_fee: self.jit_max_open_fee(),
             max_inflight_opens: self.jit_max_inflight_opens(),
         }
     }
@@ -781,8 +797,10 @@ pub struct JitChannelConfig {
     pub open_fee: Option<u128>,
     pub min_amount: u128,
     pub max_funding: u128,
-    /// `None` means the receiver places no cap on a JIT payment.
+    /// `None` refuses inbound JIT opens.
     pub max_amount: Option<u128>,
+    /// `None` accepts an acknowledged open fee of 0 only.
+    pub max_open_fee: Option<u128>,
     pub max_inflight_opens: usize,
 }
 

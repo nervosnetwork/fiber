@@ -1453,6 +1453,7 @@ fn test_graph_jit_open_fee_is_reserved_for_the_liquidity_node() {
         .payment_preimage(Hash256::default())
         .payee_pub_key(recipient)
         .final_expiry_delta(FINAL_TLC_EXPIRY_DELTA_IN_TESTS)
+        .liquidity_provider(lsp)
         .hop_hints(vec![HopHint {
             pubkey: lsp.into(),
             channel_outpoint: OutPoint::default(),
@@ -1466,6 +1467,7 @@ fn test_graph_jit_open_fee_is_reserved_for_the_liquidity_node() {
     let payment = SendPaymentData::new(
         SendPaymentCommand {
             invoice: Some(invoice.to_string()),
+            max_fee_amount: Some(100_000),
             ..Default::default()
         },
         Currency::Fibd,
@@ -1504,6 +1506,32 @@ fn test_graph_jit_open_fee_is_reserved_for_the_liquidity_node() {
             assert_eq!(build_max_fee_amount, open_fee);
         }
         other => panic!("unexpected payload: {other:?}"),
+    }
+
+    let mut probe_state = payment_state.clone();
+    probe_state.charge_jit_open_fee = false;
+    let probe = network
+        .graph
+        .build_route(probe_state.amount, None, None, &probe_state)
+        .expect("probe route leaves the open fee uncharged");
+    let probed = TrampolineOnionPacket::new(probe.last().unwrap().trampoline_onion().unwrap())
+        .peel(
+            &Privkey(network.secret_keys[3]),
+            Some(probe_state.payment_hash.as_ref()),
+            SECP256K1,
+        )
+        .expect("peel probe");
+    match probed.current {
+        crate::fiber::types::TrampolineHopPayload::Forward {
+            amount_to_forward,
+            build_max_fee_amount,
+            ..
+        } => {
+            assert_eq!(amount_to_forward, amount);
+            assert!(build_max_fee_amount < open_fee);
+            assert!(build_max_fee_amount > 0);
+        }
+        other => panic!("unexpected probe payload: {other:?}"),
     }
 }
 
@@ -1547,6 +1575,7 @@ fn test_graph_jit_open_fee_zero_is_not_replaced_by_the_fee_cap() {
         .payment_preimage(Hash256::default())
         .payee_pub_key(recipient)
         .final_expiry_delta(FINAL_TLC_EXPIRY_DELTA_IN_TESTS)
+        .liquidity_provider(lsp)
         .hop_hints(vec![HopHint {
             pubkey: lsp.into(),
             channel_outpoint: OutPoint::default(),

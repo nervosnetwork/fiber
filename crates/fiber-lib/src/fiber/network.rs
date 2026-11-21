@@ -1041,6 +1041,8 @@ pub enum NetworkActorCommand {
     ),
     // Open a JIT channel for a trampoline child payment that has no route.
     MaybeOpenJitChannel(Hash256, Pubkey),
+    // Funding transaction for an open planned by MaybeOpenJitChannel.
+    OpenPlannedJitChannel(Hash256, OpenChannelCommand),
     // Open fee confirmed by the liquidity node, for a JIT invoice.
     GetJitInvoiceTerms(RpcReplyPort<Result<u128, String>>),
     // A received TLC was removed. Drop a JIT open that was waiting on it.
@@ -3475,6 +3477,12 @@ where
                     .maybe_open_jit_channel(&myself, payment_hash, target, network_graph)
                     .await;
             }
+            NetworkActorCommand::OpenPlannedJitChannel(payment_hash, open_channel) => {
+                let network_graph = self.network_graph.clone();
+                state
+                    .open_planned_jit_channel(payment_hash, open_channel, network_graph)
+                    .await;
+            }
             NetworkActorCommand::GetJitInvoiceTerms(reply) => {
                 let _ = reply.send(state.jit.lsp_open_fee().ok_or_else(|| {
                     "JIT liquidity node has not confirmed the open fee".to_string()
@@ -5207,6 +5215,11 @@ where
                     ));
                 }
                 let available_fee_amount = incoming_amount.saturating_sub(amount_to_forward);
+                let channel_can_forward = state.peer_ckb_channel_can_forward(
+                    &next_node_id,
+                    amount_to_forward,
+                    payment_hash,
+                );
                 if available_fee_amount != build_max_fee_amount {
                     error!(
                         "Trampoline forwarding fee mismatch: available {}, build max {}",
@@ -5217,8 +5230,10 @@ where
                         state.get_public_key(),
                     ));
                 }
+                // An existing channel that can carry the payment pays a routing fee only.
                 if state.jit.service_enabled()
                     && state.jit.is_registered(&next_node_id)
+                    && !channel_can_forward
                     && (state.jit.config().open_fee_required()
                         || available_fee_amount < state.jit.config().open_fee_amount())
                 {
@@ -6513,14 +6528,18 @@ where
         target: Pubkey,
         network_graph: Arc<RwLock<NetworkGraph<S>>>,
     ) {
-        // Channel startup already consumes most of the worker stack.
-        Box::pin(self.start_jit_channel_for_payment(
+        if let Some(open_channel) = Box::pin(self.start_jit_channel_for_payment(
             myself,
             payment_hash,
             target,
             network_graph.clone(),
         ))
-        .await;
+        .await
+        {
+            let _ = myself.send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::OpenPlannedJitChannel(payment_hash, open_channel),
+            ));
+        }
         self.drain_jit_pumps(myself, network_graph).await;
     }
 
@@ -6543,14 +6562,18 @@ where
             let Some(payment_hash) = self.jit.front_queued(&peer) else {
                 continue;
             };
-            // Channel startup already consumes most of the worker stack.
-            Box::pin(self.start_jit_channel_for_payment(
+            if let Some(open_channel) = Box::pin(self.start_jit_channel_for_payment(
                 myself,
                 payment_hash,
                 peer,
                 network_graph.clone(),
             ))
-            .await;
+            .await
+            {
+                let _ = myself.send_message(NetworkActorMessage::new_command(
+                    NetworkActorCommand::OpenPlannedJitChannel(payment_hash, open_channel),
+                ));
+            }
         }
         for peer in blocked {
             self.jit.schedule_pump(peer);
@@ -6564,15 +6587,15 @@ where
         payment_hash: Hash256,
         target: Pubkey,
         network_graph: Arc<RwLock<NetworkGraph<S>>>,
-    ) {
+    ) -> Option<OpenChannelCommand> {
         let Some(session) = self.store.get_payment_session(payment_hash) else {
             self.finish_jit_payment(payment_hash).await;
-            return;
+            return None;
         };
         if session.status.is_final() {
             self.jit.forget_direct_retry(payment_hash);
             self.finish_jit_payment(payment_hash).await;
-            return;
+            return None;
         }
         if session.request.allow_mpp || session.request.max_parts.is_some_and(|parts| parts > 1) {
             self.fail_jit_payment(
@@ -6580,17 +6603,17 @@ where
                 "JIT channels do not support multi-part payments",
             )
             .await;
-            return;
+            return None;
         }
         if !self.jit_upstream_still_held(payment_hash) {
             self.fail_jit_payment(payment_hash, "upstream TLC is no longer held")
                 .await;
-            return;
+            return None;
         }
         if session.request.udt_type_script.is_some() {
             self.fail_jit_payment(payment_hash, "JIT channels only support CKB")
                 .await;
-            return;
+            return None;
         }
 
         let amount = session.request.amount;
@@ -6598,13 +6621,13 @@ where
             if self.jit.config().open_fee_required() {
                 self.fail_jit_payment(payment_hash, "JIT open fee is not configured")
                     .await;
-                return;
+                return None;
             }
             let max_fee = session.request.max_fee_amount.unwrap_or(0);
             if max_fee < self.jit.config().open_fee_amount() {
                 self.fail_jit_payment(payment_hash, "trampoline fee does not cover JIT open fee")
                     .await;
-                return;
+                return None;
             }
         }
         let channel_can_forward = self.peer_session_map.contains_key(&target)
@@ -6617,7 +6640,7 @@ where
                 let _ = actor.send_message(PaymentActorMessage::RetrySendPayment(None));
             }
             self.persist_jit();
-            return;
+            return None;
         }
         if channel_can_forward {
             self.fail_jit_payment(
@@ -6625,7 +6648,7 @@ where
                 "JIT channel could not forward the reserved payment",
             )
             .await;
-            return;
+            return None;
         }
 
         let peer_ready = self.jit.service_enabled()
@@ -6637,42 +6660,39 @@ where
                 .and_then(|peer| peer.features.as_ref())
                 .is_some_and(|features| features.supports_jit_channel());
         if !peer_ready {
-            if self.jit.has_open(&target)
-                || self
-                    .peer_channel_index
-                    .opening_channel_count_by_peer(&target)
-                    > 0
-            {
-                self.jit.enqueue(target, payment_hash);
-                self.persist_jit();
-                return;
-            }
-            self.fail_jit_payment(payment_hash, "peer is not registered for JIT channels")
+            self.fail_jit_payment(payment_hash, "Failed to build route, no path found")
                 .await;
-            return;
+            return None;
         }
 
         if self.jit.amount_exceeds_registration(&target, amount) {
             self.fail_jit_payment(payment_hash, "amount exceeds receiver JIT maximum")
                 .await;
-            return;
+            return None;
         }
 
-        if self.jit.has_open(&target)
-            || self
-                .peer_channel_index
-                .opening_channel_count_by_peer(&target)
-                > 0
-        {
+        if self.jit.has_open(&target) {
             self.jit.enqueue(target, payment_hash);
             self.persist_jit();
-            return;
+            return None;
+        }
+        if self
+            .peer_channel_index
+            .opening_channel_count_by_peer(&target)
+            > 0
+        {
+            self.fail_jit_payment(
+                payment_hash,
+                "no route to peer and another channel open is in progress",
+            )
+            .await;
+            return None;
         }
 
         if amount < self.jit.config().min_amount {
             self.fail_jit_payment(payment_hash, "amount is below JIT minimum")
                 .await;
-            return;
+            return None;
         }
 
         let now = now_timestamp_as_millis_u64();
@@ -6691,7 +6711,7 @@ where
                 "remaining TLC expiry cannot cover JIT channel open",
             )
             .await;
-            return;
+            return None;
         }
 
         let reserved = match reserved_capacity(&self.default_shutdown_script, &None) {
@@ -6702,7 +6722,7 @@ where
                     &format!("failed to compute JIT reserved capacity: {err}"),
                 )
                 .await;
-                return;
+                return None;
             }
         };
         let funding_amount = match amount.checked_add(reserved) {
@@ -6710,18 +6730,18 @@ where
             None => {
                 self.fail_jit_payment(payment_hash, "JIT funding amount overflows")
                     .await;
-                return;
+                return None;
             }
         };
         if funding_amount > self.jit.config().max_funding {
             self.fail_jit_payment(payment_hash, "JIT funding amount exceeds maximum")
                 .await;
-            return;
+            return None;
         }
         if self.jit.opens_in_flight_count() >= self.jit.config().max_inflight_opens {
             self.fail_jit_payment(payment_hash, "JIT pending channel limit reached")
                 .await;
-            return;
+            return None;
         }
 
         let open_channel = OpenChannelCommand {
@@ -6741,7 +6761,19 @@ where
             max_tlc_number_in_flight: None,
         };
 
-        // Channel startup already consumes most of the worker stack.
+        // Placeholder until OpenPlannedJitChannel replaces it with the real channel id.
+        self.jit
+            .record_open(target, Hash256::default(), payment_hash);
+        Some(open_channel)
+    }
+
+    async fn open_planned_jit_channel(
+        &mut self,
+        payment_hash: Hash256,
+        open_channel: OpenChannelCommand,
+        network_graph: Arc<RwLock<NetworkGraph<S>>>,
+    ) {
+        let target = open_channel.pubkey;
         match Box::pin(self.create_outbound_channel(open_channel, network_graph)).await {
             Ok((_, channel_id)) => {
                 self.jit.record_open(target, channel_id, payment_hash);

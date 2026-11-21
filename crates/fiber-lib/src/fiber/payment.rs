@@ -48,8 +48,6 @@ use tracing::{debug, error, instrument, warn};
 const MAX_TRAMPOLINE_HOPS_LIMIT: u16 = 5;
 const DEFAULT_MAX_FEE_RATE: u64 = 5;
 pub(crate) const MAX_FEE_RATE_DENOMINATOR: u128 = 1000;
-/// Open fee included in the default cap without an explicit `max_fee_amount`. 1,000 CKB.
-const MAX_IMPLICIT_JIT_OPEN_FEE: u128 = 100_000_000_000;
 
 fn split_trampoline_hop_hints(hints: Vec<HopHint>) -> (Vec<Pubkey>, Vec<HopHint>) {
     let mut trampoline = Vec::new();
@@ -67,9 +65,8 @@ fn split_trampoline_hop_hints(hints: Vec<HopHint>) -> (Vec<Pubkey>, Vec<HopHint>
 
 /// Fee cap for one payment.
 ///
-/// A JIT open fee is added on top of the routing allowance from the default rate.
-/// An explicit `max_fee_amount` or `max_fee_rate` stays a ceiling: it has to cover
-/// the open fee, and the route finder still has to fit the path in what remains.
+/// A non-zero JIT open fee requires an explicit `max_fee_amount` or `max_fee_rate`,
+/// and that ceiling has to cover the open fee.
 fn payment_max_fee(
     amount: u128,
     open_fee: u128,
@@ -85,11 +82,11 @@ fn payment_max_fee(
         });
     }
 
-    if requested_max_fee.is_none() && max_fee_rate.is_none() && open_fee > MAX_IMPLICIT_JIT_OPEN_FEE
-    {
-        return Err(format!(
-            "invoice JIT open fee {open_fee} exceeds the default cap {MAX_IMPLICIT_JIT_OPEN_FEE}; set max_fee_amount to pay it"
-        ));
+    if requested_max_fee.is_none() && max_fee_rate.is_none() {
+        return Err(
+            "invoice JIT open fee requires max_fee_amount or max_fee_rate; set one to pay it"
+                .to_string(),
+        );
     }
 
     if let Some(requested) = requested_max_fee {
@@ -667,11 +664,16 @@ impl SendPaymentDataExt for SendPaymentData {
                 }
             }
         };
-        if let Some(provider) = invoice
+        if invoice
             .as_ref()
-            .filter(|invoice| invoice.jit_open_fee().is_some())
-            .and_then(|invoice| invoice.liquidity_provider().copied().map(Pubkey::from))
+            .is_some_and(|invoice| invoice.jit_open_fee().is_some())
         {
+            let Some(provider) = invoice
+                .as_ref()
+                .and_then(|invoice| invoice.liquidity_provider().copied().map(Pubkey::from))
+            else {
+                return Err("JIT open fee requires the invoice liquidity provider".to_string());
+            };
             let pays_provider = trampoline_hops
                 .as_ref()
                 .and_then(|hops| hops.last())
@@ -1085,6 +1087,8 @@ pub struct PaymentActorState {
     // result arrives, the channel's persisted state may not own the attempt yet.
     // On restart those mailboxes disappear and durable channel ownership wins.
     pending_add_results: HashSet<u64>,
+    // Set after the liquidity node rejects a route that omitted the invoice open fee.
+    charge_jit_open_fee: bool,
 }
 
 impl PaymentActorState {
@@ -1102,8 +1106,35 @@ impl PaymentActorState {
             processed_closed_adds: HashSet::new(),
             attempts_with_retry_work: HashSet::new(),
             pending_add_results: HashSet::new(),
+            charge_jit_open_fee: false,
         }
     }
+}
+
+fn invoice_jit_open_fee(session: &PaymentSession) -> u128 {
+    session
+        .request
+        .payment_invoice()
+        .and_then(|invoice| invoice.jit_open_fee())
+        .unwrap_or(0)
+}
+
+fn charge_jit_open_fee_on_route(session: &PaymentSession, state: &PaymentActorState) -> bool {
+    session.is_dry_run() || state.charge_jit_open_fee || invoice_jit_open_fee(session) == 0
+}
+
+fn jit_open_fee_refusal(session: &PaymentSession, error: &TlcErr) -> bool {
+    if error.error_code != TlcErrorCode::FeeInsufficient || invoice_jit_open_fee(session) == 0 {
+        return false;
+    }
+    let Some(provider) = session
+        .request
+        .payment_invoice()
+        .and_then(|invoice| invoice.liquidity_provider().copied().map(Pubkey::from))
+    else {
+        return false;
+    };
+    error.error_node_id() == Some(provider)
 }
 
 pub struct PaymentActorArguments {
@@ -1671,8 +1702,9 @@ where
 
             let mut channel_stats = GraphChannelStat::new(Some(channel_stats));
             self.exclude_reserved_jit_channels(&mut channel_stats, session.payment_hash());
-            let payment_state =
+            let mut payment_state =
                 SendPaymentState::with_channel_stats(session.request.clone(), channel_stats);
+            payment_state.charge_jit_open_fee = charge_jit_open_fee_on_route(session, state);
             #[cfg(not(target_arch = "wasm32"))]
             let hops = self
                 .build_route_in_spawn_task(amount, None, max_fee, payment_state)
@@ -1723,6 +1755,7 @@ where
     async fn build_payment_routes(
         &self,
         session: &mut PaymentSession,
+        charge_jit_open_fee: bool,
     ) -> Result<Vec<Attempt>, Error> {
         let (source, channel_stats) = {
             let graph = self.network_graph.read().await;
@@ -1757,10 +1790,12 @@ where
         if session.max_parts() > 1 && !is_self_pay {
             let path_max = {
                 let graph = self.network_graph.read().await;
-                graph.find_path_max_capacity(&SendPaymentState::with_channel_stats(
+                let mut payment_state = SendPaymentState::with_channel_stats(
                     session.request.clone(),
                     channel_stats.clone(),
-                ))?
+                );
+                payment_state.charge_jit_open_fee = charge_jit_open_fee;
+                graph.find_path_max_capacity(&payment_state)?
             };
             if path_max
                 .checked_mul(session.max_parts() as u128)
@@ -1795,10 +1830,11 @@ where
                 session.max_parts(),
                 max_fee,
             );
-            let payment_state = SendPaymentState::with_channel_stats(
+            let mut payment_state = SendPaymentState::with_channel_stats(
                 session.request.clone(),
                 channel_stats.clone(),
             );
+            payment_state.charge_jit_open_fee = charge_jit_open_fee;
             #[cfg(not(target_arch = "wasm32"))]
             let build_route_result = self
                 .build_route_in_spawn_task(
@@ -2202,7 +2238,11 @@ where
         // it depends on the path finding algorithm to create how many of attempts,
         // if a payment can not be met in the network graph, an build path error will be returned
         // and no attempts be stored in the payment session and db.
-        let mut attempts = match self.build_payment_routes(&mut session).await {
+        let charge_open_fee = charge_jit_open_fee_on_route(&session, state);
+        let mut attempts = match self
+            .build_payment_routes(&mut session, charge_open_fee)
+            .await
+        {
             Ok(attempts) => attempts,
             Err(Error::NeedJitChannel) => {
                 self.network
@@ -2585,7 +2625,17 @@ where
                             }
                         }
                     };
-                    let need_to_retry = if let Some(route_index) = route_index {
+                    let attach_open_fee =
+                        jit_open_fee_refusal(&session, &tlc_error) && !state.charge_jit_open_fee;
+                    let need_to_retry = if attach_open_fee {
+                        // Skip record_attempt_fail so this node is not blacklisted.
+                        state.charge_jit_open_fee = true;
+                        self.network_graph
+                            .write()
+                            .await
+                            .untrack_attempt_router(&attempt);
+                        true
+                    } else if let Some(route_index) = route_index {
                         self.network_graph.write().await.record_attempt_fail_at_hop(
                             &attempt,
                             tlc_error.clone(),
@@ -2838,7 +2888,9 @@ where
         // will not store the payment session and send the onion packet
         if payment_data.dry_run {
             let mut payment_session = PaymentSession::new_session(&self.store, payment_data, 0);
-            self.build_payment_routes(&mut payment_session).await?;
+            let charge_open_fee = charge_jit_open_fee_on_route(&payment_session, state);
+            self.build_payment_routes(&mut payment_session, charge_open_fee)
+                .await?;
             return Ok(SendPaymentResponse::from_session(
                 payment_session,
                 &self.store,

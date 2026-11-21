@@ -412,6 +412,8 @@ pub struct SendPaymentState {
     pub request: SendPaymentData,
     /// Runtime channel usage statistics for path-finding (overlay on global stats).
     pub channel_stats: GraphChannelStat,
+    /// When false, a quoted JIT open fee is omitted from this route.
+    pub charge_jit_open_fee: bool,
 }
 
 impl SendPaymentState {
@@ -420,6 +422,7 @@ impl SendPaymentState {
         Self {
             request,
             channel_stats: Default::default(),
+            charge_jit_open_fee: true,
         }
     }
 
@@ -428,6 +431,7 @@ impl SendPaymentState {
         Self {
             request,
             channel_stats,
+            charge_jit_open_fee: true,
         }
     }
 }
@@ -1560,11 +1564,21 @@ where
             .payment_invoice()
             .and_then(|invoice| invoice.jit_open_fee());
         if let Some(open_fee) = jit_open_fee {
+            let routed_fee = if payment_data.charge_jit_open_fee || open_fee == 0 {
+                open_fee
+            } else {
+                let probe = self.jit_probe_hop_fee(final_amount)?;
+                if probe >= open_fee {
+                    open_fee
+                } else {
+                    probe
+                }
+            };
             return self.find_jit_trampoline_route(
                 source,
                 final_amount,
                 max_fee_amount,
-                open_fee,
+                routed_fee,
                 hops,
                 payment_data,
             );
@@ -1757,9 +1771,9 @@ where
         let target = payment_data.target_pubkey;
         if payment_data.payment_invoice().is_some_and(|invoice| {
             invoice.jit_open_fee().is_some()
-                && invoice
+                && !invoice
                     .liquidity_provider()
-                    .is_some_and(|provider| hops.last().copied() != Some(Pubkey::from(*provider)))
+                    .is_some_and(|provider| hops.last().copied() == Some(Pubkey::from(*provider)))
         }) {
             return Err(PathFindError::Other(
                 "JIT open fee must be paid to the invoice liquidity provider".to_string(),
@@ -1887,6 +1901,17 @@ where
             trampoline_onion: Some(trampoline_packet.into_bytes()),
             final_hop_expiry_delta_override: Some(trampoline_forward_expiry_delta),
         })
+    }
+
+    /// Routing fee for one trampoline hop when the open fee is not being charged.
+    fn jit_probe_hop_fee(&self, final_amount: u128) -> Result<u128, PathFindError> {
+        let one_hop_fee = calculate_tlc_forward_fee(final_amount, DEFAULT_FEE_RATE as u128)
+            .map_err(|err| PathFindError::Other(format!("invalid JIT probe fee: {err}")))?;
+        Ok(checked_mul_u128(
+            one_hop_fee.max(1),
+            10,
+            "JIT probe hop fee",
+        )?)
     }
 
     /// Last hop fee is the quoted JIT open fee. Earlier trampoline hops get a

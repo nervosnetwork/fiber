@@ -36,6 +36,7 @@ fn test_jit_config_defaults_do_not_advertise() {
     assert_eq!(config.jit_min_amount(), 0);
     assert_eq!(config.jit_max_funding(), 0);
     assert!(config.jit_max_amount().is_none());
+    assert!(config.jit_max_open_fee().is_none());
     assert_eq!(config.jit_max_inflight_opens(), 8);
     let funded = FiberConfig {
         jit_service_enabled: Some(true),
@@ -73,6 +74,7 @@ jit_open_fee: 1000
 jit_min_amount: 50
 jit_max_funding: 25000000000
 jit_max_amount: 500
+jit_max_open_fee: 40
 jit_max_inflight_opens: 3
 "#;
     let opt: <FiberConfig as ClapSerde>::Opt =
@@ -83,6 +85,7 @@ jit_max_inflight_opens: 3
     assert_eq!(config.jit_min_amount(), 50);
     assert_eq!(config.jit_max_funding(), 25_000_000_000);
     assert_eq!(config.jit_max_amount(), Some(500));
+    assert_eq!(config.jit_max_open_fee(), Some(40));
     assert_eq!(config.jit_max_inflight_opens(), 3);
     assert!(config.jit_channel_advertised());
     assert!(config.gen_node_features().supports_jit_channel());
@@ -112,7 +115,7 @@ async fn start_jit_lsp() -> NetworkNode {
 }
 
 async fn start_jit_receiver(lsp_pubkey: crate::fiber::types::Pubkey) -> NetworkNode {
-    start_jit_receiver_with_cap(lsp_pubkey, None).await
+    start_jit_receiver_with_cap(lsp_pubkey, Some(u128::MAX)).await
 }
 
 async fn wait_jit_registration(receiver: &mut NetworkNode, lsp: &mut NetworkNode) {
@@ -134,6 +137,7 @@ async fn start_jit_receiver_with_cap(
             .fiber_config_updater(move |config| {
                 config.jit_lsp_pubkey = Some(hex_pk);
                 config.jit_max_amount = max_amount;
+                config.jit_max_open_fee = Some(u128::MAX);
             })
             .build(),
     )
@@ -405,9 +409,42 @@ fn test_send_payment_uses_jit_hop_hint_without_liquidity_provider() {
         .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &payee_sk))
         .expect("build jit invoice");
 
-    let payment = SendPaymentData::new(
+    let hinted_only = SendPaymentData::new(
         SendPaymentCommand {
             invoice: Some(invoice.to_string()),
+            max_fee_amount: Some(60_000),
+            ..Default::default()
+        },
+        Currency::Fibd,
+    );
+    assert!(hinted_only
+        .expect_err("open fee without a liquidity provider")
+        .contains("liquidity provider"));
+
+    let quoted = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(1000))
+        .payment_preimage(gen_rand_sha256_hash())
+        .payee_pub_key(payee_pk)
+        .liquidity_provider(lsp_pk)
+        .allow_trampoline_routing(true)
+        .jit_open_fee(50_000)
+        .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &payee_sk))
+        .expect("build quoted jit invoice");
+    let implicit = SendPaymentData::new(
+        SendPaymentCommand {
+            invoice: Some(quoted.to_string()),
+            ..Default::default()
+        },
+        Currency::Fibd,
+    );
+    assert!(implicit
+        .expect_err("open fee without an explicit fee cap")
+        .contains("max_fee_amount"));
+
+    let payment = SendPaymentData::new(
+        SendPaymentCommand {
+            invoice: Some(quoted.to_string()),
+            max_fee_amount: Some(100_000),
             ..Default::default()
         },
         Currency::Fibd,
@@ -418,12 +455,12 @@ fn test_send_payment_uses_jit_hop_hint_without_liquidity_provider() {
         Some([lsp_pk.into()].as_slice())
     );
     assert!(payment.hop_hints.is_empty());
-    // Default routing allowance is 0.5% of (amount + open fee), added on top of the quote.
+    // Routing allowance is 0.5% of (amount + open fee), and it cannot raise the payer cap.
     assert_eq!(payment.max_fee_amount, Some(50_255));
 
     let capped = SendPaymentData::new(
         SendPaymentCommand {
-            invoice: Some(invoice.to_string()),
+            invoice: Some(quoted.to_string()),
             max_fee_amount: Some(60_000),
             ..Default::default()
         },
@@ -434,7 +471,7 @@ fn test_send_payment_uses_jit_hop_hint_without_liquidity_provider() {
 
     let rejected = SendPaymentData::new(
         SendPaymentCommand {
-            invoice: Some(invoice.to_string()),
+            invoice: Some(quoted.to_string()),
             max_fee_amount: Some(10),
             ..Default::default()
         },
@@ -446,7 +483,7 @@ fn test_send_payment_uses_jit_hop_hint_without_liquidity_provider() {
 
     let rate_rejected = SendPaymentData::new(
         SendPaymentCommand {
-            invoice: Some(invoice.to_string()),
+            invoice: Some(quoted.to_string()),
             max_fee_rate: Some(1),
             ..Default::default()
         },
@@ -483,26 +520,21 @@ fn test_send_payment_uses_jit_hop_hint_without_liquidity_provider() {
         .amount(Some(1000))
         .payment_preimage(gen_rand_sha256_hash())
         .payee_pub_key(payee_pk)
-        .hop_hints(vec![HopHint {
-            pubkey: lsp_pk.into(),
-            channel_outpoint: OutPoint::default(),
-            fee_rate: 0,
-            tlc_expiry_delta: 0,
-        }])
+        .liquidity_provider(lsp_pk)
         .allow_trampoline_routing(true)
         .jit_open_fee(100_000_000_001)
         .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &payee_sk))
         .expect("build huge fee invoice");
-    let implicit = SendPaymentData::new(
+    let huge = SendPaymentData::new(
         SendPaymentCommand {
             invoice: Some(huge_fee.to_string()),
             ..Default::default()
         },
         Currency::Fibd,
     );
-    assert!(implicit
-        .expect_err("implicit open fee above the default cap")
-        .contains("set max_fee_amount"));
+    assert!(huge
+        .expect_err("open fee without an explicit fee cap")
+        .contains("max_fee_amount"));
     let explicit = SendPaymentData::new(
         SendPaymentCommand {
             invoice: Some(huge_fee.to_string()),

@@ -79,7 +79,7 @@ impl JitSession {
     pub(crate) fn outbound_register(&self) -> JitChannelRegister {
         JitChannelRegister {
             funding_udt_type_script: None,
-            max_amount: self.config.max_amount.unwrap_or(u128::MAX),
+            max_amount: self.config.max_amount.unwrap_or(0),
             open_fee: 0,
         }
     }
@@ -105,8 +105,11 @@ impl JitSession {
     }
 
     pub(crate) fn accept_lsp(&mut self, peer: Pubkey, register: &JitChannelRegister) -> bool {
-        let expected = self.config.max_amount.unwrap_or(u128::MAX);
-        if register.funding_udt_type_script.is_some() || register.max_amount != expected {
+        let expected = self.config.max_amount.unwrap_or(0);
+        if register.funding_udt_type_script.is_some()
+            || register.max_amount != expected
+            || register.open_fee > self.config.max_open_fee.unwrap_or(0)
+        {
             return false;
         }
         // The first acknowledgement sets the fee quoted on invoices. A later
@@ -153,14 +156,14 @@ impl JitSession {
         open_channel: &OpenChannelV2,
         another_open_in_progress: bool,
     ) -> JitInboundOpen {
-        if open_channel.funding_udt_type_script.is_some()
-            || open_channel.is_public()
-            || self.config.lsp_pubkey != Some(peer)
-            || self.registered_lsp != Some(peer)
-        {
+        if self.config.lsp_pubkey != Some(peer) || self.registered_lsp != Some(peer) {
             return JitInboundOpen::Pass;
         }
-        if open_channel.is_one_way() || open_channel.is_external_funding() {
+        if open_channel.funding_udt_type_script.is_some()
+            || open_channel.is_public()
+            || open_channel.is_one_way()
+            || open_channel.is_external_funding()
+        {
             return JitInboundOpen::Abort(
                 "JIT receiver only accepts a two-way private CKB channel",
             );
@@ -170,11 +173,10 @@ impl JitSession {
                 "JIT receiver already has a channel opening with its liquidity node",
             );
         }
-        if self
-            .config
-            .max_amount
-            .is_some_and(|max_amount| open_channel.funding_amount > max_amount)
-        {
+        let Some(max_amount) = self.config.max_amount else {
+            return JitInboundOpen::Abort("JIT receiver has no funding maximum");
+        };
+        if open_channel.funding_amount > max_amount {
             return JitInboundOpen::Abort("JIT channel funding exceeds receiver maximum");
         }
         JitInboundOpen::Accept
@@ -442,8 +444,11 @@ impl JitSession {
 mod tests {
     use super::*;
     use crate::fiber::config::JitChannelConfig;
-    use crate::fiber::types::JitChannelRegister;
-    use crate::gen_rand_fiber_public_key;
+    use crate::fiber::types::{JitChannelRegister, OpenChannelV2};
+    use crate::{gen_rand_fiber_private_key, gen_rand_fiber_public_key};
+    use ckb_types::packed::Script;
+    use fiber_types::{ChannelFlags, Hash256, Pubkey};
+    use musig2::SecNonce;
 
     fn register(open_fee: u128) -> JitChannelRegister {
         JitChannelRegister {
@@ -453,13 +458,19 @@ mod tests {
         }
     }
 
+    fn capped_session(peer: Pubkey) -> JitSession {
+        JitSession::new(JitChannelConfig {
+            lsp_pubkey: Some(peer),
+            max_amount: Some(u128::MAX),
+            max_open_fee: Some(u128::MAX),
+            ..JitChannelConfig::default()
+        })
+    }
+
     #[test]
     fn lsp_ack_keeps_the_first_open_fee() {
         let peer = gen_rand_fiber_public_key();
-        let mut session = JitSession::new(JitChannelConfig {
-            lsp_pubkey: Some(peer),
-            ..JitChannelConfig::default()
-        });
+        let mut session = capped_session(peer);
         assert!(session.accept_lsp(peer, &register(100)));
         assert_eq!(session.lsp_open_fee(), Some(100));
         assert!(!session.accept_lsp(peer, &register(500)));
@@ -469,6 +480,99 @@ mod tests {
         assert!(session.lsp_open_fee().is_none());
         assert!(session.accept_lsp(peer, &register(500)));
         assert_eq!(session.lsp_open_fee(), Some(500));
+    }
+
+    #[test]
+    fn lsp_ack_rejects_an_open_fee_above_the_receiver_maximum() {
+        let peer = gen_rand_fiber_public_key();
+        let mut session = JitSession::new(JitChannelConfig {
+            lsp_pubkey: Some(peer),
+            max_amount: Some(u128::MAX),
+            max_open_fee: Some(100),
+            ..JitChannelConfig::default()
+        });
+        assert!(!session.accept_lsp(peer, &register(101)));
+        assert!(session.lsp_open_fee().is_none());
+        assert!(session.accept_lsp(peer, &register(100)));
+        assert_eq!(session.lsp_open_fee(), Some(100));
+    }
+
+    fn inbound_open(amount: u128, flags: ChannelFlags, udt: bool) -> OpenChannelV2 {
+        let nonce = SecNonce::build(gen_rand_fiber_private_key().as_ref())
+            .build()
+            .public_nonce();
+        OpenChannelV2 {
+            chain_hash: Hash256::default(),
+            channel_id: Hash256::default(),
+            funding_udt_type_script: udt.then(Script::default),
+            funding_amount: amount,
+            shutdown_script: Script::default(),
+            reserved_ckb_amount: 0,
+            funding_fee_rate: 0,
+            commitment_fee_rate: 0,
+            commitment_delay_epoch: 0,
+            max_tlc_value_in_flight: 0,
+            max_tlc_number_in_flight: 0,
+            funding_pubkey: gen_rand_fiber_public_key(),
+            tlc_basepoint: gen_rand_fiber_public_key(),
+            first_per_commitment_point: gen_rand_fiber_public_key(),
+            second_per_commitment_point: gen_rand_fiber_public_key(),
+            channel_announcement_nonce: None,
+            initial_commitment_nonce: nonce,
+            channel_flags: flags,
+            channel_features: 1,
+        }
+    }
+
+    #[test]
+    fn classify_open_aborts_public_udt_and_uncapped_opens() {
+        let peer = gen_rand_fiber_public_key();
+        let mut session = capped_session(peer);
+        assert!(session.accept_lsp(peer, &register(0)));
+        let private = inbound_open(50, ChannelFlags::empty(), false);
+        assert!(matches!(
+            session.classify_open(peer, &private, false),
+            JitInboundOpen::Accept
+        ));
+
+        let public = inbound_open(50, ChannelFlags::PUBLIC, false);
+        assert!(matches!(
+            session.classify_open(peer, &public, false),
+            JitInboundOpen::Abort(_)
+        ));
+        let udt = inbound_open(50, ChannelFlags::empty(), true);
+        assert!(matches!(
+            session.classify_open(peer, &udt, false),
+            JitInboundOpen::Abort(_)
+        ));
+        let one_way = inbound_open(50, ChannelFlags::ONE_WAY, false);
+        assert!(matches!(
+            session.classify_open(peer, &one_way, false),
+            JitInboundOpen::Abort(_)
+        ));
+        let external = inbound_open(50, ChannelFlags::EXTERNAL_FUNDING, false);
+        assert!(matches!(
+            session.classify_open(peer, &external, false),
+            JitInboundOpen::Abort(_)
+        ));
+
+        let mut uncapped = JitSession::new(JitChannelConfig {
+            lsp_pubkey: Some(peer),
+            max_open_fee: Some(0),
+            ..JitChannelConfig::default()
+        });
+        assert!(uncapped.accept_lsp(
+            peer,
+            &JitChannelRegister {
+                funding_udt_type_script: None,
+                max_amount: 0,
+                open_fee: 0,
+            }
+        ));
+        assert!(matches!(
+            uncapped.classify_open(peer, &private, false),
+            JitInboundOpen::Abort(_)
+        ));
     }
 
     #[test]
