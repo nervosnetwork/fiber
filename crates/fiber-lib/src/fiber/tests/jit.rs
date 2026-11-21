@@ -1,16 +1,18 @@
 use clap_serde_derive::ClapSerde;
+use ractor::call;
 use secp256k1::{PublicKey, Secp256k1, SecretKey};
 
-use crate::fiber::network::PeerDisconnectReason;
+use crate::fiber::network::{OpenChannelCommand, PeerDisconnectReason};
 use crate::fiber::payment::{SendPaymentCommand, SendPaymentDataExt};
 use crate::fiber::types::Privkey;
 use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
 use crate::gen_rand_sha256_hash;
 use crate::invoice::{CkbInvoice, Currency, InvoiceBuilder};
 use crate::rpc::invoice::{InvoiceRpcServerImpl, NewInvoiceParams};
-use crate::test_utils::{NetworkNode, NetworkNodeConfigBuilder};
+use crate::test_utils::{NetworkNode, NetworkNodeConfigBuilder, MIN_RESERVED_CKB};
 use crate::FiberConfig;
-use fiber_types::SendPaymentData;
+use crate::NetworkServiceEvent;
+use fiber_types::{ChannelState, SendPaymentData};
 
 fn sample_pubkey_hex() -> (String, crate::fiber::types::Pubkey) {
     let pubkey = Privkey::from_slice(&[7u8; 32]).pubkey();
@@ -221,4 +223,123 @@ fn test_send_payment_uses_invoice_liquidity_provider_as_trampoline_hop() {
         payment.trampoline_hops.as_deref(),
         Some([other_hop.into()].as_slice())
     );
+}
+
+#[tokio::test]
+async fn test_jit_receiver_auto_accepts_reserve_only_channel_from_lsp() {
+    let mut lsp = start_jit_lsp().await;
+    let mut receiver = start_jit_receiver(lsp.pubkey).await;
+    receiver.connect_to(&mut lsp).await;
+    receiver.expect_debug_event("JitChannelRegisterSent").await;
+    lsp.expect_debug_event("JitChannelRegistered").await;
+
+    let message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+            OpenChannelCommand {
+                pubkey: receiver.pubkey,
+                public: false,
+                one_way: false,
+                shutdown_script: None,
+                funding_amount: MIN_RESERVED_CKB + 10_000_000_000,
+                funding_udt_type_script: None,
+                commitment_fee_rate: None,
+                commitment_delay_epoch: None,
+                funding_fee_rate: None,
+                tlc_expiry_delta: None,
+                tlc_min_value: None,
+                tlc_fee_proportional_millionths: None,
+                max_tlc_number_in_flight: None,
+                max_tlc_value_in_flight: None,
+            },
+            rpc_reply,
+        ))
+    };
+    call!(lsp.network_actor, message)
+        .expect("lsp alive")
+        .expect("open channel");
+
+    let channel_id = receiver
+        .expect_to_process_event(|event| match event {
+            NetworkServiceEvent::ChannelCreated(pubkey, channel_id) if *pubkey == lsp.pubkey => {
+                Some(*channel_id)
+            }
+            _ => None,
+        })
+        .await;
+    assert_ne!(
+        receiver.get_channel_actor_state(channel_id).state,
+        ChannelState::ChannelReady
+    );
+
+    receiver
+        .expect_event(|event| {
+            matches!(
+                event,
+                NetworkServiceEvent::ChannelReady(pubkey, id, _)
+                    if *pubkey == lsp.pubkey && *id == channel_id
+            )
+        })
+        .await;
+    lsp.expect_event(|event| {
+        matches!(
+            event,
+            NetworkServiceEvent::ChannelReady(pubkey, id, _)
+                if *pubkey == receiver.pubkey && *id == channel_id
+        )
+    })
+    .await;
+
+    let receiver_state = receiver.get_channel_actor_state(channel_id);
+    assert_eq!(receiver_state.state, ChannelState::ChannelReady);
+    assert!(!receiver_state.is_public());
+    assert!(!receiver_state.is_one_way);
+    assert_eq!(receiver.get_local_balance_from_channel(channel_id), 0);
+}
+
+#[tokio::test]
+async fn test_jit_receiver_does_not_auto_accept_open_from_other_peer() {
+    let mut lsp = start_jit_lsp().await;
+    let mut receiver = start_jit_receiver(lsp.pubkey).await;
+    receiver.connect_to(&mut lsp).await;
+    receiver.expect_debug_event("JitChannelRegisterSent").await;
+    lsp.expect_debug_event("JitChannelRegistered").await;
+
+    let mut other = NetworkNode::new_with_node_name("other").await;
+    other.connect_to(&mut receiver).await;
+
+    let message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+            OpenChannelCommand {
+                pubkey: receiver.pubkey,
+                public: false,
+                one_way: false,
+                shutdown_script: None,
+                funding_amount: MIN_RESERVED_CKB + 10_000_000_000,
+                funding_udt_type_script: None,
+                commitment_fee_rate: None,
+                commitment_delay_epoch: None,
+                funding_fee_rate: None,
+                tlc_expiry_delta: None,
+                tlc_min_value: None,
+                tlc_fee_proportional_millionths: None,
+                max_tlc_number_in_flight: None,
+                max_tlc_value_in_flight: None,
+            },
+            rpc_reply,
+        ))
+    };
+    call!(other.network_actor, message)
+        .expect("other alive")
+        .expect("open channel");
+
+    receiver
+        .expect_event(|event| {
+            matches!(
+                event,
+                NetworkServiceEvent::ChannelPendingToBeAccepted(pubkey, _)
+                    if *pubkey == other.pubkey
+            )
+        })
+        .await;
+    receiver.expect_debug_event("ChannelAutoAcceptFailed").await;
 }

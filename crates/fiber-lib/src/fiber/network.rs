@@ -56,9 +56,9 @@ use tracing::{debug, error, info, trace, warn};
 pub(crate) const CHANNEL_REESTABLISH_INTERVAL: Duration = Duration::from_millis(10);
 
 use super::channel::{
-    get_funding_and_reserved_amount, AcceptChannelParameter, ChannelActor, ChannelActorMessage,
-    ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, ChannelEvent,
-    ChannelInitializationParameter, ChannelOpenRecordStore, OpenChannelParameter,
+    get_funding_and_reserved_amount, reserved_capacity, AcceptChannelParameter, ChannelActor,
+    ChannelActorMessage, ChannelActorStateStore, ChannelCommand, ChannelCommandWithId,
+    ChannelEvent, ChannelInitializationParameter, ChannelOpenRecordStore, OpenChannelParameter,
     ProcessingChannelError, ProcessingChannelResult, RemoveTlcCommand, StopReason,
     DEFAULT_MAX_TLC_VALUE_IN_FLIGHT, PEER_CHANNEL_RESPONSE_TIMEOUT,
 };
@@ -1740,7 +1740,11 @@ where
                     .await
                 {
                     Ok(()) => {
-                        let auto_accept = if let Some(udt_type_script) =
+                        let jit_accept = state
+                            .should_auto_accept_jit_open(peer_pubkey_for_logging, &open_channel);
+                        let auto_accept = if jit_accept {
+                            false
+                        } else if let Some(udt_type_script) =
                             open_channel.funding_udt_type_script.as_ref()
                         {
                             is_udt_type_auto_accept(udt_type_script, open_channel.funding_amount)
@@ -1749,7 +1753,31 @@ where
                                 && open_channel.funding_amount
                                     >= state.open_channel_auto_accept_min_ckb_funding_amount as u128
                         };
-                        if auto_accept {
+                        if jit_accept {
+                            match reserved_capacity(&state.default_shutdown_script, &None) {
+                                Ok(reserved) => {
+                                    let accept_channel = AcceptChannelCommand {
+                                        temp_channel_id,
+                                        funding_amount: reserved.as_u64() as u128,
+                                        shutdown_script: None,
+                                        max_tlc_number_in_flight: None,
+                                        max_tlc_value_in_flight: None,
+                                        min_tlc_value: None,
+                                        tlc_fee_proportional_millionths: None,
+                                        tlc_expiry_delta: None,
+                                    };
+                                    state.create_inbound_channel(accept_channel).await?;
+                                }
+                                Err(err) => {
+                                    error!(
+                                        peer = format!("{peer_pubkey_for_logging:?}"),
+                                        %err,
+                                        "Failed to compute reserve-only funding for JIT channel accept"
+                                    );
+                                    debug_event!(myself, "ChannelAutoAcceptFailed");
+                                }
+                            }
+                        } else if auto_accept {
                             let accept_channel = AcceptChannelCommand {
                                 temp_channel_id,
                                 funding_amount: if open_channel.funding_udt_type_script.is_some() {
@@ -5924,6 +5952,7 @@ pub struct NetworkActorState<S, C> {
     jit: super::JitChannelConfig,
     jit_registrations: HashMap<Pubkey, JitChannelRegister>,
     pending_jit_registers: HashMap<Pubkey, JitChannelRegister>,
+    jit_registered_lsp: Option<Pubkey>,
     channel_ephemeral_config: ChannelEphemeralConfig,
 
     // Inflight payment actors
@@ -7158,7 +7187,17 @@ where
         debug_event!(self.network, "JitChannelRegistered");
     }
 
-    async fn maybe_send_jit_channel_register(&self, peer_pubkey: Pubkey) {
+    fn should_auto_accept_jit_open(
+        &self,
+        peer_pubkey: Pubkey,
+        open_channel: &OpenChannelV2,
+    ) -> bool {
+        open_channel.funding_udt_type_script.is_none()
+            && self.jit.lsp_pubkey == Some(peer_pubkey)
+            && self.jit_registered_lsp == Some(peer_pubkey)
+    }
+
+    async fn maybe_send_jit_channel_register(&mut self, peer_pubkey: Pubkey) {
         let Some(lsp) = self.jit.lsp_pubkey else {
             return;
         };
@@ -7189,6 +7228,7 @@ where
             .await
         {
             Ok(()) => {
+                self.jit_registered_lsp = Some(peer_pubkey);
                 debug_event!(self.network, "JitChannelRegisterSent");
             }
             Err(err) => {
@@ -7641,6 +7681,9 @@ where
 
         self.peer_session_map.remove(&pubkey);
         self.pending_jit_registers.remove(&pubkey);
+        if self.jit_registered_lsp == Some(pubkey) {
+            self.jit_registered_lsp = None;
+        }
         if self.jit_registrations.remove(&pubkey).is_some() {
             debug_event!(self.network, "JitChannelUnregistered");
         }
@@ -8757,6 +8800,7 @@ where
             jit: config.jit_channel_config(),
             jit_registrations: Default::default(),
             pending_jit_registers: Default::default(),
+            jit_registered_lsp: None,
             channel_ephemeral_config: ChannelEphemeralConfig {
                 funding_timeout_seconds: config.funding_timeout_seconds,
                 external_funding_timeout_seconds: config.external_funding_timeout_seconds,
