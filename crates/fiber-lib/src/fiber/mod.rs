@@ -12,6 +12,7 @@ pub mod types;
 mod fee;
 pub(crate) mod gossip_policy;
 mod in_flight_ckb_tx_actor;
+mod jit;
 mod key;
 pub(crate) mod onchain_tlc_reconcile;
 #[cfg(not(target_arch = "wasm32"))]

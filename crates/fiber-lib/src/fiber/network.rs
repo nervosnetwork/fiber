@@ -67,6 +67,7 @@ use super::gossip::{
     GossipMessageUpdates,
 };
 use super::graph::{ChannelInfo, NetworkGraph, NetworkGraphStateStore, OwnedChannelUpdateEvent};
+use super::jit::{channel_confirmation_slack_ms, JitInboundOpen, JitSession};
 use super::types::{
     BroadcastMessageWithTimestamp, FiberMessage, ForwardTlcResult, GossipMessage, Init,
     JitChannelRegister, OpenChannelV2,
@@ -146,19 +147,6 @@ pub const CKB_TX_TRACING_CONFIRMATIONS: u64 = 4;
 pub const DEFAULT_PAYMENT_TRY_LIMIT: u32 = 5;
 
 const ACTOR_HANDLE_WARN_THRESHOLD_MS: u64 = 15_000;
-
-/// Upper bound for one CKB block when budgeting JIT funding confirmation.
-const JIT_ASSUMED_BLOCK_INTERVAL_MS: u64 = 30_000;
-/// Time to negotiate, build, and broadcast a JIT funding transaction before confirmations start.
-const JIT_FUNDING_SETUP_SLACK_MS: u64 = 3 * 60 * 1000;
-/// Time after the funding transaction is confirmed for the payment to be forwarded and settled.
-const JIT_POST_READY_SLACK_MS: u64 = 2 * 60 * 1000;
-
-fn jit_channel_confirmation_slack_ms() -> u64 {
-    JIT_FUNDING_SETUP_SLACK_MS
-        .saturating_add(CKB_TX_TRACING_CONFIRMATIONS.saturating_mul(JIT_ASSUMED_BLOCK_INTERVAL_MS))
-        .saturating_add(JIT_POST_READY_SLACK_MS)
-}
 
 #[derive(Debug, Clone)]
 struct OnChainTlcRemoveRelay {
@@ -6071,16 +6059,7 @@ pub struct NetworkActorState<S, C> {
     requested_disconnect_peers: HashSet<Pubkey>,
     // The features of the node, used to indicate the capabilities of the node.
     features: FeatureVector,
-    jit: super::JitChannelConfig,
-    jit_registrations: HashMap<Pubkey, JitChannelRegister>,
-    pending_jit_registers: HashMap<Pubkey, JitChannelRegister>,
-    jit_registered_lsp: Option<Pubkey>,
-    // One in-flight JIT open per peer, keyed by peer to the opening channel id.
-    jit_opens_in_flight: HashMap<Pubkey, Hash256>,
-    // Trampoline child payments waiting for a JIT channel to that peer.
-    jit_waiting_payments: HashMap<Pubkey, HashSet<Hash256>>,
-    // Payments already retried once because a direct channel can forward them.
-    jit_direct_route_retried: HashSet<Hash256>,
+    jit: JitSession,
     channel_ephemeral_config: ChannelEphemeralConfig,
 
     // Inflight payment actors
@@ -6130,12 +6109,6 @@ fn generate_channel_actor_name(local_pubkey: &Pubkey, remote_pubkey: &Pubkey) ->
     )
 }
 
-enum JitInboundOpen {
-    Accept,
-    Abort(&'static str),
-    Pass,
-}
-
 impl<S, C> NetworkActorState<S, C>
 where
     S: NetworkActorStateStore
@@ -6181,7 +6154,7 @@ where
         peer: &Pubkey,
         outpoint: &OutPoint,
     ) {
-        let Some(channel_id) = self.jit_opens_in_flight.get(peer).copied() else {
+        let Some(channel_id) = self.jit.open_id(peer) else {
             return;
         };
         let same_channel = self
@@ -6192,8 +6165,8 @@ where
         if !same_channel {
             return;
         }
-        self.jit_opens_in_flight.remove(peer);
-        let payments = self.jit_waiting_payments.remove(peer).unwrap_or_default();
+        self.jit.clear_open(peer);
+        let payments = self.jit.take_waiting(peer);
         for payment_hash in payments {
             if !self.jit_upstream_still_held(payment_hash) {
                 self.fail_jit_payment(payment_hash, "upstream TLC is no longer held")
@@ -6217,12 +6190,12 @@ where
         peer: Pubkey,
         network_graph: Arc<RwLock<NetworkGraph<S>>>,
     ) {
-        if self.jit_opens_in_flight.contains_key(&peer)
+        if self.jit.has_open(&peer)
             || self.peer_channel_index.opening_channel_count_by_peer(&peer) > 0
         {
             return;
         }
-        let payments = self.jit_waiting_payments.remove(&peer).unwrap_or_default();
+        let payments = self.jit.take_waiting(&peer);
         for payment_hash in payments {
             self.maybe_open_jit_channel(myself, payment_hash, peer, network_graph.clone())
                 .await;
@@ -6230,13 +6203,7 @@ where
     }
 
     fn replace_jit_open_channel_id(&mut self, old: Hash256, new: Hash256) {
-        if let Some(peer) = self
-            .jit_opens_in_flight
-            .iter()
-            .find_map(|(peer, id)| (*id == old).then_some(*peer))
-        {
-            self.jit_opens_in_flight.insert(peer, new);
-        }
+        self.jit.replace_open_id(old, new);
     }
 
     async fn publish_ready_ckb_channels_to_graph(
@@ -6287,9 +6254,7 @@ where
     }
 
     fn jit_payment_is_waiting(&self, payment_hash: Hash256) -> bool {
-        self.jit_waiting_payments
-            .values()
-            .any(|payments| payments.contains(&payment_hash))
+        self.jit.is_waiting(payment_hash)
     }
 
     fn jit_upstream_still_held(&self, payment_hash: Hash256) -> bool {
@@ -6314,26 +6279,6 @@ where
                         })
                 })
         })
-    }
-
-    fn detach_jit_payment(&mut self, payment_hash: Hash256) -> Vec<Hash256> {
-        let mut abandon = Vec::new();
-        let peers: Vec<Pubkey> = self.jit_waiting_payments.keys().copied().collect();
-        for peer in peers {
-            let Some(payments) = self.jit_waiting_payments.get_mut(&peer) else {
-                continue;
-            };
-            if !payments.remove(&payment_hash) {
-                continue;
-            }
-            if payments.is_empty() {
-                self.jit_waiting_payments.remove(&peer);
-                if let Some(channel_id) = self.jit_opens_in_flight.get(&peer).copied() {
-                    abandon.push(channel_id);
-                }
-            }
-        }
-        abandon
     }
 
     async fn abandon_idle_jit_opens(&mut self, channel_ids: Vec<Hash256>) {
@@ -6366,8 +6311,8 @@ where
     }
 
     async fn fail_jit_payment(&mut self, payment_hash: Hash256, reason: &str) {
-        self.jit_direct_route_retried.remove(&payment_hash);
-        let opens_to_abandon = self.detach_jit_payment(payment_hash);
+        self.jit.forget_direct_retry(payment_hash);
+        let opens_to_abandon = self.jit.detach(payment_hash);
         let Some(mut session) = self.store.get_payment_session(payment_hash) else {
             self.abandon_idle_jit_opens(opens_to_abandon).await;
             return;
@@ -6387,15 +6332,9 @@ where
     }
 
     async fn fail_jit_open_if_needed(&mut self, channel_id: Hash256) {
-        let Some(peer) = self
-            .jit_opens_in_flight
-            .iter()
-            .find_map(|(peer, id)| (*id == channel_id).then_some(*peer))
-        else {
+        let Some(payments) = self.jit.take_failed_open(channel_id) else {
             return;
         };
-        self.jit_opens_in_flight.remove(&peer);
-        let payments = self.jit_waiting_payments.remove(&peer).unwrap_or_default();
         for payment_hash in payments {
             self.fail_jit_payment(payment_hash, "JIT channel open failed")
                 .await;
@@ -6413,7 +6352,7 @@ where
             return;
         };
         if session.status.is_final() {
-            self.jit_direct_route_retried.remove(&payment_hash);
+            self.jit.forget_direct_retry(payment_hash);
             return;
         }
         if session.request.allow_mpp || session.request.max_parts.is_some_and(|parts| parts > 1) {
@@ -6439,7 +6378,7 @@ where
         if self.peer_session_map.contains_key(&target)
             && self.peer_ckb_channel_can_forward(&target, amount)
         {
-            if self.jit_direct_route_retried.insert(payment_hash) {
+            if self.jit.begin_direct_retry(payment_hash) {
                 self.publish_ready_ckb_channels_to_graph(&target, &network_graph)
                     .await;
                 if let Some(actor) = self.inflight_payments.get(&payment_hash) {
@@ -6452,8 +6391,8 @@ where
             return;
         }
 
-        if !self.jit.service_enabled
-            || !self.jit_registrations.contains_key(&target)
+        if !self.jit.service_enabled()
+            || !self.jit.is_registered(&target)
             || !self.peer_session_map.contains_key(&target)
             || !self
                 .peer_session_map
@@ -6466,36 +6405,29 @@ where
             return;
         }
 
-        if self
-            .jit_registrations
-            .get(&target)
-            .is_some_and(|register| amount > register.max_amount)
-        {
+        if self.jit.amount_exceeds_registration(&target, amount) {
             self.fail_jit_payment(payment_hash, "amount exceeds receiver JIT maximum")
                 .await;
             return;
         }
 
-        if self.jit_opens_in_flight.contains_key(&target)
+        if self.jit.has_open(&target)
             || self
                 .peer_channel_index
                 .opening_channel_count_by_peer(&target)
                 > 0
         {
-            self.jit_waiting_payments
-                .entry(target)
-                .or_default()
-                .insert(payment_hash);
+            self.jit.park(target, payment_hash);
             return;
         }
 
         let max_fee = session.request.max_fee_amount.unwrap_or(0);
-        if max_fee < self.jit.open_fee {
+        if max_fee < self.jit.config().open_fee {
             self.fail_jit_payment(payment_hash, "trampoline fee does not cover JIT open fee")
                 .await;
             return;
         }
-        if amount < self.jit.min_amount {
+        if amount < self.jit.config().min_amount {
             self.fail_jit_payment(payment_hash, "amount is below JIT minimum")
                 .await;
             return;
@@ -6509,7 +6441,7 @@ where
             .and_then(|context| context.max_outgoing_tlc_expiry)
             .unwrap_or(session.request.tlc_expiry_limit)
             .saturating_sub(now);
-        let needed_expiry = jit_channel_confirmation_slack_ms()
+        let needed_expiry = channel_confirmation_slack_ms(CKB_TX_TRACING_CONFIRMATIONS)
             .saturating_add(session.request.final_tlc_expiry_delta);
         if remaining_expiry < needed_expiry {
             self.fail_jit_payment(
@@ -6539,7 +6471,7 @@ where
                 return;
             }
         };
-        if funding_amount > self.jit.max_funding {
+        if funding_amount > self.jit.config().max_funding {
             self.fail_jit_payment(payment_hash, "JIT funding amount exceeds maximum")
                 .await;
             return;
@@ -6567,11 +6499,7 @@ where
             .await
         {
             Ok((_, channel_id)) => {
-                self.jit_opens_in_flight.insert(target, channel_id);
-                self.jit_waiting_payments
-                    .entry(target)
-                    .or_default()
-                    .insert(payment_hash);
+                self.jit.record_open(target, channel_id, payment_hash);
                 debug_event!(self.network, "JitChannelOpening");
             }
             Err(err) => {
@@ -6579,6 +6507,182 @@ where
                 self.fail_jit_payment(payment_hash, &format!("failed to open JIT channel: {err}"))
                     .await;
             }
+        }
+    }
+
+    fn on_jit_channel_register(&mut self, peer_pubkey: Pubkey, register: JitChannelRegister) {
+        if self.jit.lsp_pubkey() == Some(peer_pubkey) {
+            self.note_jit_lsp_ack(peer_pubkey, &register);
+            return;
+        }
+        if self
+            .peer_session_map
+            .get(&peer_pubkey)
+            .and_then(|peer| peer.features.as_ref())
+            .is_none()
+        {
+            self.jit.queue_register(peer_pubkey, register);
+            return;
+        }
+        self.apply_jit_channel_register(peer_pubkey, register);
+    }
+
+    fn note_jit_lsp_ack(&mut self, peer_pubkey: Pubkey, register: &JitChannelRegister) {
+        if !self.jit.accept_lsp(peer_pubkey, register) {
+            debug!(
+                peer = format!("{peer_pubkey:?}"),
+                "Ignoring JIT registration acknowledgement with unexpected terms"
+            );
+            debug_event!(self.network, "JitChannelRegisterRejected");
+            return;
+        }
+        debug_event!(self.network, "JitChannelRegisterAccepted");
+    }
+
+    fn apply_jit_channel_register(&mut self, peer_pubkey: Pubkey, register: JitChannelRegister) {
+        if !self.jit.service_enabled() {
+            debug!(
+                peer = format!("{peer_pubkey:?}"),
+                "Rejecting JitChannelRegister: service disabled"
+            );
+            debug_event!(self.network, "JitChannelRegisterRejected");
+            return;
+        }
+        let Some(peer) = self.peer_session_map.get(&peer_pubkey) else {
+            debug_event!(self.network, "JitChannelRegisterRejected");
+            return;
+        };
+        let Some(features) = peer.features.as_ref() else {
+            debug_event!(self.network, "JitChannelRegisterRejected");
+            return;
+        };
+        if !features.supports_jit_channel() || !self.features.supports_jit_channel() {
+            debug!(
+                peer = format!("{peer_pubkey:?}"),
+                "Rejecting JitChannelRegister: missing JIT_CHANNEL feature"
+            );
+            debug_event!(self.network, "JitChannelRegisterRejected");
+            return;
+        }
+        if register.funding_udt_type_script.is_some() {
+            debug!(
+                peer = format!("{peer_pubkey:?}"),
+                "Rejecting JitChannelRegister: UDT channels are not supported"
+            );
+            debug_event!(self.network, "JitChannelRegisterRejected");
+            return;
+        }
+        self.jit.insert_registration(peer_pubkey, register.clone());
+        debug_event!(self.network, "JitChannelRegistered");
+        let ack =
+            FiberMessageWithTarget::new(peer_pubkey, FiberMessage::jit_channel_register(register));
+        self.network
+            .send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::SendFiberMessage(ack),
+            ))
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+    }
+
+    fn classify_jit_open(
+        &self,
+        peer_pubkey: Pubkey,
+        open_channel: &OpenChannelV2,
+    ) -> JitInboundOpen {
+        let another_open_in_progress = self
+            .to_be_accepted_channels
+            .pending_accept_count(&peer_pubkey)
+            > 1
+            || self
+                .peer_channel_index
+                .opening_channel_count_by_peer(&peer_pubkey)
+                > 0;
+        self.jit
+            .classify_open(peer_pubkey, open_channel, another_open_in_progress)
+    }
+
+    async fn maybe_send_jit_channel_register(&mut self, peer_pubkey: Pubkey) {
+        let Some(lsp) = self.jit.lsp_pubkey() else {
+            return;
+        };
+        if lsp != peer_pubkey {
+            return;
+        }
+        let Some(peer) = self.peer_session_map.get(&peer_pubkey) else {
+            return;
+        };
+        let Some(features) = peer.features.as_ref() else {
+            return;
+        };
+        if !features.supports_jit_channel() || !self.features.supports_jit_channel() {
+            debug!(
+                peer = format!("{peer_pubkey:?}"),
+                "Skipping JitChannelRegister: peer or local node does not advertise JIT_CHANNEL"
+            );
+            return;
+        }
+        match self
+            .send_fiber_message_to_pubkey(
+                &peer_pubkey,
+                FiberMessage::jit_channel_register(self.jit.outbound_register()),
+            )
+            .await
+        {
+            Ok(()) => {
+                debug_event!(self.network, "JitChannelRegisterSent");
+            }
+            Err(err) => {
+                error!(
+                    peer = format!("{peer_pubkey:?}"),
+                    %err,
+                    "Failed to send JitChannelRegister"
+                );
+            }
+        }
+    }
+
+    fn jit_open_can_abandon(&self, channel_id: Hash256) -> bool {
+        let Some(channel) = self.store.get_channel_actor_state(&channel_id) else {
+            return self.channels.contains_key(&channel_id);
+        };
+        if channel.has_submitted_local_external_funding() {
+            return false;
+        }
+        match channel.state {
+            ChannelState::ChannelReady
+            | ChannelState::ShuttingDown(_)
+            | ChannelState::Closed(_)
+            | ChannelState::AwaitingChannelReady(_) => false,
+            ChannelState::AwaitingTxSignatures(flags)
+                if flags.contains(AwaitingTxSignaturesFlags::OUR_TX_SIGNATURES_SENT) =>
+            {
+                false
+            }
+            _ => channel.funding_tx_confirmed_at.is_none(),
+        }
+    }
+
+    async fn on_jit_peer_disconnected(&mut self, pubkey: Pubkey) {
+        let Some(channel_id) = self.jit.open_id(&pubkey) else {
+            let payments = self.jit.take_waiting(&pubkey);
+            for payment_hash in payments {
+                self.fail_jit_payment(payment_hash, "peer disconnected during JIT channel open")
+                    .await;
+            }
+            return;
+        };
+        if !self.jit_open_can_abandon(channel_id) {
+            debug!("JIT channel {channel_id:?} stayed open after {pubkey:?} disconnected");
+            return;
+        }
+        let payments = self.jit.waiting(&pubkey);
+        if payments.is_empty() {
+            self.jit.clear_open(&pubkey);
+            self.abandon_idle_jit_opens(vec![channel_id]).await;
+            return;
+        }
+        for payment_hash in payments {
+            self.fail_jit_payment(payment_hash, "peer disconnected during JIT channel open")
+                .await;
         }
     }
 
@@ -7678,123 +7782,6 @@ where
         Ok(())
     }
 
-    fn on_jit_channel_register(&mut self, peer_pubkey: Pubkey, register: JitChannelRegister) {
-        if self.jit.lsp_pubkey == Some(peer_pubkey) {
-            self.note_jit_lsp_ack(peer_pubkey, &register);
-            return;
-        }
-        if self
-            .peer_session_map
-            .get(&peer_pubkey)
-            .and_then(|peer| peer.features.as_ref())
-            .is_none()
-        {
-            self.pending_jit_registers.insert(peer_pubkey, register);
-            return;
-        }
-        self.apply_jit_channel_register(peer_pubkey, register);
-    }
-
-    fn note_jit_lsp_ack(&mut self, peer_pubkey: Pubkey, register: &JitChannelRegister) {
-        let expected = self.jit.max_amount.unwrap_or(u128::MAX);
-        if register.funding_udt_type_script.is_some() || register.max_amount != expected {
-            debug!(
-                peer = format!("{peer_pubkey:?}"),
-                "Ignoring JIT registration acknowledgement with unexpected terms"
-            );
-            debug_event!(self.network, "JitChannelRegisterRejected");
-            return;
-        }
-        self.jit_registered_lsp = Some(peer_pubkey);
-        debug_event!(self.network, "JitChannelRegisterAccepted");
-    }
-
-    fn apply_jit_channel_register(&mut self, peer_pubkey: Pubkey, register: JitChannelRegister) {
-        if !self.jit.service_enabled {
-            debug!(
-                peer = format!("{peer_pubkey:?}"),
-                "Rejecting JitChannelRegister: service disabled"
-            );
-            debug_event!(self.network, "JitChannelRegisterRejected");
-            return;
-        }
-        let Some(peer) = self.peer_session_map.get(&peer_pubkey) else {
-            debug_event!(self.network, "JitChannelRegisterRejected");
-            return;
-        };
-        let Some(features) = peer.features.as_ref() else {
-            debug_event!(self.network, "JitChannelRegisterRejected");
-            return;
-        };
-        if !features.supports_jit_channel() || !self.features.supports_jit_channel() {
-            debug!(
-                peer = format!("{peer_pubkey:?}"),
-                "Rejecting JitChannelRegister: missing JIT_CHANNEL feature"
-            );
-            debug_event!(self.network, "JitChannelRegisterRejected");
-            return;
-        }
-        if register.funding_udt_type_script.is_some() {
-            debug!(
-                peer = format!("{peer_pubkey:?}"),
-                "Rejecting JitChannelRegister: UDT channels are not supported"
-            );
-            debug_event!(self.network, "JitChannelRegisterRejected");
-            return;
-        }
-        self.jit_registrations.insert(peer_pubkey, register.clone());
-        debug_event!(self.network, "JitChannelRegistered");
-        let ack =
-            FiberMessageWithTarget::new(peer_pubkey, FiberMessage::jit_channel_register(register));
-        self.network
-            .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::SendFiberMessage(ack),
-            ))
-            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-    }
-
-    fn classify_jit_open(
-        &self,
-        peer_pubkey: Pubkey,
-        open_channel: &OpenChannelV2,
-    ) -> JitInboundOpen {
-        if open_channel.funding_udt_type_script.is_some()
-            || open_channel.is_public()
-            || self.jit.lsp_pubkey != Some(peer_pubkey)
-            || self.jit_registered_lsp != Some(peer_pubkey)
-        {
-            return JitInboundOpen::Pass;
-        }
-        if open_channel.is_one_way() || open_channel.is_external_funding() {
-            return JitInboundOpen::Abort(
-                "JIT receiver only accepts a two-way private CKB channel",
-            );
-        }
-        // The open we are classifying is already in the pending-accept map.
-        let another_open_in_progress = self
-            .to_be_accepted_channels
-            .pending_accept_count(&peer_pubkey)
-            > 1
-            || self
-                .peer_channel_index
-                .opening_channel_count_by_peer(&peer_pubkey)
-                > 0;
-        if another_open_in_progress {
-            return JitInboundOpen::Abort(
-                "JIT receiver already has a channel opening with its liquidity node",
-            );
-        }
-        // `funding_amount` is the inbound amount above the funder's reserved capacity.
-        if self
-            .jit
-            .max_amount
-            .is_some_and(|max_amount| open_channel.funding_amount > max_amount)
-        {
-            return JitInboundOpen::Abort("JIT channel funding exceeds receiver maximum");
-        }
-        JitInboundOpen::Accept
-    }
-
     fn abort_pending_open(&mut self, peer: Pubkey, channel_id: Hash256, reason: &str) {
         self.store.delete_channel_open_record(&channel_id);
         self.to_be_accepted_channels.remove(&channel_id);
@@ -7811,49 +7798,6 @@ where
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
         debug_event!(self.network, "ChannelAutoAcceptFailed");
-    }
-
-    async fn maybe_send_jit_channel_register(&mut self, peer_pubkey: Pubkey) {
-        let Some(lsp) = self.jit.lsp_pubkey else {
-            return;
-        };
-        if lsp != peer_pubkey {
-            return;
-        }
-        let Some(peer) = self.peer_session_map.get(&peer_pubkey) else {
-            return;
-        };
-        let Some(features) = peer.features.as_ref() else {
-            return;
-        };
-        if !features.supports_jit_channel() || !self.features.supports_jit_channel() {
-            debug!(
-                peer = format!("{peer_pubkey:?}"),
-                "Skipping JitChannelRegister: peer or local node does not advertise JIT_CHANNEL"
-            );
-            return;
-        }
-        match self
-            .send_fiber_message_to_pubkey(
-                &peer_pubkey,
-                FiberMessage::jit_channel_register(JitChannelRegister {
-                    funding_udt_type_script: None,
-                    max_amount: self.jit.max_amount.unwrap_or(u128::MAX),
-                }),
-            )
-            .await
-        {
-            Ok(()) => {
-                debug_event!(self.network, "JitChannelRegisterSent");
-            }
-            Err(err) => {
-                error!(
-                    peer = format!("{peer_pubkey:?}"),
-                    %err,
-                    "Failed to send JitChannelRegister"
-                );
-            }
-        }
     }
 
     async fn send_fiber_message_to_pubkey(
@@ -8295,11 +8239,7 @@ where
         }
 
         self.peer_session_map.remove(&pubkey);
-        self.pending_jit_registers.remove(&pubkey);
-        if self.jit_registered_lsp == Some(pubkey) {
-            self.jit_registered_lsp = None;
-        }
-        if self.jit_registrations.remove(&pubkey).is_some() {
+        if self.jit.clear_session(pubkey) {
             debug_event!(self.network, "JitChannelUnregistered");
         }
         self.peer_message_policy
@@ -8341,61 +8281,6 @@ where
         }
         self.seed_peer_reconnect_backoff_if_needed(&peer_id, PeerReconnectTrigger::Disconnected);
         true
-    }
-
-    fn jit_open_can_abandon(&self, channel_id: Hash256) -> bool {
-        let Some(channel) = self.store.get_channel_actor_state(&channel_id) else {
-            return self.channels.contains_key(&channel_id);
-        };
-        if channel.has_submitted_local_external_funding() {
-            return false;
-        }
-        match channel.state {
-            ChannelState::ChannelReady
-            | ChannelState::ShuttingDown(_)
-            | ChannelState::Closed(_)
-            | ChannelState::AwaitingChannelReady(_) => false,
-            ChannelState::AwaitingTxSignatures(flags)
-                if flags.contains(AwaitingTxSignaturesFlags::OUR_TX_SIGNATURES_SENT) =>
-            {
-                false
-            }
-            _ => channel.funding_tx_confirmed_at.is_none(),
-        }
-    }
-
-    async fn on_jit_peer_disconnected(&mut self, pubkey: Pubkey) {
-        let Some(channel_id) = self.jit_opens_in_flight.get(&pubkey).copied() else {
-            let payments = self
-                .jit_waiting_payments
-                .remove(&pubkey)
-                .unwrap_or_default();
-            for payment_hash in payments {
-                self.fail_jit_payment(payment_hash, "peer disconnected during JIT channel open")
-                    .await;
-            }
-            return;
-        };
-        if !self.jit_open_can_abandon(channel_id) {
-            debug!("JIT channel {channel_id:?} stayed open after {pubkey:?} disconnected");
-            return;
-        }
-        let payments: Vec<Hash256> = self
-            .jit_waiting_payments
-            .get(&pubkey)
-            .cloned()
-            .unwrap_or_default()
-            .into_iter()
-            .collect();
-        if payments.is_empty() {
-            self.jit_opens_in_flight.remove(&pubkey);
-            self.abandon_idle_jit_opens(vec![channel_id]).await;
-            return;
-        }
-        for payment_hash in payments {
-            self.fail_jit_payment(payment_hash, "peer disconnected during JIT channel open")
-                .await;
-        }
     }
 
     fn record_invalid_peer_message(&self, pubkey: Pubkey) -> bool {
@@ -8710,7 +8595,7 @@ where
         }
         debug_event!(myself, "PeerInit");
         self.maybe_send_jit_channel_register(peer_pubkey).await;
-        if let Some(register) = self.pending_jit_registers.remove(&peer_pubkey) {
+        if let Some(register) = self.jit.take_pending_register(&peer_pubkey) {
             self.apply_jit_channel_register(peer_pubkey, register);
         }
         if let Some(channels) = self.peer_channel_index.get_channels(&peer_pubkey) {
@@ -9468,13 +9353,7 @@ where
             peer_reconnect_backoff_attempts: Default::default(),
             requested_disconnect_peers: Default::default(),
             features,
-            jit: config.jit_channel_config(),
-            jit_registrations: Default::default(),
-            pending_jit_registers: Default::default(),
-            jit_registered_lsp: None,
-            jit_opens_in_flight: Default::default(),
-            jit_waiting_payments: Default::default(),
-            jit_direct_route_retried: Default::default(),
+            jit: JitSession::new(config.jit_channel_config()),
             channel_ephemeral_config: ChannelEphemeralConfig {
                 funding_timeout_seconds: config.funding_timeout_seconds,
                 external_funding_timeout_seconds: config.external_funding_timeout_seconds,
