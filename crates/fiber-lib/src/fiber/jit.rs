@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use fiber_types::{Hash256, Pubkey};
 
@@ -32,7 +32,11 @@ pub(crate) struct JitSession {
     registered_lsp: Option<Pubkey>,
     lsp_open_fee: Option<u128>,
     opens_in_flight: HashMap<Pubkey, Hash256>,
-    waiting_payments: HashMap<Pubkey, HashSet<Hash256>>,
+    open_for: HashMap<Pubkey, Hash256>,
+    queued: HashMap<Pubkey, VecDeque<Hash256>>,
+    routing_peer: HashMap<Hash256, Pubkey>,
+    pending_pumps: VecDeque<Pubkey>,
+    draining: bool,
     direct_route_retried: HashSet<Hash256>,
 }
 
@@ -45,7 +49,11 @@ impl JitSession {
             registered_lsp: None,
             lsp_open_fee: None,
             opens_in_flight: HashMap::new(),
-            waiting_payments: HashMap::new(),
+            open_for: HashMap::new(),
+            queued: HashMap::new(),
+            routing_peer: HashMap::new(),
+            pending_pumps: VecDeque::new(),
+            draining: false,
             direct_route_retried: HashSet::new(),
         }
     }
@@ -114,6 +122,10 @@ impl JitSession {
         self.registrations.contains_key(peer)
     }
 
+    pub(crate) fn allows_zero_open_fee(&self, next: &Pubkey) -> bool {
+        self.config.service_enabled && self.config.open_fee == Some(0) && self.is_registered(next)
+    }
+
     pub(crate) fn amount_exceeds_registration(&self, peer: &Pubkey, amount: u128) -> bool {
         self.registrations
             .get(peer)
@@ -170,8 +182,8 @@ impl JitSession {
         self.opens_in_flight.contains_key(peer)
     }
 
-    pub(crate) fn clear_open(&mut self, peer: &Pubkey) {
-        self.opens_in_flight.remove(peer);
+    pub(crate) fn opens_in_flight_count(&self) -> usize {
+        self.opens_in_flight.len()
     }
 
     pub(crate) fn replace_open_id(&mut self, old: Hash256, new: Hash256) {
@@ -186,60 +198,120 @@ impl JitSession {
 
     pub(crate) fn record_open(&mut self, peer: Pubkey, channel_id: Hash256, payment_hash: Hash256) {
         self.opens_in_flight.insert(peer, channel_id);
-        self.park(peer, payment_hash);
+        self.open_for.insert(peer, payment_hash);
+        self.routing_peer.insert(payment_hash, peer);
+        self.remove_queued(peer, payment_hash);
     }
 
-    pub(crate) fn park(&mut self, peer: Pubkey, payment_hash: Hash256) {
-        self.waiting_payments
-            .entry(peer)
-            .or_default()
-            .insert(payment_hash);
+    pub(crate) fn enqueue(&mut self, peer: Pubkey, payment_hash: Hash256) {
+        if self.open_for.get(&peer) == Some(&payment_hash) {
+            return;
+        }
+        let queue = self.queued.entry(peer).or_default();
+        if queue.contains(&payment_hash) {
+            return;
+        }
+        queue.push_back(payment_hash);
+        self.routing_peer.insert(payment_hash, peer);
     }
 
-    pub(crate) fn take_waiting(&mut self, peer: &Pubkey) -> HashSet<Hash256> {
-        self.waiting_payments.remove(peer).unwrap_or_default()
-    }
-
-    pub(crate) fn waiting(&self, peer: &Pubkey) -> Vec<Hash256> {
-        self.waiting_payments
+    pub(crate) fn front_queued(&self, peer: &Pubkey) -> Option<Hash256> {
+        self.queued
             .get(peer)
-            .map(|payments| payments.iter().copied().collect())
-            .unwrap_or_default()
+            .and_then(|queue| queue.front().copied())
+    }
+
+    pub(crate) fn release_queued(&mut self, peer: &Pubkey, payment_hash: Hash256) {
+        self.remove_queued(*peer, payment_hash);
+    }
+
+    pub(crate) fn take_funded_payment(&mut self, peer: &Pubkey) -> Option<Hash256> {
+        self.opens_in_flight.remove(peer);
+        self.open_for.remove(peer)
     }
 
     pub(crate) fn is_waiting(&self, payment_hash: Hash256) -> bool {
-        self.waiting_payments
+        self.open_for
             .values()
-            .any(|payments| payments.contains(&payment_hash))
+            .any(|payment| *payment == payment_hash)
+            || self
+                .queued
+                .values()
+                .any(|queue| queue.contains(&payment_hash))
     }
 
-    pub(crate) fn detach(&mut self, payment_hash: Hash256) -> Vec<Hash256> {
+    pub(crate) fn detach(&mut self, payment_hash: Hash256) -> (Option<Pubkey>, Vec<Hash256>) {
+        let Some(peer) = self.routing_peer.remove(&payment_hash) else {
+            return (None, Vec::new());
+        };
+        self.remove_queued(peer, payment_hash);
         let mut abandon = Vec::new();
-        let peers: Vec<Pubkey> = self.waiting_payments.keys().copied().collect();
-        for peer in peers {
-            let Some(payments) = self.waiting_payments.get_mut(&peer) else {
-                continue;
-            };
-            if !payments.remove(&payment_hash) {
-                continue;
-            }
-            if payments.is_empty() {
-                self.waiting_payments.remove(&peer);
-                if let Some(channel_id) = self.opens_in_flight.get(&peer).copied() {
-                    abandon.push(channel_id);
-                }
+        if self.open_for.get(&peer) == Some(&payment_hash) {
+            self.open_for.remove(&peer);
+            if let Some(channel_id) = self.opens_in_flight.remove(&peer) {
+                abandon.push(channel_id);
             }
         }
-        abandon
+        (Some(peer), abandon)
     }
 
-    pub(crate) fn take_failed_open(&mut self, channel_id: Hash256) -> Option<HashSet<Hash256>> {
+    pub(crate) fn take_failed_open(&mut self, channel_id: Hash256) -> Option<Hash256> {
         let peer = self
             .opens_in_flight
             .iter()
             .find_map(|(peer, id)| (*id == channel_id).then_some(*peer))?;
         self.opens_in_flight.remove(&peer);
-        Some(self.waiting_payments.remove(&peer).unwrap_or_default())
+        self.open_for.remove(&peer)
+    }
+
+    pub(crate) fn take_peer(&mut self, peer: &Pubkey) -> (Option<Hash256>, Vec<Hash256>) {
+        let channel_id = self.opens_in_flight.remove(peer);
+        let mut payments = Vec::new();
+        if let Some(payment) = self.open_for.remove(peer) {
+            self.routing_peer.remove(&payment);
+            payments.push(payment);
+        }
+        if let Some(queue) = self.queued.remove(peer) {
+            for payment in queue {
+                self.routing_peer.remove(&payment);
+                if !payments.contains(&payment) {
+                    payments.push(payment);
+                }
+            }
+        }
+        (channel_id, payments)
+    }
+
+    pub(crate) fn schedule_pump(&mut self, peer: Pubkey) {
+        if !self.pending_pumps.contains(&peer) {
+            self.pending_pumps.push_back(peer);
+        }
+    }
+
+    pub(crate) fn pop_pump(&mut self) -> Option<Pubkey> {
+        self.pending_pumps.pop_front()
+    }
+
+    pub(crate) fn try_begin_drain(&mut self) -> bool {
+        if self.draining {
+            return false;
+        }
+        self.draining = true;
+        true
+    }
+
+    pub(crate) fn end_drain(&mut self) {
+        self.draining = false;
+    }
+
+    fn remove_queued(&mut self, peer: Pubkey, payment_hash: Hash256) {
+        let Some(queue) = self.queued.get_mut(&peer) else {
+            return;
+        };
+        queue.retain(|payment| *payment != payment_hash);
+        if queue.is_empty() {
+            self.queued.remove(&peer);
+        }
     }
 
     pub(crate) fn forget_direct_retry(&mut self, payment_hash: Hash256) {
@@ -282,5 +354,34 @@ mod tests {
         assert!(session.lsp_open_fee().is_none());
         assert!(session.accept_lsp(peer, &register(500)));
         assert_eq!(session.lsp_open_fee(), Some(500));
+    }
+
+    #[test]
+    fn one_open_does_not_cover_a_later_payment() {
+        let peer = gen_rand_fiber_public_key();
+        let mut session = JitSession::new(JitChannelConfig::default());
+        let first = Hash256::default();
+        let second = Hash256::from([1u8; 32]);
+        let channel_id = Hash256::from([2u8; 32]);
+
+        session.record_open(peer, channel_id, first);
+        session.enqueue(peer, second);
+        assert!(session.is_waiting(first));
+        assert!(session.is_waiting(second));
+        assert_eq!(session.front_queued(&peer), Some(second));
+
+        assert_eq!(session.take_funded_payment(&peer), Some(first));
+        assert!(!session.has_open(&peer));
+        assert!(!session.is_waiting(first));
+        assert_eq!(session.front_queued(&peer), Some(second));
+
+        session.record_open(peer, channel_id, first);
+        session.enqueue(peer, second);
+        let (detached_peer, abandon) = session.detach(first);
+        assert_eq!(detached_peer, Some(peer));
+        assert_eq!(abandon, vec![channel_id]);
+        assert!(!session.has_open(&peer));
+        assert_eq!(session.front_queued(&peer), Some(second));
+        assert!(session.is_waiting(second));
     }
 }

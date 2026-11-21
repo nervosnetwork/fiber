@@ -34,6 +34,8 @@ fiber:
   # jit_open_fee: 1000
   # jit_min_amount: 100000000
   # jit_max_funding: 100000000000
+  ## How many JIT channels may be unconfirmed at once. 0 opens none. [default: 8]
+  # jit_max_inflight_opens: 8
   ##
   ## Receiver, the node that gets a channel from that liquidity node.
   ## Do not set jit_open_fee here. The fee comes from the liquidity node.

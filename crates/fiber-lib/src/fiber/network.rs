@@ -2315,8 +2315,9 @@ where
                     debug!("Owned channel is down");
                 }
                 if let Some((peer, outpoint)) = jit_ready {
+                    let network_graph = self.network_graph.clone();
                     state
-                        .retry_jit_waiting_payments(&myself, &peer, &outpoint)
+                        .retry_jit_waiting_payments(&myself, &peer, &outpoint, network_graph)
                         .await;
                 }
             }
@@ -2375,9 +2376,20 @@ where
                 state.resolve_trampoline_upstream(payment_hash, None).await;
             }
             NetworkActorEvent::PaymentActorStopped(payment_hash, actor_id, last_error_packet) => {
-                state
+                let handled = state
                     .on_payment_actor_stopped(payment_hash, actor_id, last_error_packet)
                     .await;
+                if handled {
+                    let payment_final = state
+                        .store
+                        .get_payment_session(payment_hash)
+                        .is_some_and(|session| session.status.is_final());
+                    if payment_final {
+                        state.finish_jit_payment(payment_hash).await;
+                    }
+                    let network_graph = self.network_graph.clone();
+                    state.drain_jit_pumps(&myself, network_graph).await;
+                }
             }
             NetworkActorEvent::ChannelSettlementCompleted(channel_id) => {
                 if let Some(channel_actor) = state.channels.get(&channel_id) {
@@ -3462,6 +3474,8 @@ where
                     state
                         .fail_jit_payment(payment_hash, "upstream TLC is no longer held")
                         .await;
+                    let network_graph = self.network_graph.clone();
+                    state.drain_jit_pumps(&myself, network_graph).await;
                 }
             }
             NetworkActorCommand::AcceptChannel(accept_channel, reply) => {
@@ -5166,7 +5180,10 @@ where
                 tlc_expiry_limit,
                 max_parts,
             } => {
-                if incoming_amount <= amount_to_forward {
+                if incoming_amount < amount_to_forward
+                    || (incoming_amount == amount_to_forward
+                        && !state.jit.allows_zero_open_fee(&next_node_id))
+                {
                     error!(
                         "Trampoline forwarding fee insufficient: incoming {}, forward {}",
                         incoming_amount, amount_to_forward
@@ -6160,6 +6177,7 @@ where
         myself: &ActorRef<NetworkActorMessage>,
         peer: &Pubkey,
         outpoint: &OutPoint,
+        network_graph: Arc<RwLock<NetworkGraph<S>>>,
     ) {
         let Some(channel_id) = self.jit.open_id(peer) else {
             return;
@@ -6172,22 +6190,24 @@ where
         if !same_channel {
             return;
         }
-        self.jit.clear_open(peer);
-        let payments = self.jit.take_waiting(peer);
-        for payment_hash in payments {
-            if !self.jit_upstream_still_held(payment_hash) {
-                self.fail_jit_payment(payment_hash, "upstream TLC is no longer held")
-                    .await;
-                continue;
-            }
-            if let Err(err) = myself.send_message(NetworkActorMessage::new_event(
-                NetworkActorEvent::RetrySendPayment(payment_hash, None),
-            )) {
-                debug!(
-                    "Failed to retry JIT payment {:?} after channel ready: {:?}",
-                    payment_hash, err
-                );
-            }
+        let Some(payment_hash) = self.jit.take_funded_payment(peer) else {
+            return;
+        };
+        if !self.jit_upstream_still_held(payment_hash) {
+            self.fail_jit_payment(payment_hash, "upstream TLC is no longer held")
+                .await;
+            self.drain_jit_pumps(myself, network_graph).await;
+            return;
+        }
+        if let Err(err) = myself.send_message(NetworkActorMessage::new_event(
+            NetworkActorEvent::RetrySendPayment(payment_hash, None),
+        )) {
+            debug!(
+                "Failed to retry JIT payment {:?} after channel ready: {:?}",
+                payment_hash, err
+            );
+            self.finish_jit_payment(payment_hash).await;
+            self.drain_jit_pumps(myself, network_graph).await;
         }
     }
 
@@ -6197,16 +6217,8 @@ where
         peer: Pubkey,
         network_graph: Arc<RwLock<NetworkGraph<S>>>,
     ) {
-        if self.jit.has_open(&peer)
-            || self.peer_channel_index.opening_channel_count_by_peer(&peer) > 0
-        {
-            return;
-        }
-        let payments = self.jit.take_waiting(&peer);
-        for payment_hash in payments {
-            self.maybe_open_jit_channel(myself, payment_hash, peer, network_graph.clone())
-                .await;
-        }
+        self.jit.schedule_pump(peer);
+        self.drain_jit_pumps(myself, network_graph).await;
     }
 
     fn replace_jit_open_channel_id(&mut self, old: Hash256, new: Hash256) {
@@ -6288,6 +6300,14 @@ where
         })
     }
 
+    async fn finish_jit_payment(&mut self, payment_hash: Hash256) {
+        let (peer, abandon) = self.jit.detach(payment_hash);
+        self.abandon_idle_jit_opens(abandon).await;
+        if let Some(peer) = peer {
+            self.jit.schedule_pump(peer);
+        }
+    }
+
     async fn abandon_idle_jit_opens(&mut self, channel_ids: Vec<Hash256>) {
         for channel_id in channel_ids {
             if let Err(err) = self.abandon_channel(channel_id).await {
@@ -6319,36 +6339,73 @@ where
 
     async fn fail_jit_payment(&mut self, payment_hash: Hash256, reason: &str) {
         self.jit.forget_direct_retry(payment_hash);
-        let opens_to_abandon = self.jit.detach(payment_hash);
-        let Some(mut session) = self.store.get_payment_session(payment_hash) else {
-            self.abandon_idle_jit_opens(opens_to_abandon).await;
-            return;
-        };
-        if session.status.is_final() {
-            self.abandon_idle_jit_opens(opens_to_abandon).await;
-            return;
+        let (peer, opens_to_abandon) = self.jit.detach(payment_hash);
+        if let Some(mut session) = self.store.get_payment_session(payment_hash) {
+            if !session.status.is_final() {
+                session.set_failed_status(reason);
+                session.last_error_code = Some(TlcErrorCode::TemporaryNodeFailure);
+                self.store.insert_payment_session(session);
+                if let Some(actor) = self.inflight_payments.get(&payment_hash) {
+                    let _ = actor.send_message(PaymentActorMessage::RetrySendPayment(None));
+                }
+                self.resolve_trampoline_upstream(payment_hash, None).await;
+            }
         }
-        session.set_failed_status(reason);
-        session.last_error_code = Some(TlcErrorCode::TemporaryNodeFailure);
-        self.store.insert_payment_session(session);
-        if let Some(actor) = self.inflight_payments.get(&payment_hash) {
-            let _ = actor.send_message(PaymentActorMessage::RetrySendPayment(None));
-        }
-        self.resolve_trampoline_upstream(payment_hash, None).await;
         self.abandon_idle_jit_opens(opens_to_abandon).await;
+        if let Some(peer) = peer {
+            self.jit.schedule_pump(peer);
+        }
     }
 
     async fn fail_jit_open_if_needed(&mut self, channel_id: Hash256) {
-        let Some(payments) = self.jit.take_failed_open(channel_id) else {
+        let Some(payment_hash) = self.jit.take_failed_open(channel_id) else {
             return;
         };
-        for payment_hash in payments {
-            self.fail_jit_payment(payment_hash, "JIT channel open failed")
-                .await;
-        }
+        self.fail_jit_payment(payment_hash, "JIT channel open failed")
+            .await;
     }
 
     async fn maybe_open_jit_channel(
+        &mut self,
+        myself: &ActorRef<NetworkActorMessage>,
+        payment_hash: Hash256,
+        target: Pubkey,
+        network_graph: Arc<RwLock<NetworkGraph<S>>>,
+    ) {
+        self.start_jit_channel_for_payment(myself, payment_hash, target, network_graph.clone())
+            .await;
+        self.drain_jit_pumps(myself, network_graph).await;
+    }
+
+    async fn drain_jit_pumps(
+        &mut self,
+        myself: &ActorRef<NetworkActorMessage>,
+        network_graph: Arc<RwLock<NetworkGraph<S>>>,
+    ) {
+        if !self.jit.try_begin_drain() {
+            return;
+        }
+        let mut blocked = Vec::new();
+        while let Some(peer) = self.jit.pop_pump() {
+            if self.jit.has_open(&peer)
+                || self.peer_channel_index.opening_channel_count_by_peer(&peer) > 0
+            {
+                blocked.push(peer);
+                continue;
+            }
+            let Some(payment_hash) = self.jit.front_queued(&peer) else {
+                continue;
+            };
+            self.start_jit_channel_for_payment(myself, payment_hash, peer, network_graph.clone())
+                .await;
+        }
+        for peer in blocked {
+            self.jit.schedule_pump(peer);
+        }
+        self.jit.end_drain();
+    }
+
+    async fn start_jit_channel_for_payment(
         &mut self,
         _myself: &ActorRef<NetworkActorMessage>,
         payment_hash: Hash256,
@@ -6356,10 +6413,12 @@ where
         network_graph: Arc<RwLock<NetworkGraph<S>>>,
     ) {
         let Some(session) = self.store.get_payment_session(payment_hash) else {
+            self.finish_jit_payment(payment_hash).await;
             return;
         };
         if session.status.is_final() {
             self.jit.forget_direct_retry(payment_hash);
+            self.finish_jit_payment(payment_hash).await;
             return;
         }
         if session.request.allow_mpp || session.request.max_parts.is_some_and(|parts| parts > 1) {
@@ -6386,6 +6445,7 @@ where
             && self.peer_ckb_channel_can_forward(&target, amount)
         {
             if self.jit.begin_direct_retry(payment_hash) {
+                self.jit.release_queued(&target, payment_hash);
                 self.publish_ready_ckb_channels_to_graph(&target, &network_graph)
                     .await;
                 if let Some(actor) = self.inflight_payments.get(&payment_hash) {
@@ -6424,7 +6484,7 @@ where
                 .opening_channel_count_by_peer(&target)
                 > 0
         {
-            self.jit.park(target, payment_hash);
+            self.jit.enqueue(target, payment_hash);
             return;
         }
 
@@ -6486,6 +6546,11 @@ where
         };
         if funding_amount > self.jit.config().max_funding {
             self.fail_jit_payment(payment_hash, "JIT funding amount exceeds maximum")
+                .await;
+            return;
+        }
+        if self.jit.opens_in_flight_count() >= self.jit.config().max_inflight_opens {
+            self.fail_jit_payment(payment_hash, "JIT pending channel limit reached")
                 .await;
             return;
         }
@@ -6688,27 +6753,19 @@ where
     }
 
     async fn on_jit_peer_disconnected(&mut self, pubkey: Pubkey) {
-        let Some(channel_id) = self.jit.open_id(&pubkey) else {
-            let payments = self.jit.take_waiting(&pubkey);
-            for payment_hash in payments {
-                self.fail_jit_payment(payment_hash, "peer disconnected during JIT channel open")
-                    .await;
+        if let Some(channel_id) = self.jit.open_id(&pubkey) {
+            if !self.jit_open_can_abandon(channel_id) {
+                debug!("JIT channel {channel_id:?} stayed open after {pubkey:?} disconnected");
+                return;
             }
-            return;
-        };
-        if !self.jit_open_can_abandon(channel_id) {
-            debug!("JIT channel {channel_id:?} stayed open after {pubkey:?} disconnected");
-            return;
         }
-        let payments = self.jit.waiting(&pubkey);
-        if payments.is_empty() {
-            self.jit.clear_open(&pubkey);
-            self.abandon_idle_jit_opens(vec![channel_id]).await;
-            return;
-        }
+        let (channel_id, payments) = self.jit.take_peer(&pubkey);
         for payment_hash in payments {
             self.fail_jit_payment(payment_hash, "peer disconnected during JIT channel open")
                 .await;
+        }
+        if let Some(channel_id) = channel_id {
+            self.abandon_idle_jit_opens(vec![channel_id]).await;
         }
     }
 
@@ -8796,7 +8853,7 @@ where
         payment_hash: Hash256,
         actor_id: ActorId,
         last_error_packet: Option<TlcErrPacket>,
-    ) {
+    ) -> bool {
         if self
             .inflight_payments
             .get(&payment_hash)
@@ -8805,13 +8862,14 @@ where
             // A channel update may already have replaced the stopped actor.
             // Its delayed stop event must not remove or resolve the replacement.
             debug!("Ignoring stale payment actor stop for {payment_hash:?}");
-            return;
+            return false;
         }
         debug!("Payment actor stopped {payment_hash}");
         self.inflight_payments.remove(&payment_hash);
 
         self.resolve_trampoline_upstream(payment_hash, last_error_packet.as_ref())
             .await;
+        true
     }
 
     async fn resolve_trampoline_upstream(

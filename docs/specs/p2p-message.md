@@ -64,6 +64,10 @@ inbound amount (the funding amount above reserved cell capacity) is within
 `max_amount`. One-way and externally funded opens are aborted. The liquidity
 node also refuses a payment above `max_amount` or a multi-part payment. A receiver
 disconnect before the funding signatures are sent abandons the open and fails the payment.
+The liquidity node opens at most `jit_max_inflight_opens` channels at once (default 8)
+and fails a payment that arrives while that many opens are still unconfirmed. A later
+payment to the same receiver waits until the open sized for an earlier payment has
+finished. It does not share that earlier funding.
 
 ## Channel establishment
 

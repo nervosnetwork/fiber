@@ -1545,10 +1545,10 @@ where
                 "max_fee_amount is required for trampoline routing".to_string(),
             ));
         };
+        // `Some(0)` is a quote of zero. A missing attribute uses ordinary fee splitting.
         let jit_open_fee = payment_data
             .payment_invoice()
-            .and_then(|invoice| invoice.jit_open_fee())
-            .filter(|fee| *fee > 0);
+            .and_then(|invoice| invoice.jit_open_fee());
         if let Some(open_fee) = jit_open_fee {
             return self.find_jit_trampoline_route(
                 source,
