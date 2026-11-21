@@ -83,6 +83,7 @@ async fn start_jit_lsp() -> NetworkNode {
             .node_name(Some("jit-lsp".to_string()))
             .fiber_config_updater(|config| {
                 config.jit_service_enabled = Some(true);
+                config.jit_max_funding = Some(HUGE_CKB_AMOUNT);
             })
             .build(),
     )
@@ -555,6 +556,7 @@ async fn test_jit_insufficient_open_fee_does_not_open_channel() {
             .fiber_config_updater(|config| {
                 config.jit_service_enabled = Some(true);
                 config.jit_open_fee = Some(10_000);
+                config.jit_max_funding = Some(HUGE_CKB_AMOUNT);
             })
             .build(),
     )
@@ -593,4 +595,95 @@ async fn test_jit_insufficient_open_fee_does_not_open_channel() {
     payer.wait_until_failed(res.payment_hash).await;
     assert!(channel_ids_with_peer(&receiver, lsp.pubkey).is_empty());
     assert!(channel_ids_with_peer(&lsp, receiver.pubkey).is_empty());
+}
+
+#[tokio::test]
+async fn test_jit_zero_max_funding_does_not_open_channel() {
+    init_tracing();
+
+    let mut lsp = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .node_name(Some("jit-lsp-uncapped".to_string()))
+            .fiber_config_updater(|config| {
+                config.jit_service_enabled = Some(true);
+            })
+            .build(),
+    )
+    .await;
+    let mut payer = NetworkNode::new_with_node_name("jit-payer").await;
+    let mut receiver = start_jit_receiver(lsp.pubkey).await;
+
+    payer.connect_to(&mut lsp).await;
+    establish_channel_between_nodes(
+        &mut payer,
+        &mut lsp,
+        ChannelParameters {
+            public: true,
+            node_a_funding_amount: HUGE_CKB_AMOUNT,
+            node_b_funding_amount: HUGE_CKB_AMOUNT,
+            ..Default::default()
+        },
+    )
+    .await;
+    wait_for_network_graph_update(&payer, 1).await;
+    wait_until_node_supports_trampoline_routing(&payer, &lsp).await;
+
+    receiver.connect_to(&mut lsp).await;
+    receiver.expect_debug_event("JitChannelRegisterSent").await;
+    lsp.expect_debug_event("JitChannelRegistered").await;
+
+    let invoice = new_receiver_jit_invoice(&receiver, 1000).await;
+    let res = payer
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            max_fee_amount: Some(10_000),
+            ..Default::default()
+        })
+        .await
+        .expect("send payment");
+    payer.wait_until_failed(res.payment_hash).await;
+    assert!(channel_ids_with_peer(&receiver, lsp.pubkey).is_empty());
+    assert!(channel_ids_with_peer(&lsp, receiver.pubkey).is_empty());
+}
+
+#[tokio::test]
+async fn test_jit_second_inbound_payment_opens_another_channel() {
+    init_tracing();
+
+    let (payer, lsp, mut receiver) = start_jit_payment_nodes().await;
+    let amount = 1000;
+    let first = new_receiver_jit_invoice(&receiver, amount).await;
+    let first_payment = payer
+        .send_payment(SendPaymentCommand {
+            invoice: Some(first.to_string()),
+            max_fee_amount: Some(10_000),
+            ..Default::default()
+        })
+        .await
+        .expect("first payment");
+    receiver
+        .expect_event(|event| {
+            matches!(event, NetworkServiceEvent::ChannelReady(pubkey, _, _) if *pubkey == lsp.pubkey)
+        })
+        .await;
+    payer.wait_until_success(first_payment.payment_hash).await;
+    assert_eq!(channel_ids_with_peer(&receiver, lsp.pubkey).len(), 1);
+
+    let second = new_receiver_jit_invoice(&receiver, amount).await;
+    let second_payment = payer
+        .send_payment(SendPaymentCommand {
+            invoice: Some(second.to_string()),
+            max_fee_amount: Some(10_000),
+            ..Default::default()
+        })
+        .await
+        .expect("second payment");
+    payer.wait_until_success(second_payment.payment_hash).await;
+    let channel_ids = channel_ids_with_peer(&receiver, lsp.pubkey);
+    assert_eq!(channel_ids.len(), 2);
+    let received: u128 = channel_ids
+        .iter()
+        .map(|channel_id| receiver.get_local_balance_from_channel(*channel_id))
+        .sum();
+    assert_eq!(received, amount * 2);
 }

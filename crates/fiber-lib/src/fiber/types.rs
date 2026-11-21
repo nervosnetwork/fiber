@@ -967,7 +967,6 @@ impl FiberMessage {
         FiberMessage::Init(init_message)
     }
 
-    /// Creates a JIT channel registration.
     pub fn jit_channel_register(message: JitChannelRegister) -> Self {
         Self::JitChannelRegister(message)
     }

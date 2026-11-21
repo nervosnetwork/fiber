@@ -4,7 +4,7 @@ use crate::fiber::peer_message_policy::PeerMessagePolicyConfig;
 use crate::fiber::KeyPair;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::fiber::{onion_service::OnionConfig, proxy::ProxyConfig};
-use crate::{ckb::contracts::Contract, invoice::Currency, Result};
+use crate::{ckb::contracts::Contract, invoice::Currency, Error, Result};
 use ckb_jsonrpc_types::{CellDep, Script};
 use clap_serde_derive::{
     clap::{self},
@@ -234,12 +234,12 @@ pub struct FiberConfig {
     )]
     pub jit_min_amount: Option<u128>,
 
-    /// Largest CKB funding amount this node will put into a JIT channel, in shannons.
+    /// Largest CKB funding amount this node will put into a JIT channel, in shannons. 0 funds nothing.
     #[arg(
         name = "FIBER_JIT_MAX_FUNDING",
         long = "fiber-jit-max-funding",
         env,
-        help = "Largest CKB funding amount this node will put into a JIT channel, in shannons [default: 0]"
+        help = "Largest CKB funding amount this node will put into a JIT channel, in shannons. 0 funds nothing [default: 0]"
     )]
     pub jit_max_funding: Option<u128>,
 
@@ -627,7 +627,6 @@ impl FiberConfig {
             .unwrap_or(DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT)
     }
 
-    /// Parsed liquidity-node pubkey this receiver registers with, if configured.
     pub fn jit_lsp_pubkey(&self) -> Option<Pubkey> {
         self.jit_lsp_pubkey
             .as_deref()
@@ -650,7 +649,6 @@ impl FiberConfig {
         self.jit_max_funding.unwrap_or(0)
     }
 
-    /// True when this node should advertise `JIT_CHANNEL`.
     pub fn jit_channel_advertised(&self) -> bool {
         self.jit_lsp_pubkey().is_some() || self.jit_service_enabled()
     }
@@ -741,7 +739,6 @@ impl FiberConfig {
     }
 }
 
-/// Runtime JIT channel settings copied onto the network actor.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct JitChannelConfig {
     pub lsp_pubkey: Option<Pubkey>,
@@ -751,13 +748,13 @@ pub struct JitChannelConfig {
     pub max_funding: u128,
 }
 
-fn parse_jit_pubkey(raw: &str) -> std::result::Result<Pubkey, String> {
+fn parse_jit_pubkey(raw: &str) -> Result<Pubkey> {
     let hex_str = raw
         .strip_prefix("0x")
         .or_else(|| raw.strip_prefix("0X"))
         .unwrap_or(raw);
-    let bytes = hex::decode(hex_str).map_err(|err| err.to_string())?;
-    Pubkey::from_slice(&bytes).map_err(|err| err.to_string())
+    let bytes = hex::decode(hex_str).map_err(|err| Error::InvalidParameter(err.to_string()))?;
+    Pubkey::from_slice(&bytes).map_err(|err| Error::InvalidParameter(err.to_string()))
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
