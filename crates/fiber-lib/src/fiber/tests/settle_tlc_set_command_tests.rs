@@ -1675,3 +1675,250 @@ fn test_rejected_tlcs_are_still_logged_as_error() {
         "ERROR events for a rejected extra TLC and a TLC on a paid invoice"
     );
 }
+
+#[test]
+fn test_non_mpp_received_rejects_extra_tlc_when_already_fulfilling() {
+    use fiber_types::{RemoveTlcFulfill, RemoveTlcReason};
+
+    let preimage = gen_rand_sha256_hash();
+    let payment_hash = Hash256::from(ckb_hash::blake2b_256(preimage));
+    // Ensure ch_a < ch_b in channel_id order so ch_a appears first in payment_hold_tlcs.
+    let ch_a = Hash256::from([1u8; 32]);
+    let ch_b = Hash256::from([2u8; 32]);
+
+    let mut state_b = create_test_channel_state_with_tlc(ch_b, 0, 1000, payment_hash, None);
+    state_b
+        .tlc_state
+        .received_tlcs
+        .tlcs
+        .iter_mut()
+        .find(|t| t.tlc_id == TLCId::Received(0))
+        .unwrap()
+        .removed_reason = Some(RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+        payment_preimage: preimage,
+    }));
+
+    // Case A: ch_b already removed from payment_hold_tlcs (after network.rs:4509), ch_a remains.
+    let store = MockStore::new()
+        .with_invoice(
+            create_test_invoice(payment_hash, Some(1000), false),
+            CkbInvoiceStatus::Received,
+        )
+        .with_preimage(payment_hash, preimage)
+        .with_channel_state(create_test_channel_state_with_tlc(
+            ch_a,
+            0,
+            1000,
+            payment_hash,
+            None,
+        ))
+        .with_channel_state(state_b)
+        .with_hold_tlc(payment_hash, ch_a, 0);
+
+    let settlements = SettleTlcSetCommand::new_received_hold_tlc_set(payment_hash, &store).run();
+    assert_eq!(settlements.len(), 1);
+    assert_eq!(
+        get_error_code(&settlements[0]),
+        Some(TlcErrorCode::HoldTlcTimeout),
+        "overpaid non-MPP TLC ch_a must be rejected when ch_b is already fulfilling"
+    );
+}
+
+#[test]
+fn test_mpp_received_rejects_extra_tlc_when_already_fulfilling() {
+    use std::collections::HashSet;
+
+    use fiber_types::{RemoveTlcFulfill, RemoveTlcReason};
+
+    let preimage = gen_rand_sha256_hash();
+    let payment_hash = Hash256::from(ckb_hash::blake2b_256(preimage));
+    let ch_a = Hash256::from([1u8; 32]);
+    let ch_b = Hash256::from([2u8; 32]);
+    let ch_c = Hash256::from([3u8; 32]);
+
+    // Case 1: ch_b (600) + ch_c (400) are already fulfilling in store (even while still in
+    // payment_hold_tlcs); overpaid ch_a (500, ch_a < ch_b) must be rejected, never fulfilled.
+    let mut state_b = create_test_channel_state_with_tlc(ch_b, 0, 600, payment_hash, Some(1000));
+    state_b
+        .tlc_state
+        .received_tlcs
+        .tlcs
+        .iter_mut()
+        .find(|t| t.tlc_id == TLCId::Received(0))
+        .unwrap()
+        .removed_reason = Some(RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+        payment_preimage: preimage,
+    }));
+    let mut state_c = create_test_channel_state_with_tlc(ch_c, 0, 400, payment_hash, Some(1000));
+    state_c
+        .tlc_state
+        .received_tlcs
+        .tlcs
+        .iter_mut()
+        .find(|t| t.tlc_id == TLCId::Received(0))
+        .unwrap()
+        .removed_reason = Some(RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+        payment_preimage: preimage,
+    }));
+
+    let store = MockStore::new()
+        .with_invoice(
+            create_test_invoice(payment_hash, Some(1000), true),
+            CkbInvoiceStatus::Received,
+        )
+        .with_preimage(payment_hash, preimage)
+        .with_channel_state(create_test_channel_state_with_tlc(
+            ch_a,
+            0,
+            500,
+            payment_hash,
+            Some(1000),
+        ))
+        .with_channel_state(state_b)
+        .with_channel_state(state_c)
+        .with_hold_tlc(payment_hash, ch_a, 0)
+        .with_hold_tlc(payment_hash, ch_b, 0)
+        .with_hold_tlc(payment_hash, ch_c, 0);
+
+    let settlements = SettleTlcSetCommand::new_received_hold_tlc_set(payment_hash, &store).run();
+    assert!(
+        settlements.iter().all(|s| !is_fulfill_settlement(s)),
+        "no overpaid TLC should be fulfilled when invoice is already covered"
+    );
+    let rejected_channels: Vec<Hash256> = settlements
+        .iter()
+        .filter(|s| get_error_code(s) == Some(TlcErrorCode::HoldTlcTimeout))
+        .map(|s| s.channel_id())
+        .collect();
+    assert_eq!(rejected_channels, vec![ch_a]);
+
+    // Case 2: ch_b (600) + ch_c (400) are only in-flight in `pending_remove_tlcs` (Fulfill)
+    // before the channel actor writes to store; overpaid ch_a (ch_a < ch_b) must still be
+    // rejected, never fulfilled.
+    let store_inflight = MockStore::new()
+        .with_invoice(
+            create_test_invoice(payment_hash, Some(1000), true),
+            CkbInvoiceStatus::Received,
+        )
+        .with_preimage(payment_hash, preimage)
+        .with_channel_state(create_test_channel_state_with_tlc(
+            ch_a,
+            0,
+            500,
+            payment_hash,
+            Some(1000),
+        ))
+        .with_channel_state(create_test_channel_state_with_tlc(
+            ch_b,
+            0,
+            600,
+            payment_hash,
+            Some(1000),
+        ))
+        .with_channel_state(create_test_channel_state_with_tlc(
+            ch_c,
+            0,
+            400,
+            payment_hash,
+            Some(1000),
+        ))
+        .with_hold_tlc(payment_hash, ch_a, 0)
+        .with_hold_tlc(payment_hash, ch_b, 0)
+        .with_hold_tlc(payment_hash, ch_c, 0);
+    let inflight_fulfills = HashSet::from([(ch_b, 0), (ch_c, 0)]);
+    let settlements_inflight = SettleTlcSetCommand::new_hold_tlc_set_with_in_flight(
+        payment_hash,
+        &store_inflight,
+        true,
+        &HashSet::new(),
+        &inflight_fulfills,
+    )
+    .run();
+    assert_eq!(settlements_inflight.len(), 1);
+    assert_eq!(settlements_inflight[0].channel_id(), ch_a);
+    assert_eq!(
+        get_error_code(&settlements_inflight[0]),
+        Some(TlcErrorCode::HoldTlcTimeout)
+    );
+
+    // Case 3: Amount-less MPP invoice with ch_b (1000, total_amount=1000) already fulfilling;
+    // late ch_a declaring a larger total_amount=2000 must be rejected.
+    let mut state_b_amountless =
+        create_test_channel_state_with_tlc(ch_b, 0, 1000, payment_hash, Some(1000));
+    state_b_amountless
+        .tlc_state
+        .received_tlcs
+        .tlcs
+        .iter_mut()
+        .find(|t| t.tlc_id == TLCId::Received(0))
+        .unwrap()
+        .removed_reason = Some(RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+        payment_preimage: preimage,
+    }));
+    let store_amountless = MockStore::new()
+        .with_invoice(
+            create_test_invoice(payment_hash, None, true),
+            CkbInvoiceStatus::Received,
+        )
+        .with_preimage(payment_hash, preimage)
+        .with_channel_state(create_test_channel_state_with_tlc(
+            ch_a,
+            0,
+            1000,
+            payment_hash,
+            Some(2000),
+        ))
+        .with_channel_state(state_b_amountless)
+        .with_hold_tlc(payment_hash, ch_a, 0);
+    let settlements_amountless =
+        SettleTlcSetCommand::new_received_hold_tlc_set(payment_hash, &store_amountless).run();
+    assert_eq!(settlements_amountless.len(), 1);
+    assert_eq!(
+        get_error_code(&settlements_amountless[0]),
+        Some(TlcErrorCode::IncorrectOrUnknownPaymentDetails)
+    );
+}
+
+#[test]
+fn test_mpp_received_completes_remaining_part_after_hold_removed() {
+    use fiber_types::{RemoveTlcFulfill, RemoveTlcReason};
+
+    let preimage = gen_rand_sha256_hash();
+    let payment_hash = Hash256::from(ckb_hash::blake2b_256(preimage));
+    let ch_0 = Hash256::from([1u8; 32]);
+    let ch_1 = Hash256::from([2u8; 32]);
+
+    let mut state_0 = create_test_channel_state_with_tlc(ch_0, 0, 600, payment_hash, Some(1000));
+    state_0
+        .tlc_state
+        .received_tlcs
+        .tlcs
+        .iter_mut()
+        .find(|t| t.tlc_id == TLCId::Received(0))
+        .unwrap()
+        .removed_reason = Some(RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+        payment_preimage: preimage,
+    }));
+
+    // ch_0 (600) is already fulfilling and removed from payment_hold_tlcs; ch_1 (400) remains.
+    let store = MockStore::new()
+        .with_invoice(
+            create_test_invoice(payment_hash, Some(1000), true),
+            CkbInvoiceStatus::Received,
+        )
+        .with_preimage(payment_hash, preimage)
+        .with_channel_state(state_0)
+        .with_channel_state(create_test_channel_state_with_tlc(
+            ch_1,
+            0,
+            400,
+            payment_hash,
+            Some(1000),
+        ))
+        .with_hold_tlc(payment_hash, ch_1, 0);
+
+    let settlements = SettleTlcSetCommand::new_received_hold_tlc_set(payment_hash, &store).run();
+    assert_eq!(settlements.len(), 1);
+    assert!(is_fulfill_settlement(&settlements[0]));
+    assert_eq!(settlements[0].channel_id(), ch_1);
+}

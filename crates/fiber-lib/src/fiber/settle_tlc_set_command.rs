@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use crate::{
     fiber::{
         channel::{ChannelActorStateStore, RemoveTlcCommand},
@@ -14,8 +16,17 @@ pub struct SettleTlcSetCommand<'s, S> {
     payment_hash: Hash256,
     is_hold_tlc_set: bool,
     allow_received_invoice: bool,
+    inflight_fulfill_tlcs: HashSet<(Hash256, u64)>,
     tlcs: Vec<TlcSettlementContext>,
     store: &'s S,
+}
+
+#[derive(Default)]
+struct AlreadyFulfilledTlcs {
+    count: usize,
+    amount: u128,
+    total_amount: Option<u128>,
+    keys: HashSet<(Hash256, u64)>,
 }
 
 pub struct SettleOnChainFulfilledInvoiceCommand<'s, S> {
@@ -98,25 +109,44 @@ where
             store,
             is_hold_tlc_set: false,
             allow_received_invoice: false,
+            inflight_fulfill_tlcs: HashSet::new(),
         }
     }
 
     pub fn new_hold_tlc_set(payment_hash: Hash256, store: &'s S) -> Self {
-        Self::new_hold_tlc_set_with_received_invoice(payment_hash, store, false)
+        Self::new_hold_tlc_set_with_in_flight(
+            payment_hash,
+            store,
+            false,
+            &HashSet::new(),
+            &HashSet::new(),
+        )
     }
 
     pub fn new_received_hold_tlc_set(payment_hash: Hash256, store: &'s S) -> Self {
-        Self::new_hold_tlc_set_with_received_invoice(payment_hash, store, true)
+        Self::new_hold_tlc_set_with_in_flight(
+            payment_hash,
+            store,
+            true,
+            &HashSet::new(),
+            &HashSet::new(),
+        )
     }
 
-    fn new_hold_tlc_set_with_received_invoice(
+    pub fn new_hold_tlc_set_with_in_flight(
         payment_hash: Hash256,
         store: &'s S,
         allow_received_invoice: bool,
+        excluded_fail_tlcs: &HashSet<(Hash256, u64)>,
+        inflight_fulfill_tlcs: &HashSet<(Hash256, u64)>,
     ) -> Self {
         let tlcs = store
             .get_payment_hold_tlcs(payment_hash)
             .iter()
+            .filter(|hold_tlc| {
+                let key = (hold_tlc.channel_id, hold_tlc.tlc_id);
+                !excluded_fail_tlcs.contains(&key) && !inflight_fulfill_tlcs.contains(&key)
+            })
             .filter_map(|hold_tlc| {
                 make_sttlement_context(hold_tlc.channel_id, hold_tlc.tlc_id, store)
             })
@@ -128,6 +158,7 @@ where
             store,
             is_hold_tlc_set: true,
             allow_received_invoice,
+            inflight_fulfill_tlcs: inflight_fulfill_tlcs.clone(),
         }
     }
 
@@ -149,7 +180,26 @@ where
             return self.skip_all();
         }
 
-        let mut rejected = self.leave_just_fulfilled_tlcs(&invoice);
+        // For an already-Received invoice with a known preimage (e.g. crash recovery, retry, or
+        // concurrent overpaid TLCs arriving while earlier TLCs are already fulfilling), account
+        // for any TLCs already fulfilling on channels or in-flight so we complete any remaining
+        // MPP parts without double-paying or fulfilling overpaid TLCs.
+        let already_fulfilled = if self.allow_received_invoice
+            && invoice_status == CkbInvoiceStatus::Received
+            && self.store.get_preimage(&self.payment_hash).is_some()
+        {
+            let already = self.already_fulfilled_received_tlcs();
+            if !already.keys.is_empty() {
+                self.tlcs
+                    .retain(|tlc| !already.keys.contains(&(tlc.channel_id, tlc.id)));
+            }
+            already
+        } else {
+            AlreadyFulfilledTlcs::default()
+        };
+
+        let mut rejected =
+            self.leave_just_fulfilled_tlcs_with_already_fulfilled(&invoice, &already_fulfilled);
         if self.tlcs.is_empty() {
             return rejected;
         }
@@ -163,6 +213,49 @@ where
         settlements
     }
 
+    /// Collect received non-forwarding TLCs for `self.payment_hash` that have already entered
+    /// fulfillment (removed_reason, queued retryable RemoveTlcFulfill, or in-flight fulfill).
+    fn already_fulfilled_received_tlcs(&self) -> AlreadyFulfilledTlcs {
+        let mut already = AlreadyFulfilledTlcs::default();
+        for (_, channel_id, _) in self.store.get_channel_states(None) {
+            let Some(state) = self.store.get_channel_actor_state(&channel_id) else {
+                continue;
+            };
+            for tlc in &state.core.tlc_state.received_tlcs.tlcs {
+                if tlc.payment_hash != self.payment_hash
+                    || tlc.forwarding_tlc.is_some()
+                    || state.is_waiting_forward_result_for_received_tlc(tlc.tlc_id)
+                {
+                    continue;
+                }
+                let key = (channel_id, tlc.id());
+                let is_fulfilling = self.inflight_fulfill_tlcs.contains(&key)
+                    || matches!(
+                        tlc.removed_reason,
+                        Some(RemoveTlcReason::RemoveTlcFulfill(_))
+                    )
+                    || state.retryable_tlc_operations.iter().any(|op| {
+                        matches!(
+                            op,
+                            fiber_types::RetryableTlcOperation::RemoveTlc(
+                                queued,
+                                RemoveTlcReason::RemoveTlcFulfill(_)
+                            ) if *queued == tlc.tlc_id
+                        )
+                    });
+                if is_fulfilling {
+                    already.count += 1;
+                    already.amount = already.amount.saturating_add(tlc.amount);
+                    if already.total_amount.is_none() {
+                        already.total_amount = Some(tlc.total_amount.unwrap_or(tlc.amount));
+                    }
+                    already.keys.insert(key);
+                }
+            }
+        }
+        already
+    }
+
     /// Leave just fulfilled tlcs, and reject the rest.
     ///
     /// Return settlements for rejected tlcs.
@@ -173,17 +266,22 @@ where
     ///
     /// When this function returns, and `self.tlcs` is not empty, it means the
     /// invoice is now fulfilled, and `self.tlcs` is ready to be settled.
-    fn leave_just_fulfilled_tlcs(&mut self, invoice: &CkbInvoice) -> Vec<TlcSettlement> {
+    fn leave_just_fulfilled_tlcs_with_already_fulfilled(
+        &mut self,
+        invoice: &CkbInvoice,
+        already_fulfilled: &AlreadyFulfilledTlcs,
+    ) -> Vec<TlcSettlement> {
         if invoice.allow_mpp() {
-            self.leave_just_fulfilled_tlcs_for_mpp_invoice(invoice)
+            self.leave_just_fulfilled_tlcs_for_mpp_invoice(invoice, already_fulfilled)
         } else {
-            self.leave_just_fulfilled_tlcs_for_non_mpp_invoice(invoice)
+            self.leave_just_fulfilled_tlcs_for_non_mpp_invoice(invoice, already_fulfilled)
         }
     }
 
     fn leave_just_fulfilled_tlcs_for_mpp_invoice(
         &mut self,
         invoice: &CkbInvoice,
+        already_fulfilled: &AlreadyFulfilledTlcs,
     ) -> Vec<TlcSettlement> {
         let Some(first_tlc) = self.tlcs.first() else {
             return Vec::new();
@@ -193,12 +291,22 @@ where
         if declared_total_amount < invoice.amount.unwrap_or_default() {
             return self.reject_all(TlcErrorCode::IncorrectOrUnknownPaymentDetails);
         }
-        // The invoice amount is authoritative when present. A payer-declared total
-        // that exceeds it must not be able to block settlement, including for TLCs
-        // persisted before acceptance-time validation was added.
-        let total_amount = invoice.amount.unwrap_or(declared_total_amount);
+        if invoice.amount.is_none()
+            && already_fulfilled
+                .total_amount
+                .is_some_and(|expected| expected != declared_total_amount)
+        {
+            return self.reject_all(TlcErrorCode::IncorrectOrUnknownPaymentDetails);
+        }
+        // The invoice amount is authoritative when present. For amount-less MPP invoices
+        // with parts already fulfilling, use the already-accepted total_amount so late TLCs
+        // cannot inflate the target.
+        let total_amount = invoice
+            .amount
+            .or(already_fulfilled.total_amount)
+            .unwrap_or(declared_total_amount);
 
-        let mut accumulated_amount = 0;
+        let mut accumulated_amount = already_fulfilled.amount;
         // Remove overpaid TLCs
         let mut retain_len: usize = 0;
         for tlc in self.tlcs.iter() {
@@ -221,7 +329,11 @@ where
     fn leave_just_fulfilled_tlcs_for_non_mpp_invoice(
         &mut self,
         invoice: &CkbInvoice,
+        already_fulfilled: &AlreadyFulfilledTlcs,
     ) -> Vec<TlcSettlement> {
+        if already_fulfilled.count > 0 {
+            return self.reject_all(TlcErrorCode::HoldTlcTimeout);
+        }
         let required_amount = invoice.amount.unwrap_or_default();
 
         let Some(index) = self

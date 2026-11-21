@@ -4248,6 +4248,32 @@ async fn assert_trampoline_success_drains_remaining_tlc(restart: bool) {
         )
         .await;
 
+    // Model a malicious C that explicitly fails held[0] (whose commitment exchange is held)
+    // and fulfills only held[1], rather than racing with C's honest hold-set retry timer.
+    let failed = &held[0];
+    let failed_tlc = node_c
+        .get_tlc(failed.channel_id, TLCId::Received(failed.tlc_id))
+        .expect("held[0] TLC");
+    call!(node_c.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: failed.channel_id,
+                command: ChannelCommand::RemoveTlc(
+                    RemoveTlcCommand {
+                        id: failed.tlc_id,
+                        reason: RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+                            TlcErr::new(TlcErrorCode::HoldTlcTimeout),
+                            &failed_tlc.shared_secret,
+                        )),
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("C network actor alive")
+    .expect("fail remaining shard");
+
     // Learn the proof while another real outgoing TLC is still committed.
     let fulfilled = &held[1];
     call!(node_c.network_actor, |rpc_reply| {
