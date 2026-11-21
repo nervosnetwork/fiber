@@ -42,9 +42,38 @@ not reassigned to other messages. Remaining messages retain their existing IDs:
 | 25 | ShutdownV2 |
 | 26 | ClosingSignedV2 |
 | 27 | TxCompleteV2 |
+| 28 | JitChannelRegister |
 
 Malformed messages, including removed wire IDs, are rejected before dispatch.
 The onion/trampoline packet version is independent of the channel protocol.
+
+`JitChannelRegister` is a session-scoped message, not a channel operation. A
+receiver sends it after `Init` to a peer that advertised the optional
+`JIT_CHANNEL` feature (bit 9). `funding_udt_type_script` is empty for CKB;
+`max_amount` is the largest inbound payment the receiver wants on a just-in-time
+channel. The receiver sends `open_fee` as 0. The liquidity node ignores the
+message unless JIT service is enabled. When it accepts, it sends
+`JitChannelRegister` back with the same `max_amount` and `open_fee` set to its
+configured fee. Silence is a rejection. If the node can fund a channel and the
+fee was not configured, it rejects the registration. Explicit 0 charges nothing.
+The payer pays this fee only to the invoice's `liquidity_provider`, and only when
+`max_fee_amount` or `max_fee_rate` is set. A payer that sets neither does not pay a
+non-zero open fee. The liquidity node requires the fee only when it has to open a
+channel. A channel that can already forward the payment is paid a normal routing fee.
+A higher payer fee cap does not increase the open fee. The receiver quotes the
+acknowledged fee only when it is within `jit_max_open_fee`; unset accepts only 0.
+The receiver auto-accepts one private two-way CKB open from that peer at a time,
+only after that acknowledgement, and only when `jit_max_amount` is set and the
+funder's inbound amount (the funding amount above reserved cell capacity) is within
+it. Public, UDT, one-way, and externally funded opens are aborted. The liquidity
+node also refuses a payment above `max_amount` or a multi-part payment. A receiver
+disconnect before the funding signatures are sent abandons the open and fails the payment.
+The liquidity node opens at most `jit_max_inflight_opens` channels at once (default 8)
+and fails a payment that arrives while that many opens are still unconfirmed. A later
+payment to the same receiver waits until the open sized for an earlier payment has
+finished. It does not share that earlier funding. Once the open is ready, that balance
+stays reserved for its payment until the payment finishes, and the next payment opens
+its own channel.
 
 ## Channel establishment
 

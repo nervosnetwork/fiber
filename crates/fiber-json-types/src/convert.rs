@@ -542,6 +542,21 @@ impl From<fiber_types::Attribute> for crate::invoice::Attribute {
             InternalAttr::PaymentSecret(secret) => {
                 JsonAttr::PaymentSecret(JsonHash256::from(secret).to_string())
             }
+            InternalAttr::LiquidityProvider(pk) => {
+                JsonAttr::LiquidityProvider(JsonPubkey(pk.serialize()))
+            }
+            InternalAttr::JitOpenFee(fee) => JsonAttr::JitOpenFee(fee),
+            InternalAttr::HopHints(hints) => JsonAttr::HopHints(
+                hints
+                    .into_iter()
+                    .map(|hint| crate::payment::HopHint {
+                        pubkey: JsonPubkey(hint.pubkey.serialize()),
+                        channel_outpoint: hint.channel_outpoint,
+                        fee_rate: hint.fee_rate,
+                        tlc_expiry_delta: hint.tlc_expiry_delta,
+                    })
+                    .collect(),
+            ),
         }
     }
 }

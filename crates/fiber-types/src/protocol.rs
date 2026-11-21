@@ -245,6 +245,7 @@ pub mod feature_bits {
         TRAMPOLINE_ROUTING, 5;
         // more features, please note that base bit must be defined as increasing odd numbers
         CHANNEL_V2, 7;
+        JIT_CHANNEL, 9;
     }
 }
 

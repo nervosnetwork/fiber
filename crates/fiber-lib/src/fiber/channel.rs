@@ -2162,6 +2162,11 @@ where
         let payment_hash = state
             .tlc_state
             .set_received_tlc_removed(command.id, reason.clone());
+        self.network
+            .send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::JitUpstreamTlcRemoved(payment_hash),
+            ))
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
         if let RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill { payment_preimage }) = &reason {
             self.store_preimage(payment_hash, *payment_preimage);
         }

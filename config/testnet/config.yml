@@ -11,8 +11,8 @@ fiber:
   # Disable automatic peer reconnect backoff after disconnects.
   # enable_peer_reconnect_backoff: true
   # Every store write waits for the disk. Slower, but a power loss cannot lose the last writes.
-  # A node that holds others' funds should turn it on.
-  # store_sync_writes: false
+  # Default is off. Uncomment on a node that holds others' funds, including a JIT liquidity node.
+  # store_sync_writes: true
   bootnode_addrs:
     - "/ip4/54.179.226.154/tcp/8228/p2p/Qmes1EBD4yNo9Ywkfe6eRw9tG1nVNGLDmMud1xJMsoYFKy"
     - "/ip4/16.163.7.105/tcp/8228/p2p/QmdyQWjPtbK4NWWsvy8s69NGJaQULwgeQDT5ZpNDrTNaeV"
@@ -21,6 +21,30 @@ fiber:
     # If you want to announce your fiber node public address to the network, you need to add the address here, please change the ip to your public ip accordingly.
     # - "/ip4/YOUR-FIBER-NODE-PUBLIC-IP/tcp/8228"
   chain: testnet
+
+  ## Just-in-time channels. Amounts are shannons (1 CKB = 100000000).
+  ## Uncomment one role and leave the other commented.
+  ##
+  ## Liquidity node, the node that funds channels.
+  ## Also uncomment store_sync_writes above and add this node's public address to announced_addrs.
+  ## jit_open_fee is required once jit_max_funding is set. Explicit 0 charges nothing.
+  ## jit_max_funding is the payment plus the channel's reserved cell capacity, so a payment
+  ## equal to this number will not open.
+  # jit_service_enabled: true
+  # jit_open_fee: 1000
+  # jit_min_amount: 100000000
+  # jit_max_funding: 100000000000
+  ## How many JIT channels may be unconfirmed at once. 0 opens none. [default: 8]
+  # jit_max_inflight_opens: 8
+  ##
+  ## Receiver, the node that gets a channel from that liquidity node.
+  ## Do not set jit_open_fee here. The fee comes from the liquidity node.
+  ## Replace PASTE_LIQUIDITY_NODE_PUBKEY with that node's hex public key before uncommenting.
+  ## The node will not start if that value is left as written.
+  ## jit_max_amount is the largest funded amount this node accepts, payment plus reserved
+  ## cell capacity. Set it at least as high as the liquidity node's jit_max_funding.
+  # jit_lsp_pubkey: "PASTE_LIQUIDITY_NODE_PUBKEY"
+  # jit_max_amount: 100000000000
 
   ## SOCKS5 proxy settings
   ## Uncomment to route all outbound P2P connections through a SOCKS5 proxy (e.g. Tor).

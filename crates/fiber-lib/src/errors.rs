@@ -57,6 +57,8 @@ pub enum Error {
     BuildPaymentRouteError(String),
     #[error("Send payment error: {0}")]
     SendPaymentError(String),
+    #[error("Need a JIT channel for this trampoline payment")]
+    NeedJitChannel,
     #[error("Send payment first hop error: {0}")]
     FirstHopError(String, bool),
     #[error("Payment admission acknowledgement interrupted: {0}")]

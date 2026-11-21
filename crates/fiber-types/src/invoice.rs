@@ -3,15 +3,18 @@
 use crate::serde_utils::EntityHex;
 
 use crate::gen::invoice as gen_invoice;
+use crate::payment::HopHint;
+use crate::Pubkey;
 use arcode::bitbit::{BitReader, BitWriter, MSB};
 use arcode::{ArithmeticDecoder, ArithmeticEncoder, EOFKind, Model};
 use bech32::{encode, u5, FromBase32, ToBase32, Variant, WriteBase32};
 use ckb_hash::blake2b_256;
-use ckb_types::packed::Script as PackedScript;
+use ckb_types::packed::{OutPoint, Script as PackedScript};
 use ckb_types::prelude::{Pack, Unpack};
 use gen_invoice::{
     Description, ExpiryTime, FallbackAddr, Feature, FinalHtlcMinimumExpiryDelta, FinalHtlcTimeout,
-    InvoiceAttr, InvoiceAttrUnion, InvoiceAttrsVec, PayeePublicKey, PaymentHash, PaymentSecret,
+    HopHints, InvoiceAttr, InvoiceAttrUnion, InvoiceAttrsVec, InvoiceHopHint, InvoiceHopHintVec,
+    JitOpenFee, LiquidityProvider, PayeePublicKey, PaymentHash, PaymentSecret,
     RawInvoiceDataBuilder, UdtScript,
 };
 use molecule::prelude::Byte;
@@ -132,6 +135,12 @@ pub enum InvoiceError {
     /// Invoice payee public key is malformed.
     #[error("Invalid payee public key")]
     InvalidPayeePublicKey,
+    /// Invoice liquidity provider public key is malformed.
+    #[error("Invalid liquidity provider public key")]
+    InvalidLiquidityProvider,
+    /// Invoice hop hint is malformed.
+    #[error("Invalid hop hint")]
+    InvalidHopHint,
     /// Invoice signature contains malformed base32 data.
     #[error("Invalid signature encoding")]
     InvalidSignatureEncoding,
@@ -583,6 +592,13 @@ pub enum Attribute {
     Feature(FeatureVector),
     /// The payment secret of the invoice.
     PaymentSecret(Hash256),
+    /// The liquidity provider that can open a JIT channel for this invoice.
+    LiquidityProvider(PublicKey),
+    /// Fee the liquidity node charges to open a JIT channel. The payer also pays the route to that node.
+    #[serde(with = "U128Hex")]
+    JitOpenFee(u128),
+    /// Route hints. A zero channel outpoint names the liquidity node that opens the channel.
+    HopHints(Vec<HopHint>),
 }
 
 /// The metadata of the invoice.
@@ -833,6 +849,38 @@ impl CkbInvoice {
             .next()
     }
 
+    /// Returns the JIT open fee if the invoice quotes one.
+    pub fn jit_open_fee(&self) -> Option<u128> {
+        self.data.attrs.iter().find_map(|attr| match attr {
+            Attribute::JitOpenFee(fee) => Some(*fee),
+            _ => None,
+        })
+    }
+
+    /// Returns hop hints carried by the invoice.
+    pub fn hop_hints(&self) -> Vec<HopHint> {
+        self.data
+            .attrs
+            .iter()
+            .find_map(|attr| match attr {
+                Attribute::HopHints(hints) => Some(hints.clone()),
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+
+    /// Returns the liquidity provider public key if set in the invoice attributes.
+    pub fn liquidity_provider(&self) -> Option<&PublicKey> {
+        self.data
+            .attrs
+            .iter()
+            .filter_map(|attr| match attr {
+                Attribute::LiquidityProvider(val) => Some(val),
+                _ => None,
+            })
+            .next()
+    }
+
     /// Returns whether the invoice allows MPP (multi-part payments).
     pub fn allow_mpp(&self) -> bool {
         self.data
@@ -1067,6 +1115,27 @@ impl TryFrom<gen_invoice::RawInvoiceData> for InvoiceData {
     }
 }
 
+fn invoice_hop_hint(hint: &HopHint) -> InvoiceHopHint {
+    InvoiceHopHint::new_builder()
+        .pubkey(hint.pubkey.serialize().pack())
+        .channel_outpoint(hint.channel_outpoint.as_slice().pack())
+        .fee_rate(hint.fee_rate.pack())
+        .tlc_expiry_delta(hint.tlc_expiry_delta.pack())
+        .build()
+}
+
+fn decode_invoice_hop_hint(hint: InvoiceHopHint) -> Result<HopHint, InvoiceError> {
+    let pubkey_bytes: Vec<u8> = hint.pubkey().unpack();
+    let outpoint_bytes: Vec<u8> = hint.channel_outpoint().unpack();
+    Ok(HopHint {
+        pubkey: Pubkey::from_slice(&pubkey_bytes).map_err(|_| InvoiceError::InvalidHopHint)?,
+        channel_outpoint: OutPoint::from_slice(&outpoint_bytes)
+            .map_err(|_| InvoiceError::InvalidHopHint)?,
+        fee_rate: hint.fee_rate().unpack(),
+        tlc_expiry_delta: hint.tlc_expiry_delta().unpack(),
+    })
+}
+
 impl From<Attribute> for InvoiceAttr {
     fn from(attr: Attribute) -> Self {
         let a = match attr {
@@ -1112,6 +1181,22 @@ impl From<Attribute> for InvoiceAttr {
                     .value(payment_secret.into())
                     .build(),
             ),
+            Attribute::LiquidityProvider(pubkey) => InvoiceAttrUnion::LiquidityProvider(
+                LiquidityProvider::new_builder()
+                    .value(pubkey.serialize().pack())
+                    .build(),
+            ),
+            Attribute::JitOpenFee(fee) => {
+                InvoiceAttrUnion::JitOpenFee(JitOpenFee::new_builder().value(fee.pack()).build())
+            }
+            Attribute::HopHints(hints) => {
+                let hints = hints.iter().map(invoice_hop_hint).collect();
+                InvoiceAttrUnion::HopHints(
+                    HopHints::new_builder()
+                        .value(InvoiceHopHintVec::new_builder().set(hints).build())
+                        .build(),
+                )
+            }
         };
         InvoiceAttr::new_builder().set(a).build()
     }
@@ -1166,6 +1251,20 @@ impl TryFrom<InvoiceAttr> for Attribute {
                 Attribute::HashAlgorithm(hash_algorithm)
             }
             InvoiceAttrUnion::PaymentSecret(x) => Attribute::PaymentSecret(x.value().into()),
+            InvoiceAttrUnion::LiquidityProvider(x) => {
+                let value: Vec<u8> = x.value().unpack();
+                Attribute::LiquidityProvider(
+                    PublicKey::from_slice(&value)
+                        .map_err(|_| InvoiceError::InvalidLiquidityProvider)?,
+                )
+            }
+            InvoiceAttrUnion::JitOpenFee(x) => Attribute::JitOpenFee(x.value().unpack()),
+            InvoiceAttrUnion::HopHints(x) => Attribute::HopHints(
+                x.value()
+                    .into_iter()
+                    .map(decode_invoice_hop_hint)
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
         };
         Ok(attr)
     }

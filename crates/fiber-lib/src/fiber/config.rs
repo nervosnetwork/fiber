@@ -4,13 +4,14 @@ use crate::fiber::peer_message_policy::PeerMessagePolicyConfig;
 use crate::fiber::KeyPair;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::fiber::{onion_service::OnionConfig, proxy::ProxyConfig};
-use crate::{ckb::contracts::Contract, invoice::Currency, Result};
+use crate::{ckb::contracts::Contract, invoice::Currency, Error, Result};
 use ckb_jsonrpc_types::{CellDep, Script};
 use clap_serde_derive::{
     clap::{self},
     ClapSerde,
 };
 use fiber_types::protocol::AnnouncedNodeName;
+use fiber_types::Pubkey;
 pub use fiber_types::DEFAULT_FINAL_TLC_EXPIRY_DELTA;
 #[cfg(not(any(test, feature = "bench")))]
 use once_cell::sync::OnceCell;
@@ -34,6 +35,9 @@ pub const DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT: u64 =
 
 /// Default minimum ckb funding amount for auto accepting an open channel request.
 pub const DEFAULT_OPEN_CHANNEL_AUTO_ACCEPT_MIN_CKB_FUNDING_AMOUNT: u64 = 100 * CKB_SHANNONS;
+
+/// Default number of JIT channels a liquidity node will open at the same time.
+pub const DEFAULT_JIT_MAX_INFLIGHT_OPENS: usize = 8;
 
 // The default commitment delay is 1 epochs.
 pub const DEFAULT_COMMITMENT_DELAY_EPOCHS: u64 = 1;
@@ -196,6 +200,78 @@ pub struct FiberConfig {
         help = "whether to accept open channel requests with ckb funding amount automatically, unit: shannons [default: 10000000000 shannons], if this is set to zero, it means to disable auto accept"
     )]
     pub auto_accept_channel_ckb_funding_amount: Option<u64>,
+
+    /// Hex pubkey of the liquidity node this receiver registers with for JIT channels.
+    #[arg(
+        name = "FIBER_JIT_LSP_PUBKEY",
+        long = "fiber-jit-lsp-pubkey",
+        env,
+        help = "Hex pubkey of the liquidity node this receiver registers with for JIT channels"
+    )]
+    pub jit_lsp_pubkey: Option<String>,
+
+    /// Enable serving just-in-time channels to registered receivers.
+    #[arg(
+        name = "FIBER_JIT_SERVICE_ENABLED",
+        long = "fiber-jit-service-enabled",
+        env,
+        help = "Enable serving just-in-time channels to registered receivers [default: false]"
+    )]
+    pub jit_service_enabled: Option<bool>,
+
+    /// Fee, in the channel asset, charged for opening a JIT channel.
+    #[arg(
+        name = "FIBER_JIT_OPEN_FEE",
+        long = "fiber-jit-open-fee",
+        env,
+        help = "Fee charged for opening a JIT channel, in the channel asset. Required when JIT funding is enabled; unset refuses funded opens. Explicit 0 charges nothing"
+    )]
+    pub jit_open_fee: Option<u128>,
+
+    /// Smallest payment this node will open a JIT channel for.
+    #[arg(
+        name = "FIBER_JIT_MIN_AMOUNT",
+        long = "fiber-jit-min-amount",
+        env,
+        help = "Smallest payment this node will open a JIT channel for [default: 0]"
+    )]
+    pub jit_min_amount: Option<u128>,
+
+    /// Largest CKB funding amount this node will put into a JIT channel, in shannons. 0 funds nothing.
+    #[arg(
+        name = "FIBER_JIT_MAX_FUNDING",
+        long = "fiber-jit-max-funding",
+        env,
+        help = "Largest CKB funding amount this node will put into a JIT channel, in shannons. 0 funds nothing [default: 0]"
+    )]
+    pub jit_max_funding: Option<u128>,
+
+    /// Largest payment amount this receiver will request on a JIT channel. Unset refuses JIT opens.
+    #[arg(
+        name = "FIBER_JIT_MAX_AMOUNT",
+        long = "fiber-jit-max-amount",
+        env,
+        help = "Largest inbound JIT payment this receiver will accept. Unset refuses JIT opens"
+    )]
+    pub jit_max_amount: Option<u128>,
+
+    /// Largest open fee this receiver will quote on a JIT invoice. Unset accepts only 0.
+    #[arg(
+        name = "FIBER_JIT_MAX_OPEN_FEE",
+        long = "fiber-jit-max-open-fee",
+        env,
+        help = "Largest JIT open fee this receiver will quote. Unset accepts only 0"
+    )]
+    pub jit_max_open_fee: Option<u128>,
+
+    /// Maximum number of JIT channels this node will open at the same time.
+    #[arg(
+        name = "FIBER_JIT_MAX_INFLIGHT_OPENS",
+        long = "fiber-jit-max-inflight-opens",
+        env,
+        help = "Maximum number of JIT channels this node will open at the same time. 0 opens none [default: 8]"
+    )]
+    pub jit_max_inflight_opens: Option<usize>,
 
     /// The expiry delta to forward a tlc, in milliseconds. [default: 86400000 (1 day)]
     #[arg(
@@ -581,6 +657,63 @@ impl FiberConfig {
             .unwrap_or(DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT)
     }
 
+    pub fn jit_lsp_pubkey(&self) -> Option<Pubkey> {
+        self.jit_lsp_pubkey
+            .as_deref()
+            .map(|raw| parse_jit_pubkey(raw).expect("invalid fiber-jit-lsp-pubkey"))
+    }
+
+    pub fn jit_service_enabled(&self) -> bool {
+        self.jit_service_enabled.unwrap_or(false)
+    }
+
+    /// Configured JIT open fee. `None` means the operator did not set one.
+    /// Unset refuses a funded open. Explicit 0 charges nothing.
+    pub fn jit_open_fee(&self) -> Option<u128> {
+        self.jit_open_fee
+    }
+
+    pub fn jit_min_amount(&self) -> u128 {
+        self.jit_min_amount.unwrap_or(0)
+    }
+
+    pub fn jit_max_funding(&self) -> u128 {
+        self.jit_max_funding.unwrap_or(0)
+    }
+
+    pub fn jit_max_inflight_opens(&self) -> usize {
+        self.jit_max_inflight_opens
+            .unwrap_or(DEFAULT_JIT_MAX_INFLIGHT_OPENS)
+    }
+
+    /// Receiver cap advertised in `JitChannelRegister`. `None` refuses JIT opens.
+    pub fn jit_max_amount(&self) -> Option<u128> {
+        self.jit_max_amount
+    }
+
+    /// Largest open fee this receiver will accept from its liquidity node.
+    /// `None` accepts only 0.
+    pub fn jit_max_open_fee(&self) -> Option<u128> {
+        self.jit_max_open_fee
+    }
+
+    pub fn jit_channel_advertised(&self) -> bool {
+        self.jit_lsp_pubkey().is_some() || self.jit_service_enabled()
+    }
+
+    pub fn jit_channel_config(&self) -> JitChannelConfig {
+        JitChannelConfig {
+            lsp_pubkey: self.jit_lsp_pubkey(),
+            service_enabled: self.jit_service_enabled(),
+            open_fee: self.jit_open_fee,
+            min_amount: self.jit_min_amount(),
+            max_funding: self.jit_max_funding(),
+            max_amount: self.jit_max_amount(),
+            max_open_fee: self.jit_max_open_fee(),
+            max_inflight_opens: self.jit_max_inflight_opens(),
+        }
+    }
+
     pub fn tlc_expiry_delta(&self) -> u64 {
         self.tlc_expiry_delta.unwrap_or(DEFAULT_TLC_EXPIRY_DELTA)
     }
@@ -650,8 +783,44 @@ impl FiberConfig {
         let mut fv = FeatureVector::default();
         // Channel V2 combines independent nonce sessions and full on-chain hashes.
         fv.set_channel_v2_required();
+        if self.jit_channel_advertised() {
+            fv.set_jit_channel_optional();
+        }
         fv
     }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct JitChannelConfig {
+    pub lsp_pubkey: Option<Pubkey>,
+    pub service_enabled: bool,
+    pub open_fee: Option<u128>,
+    pub min_amount: u128,
+    pub max_funding: u128,
+    /// `None` refuses inbound JIT opens.
+    pub max_amount: Option<u128>,
+    /// `None` accepts an acknowledged open fee of 0 only.
+    pub max_open_fee: Option<u128>,
+    pub max_inflight_opens: usize,
+}
+
+impl JitChannelConfig {
+    pub fn open_fee_amount(&self) -> u128 {
+        self.open_fee.unwrap_or(0)
+    }
+
+    pub fn open_fee_required(&self) -> bool {
+        self.service_enabled && self.max_funding > 0 && self.open_fee.is_none()
+    }
+}
+
+fn parse_jit_pubkey(raw: &str) -> Result<Pubkey> {
+    let hex_str = raw
+        .strip_prefix("0x")
+        .or_else(|| raw.strip_prefix("0X"))
+        .unwrap_or(raw);
+    let bytes = hex::decode(hex_str).map_err(|err| Error::InvalidParameter(err.to_string()))?;
+    Pubkey::from_slice(&bytes).map_err(|err| Error::InvalidParameter(err.to_string()))
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Eq, PartialEq, Hash)]

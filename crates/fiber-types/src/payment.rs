@@ -472,7 +472,7 @@ pub struct RouterHop {
 /// A hop hint is a hint for a node to use a specific channel,
 /// usually used for the last hop to the target node.
 #[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct HopHint {
     /// The public key of the node.
     pub pubkey: Pubkey,

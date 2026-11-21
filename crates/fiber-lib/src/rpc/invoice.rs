@@ -11,7 +11,8 @@ use crate::invoice::{
 };
 use crate::rpc::utils::rpc_error;
 use crate::{gen_rand_sha256_hash, handle_actor_call, log_and_error, FiberConfig};
-use fiber_types::{FeatureVector, Privkey};
+use ckb_types::packed::OutPoint;
+use fiber_types::{FeatureVector, HopHint, Privkey, Pubkey};
 
 #[cfg(not(target_arch = "wasm32"))]
 use jsonrpsee::proc_macros::rpc;
@@ -74,6 +75,7 @@ pub struct InvoiceRpcServerImpl<S> {
     keypair: Option<(PublicKey, SecretKey)>,
     currency: Option<Currency>,
     node_features: Option<FeatureVector>,
+    jit_lsp_pubkey: Option<PublicKey>,
 }
 
 impl<S> InvoiceRpcServerImpl<S> {
@@ -82,7 +84,7 @@ impl<S> InvoiceRpcServerImpl<S> {
         network_actor: Option<ActorRef<NetworkActorMessage>>,
         config: Option<FiberConfig>,
     ) -> Self {
-        let (keypair, currency, node_features) = if let Some(config) = config {
+        let (keypair, currency, node_features, jit_lsp_pubkey) = if let Some(config) = config {
             let kp = config
                 .read_or_generate_secret_key()
                 .expect("read or generate secret key");
@@ -102,9 +104,10 @@ impl<S> InvoiceRpcServerImpl<S> {
                 Some(keypair),
                 Some(currency),
                 Some(config.gen_node_features()),
+                config.jit_lsp_pubkey().map(Into::into),
             )
         } else {
-            (None, None, None)
+            (None, None, None, None)
         };
         Self {
             store,
@@ -112,6 +115,7 @@ impl<S> InvoiceRpcServerImpl<S> {
             keypair,
             currency,
             node_features,
+            jit_lsp_pubkey,
         }
     }
 }
@@ -238,6 +242,42 @@ where
                 return error("Node does not support trampoline routing, please enable trampoline routing feature");
             }
         };
+
+        if params.udt_type_script.is_none() && params.allow_trampoline_routing != Some(false) {
+            if let Some(lsp_pubkey) = self.jit_lsp_pubkey {
+                if params.allow_mpp == Some(true) {
+                    return error("JIT channel invoices do not support multi-part payments");
+                }
+                if !self
+                    .node_features
+                    .as_ref()
+                    .is_some_and(|features| features.supports_trampoline_routing())
+                {
+                    return error("Node does not support trampoline routing, please enable trampoline routing feature");
+                }
+                let open_fee = match &self.network_actor {
+                    Some(network_actor) => {
+                        let message = |rpc_reply| {
+                            NetworkActorMessage::Command(NetworkActorCommand::GetJitInvoiceTerms(
+                                rpc_reply,
+                            ))
+                        };
+                        handle_actor_call!(network_actor, message, params)?
+                    }
+                    None => return error("network actor not initialized"),
+                };
+                invoice_builder = invoice_builder
+                    .liquidity_provider(lsp_pubkey)
+                    .jit_open_fee(open_fee)
+                    .hop_hints(vec![HopHint {
+                        pubkey: Pubkey::from(lsp_pubkey),
+                        channel_outpoint: OutPoint::default(),
+                        fee_rate: 0,
+                        tlc_expiry_delta: 0,
+                    }])
+                    .allow_trampoline_routing(true);
+            }
+        }
 
         let final_expiry_delta = params.final_expiry_delta.unwrap_or(MIN_TLC_EXPIRY_DELTA);
         if final_expiry_delta < MIN_TLC_EXPIRY_DELTA {

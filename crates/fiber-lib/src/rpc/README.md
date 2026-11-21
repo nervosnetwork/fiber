@@ -1252,6 +1252,9 @@ The attributes of the invoice.
 * `hash_algorithm` - <em>[HashAlgorithm](#type-hashalgorithm)</em>, The hash algorithm of the invoice
 * `feature` - <em>`Vec<String>`</em>, The feature flags of the invoice
 * `payment_secret` - <em>`String`</em>, The payment secret of the invoice
+* `liquidity_provider` - <em>[Pubkey](#type-pubkey)</em>, The liquidity provider that can open a JIT channel for this invoice
+* `jit_open_fee` - <em>`u128`</em>, Fee the liquidity node charges to open a JIT channel. The payer also pays the route to that node.
+* `hop_hints` - <em>Vec<[HopHint](#type-hophint)></em>, Route hints. A zero channel outpoint names the liquidity node that opens the channel
 ---
 
 <a id="#type-cchinvoice"></a>
