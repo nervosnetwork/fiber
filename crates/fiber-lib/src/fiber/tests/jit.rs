@@ -362,6 +362,28 @@ fn test_send_payment_uses_invoice_liquidity_provider_as_trampoline_hop() {
         payment.trampoline_hops.as_deref(),
         Some([other_hop.into()].as_slice())
     );
+
+    let quoted = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(1000))
+        .payment_preimage(gen_rand_sha256_hash())
+        .payee_pub_key(payee_pk)
+        .liquidity_provider(lsp_pk)
+        .allow_trampoline_routing(true)
+        .jit_open_fee(50_000)
+        .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &payee_sk))
+        .expect("build quoted jit invoice");
+    let mismatch = SendPaymentData::new(
+        SendPaymentCommand {
+            invoice: Some(quoted.to_string()),
+            trampoline_hops: Some(vec![other_hop.into()]),
+            max_fee_amount: Some(60_000),
+            ..Default::default()
+        },
+        Currency::Fibd,
+    );
+    assert!(mismatch
+        .expect_err("open fee paid to a different hop")
+        .contains("liquidity provider"));
 }
 
 #[test]
@@ -456,6 +478,41 @@ fn test_send_payment_uses_jit_hop_hint_without_liquidity_provider() {
     assert!(hinted
         .expect_err("sentinel hint on an invoice that disallows trampoline")
         .contains("hop hints"));
+
+    let huge_fee = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(1000))
+        .payment_preimage(gen_rand_sha256_hash())
+        .payee_pub_key(payee_pk)
+        .hop_hints(vec![HopHint {
+            pubkey: lsp_pk.into(),
+            channel_outpoint: OutPoint::default(),
+            fee_rate: 0,
+            tlc_expiry_delta: 0,
+        }])
+        .allow_trampoline_routing(true)
+        .jit_open_fee(100_000_000_001)
+        .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &payee_sk))
+        .expect("build huge fee invoice");
+    let implicit = SendPaymentData::new(
+        SendPaymentCommand {
+            invoice: Some(huge_fee.to_string()),
+            ..Default::default()
+        },
+        Currency::Fibd,
+    );
+    assert!(implicit
+        .expect_err("implicit open fee above the default cap")
+        .contains("set max_fee_amount"));
+    let explicit = SendPaymentData::new(
+        SendPaymentCommand {
+            invoice: Some(huge_fee.to_string()),
+            max_fee_amount: Some(100_000_000_001),
+            ..Default::default()
+        },
+        Currency::Fibd,
+    )
+    .expect("explicit fee cap opts into the quote");
+    assert_eq!(explicit.max_fee_amount, Some(100_000_000_001));
 }
 
 #[tokio::test]

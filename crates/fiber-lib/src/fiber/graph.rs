@@ -25,8 +25,8 @@ use fiber_types::protocol::AnnouncedNodeName;
 pub use fiber_types::ChannelUpdateInfo;
 use fiber_types::{
     Attempt, BroadcastMessageID, ChannelAnnouncement, ChannelUpdate, Cursor, FeatureVector,
-    Hash256, HopHint, NodeAnnouncement, PaymentHopData, PaymentSession, PaymentStatus, Privkey,
-    Pubkey, RouterHop, SendPaymentData, TlcErr, UdtCfgInfos,
+    Hash256, HopHint, NodeAnnouncement, PaymentHopData, PaymentSession, PaymentStatus,
+    PersistedJit, Privkey, Pubkey, RouterHop, SendPaymentData, TlcErr, UdtCfgInfos,
 };
 use parking_lot::Mutex;
 use rand::{rng, Rng};
@@ -1745,6 +1745,16 @@ where
         payment_data: &SendPaymentState,
     ) -> Result<ResolvedRoute, PathFindError> {
         let target = payment_data.target_pubkey;
+        if payment_data.payment_invoice().is_some_and(|invoice| {
+            invoice.jit_open_fee().is_some()
+                && invoice
+                    .liquidity_provider()
+                    .is_some_and(|provider| hops.last().copied() != Some(Pubkey::from(*provider)))
+        }) {
+            return Err(PathFindError::Other(
+                "JIT open fee must be paid to the invoice liquidity provider".to_string(),
+            ));
+        }
         let routing_budget = max_fee_amount.checked_sub(open_fee).ok_or_else(|| {
             PathFindError::Other(format!(
                 "max_fee_amount {max_fee_amount} does not cover the invoice JIT open fee {open_fee}"
@@ -3318,4 +3328,6 @@ pub trait NetworkGraphStateStore {
     /// when the channel state does not already own a matching TLC or queued AddTlc.
     fn get_pending_attempts_by_channel_outpoint(&self, channel_outpoint: &OutPoint)
         -> Vec<Attempt>;
+    fn get_jit_tracking(&self) -> Option<PersistedJit>;
+    fn insert_jit_tracking(&self, tracking: PersistedJit);
 }

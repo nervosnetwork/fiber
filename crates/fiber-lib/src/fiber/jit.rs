@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use fiber_types::{Hash256, Pubkey};
+use fiber_types::{
+    Hash256, PersistedJit, PersistedJitOpen, PersistedJitQueue, PersistedJitReservation, Pubkey,
+};
 
 use super::config::JitChannelConfig;
 use super::types::{JitChannelRegister, OpenChannelV2};
@@ -38,6 +40,8 @@ pub(crate) struct JitSession {
     pending_pumps: VecDeque<Pubkey>,
     draining: bool,
     direct_route_retried: HashSet<Hash256>,
+    reserved: HashMap<Hash256, (Pubkey, Hash256)>,
+    ready_retries: Vec<(Pubkey, Hash256)>,
 }
 
 impl JitSession {
@@ -55,6 +59,8 @@ impl JitSession {
             pending_pumps: VecDeque::new(),
             draining: false,
             direct_route_retried: HashSet::new(),
+            reserved: HashMap::new(),
+            ready_retries: Vec::new(),
         }
     }
 
@@ -194,6 +200,104 @@ impl JitSession {
         {
             self.opens_in_flight.insert(peer, new);
         }
+        if let Some(reservation) = self.reserved.remove(&old) {
+            self.reserved.insert(new, reservation);
+        }
+    }
+
+    pub(crate) fn reserve_channel(
+        &mut self,
+        peer: Pubkey,
+        channel_id: Hash256,
+        payment_hash: Hash256,
+    ) {
+        self.reserved.insert(channel_id, (peer, payment_hash));
+        self.routing_peer.entry(payment_hash).or_insert(peer);
+    }
+
+    pub(crate) fn release_reservation(&mut self, payment_hash: Hash256) {
+        self.reserved.retain(|_, (_, owner)| *owner != payment_hash);
+    }
+
+    pub(crate) fn allows_channel_for_payment(
+        &self,
+        channel_id: Hash256,
+        payment_hash: Hash256,
+    ) -> bool {
+        self.reserved
+            .get(&channel_id)
+            .is_none_or(|(_, owner)| *owner == payment_hash)
+    }
+
+    pub(crate) fn push_ready_retry(&mut self, peer: Pubkey, payment_hash: Hash256) {
+        if !self
+            .ready_retries
+            .iter()
+            .any(|(queued_peer, queued_payment)| {
+                *queued_peer == peer && *queued_payment == payment_hash
+            })
+        {
+            self.ready_retries.push((peer, payment_hash));
+        }
+    }
+
+    pub(crate) fn take_ready_retries(&mut self, peer: &Pubkey) -> Vec<Hash256> {
+        let mut kept = Vec::new();
+        let mut taken = Vec::new();
+        for (queued_peer, payment_hash) in self.ready_retries.drain(..) {
+            if &queued_peer == peer {
+                taken.push(payment_hash);
+            } else {
+                kept.push((queued_peer, payment_hash));
+            }
+        }
+        self.ready_retries = kept;
+        taken
+    }
+
+    pub(crate) fn snapshot(&self) -> PersistedJit {
+        let mut opens = Vec::new();
+        for (peer, channel_id) in &self.opens_in_flight {
+            let Some(payment_hash) = self.open_for.get(peer) else {
+                continue;
+            };
+            opens.push(PersistedJitOpen {
+                peer: *peer,
+                channel_id: *channel_id,
+                payment_hash: *payment_hash,
+            });
+        }
+        opens.sort_by(|left, right| {
+            left.peer
+                .cmp(&right.peer)
+                .then_with(|| left.payment_hash.as_ref().cmp(right.payment_hash.as_ref()))
+        });
+        let mut queued: Vec<_> = self
+            .queued
+            .iter()
+            .map(|(peer, queue)| PersistedJitQueue {
+                peer: *peer,
+                payments: queue.iter().copied().collect(),
+            })
+            .collect();
+        queued.sort_by_key(|queue| queue.peer);
+        let mut reserved: Vec<_> = self
+            .reserved
+            .iter()
+            .map(
+                |(channel_id, (peer, payment_hash))| PersistedJitReservation {
+                    peer: *peer,
+                    channel_id: *channel_id,
+                    payment_hash: *payment_hash,
+                },
+            )
+            .collect();
+        reserved.sort_by(|left, right| left.channel_id.as_ref().cmp(right.channel_id.as_ref()));
+        PersistedJit {
+            opens,
+            queued,
+            reserved,
+        }
     }
 
     pub(crate) fn record_open(&mut self, peer: Pubkey, channel_id: Hash256, payment_hash: Hash256) {
@@ -223,6 +327,13 @@ impl JitSession {
 
     pub(crate) fn release_queued(&mut self, peer: &Pubkey, payment_hash: Hash256) {
         self.remove_queued(*peer, payment_hash);
+    }
+
+    pub(crate) fn take_queued(&mut self, peer: &Pubkey) -> Vec<Hash256> {
+        self.queued
+            .remove(peer)
+            .map(|queue| queue.into_iter().collect())
+            .unwrap_or_default()
     }
 
     pub(crate) fn take_funded_payment(&mut self, peer: &Pubkey) -> Option<Hash256> {
@@ -286,6 +397,10 @@ impl JitSession {
         if !self.pending_pumps.contains(&peer) {
             self.pending_pumps.push_back(peer);
         }
+    }
+
+    pub(crate) fn unschedule_pump(&mut self, peer: &Pubkey) {
+        self.pending_pumps.retain(|queued| queued != peer);
     }
 
     pub(crate) fn pop_pump(&mut self) -> Option<Pubkey> {
@@ -383,5 +498,44 @@ mod tests {
         assert!(!session.has_open(&peer));
         assert_eq!(session.front_queued(&peer), Some(second));
         assert!(session.is_waiting(second));
+    }
+
+    #[test]
+    fn reserved_channel_stays_with_its_payment_across_snapshot() {
+        let peer = gen_rand_fiber_public_key();
+        let mut session = JitSession::new(JitChannelConfig::default());
+        let first = Hash256::default();
+        let second = Hash256::from([1u8; 32]);
+        let channel_id = Hash256::from([2u8; 32]);
+
+        session.record_open(peer, channel_id, first);
+        session.enqueue(peer, second);
+        let saved = session.snapshot();
+        assert_eq!(saved.opens.len(), 1);
+        assert_eq!(saved.queued.len(), 1);
+        assert_eq!(saved.queued[0].payments, vec![second]);
+
+        session.reserve_channel(peer, channel_id, first);
+        assert!(session.allows_channel_for_payment(channel_id, first));
+        assert!(!session.allows_channel_for_payment(channel_id, second));
+        let queued = session.take_queued(&peer);
+        assert_eq!(queued, vec![second]);
+        assert!(session.has_open(&peer));
+
+        let mut restored = JitSession::new(JitChannelConfig::default());
+        let saved = session.snapshot();
+        for open in saved.opens {
+            restored.record_open(open.peer, open.channel_id, open.payment_hash);
+        }
+        for reservation in &saved.reserved {
+            restored.reserve_channel(
+                reservation.peer,
+                reservation.channel_id,
+                reservation.payment_hash,
+            );
+        }
+        assert!(restored.has_open(&peer));
+        assert!(restored.allows_channel_for_payment(channel_id, first));
+        assert!(!restored.allows_channel_for_payment(channel_id, second));
     }
 }

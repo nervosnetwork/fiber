@@ -37,8 +37,8 @@ use fiber_types::ChannelFeatures;
 use fiber_types::{
     Attempt, AttemptStatus, BroadcastMessage, BroadcastMessageID, ChannelData, ChannelOpenRecord,
     ChannelState, Cursor, Direction, Hash256, PaymentCustomRecords, PaymentSession, PaymentStatus,
-    PersistentNetworkActorState, Pubkey, SettlementData, ShutdownSettlementRecord, TLCId,
-    TimedResult, CURSOR_SIZE,
+    PersistedJit, PersistentNetworkActorState, Pubkey, SettlementData, ShutdownSettlementRecord,
+    TLCId, TimedResult, CURSOR_SIZE,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use fiber_types::{CchOrder, CchReceiveBtcOrderCreation, CchSendBtcOrderCreation};
@@ -348,6 +348,9 @@ pub fn check_validate<P: AsRef<Path>>(path: P) -> Result<(), String> {
         match key[0] {
             CHANNEL_ACTOR_STATE_PREFIX | CHANNEL_OPEN_RECORD_PREFIX | WATCHTOWER_CHANNEL_PREFIX => {
             }
+            JIT_TRACKING_PREFIX => {
+                check_deserialization::<PersistedJit>(&value, "JIT_TRACKING_PREFIX", &mut errors);
+            }
             PUBLIC_KEY_NETWORK_ACTOR_STATE_PREFIX => {
                 check_deserialization::<PersistentNetworkActorState>(
                     &value,
@@ -513,6 +516,7 @@ pub enum KeyValue {
     #[cfg(not(target_arch = "wasm32"))]
     CchSendBtcOrderCreation(Hash256, CchSendBtcOrderCreation),
     ChannelOpenRecord(Hash256, ChannelOpenRecord),
+    JitTracking(PersistedJit),
 }
 
 /// Recorded store changes.
@@ -689,6 +693,7 @@ impl StoreKeyValue for KeyValue {
             KeyValue::ChannelOpenRecord(channel_id, _) => {
                 [&[CHANNEL_OPEN_RECORD_PREFIX], channel_id.as_ref()].concat()
             }
+            KeyValue::JitTracking(_) => vec![JIT_TRACKING_PREFIX],
         }
     }
 
@@ -739,6 +744,7 @@ impl StoreKeyValue for KeyValue {
                 serialize_to_vec(creation, "CchSendBtcOrderCreation")
             }
             KeyValue::ChannelOpenRecord(_, record) => serialize_to_vec(record, "ChannelOpenRecord"),
+            KeyValue::JitTracking(tracking) => serialize_to_vec(tracking, "JitTracking"),
         }
     }
 }
@@ -1466,6 +1472,18 @@ impl PreimageStore for Store {
 }
 
 impl NetworkGraphStateStore for Store {
+    fn get_jit_tracking(&self) -> Option<PersistedJit> {
+        self.get(vec![JIT_TRACKING_PREFIX])
+            .map(|value| deserialize_from(value.as_ref(), "JitTracking"))
+    }
+
+    fn insert_jit_tracking(&self, tracking: PersistedJit) {
+        let mut batch = self.batch();
+        let kv = KeyValue::JitTracking(tracking);
+        batch.put(kv.key(), kv.value());
+        batch.commit();
+    }
+
     fn get_payment_session(&self, payment_hash: Hash256) -> Option<PaymentSession> {
         let prefix = [&[PAYMENT_SESSION_PREFIX], payment_hash.as_ref()].concat();
         self.get(prefix)

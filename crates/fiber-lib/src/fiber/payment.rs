@@ -48,6 +48,8 @@ use tracing::{debug, error, instrument, warn};
 const MAX_TRAMPOLINE_HOPS_LIMIT: u16 = 5;
 const DEFAULT_MAX_FEE_RATE: u64 = 5;
 pub(crate) const MAX_FEE_RATE_DENOMINATOR: u128 = 1000;
+/// Open fee included in the default cap without an explicit `max_fee_amount`. 1,000 CKB.
+const MAX_IMPLICIT_JIT_OPEN_FEE: u128 = 100_000_000_000;
 
 fn split_trampoline_hop_hints(hints: Vec<HopHint>) -> (Vec<Pubkey>, Vec<HopHint>) {
     let mut trampoline = Vec::new();
@@ -81,6 +83,13 @@ fn payment_max_fee(
             Some(requested) => requested.min(rate_cap),
             None => rate_cap,
         });
+    }
+
+    if requested_max_fee.is_none() && max_fee_rate.is_none() && open_fee > MAX_IMPLICIT_JIT_OPEN_FEE
+    {
+        return Err(format!(
+            "invoice JIT open fee {open_fee} exceeds the default cap {MAX_IMPLICIT_JIT_OPEN_FEE}; set max_fee_amount to pay it"
+        ));
     }
 
     if let Some(requested) = requested_max_fee {
@@ -658,6 +667,21 @@ impl SendPaymentDataExt for SendPaymentData {
                 }
             }
         };
+        if let Some(provider) = invoice
+            .as_ref()
+            .filter(|invoice| invoice.jit_open_fee().is_some())
+            .and_then(|invoice| invoice.liquidity_provider().copied().map(Pubkey::from))
+        {
+            let pays_provider = trampoline_hops
+                .as_ref()
+                .and_then(|hops| hops.last())
+                .is_some_and(|hop| *hop == provider);
+            if !pays_provider {
+                return Err(
+                    "JIT open fee must be paid to the invoice liquidity provider".to_string(),
+                );
+            }
+        }
 
         SendPaymentDataBuilder::new(target, amount, payment_hash)
             .invoice(command.invoice)

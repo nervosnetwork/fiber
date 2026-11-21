@@ -57,7 +57,8 @@ message unless JIT service is enabled. When it accepts, it sends
 configured fee. Silence is a rejection. If the node can fund a channel and the
 fee was not configured, it rejects the registration. Explicit 0 charges nothing.
 The payer's fee cap must cover this fee plus the route to the liquidity node. The
-liquidity node is paid this fee on the trampoline hop. A higher payer fee cap does
+liquidity node is paid this fee on the trampoline hop, and it rejects a hop that pays
+less than `open_fee` even when a channel to the receiver already exists. A higher payer fee cap does
 not increase that charge. The receiver auto-accepts one private two-way CKB
 open from that peer at a time, and only after that acknowledgement, and only when the funder's
 inbound amount (the funding amount above reserved cell capacity) is within
@@ -67,7 +68,9 @@ disconnect before the funding signatures are sent abandons the open and fails th
 The liquidity node opens at most `jit_max_inflight_opens` channels at once (default 8)
 and fails a payment that arrives while that many opens are still unconfirmed. A later
 payment to the same receiver waits until the open sized for an earlier payment has
-finished. It does not share that earlier funding.
+finished. It does not share that earlier funding. Once the open is ready, that balance
+stays reserved for its payment until the payment finishes, and the next payment opens
+its own channel.
 
 ## Channel establishment
 
