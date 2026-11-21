@@ -243,6 +243,15 @@ pub struct FiberConfig {
     )]
     pub jit_max_funding: Option<u128>,
 
+    /// Largest payment amount this receiver will request on a JIT channel. Unset means no cap.
+    #[arg(
+        name = "FIBER_JIT_MAX_AMOUNT",
+        long = "fiber-jit-max-amount",
+        env,
+        help = "Largest payment amount this receiver will request on a JIT channel. Unset means no cap"
+    )]
+    pub jit_max_amount: Option<u128>,
+
     /// The expiry delta to forward a tlc, in milliseconds. [default: 86400000 (1 day)]
     #[arg(
         name = "FIBER_TLC_EXPIRY_DELTA",
@@ -649,6 +658,11 @@ impl FiberConfig {
         self.jit_max_funding.unwrap_or(0)
     }
 
+    /// Receiver cap advertised in `JitChannelRegister`. `None` means no cap.
+    pub fn jit_max_amount(&self) -> Option<u128> {
+        self.jit_max_amount
+    }
+
     pub fn jit_channel_advertised(&self) -> bool {
         self.jit_lsp_pubkey().is_some() || self.jit_service_enabled()
     }
@@ -660,6 +674,7 @@ impl FiberConfig {
             open_fee: self.jit_open_fee(),
             min_amount: self.jit_min_amount(),
             max_funding: self.jit_max_funding(),
+            max_amount: self.jit_max_amount(),
         }
     }
 
@@ -746,6 +761,8 @@ pub struct JitChannelConfig {
     pub open_fee: u128,
     pub min_amount: u128,
     pub max_funding: u128,
+    /// `None` means the receiver places no cap on a JIT payment.
+    pub max_amount: Option<u128>,
 }
 
 fn parse_jit_pubkey(raw: &str) -> Result<Pubkey> {

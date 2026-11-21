@@ -32,6 +32,7 @@ fn test_jit_config_defaults_do_not_advertise() {
     assert_eq!(config.jit_open_fee(), 0);
     assert_eq!(config.jit_min_amount(), 0);
     assert_eq!(config.jit_max_funding(), 0);
+    assert!(config.jit_max_amount().is_none());
     assert!(!config.jit_channel_advertised());
     assert!(!config.gen_node_features().supports_jit_channel());
 }
@@ -56,6 +57,7 @@ jit_service_enabled: true
 jit_open_fee: 1000
 jit_min_amount: 50
 jit_max_funding: 25000000000
+jit_max_amount: 500
 "#;
     let opt: <FiberConfig as ClapSerde>::Opt =
         serde_yaml::from_str(yaml).expect("parse fiber config");
@@ -64,6 +66,7 @@ jit_max_funding: 25000000000
     assert_eq!(config.jit_open_fee(), 1000);
     assert_eq!(config.jit_min_amount(), 50);
     assert_eq!(config.jit_max_funding(), 25_000_000_000);
+    assert_eq!(config.jit_max_amount(), Some(500));
     assert!(config.jit_channel_advertised());
     assert!(config.gen_node_features().supports_jit_channel());
 }
@@ -91,12 +94,20 @@ async fn start_jit_lsp() -> NetworkNode {
 }
 
 async fn start_jit_receiver(lsp_pubkey: crate::fiber::types::Pubkey) -> NetworkNode {
+    start_jit_receiver_with_cap(lsp_pubkey, None).await
+}
+
+async fn start_jit_receiver_with_cap(
+    lsp_pubkey: crate::fiber::types::Pubkey,
+    max_amount: Option<u128>,
+) -> NetworkNode {
     let hex_pk = hex::encode(lsp_pubkey.serialize());
     NetworkNode::new_with_config(
         NetworkNodeConfigBuilder::new()
             .node_name(Some("jit-receiver".to_string()))
             .fiber_config_updater(move |config| {
                 config.jit_lsp_pubkey = Some(hex_pk);
+                config.jit_max_amount = max_amount;
             })
             .build(),
     )
@@ -183,6 +194,27 @@ async fn test_jit_new_invoice_embeds_liquidity_provider() {
         Some(lsp.pubkey)
     );
     assert!(invoice.allow_trampoline_routing());
+
+    let opted_out = rpc
+        .new_invoice(NewInvoiceParams {
+            amount: 1000,
+            description: Some("direct".to_string()),
+            currency: fiber_json_types::Currency::Fibd,
+            payment_preimage: Some(gen_rand_sha256_hash().into()),
+            payment_hash: None,
+            expiry: None,
+            fallback_address: None,
+            final_expiry_delta: None,
+            udt_type_script: None,
+            hash_algorithm: None,
+            allow_mpp: None,
+            allow_trampoline_routing: Some(false),
+        })
+        .await
+        .expect("direct invoice");
+    let opted_out: CkbInvoice = opted_out.invoice_address.parse().unwrap();
+    assert!(opted_out.liquidity_provider().is_none());
+    assert!(!opted_out.allow_trampoline_routing());
 }
 
 fn signed_jit_invoice(payee_sk: &SecretKey, payee_pk: PublicKey, lsp_pk: PublicKey) -> CkbInvoice {
@@ -348,6 +380,98 @@ async fn test_jit_receiver_does_not_auto_accept_open_from_other_peer() {
         })
         .await;
     receiver.expect_debug_event("ChannelAutoAcceptFailed").await;
+}
+
+#[tokio::test]
+async fn test_jit_receiver_does_not_auto_accept_public_open_from_lsp() {
+    let mut lsp = start_jit_lsp().await;
+    let mut receiver = start_jit_receiver(lsp.pubkey).await;
+    receiver.connect_to(&mut lsp).await;
+    receiver.expect_debug_event("JitChannelRegisterSent").await;
+    lsp.expect_debug_event("JitChannelRegistered").await;
+
+    let message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+            OpenChannelCommand {
+                pubkey: receiver.pubkey,
+                public: true,
+                one_way: false,
+                shutdown_script: None,
+                funding_amount: MIN_RESERVED_CKB + 10_000_000_000,
+                funding_udt_type_script: None,
+                commitment_fee_rate: None,
+                commitment_delay_epoch: None,
+                funding_fee_rate: None,
+                tlc_expiry_delta: None,
+                tlc_min_value: None,
+                tlc_fee_proportional_millionths: None,
+                max_tlc_number_in_flight: None,
+                max_tlc_value_in_flight: None,
+            },
+            rpc_reply,
+        ))
+    };
+    call!(lsp.network_actor, message)
+        .expect("lsp alive")
+        .expect("open channel");
+
+    receiver
+        .expect_event(|event| {
+            matches!(
+                event,
+                NetworkServiceEvent::ChannelPendingToBeAccepted(pubkey, _)
+                    if *pubkey == lsp.pubkey
+            )
+        })
+        .await;
+    receiver.expect_debug_event("ChannelAutoAcceptFailed").await;
+    assert!(channel_ids_with_peer(&receiver, lsp.pubkey).is_empty());
+}
+
+#[tokio::test]
+async fn test_jit_receiver_rejects_open_above_max_amount() {
+    let mut lsp = start_jit_lsp().await;
+    let mut receiver = start_jit_receiver_with_cap(lsp.pubkey, Some(1_000)).await;
+    receiver.connect_to(&mut lsp).await;
+    receiver.expect_debug_event("JitChannelRegisterSent").await;
+    lsp.expect_debug_event("JitChannelRegistered").await;
+
+    let message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+            OpenChannelCommand {
+                pubkey: receiver.pubkey,
+                public: false,
+                one_way: false,
+                shutdown_script: None,
+                funding_amount: MIN_RESERVED_CKB + 10_000_000_000,
+                funding_udt_type_script: None,
+                commitment_fee_rate: None,
+                commitment_delay_epoch: None,
+                funding_fee_rate: None,
+                tlc_expiry_delta: None,
+                tlc_min_value: None,
+                tlc_fee_proportional_millionths: None,
+                max_tlc_number_in_flight: None,
+                max_tlc_value_in_flight: None,
+            },
+            rpc_reply,
+        ))
+    };
+    call!(lsp.network_actor, message)
+        .expect("lsp alive")
+        .expect("open channel");
+
+    receiver
+        .expect_event(|event| {
+            matches!(
+                event,
+                NetworkServiceEvent::ChannelPendingToBeAccepted(pubkey, _)
+                    if *pubkey == lsp.pubkey
+            )
+        })
+        .await;
+    receiver.expect_debug_event("ChannelAutoAcceptFailed").await;
+    assert!(channel_ids_with_peer(&receiver, lsp.pubkey).is_empty());
 }
 
 async fn new_receiver_jit_invoice(receiver: &NetworkNode, amount: u128) -> CkbInvoice {
@@ -686,4 +810,45 @@ async fn test_jit_second_inbound_payment_opens_another_channel() {
         .map(|channel_id| receiver.get_local_balance_from_channel(*channel_id))
         .sum();
     assert_eq!(received, amount * 2);
+}
+
+#[tokio::test]
+async fn test_jit_payment_above_receiver_max_does_not_open_channel() {
+    init_tracing();
+
+    let mut lsp = start_jit_lsp().await;
+    let mut payer = NetworkNode::new_with_node_name("jit-payer").await;
+    let mut receiver = start_jit_receiver_with_cap(lsp.pubkey, Some(100)).await;
+
+    payer.connect_to(&mut lsp).await;
+    establish_channel_between_nodes(
+        &mut payer,
+        &mut lsp,
+        ChannelParameters {
+            public: true,
+            node_a_funding_amount: HUGE_CKB_AMOUNT,
+            node_b_funding_amount: HUGE_CKB_AMOUNT,
+            ..Default::default()
+        },
+    )
+    .await;
+    wait_for_network_graph_update(&payer, 1).await;
+    wait_until_node_supports_trampoline_routing(&payer, &lsp).await;
+
+    receiver.connect_to(&mut lsp).await;
+    receiver.expect_debug_event("JitChannelRegisterSent").await;
+    lsp.expect_debug_event("JitChannelRegistered").await;
+
+    let invoice = new_receiver_jit_invoice(&receiver, 1_000).await;
+    let res = payer
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            max_fee_amount: Some(10_000),
+            ..Default::default()
+        })
+        .await
+        .expect("send payment");
+    payer.wait_until_failed(res.payment_hash).await;
+    assert!(channel_ids_with_peer(&receiver, lsp.pubkey).is_empty());
+    assert!(channel_ids_with_peer(&lsp, receiver.pubkey).is_empty());
 }

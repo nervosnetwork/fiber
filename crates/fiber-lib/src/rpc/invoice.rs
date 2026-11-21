@@ -242,7 +242,7 @@ where
             }
         };
 
-        if params.udt_type_script.is_none() {
+        if params.udt_type_script.is_none() && params.allow_trampoline_routing != Some(false) {
             if let Some(lsp_pubkey) = self.jit_lsp_pubkey {
                 invoice_builder = invoice_builder
                     .liquidity_provider(lsp_pubkey)

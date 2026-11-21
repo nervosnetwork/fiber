@@ -50,8 +50,12 @@ The onion/trampoline packet version is independent of the channel protocol.
 `JitChannelRegister` is a session-scoped message, not a channel operation. A
 receiver sends it after `Init` to a peer that advertised the optional
 `JIT_CHANNEL` feature (bit 9). `funding_udt_type_script` is empty for CKB;
-`max_amount` is the largest inbound amount the receiver wants on a just-in-time
-channel. The message is ignored until both sides enable JIT channel service.
+`max_amount` is the largest inbound payment the receiver wants on a just-in-time
+channel. The liquidity node ignores the message unless JIT service is enabled,
+and it refuses to open a channel for a payment above `max_amount`. The receiver
+auto-accepts one private CKB open from that peer at a time, and only when the
+funder's inbound amount (the funding amount above reserved cell capacity) is
+within `max_amount`.
 
 ## Channel establishment
 
