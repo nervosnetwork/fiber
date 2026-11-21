@@ -36,9 +36,6 @@ pub const DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT: u64 =
 /// Default minimum ckb funding amount for auto accepting an open channel request.
 pub const DEFAULT_OPEN_CHANNEL_AUTO_ACCEPT_MIN_CKB_FUNDING_AMOUNT: u64 = 100 * CKB_SHANNONS;
 
-/// Default number of JIT channels a liquidity node will open at the same time. Zero opens none.
-pub const DEFAULT_JIT_MAX_INFLIGHT_OPENS: usize = 8;
-
 // The default commitment delay is 1 epochs.
 pub const DEFAULT_COMMITMENT_DELAY_EPOCHS: u64 = 1;
 
@@ -254,15 +251,6 @@ pub struct FiberConfig {
         help = "Largest payment amount this receiver will request on a JIT channel. Unset means no cap"
     )]
     pub jit_max_amount: Option<u128>,
-
-    /// Maximum number of JIT channels this node will open at the same time.
-    #[arg(
-        name = "FIBER_JIT_MAX_INFLIGHT_OPENS",
-        long = "fiber-jit-max-inflight-opens",
-        env,
-        help = "Maximum number of JIT channels this node will open at the same time. 0 opens none [default: 8]"
-    )]
-    pub jit_max_inflight_opens: Option<usize>,
 
     /// The expiry delta to forward a tlc, in milliseconds. [default: 86400000 (1 day)]
     #[arg(
@@ -670,11 +658,6 @@ impl FiberConfig {
         self.jit_max_funding.unwrap_or(0)
     }
 
-    pub fn jit_max_inflight_opens(&self) -> usize {
-        self.jit_max_inflight_opens
-            .unwrap_or(DEFAULT_JIT_MAX_INFLIGHT_OPENS)
-    }
-
     /// Receiver cap advertised in `JitChannelRegister`. `None` means no cap.
     pub fn jit_max_amount(&self) -> Option<u128> {
         self.jit_max_amount
@@ -692,7 +675,6 @@ impl FiberConfig {
             min_amount: self.jit_min_amount(),
             max_funding: self.jit_max_funding(),
             max_amount: self.jit_max_amount(),
-            max_inflight_opens: self.jit_max_inflight_opens(),
         }
     }
 
@@ -781,7 +763,6 @@ pub struct JitChannelConfig {
     pub max_funding: u128,
     /// `None` means the receiver places no cap on a JIT payment.
     pub max_amount: Option<u128>,
-    pub max_inflight_opens: usize,
 }
 
 fn parse_jit_pubkey(raw: &str) -> Result<Pubkey> {

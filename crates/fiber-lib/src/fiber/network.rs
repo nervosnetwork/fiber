@@ -6488,11 +6488,6 @@ where
                 .insert(payment_hash);
             return;
         }
-        if self.jit_opens_in_flight.len() >= self.jit.max_inflight_opens {
-            self.fail_jit_payment(payment_hash, "JIT pending channel limit reached")
-                .await;
-            return;
-        }
 
         let max_fee = session.request.max_fee_amount.unwrap_or(0);
         if max_fee < self.jit.open_fee {

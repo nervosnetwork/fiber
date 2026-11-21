@@ -32,7 +32,6 @@ fn test_jit_config_defaults_do_not_advertise() {
     assert_eq!(config.jit_open_fee(), 0);
     assert_eq!(config.jit_min_amount(), 0);
     assert_eq!(config.jit_max_funding(), 0);
-    assert_eq!(config.jit_max_inflight_opens(), 8);
     assert!(config.jit_max_amount().is_none());
     assert!(!config.jit_channel_advertised());
     assert!(!config.gen_node_features().supports_jit_channel());
@@ -59,7 +58,6 @@ jit_open_fee: 1000
 jit_min_amount: 50
 jit_max_funding: 25000000000
 jit_max_amount: 500
-jit_max_inflight_opens: 3
 "#;
     let opt: <FiberConfig as ClapSerde>::Opt =
         serde_yaml::from_str(yaml).expect("parse fiber config");
@@ -69,7 +67,6 @@ jit_max_inflight_opens: 3
     assert_eq!(config.jit_min_amount(), 50);
     assert_eq!(config.jit_max_funding(), 25_000_000_000);
     assert_eq!(config.jit_max_amount(), Some(500));
-    assert_eq!(config.jit_max_inflight_opens(), 3);
     assert!(config.jit_channel_advertised());
     assert!(config.gen_node_features().supports_jit_channel());
 }

@@ -57,9 +57,8 @@ rejection. The receiver auto-accepts one private two-way CKB open from that
 peer at a time, and only after that acknowledgement, and only when the funder's
 inbound amount (the funding amount above reserved cell capacity) is within
 `max_amount`. One-way and externally funded opens are aborted. The liquidity
-node also refuses a payment above `max_amount`, a multi-part payment, or a new
-open once its pending-channel limit is reached. A receiver disconnect before
-the funding signatures are sent abandons the open and fails the payment.
+node also refuses a payment above `max_amount` or a multi-part payment. A receiver
+disconnect before the funding signatures are sent abandons the open and fails the payment.
 
 ## Channel establishment
 
