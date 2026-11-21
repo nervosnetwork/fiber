@@ -546,6 +546,15 @@ impl SendPaymentDataExt for SendPaymentData {
             BasicMppPaymentData::new(payment_secret, amount).write(records);
         }
 
+        let trampoline_hops = match command.trampoline_hops {
+            Some(hops) => Some(hops),
+            None => invoice
+                .as_ref()
+                .filter(|inv| inv.udt_type_script().is_none())
+                .and_then(|inv| inv.liquidity_provider().copied().map(Pubkey::from))
+                .map(|lsp| vec![lsp]),
+        };
+
         SendPaymentDataBuilder::new(target, amount, payment_hash)
             .invoice(command.invoice)
             .final_tlc_expiry_delta(final_tlc_expiry_delta)
@@ -561,7 +570,7 @@ impl SendPaymentDataExt for SendPaymentData {
             .hop_hints(hop_hints)
             .allow_mpp(allow_mpp)
             .dry_run(command.dry_run)
-            .trampoline_hops(command.trampoline_hops)
+            .trampoline_hops(trampoline_hops)
             .build()
     }
 

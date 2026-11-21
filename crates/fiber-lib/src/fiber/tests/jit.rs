@@ -1,13 +1,16 @@
 use clap_serde_derive::ClapSerde;
+use secp256k1::{PublicKey, Secp256k1, SecretKey};
 
 use crate::fiber::network::PeerDisconnectReason;
+use crate::fiber::payment::{SendPaymentCommand, SendPaymentDataExt};
 use crate::fiber::types::Privkey;
 use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
 use crate::gen_rand_sha256_hash;
-use crate::invoice::CkbInvoice;
+use crate::invoice::{CkbInvoice, Currency, InvoiceBuilder};
 use crate::rpc::invoice::{InvoiceRpcServerImpl, NewInvoiceParams};
 use crate::test_utils::{NetworkNode, NetworkNodeConfigBuilder};
 use crate::FiberConfig;
+use fiber_types::SendPaymentData;
 
 fn sample_pubkey_hex() -> (String, crate::fiber::types::Pubkey) {
     let pubkey = Privkey::from_slice(&[7u8; 32]).pubkey();
@@ -172,4 +175,50 @@ async fn test_jit_new_invoice_embeds_liquidity_provider() {
         Some(lsp.pubkey)
     );
     assert!(invoice.allow_trampoline_routing());
+}
+
+fn signed_jit_invoice(payee_sk: &SecretKey, payee_pk: PublicKey, lsp_pk: PublicKey) -> CkbInvoice {
+    InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(1000))
+        .payment_preimage(gen_rand_sha256_hash())
+        .payee_pub_key(payee_pk)
+        .liquidity_provider(lsp_pk)
+        .allow_trampoline_routing(true)
+        .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, payee_sk))
+        .expect("build jit invoice")
+}
+
+#[test]
+fn test_send_payment_uses_invoice_liquidity_provider_as_trampoline_hop() {
+    let (payee_sk, payee_pk) = crate::gen_rand_secp256k1_keypair_tuple();
+    let lsp_pk: PublicKey = crate::gen_rand_fiber_public_key().into();
+    let other_hop: PublicKey = crate::gen_rand_fiber_public_key().into();
+    let invoice = signed_jit_invoice(&payee_sk, payee_pk, lsp_pk);
+
+    let payment = SendPaymentData::new(
+        SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            ..Default::default()
+        },
+        Currency::Fibd,
+    )
+    .expect("build payment");
+    assert_eq!(
+        payment.trampoline_hops.as_deref(),
+        Some([lsp_pk.into()].as_slice())
+    );
+
+    let payment = SendPaymentData::new(
+        SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            trampoline_hops: Some(vec![other_hop.into()]),
+            ..Default::default()
+        },
+        Currency::Fibd,
+    )
+    .expect("build payment with explicit hops");
+    assert_eq!(
+        payment.trampoline_hops.as_deref(),
+        Some([other_hop.into()].as_slice())
+    );
 }
