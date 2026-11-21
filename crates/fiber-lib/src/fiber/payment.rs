@@ -1663,6 +1663,12 @@ where
             match build_route_result {
                 Err(e) => {
                     error!("build_payment_routes failed to build route: {}", e);
+                    if matches!(e, PathFindError::NoPathFound)
+                        && session.request.trampoline_context.is_some()
+                        && session.request.udt_type_script.is_none()
+                    {
+                        return Err(Error::NeedJitChannel);
+                    }
                     let error = if session.request.trampoline_context.is_some() {
                         session
                             .last_error_code
@@ -2043,12 +2049,24 @@ where
         // it depends on the path finding algorithm to create how many of attempts,
         // if a payment can not be met in the network graph, an build path error will be returned
         // and no attempts be stored in the payment session and db.
-        let mut attempts = self
-            .build_payment_routes(&mut session)
-            .await
-            .inspect_err(|e| {
+        let mut attempts = match self.build_payment_routes(&mut session).await {
+            Ok(attempts) => attempts,
+            Err(Error::NeedJitChannel) => {
+                self.network
+                    .send_message(NetworkActorMessage::new_command(
+                        NetworkActorCommand::MaybeOpenJitChannel(
+                            payment_hash,
+                            session.request.target_pubkey,
+                        ),
+                    ))
+                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                return Ok(());
+            }
+            Err(e) => {
                 self.set_payment_fail_with_error(&mut session, &e.to_string(), None);
-            })?;
+                return Err(e);
+            }
+        };
 
         for attempt in attempts.iter_mut() {
             self.send_attempt(myself.clone(), state, &mut session, attempt)
