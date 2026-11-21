@@ -3838,9 +3838,17 @@ where
         F: Fn(Result<(), ProcessingChannelError>) -> NetworkActorCommand + Clone + Send + 'static,
     {
         let tlc_id = remove_tlc_command.id;
-        if !state.pending_remove_tlcs.insert((channel_id, tlc_id)) {
+        let kind = match remove_tlc_command.reason {
+            RemoveTlcReason::RemoveTlcFulfill(_) => PendingRemoveTlcKind::Fulfill,
+            RemoveTlcReason::RemoveTlcFail(_) => PendingRemoveTlcKind::Fail,
+        };
+        if state
+            .pending_remove_tlcs
+            .contains_key(&(channel_id, tlc_id))
+        {
             return;
         }
+        state.pending_remove_tlcs.insert((channel_id, tlc_id), kind);
 
         let Some(channel_actor) = state.channels.get(&channel_id).cloned() else {
             let result = if state.queue_retryable_remove_tlc(channel_id, &remove_tlc_command) {
@@ -4474,13 +4482,36 @@ where
         );
     }
 
+    fn pending_remove_tlcs_by_kind(state: &NetworkActorState<S, C>) -> PendingRemoveTlcSets {
+        let mut sets = PendingRemoveTlcSets::default();
+        for (&key, &kind) in &state.pending_remove_tlcs {
+            match kind {
+                PendingRemoveTlcKind::Fail => {
+                    sets.failing.insert(key);
+                }
+                PendingRemoveTlcKind::Fulfill => {
+                    sets.fulfilling.insert(key);
+                }
+            }
+        }
+        sets
+    }
+
     fn settle_hold_tlc_set(
         &self,
         myself: ActorRef<NetworkActorMessage>,
         state: &mut NetworkActorState<S, C>,
         payment_hash: Hash256,
     ) {
-        let settlements = SettleTlcSetCommand::new_hold_tlc_set(payment_hash, &self.store).run();
+        let pending = Self::pending_remove_tlcs_by_kind(state);
+        let settlements = SettleTlcSetCommand::new_hold_tlc_set_with_in_flight(
+            payment_hash,
+            &self.store,
+            false,
+            &pending.failing,
+            &pending.fulfilling,
+        )
+        .run();
         self.apply_tlc_settlements(myself, state, settlements, Some(payment_hash));
     }
 
@@ -4509,8 +4540,15 @@ where
                 self.store.remove_payment_hold_tlc(&payment_hash, &hold.channel_id, hold.tlc_id);
             }
         }
-        let settlements =
-            SettleTlcSetCommand::new_received_hold_tlc_set(payment_hash, &self.store).run();
+        let pending = Self::pending_remove_tlcs_by_kind(state);
+        let settlements = SettleTlcSetCommand::new_hold_tlc_set_with_in_flight(
+            payment_hash,
+            &self.store,
+            true,
+            &pending.failing,
+            &pending.fulfilling,
+        )
+        .run();
         self.apply_tlc_settlements(myself, state, settlements, Some(payment_hash));
     }
 
@@ -5932,7 +5970,7 @@ pub struct NetworkActorState<S, C> {
     last_channel_ready_scan: HashMap<OutPoint, u64>,
     pending_channel_ready_retry_scans: HashSet<OutPoint>,
     // RemoveTlc commands awaiting a live ChannelActor response.
-    pending_remove_tlcs: HashSet<(Hash256, u64)>,
+    pending_remove_tlcs: HashMap<(Hash256, u64), PendingRemoveTlcKind>,
     // Active in-flight CKB tx tracers by tx_hash. Stores actor refs so
     // send_tx can upgrade a trace-only actor with the actual transaction.
     inflight_tracers: HashMap<Hash256, ActorRef<InFlightCkbTxActorMessage>>,
@@ -5940,6 +5978,18 @@ pub struct NetworkActorState<S, C> {
     test_fiber_message_hold: Option<TestFiberMessageHold>,
     #[cfg(test)]
     test_held_fiber_messages: VecDeque<FiberMessageWithTarget>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingRemoveTlcKind {
+    Fail,
+    Fulfill,
+}
+
+#[derive(Default)]
+struct PendingRemoveTlcSets {
+    failing: HashSet<(Hash256, u64)>,
+    fulfilling: HashSet<(Hash256, u64)>,
 }
 
 #[derive(Debug, Clone)]
