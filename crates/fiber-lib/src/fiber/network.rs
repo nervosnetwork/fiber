@@ -6222,6 +6222,8 @@ where
             return;
         };
         self.jit.reserve_channel(*peer, channel_id, payment_hash);
+        // Pathfinding reads the stored reservation, so write it before the retry runs.
+        self.persist_jit();
         if !self.jit_upstream_still_held(payment_hash) {
             self.fail_jit_payment(payment_hash, "upstream TLC is no longer held")
                 .await;
@@ -6605,11 +6607,9 @@ where
                 return;
             }
         }
-        // A later pass leaves the retry flag set and opens a channel below.
-        if self.peer_session_map.contains_key(&target)
-            && self.peer_ckb_channel_can_forward(&target, amount, payment_hash)
-            && self.jit.begin_direct_retry(payment_hash)
-        {
+        let channel_can_forward = self.peer_session_map.contains_key(&target)
+            && self.peer_ckb_channel_can_forward(&target, amount, payment_hash);
+        if channel_can_forward && self.jit.begin_direct_retry(payment_hash) {
             self.jit.release_queued(&target, payment_hash);
             self.publish_ready_ckb_channels_to_graph(&target, &network_graph)
                 .await;
@@ -6617,6 +6617,14 @@ where
                 let _ = actor.send_message(PaymentActorMessage::RetrySendPayment(None));
             }
             self.persist_jit();
+            return;
+        }
+        if channel_can_forward {
+            self.fail_jit_payment(
+                payment_hash,
+                "JIT channel could not forward the reserved payment",
+            )
+            .await;
             return;
         }
 

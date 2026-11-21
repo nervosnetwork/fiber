@@ -468,6 +468,32 @@ fn test_graph_find_path_with_private_hop_hint() {
 
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_graph_find_path_skips_a_channel_reserved_for_another_payment() {
+    let mut network = MockNetworkGraph::new(2);
+    network.add_edge(1, 2, Some(1_000), Some(0));
+    let open = network.find_path(1, 2, 100, 1_000).expect("open channel");
+    assert_eq!(open.len(), 1);
+
+    let mut reserved = GraphChannelStat::default();
+    reserved.block_channel(network.edges[0].2.clone());
+    let blocked = network.graph.find_path(
+        network.keys[1].into(),
+        network.keys[2].into(),
+        Some(100),
+        Some(1_000),
+        None,
+        FINAL_TLC_EXPIRY_DELTA_IN_TESTS,
+        MAX_PAYMENT_TLC_EXPIRY_LIMIT,
+        false,
+        &[],
+        &reserved,
+        true,
+    );
+    assert!(matches!(blocked, Err(PathFindError::NoPathFound)));
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 fn test_graph_find_path_fee() {
     let mut network = MockNetworkGraph::new(5);
 

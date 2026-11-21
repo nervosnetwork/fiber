@@ -1669,7 +1669,8 @@ where
                 graph.channel_stats()
             };
 
-            let channel_stats = GraphChannelStat::new(Some(channel_stats));
+            let mut channel_stats = GraphChannelStat::new(Some(channel_stats));
+            self.exclude_reserved_jit_channels(&mut channel_stats, session.payment_hash());
             let payment_state =
                 SendPaymentState::with_channel_stats(session.request.clone(), channel_stats);
             #[cfg(not(target_arch = "wasm32"))]
@@ -1696,6 +1697,29 @@ where
         Ok(())
     }
 
+    fn exclude_reserved_jit_channels(
+        &self,
+        channel_stats: &mut GraphChannelStat,
+        payment_hash: Hash256,
+    ) {
+        let Some(saved) = self.store.get_jit_tracking() else {
+            return;
+        };
+        for reservation in saved.reserved {
+            if reservation.payment_hash == payment_hash {
+                continue;
+            }
+            let Some(outpoint) = self
+                .store
+                .get_channel_actor_state(&reservation.channel_id)
+                .and_then(|channel| channel.get_funding_transaction_outpoint())
+            else {
+                continue;
+            };
+            channel_stats.block_channel(outpoint);
+        }
+    }
+
     async fn build_payment_routes(
         &self,
         session: &mut PaymentSession,
@@ -1716,6 +1740,7 @@ where
         }
 
         let mut channel_stats = GraphChannelStat::new(Some(channel_stats));
+        self.exclude_reserved_jit_channels(&mut channel_stats, session.payment_hash());
         let amount_low_bound = Some(1);
         // Derive the next id from the highest retained id: a retried session can
         // keep settled attempts, so ids may not be contiguous and `attempts_count`

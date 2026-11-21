@@ -322,6 +322,7 @@ impl ChannelStatElem {
 pub struct GraphChannelStat {
     base: Option<Arc<Mutex<GraphChannelStat>>>,
     inner: HashMap<OutPoint, ChannelStatElem>,
+    blocked: HashSet<OutPoint>,
 }
 
 impl GraphChannelStat {
@@ -329,7 +330,16 @@ impl GraphChannelStat {
         Self {
             inner: HashMap::new(),
             base,
+            blocked: HashSet::new(),
         }
+    }
+
+    pub fn block_channel(&mut self, outpoint: OutPoint) {
+        self.blocked.insert(outpoint);
+    }
+
+    pub fn blocks_channel(&self, outpoint: &OutPoint) -> bool {
+        self.blocked.contains(outpoint)
     }
 
     pub fn get_channel_count(&self, channel_outpoint: &OutPoint) -> usize {
@@ -2691,6 +2701,9 @@ where
             });
 
             for hint in filtered_hints {
+                if channel_stats.blocks_channel(&hint.channel_outpoint) {
+                    continue;
+                }
                 // Say we have a payment path A -- channel 1 --> B -- channel 2 --> C.
                 // For now, all the fees that B will receive are calculated based on the fee rate B sets in channel 1.
                 // We didn't use the outbound fees for B in channel 2 at all. This is different from lnd,
@@ -2796,6 +2809,9 @@ where
                 None => self.get_node_inbounds(cur_hop.node_id).collect(),
             };
             for (from, to, channel_info, channel_update) in edges {
+                if channel_stats.blocks_channel(channel_info.out_point()) {
+                    continue;
+                }
                 let is_source = from == source;
                 if allow_mpp && !self.is_node_support_mpp(&from) {
                     continue;
@@ -2996,7 +3012,8 @@ where
     ) -> Vec<(RouterHop, Pubkey, u64, u128)> {
         self.get_node_inbounds(source)
             .filter(|(from, _, channel_info, channel_update)| {
-                udt_type_script == channel_info.udt_type_script()
+                !channel_stats.blocks_channel(channel_info.out_point())
+                    && udt_type_script == channel_info.udt_type_script()
                     && self.check_channel_amount_and_expiry(
                         amount,
                         channel_info,
