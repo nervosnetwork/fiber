@@ -13165,6 +13165,7 @@ impl ::core::fmt::Display for JitChannelRegister {
             self.funding_udt_type_script()
         )?;
         write!(f, ", {}: {}", "max_amount", self.max_amount())?;
+        write!(f, ", {}: {}", "open_fee", self.open_fee())?;
         let extra_count = self.count_extra_fields();
         if extra_count != 0 {
             write!(f, ", .. ({} fields)", extra_count)?;
@@ -13179,10 +13180,11 @@ impl ::core::default::Default for JitChannelRegister {
     }
 }
 impl JitChannelRegister {
-    const DEFAULT_VALUE: [u8; 28] = [
-        28, 0, 0, 0, 12, 0, 0, 0, 12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    const DEFAULT_VALUE: [u8; 48] = [
+        48, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     ];
-    pub const FIELD_COUNT: usize = 2;
+    pub const FIELD_COUNT: usize = 3;
     pub fn total_size(&self) -> usize {
         molecule::unpack_number(self.as_slice()) as usize
     }
@@ -13208,8 +13210,14 @@ impl JitChannelRegister {
     pub fn max_amount(&self) -> Uint128 {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[8..]) as usize;
+        let end = molecule::unpack_number(&slice[12..]) as usize;
+        Uint128::new_unchecked(self.0.slice(start..end))
+    }
+    pub fn open_fee(&self) -> Uint128 {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[12..]) as usize;
         if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[12..]) as usize;
+            let end = molecule::unpack_number(&slice[16..]) as usize;
             Uint128::new_unchecked(self.0.slice(start..end))
         } else {
             Uint128::new_unchecked(self.0.slice(start..))
@@ -13244,6 +13252,7 @@ impl molecule::prelude::Entity for JitChannelRegister {
         Self::new_builder()
             .funding_udt_type_script(self.funding_udt_type_script())
             .max_amount(self.max_amount())
+            .open_fee(self.open_fee())
     }
 }
 #[derive(Clone, Copy)]
@@ -13272,6 +13281,7 @@ impl<'r> ::core::fmt::Display for JitChannelRegisterReader<'r> {
             self.funding_udt_type_script()
         )?;
         write!(f, ", {}: {}", "max_amount", self.max_amount())?;
+        write!(f, ", {}: {}", "open_fee", self.open_fee())?;
         let extra_count = self.count_extra_fields();
         if extra_count != 0 {
             write!(f, ", .. ({} fields)", extra_count)?;
@@ -13280,7 +13290,7 @@ impl<'r> ::core::fmt::Display for JitChannelRegisterReader<'r> {
     }
 }
 impl<'r> JitChannelRegisterReader<'r> {
-    pub const FIELD_COUNT: usize = 2;
+    pub const FIELD_COUNT: usize = 3;
     pub fn total_size(&self) -> usize {
         molecule::unpack_number(self.as_slice()) as usize
     }
@@ -13306,8 +13316,14 @@ impl<'r> JitChannelRegisterReader<'r> {
     pub fn max_amount(&self) -> Uint128Reader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[8..]) as usize;
+        let end = molecule::unpack_number(&slice[12..]) as usize;
+        Uint128Reader::new_unchecked(&self.as_slice()[start..end])
+    }
+    pub fn open_fee(&self) -> Uint128Reader<'r> {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[12..]) as usize;
         if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[12..]) as usize;
+            let end = molecule::unpack_number(&slice[16..]) as usize;
             Uint128Reader::new_unchecked(&self.as_slice()[start..end])
         } else {
             Uint128Reader::new_unchecked(&self.as_slice()[start..])
@@ -13362,6 +13378,7 @@ impl<'r> molecule::prelude::Reader<'r> for JitChannelRegisterReader<'r> {
         }
         ScriptOptReader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
         Uint128Reader::verify(&slice[offsets[1]..offsets[2]], compatible)?;
+        Uint128Reader::verify(&slice[offsets[2]..offsets[3]], compatible)?;
         Ok(())
     }
 }
@@ -13369,15 +13386,20 @@ impl<'r> molecule::prelude::Reader<'r> for JitChannelRegisterReader<'r> {
 pub struct JitChannelRegisterBuilder {
     pub(crate) funding_udt_type_script: ScriptOpt,
     pub(crate) max_amount: Uint128,
+    pub(crate) open_fee: Uint128,
 }
 impl JitChannelRegisterBuilder {
-    pub const FIELD_COUNT: usize = 2;
+    pub const FIELD_COUNT: usize = 3;
     pub fn funding_udt_type_script(mut self, v: ScriptOpt) -> Self {
         self.funding_udt_type_script = v;
         self
     }
     pub fn max_amount(mut self, v: Uint128) -> Self {
         self.max_amount = v;
+        self
+    }
+    pub fn open_fee(mut self, v: Uint128) -> Self {
+        self.open_fee = v;
         self
     }
 }
@@ -13388,6 +13410,7 @@ impl molecule::prelude::Builder for JitChannelRegisterBuilder {
         molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1)
             + self.funding_udt_type_script.as_slice().len()
             + self.max_amount.as_slice().len()
+            + self.open_fee.as_slice().len()
     }
     fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
         let mut total_size = molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1);
@@ -13396,12 +13419,15 @@ impl molecule::prelude::Builder for JitChannelRegisterBuilder {
         total_size += self.funding_udt_type_script.as_slice().len();
         offsets.push(total_size);
         total_size += self.max_amount.as_slice().len();
+        offsets.push(total_size);
+        total_size += self.open_fee.as_slice().len();
         writer.write_all(&molecule::pack_number(total_size as molecule::Number))?;
         for offset in offsets.into_iter() {
             writer.write_all(&molecule::pack_number(offset as molecule::Number))?;
         }
         writer.write_all(self.funding_udt_type_script.as_slice())?;
         writer.write_all(self.max_amount.as_slice())?;
+        writer.write_all(self.open_fee.as_slice())?;
         Ok(())
     }
     fn build(&self) -> Self::Entity {

@@ -43,6 +43,23 @@ table LiquidityProvider {
     value: Bytes,
 }
 
+table JitOpenFee {
+    value: Uint128,
+}
+
+table InvoiceHopHint {
+    pubkey: Bytes,
+    channel_outpoint: Bytes,
+    fee_rate: Uint64,
+    tlc_expiry_delta: Uint64,
+}
+
+vector InvoiceHopHintVec <InvoiceHopHint>;
+
+table HopHints {
+    value: InvoiceHopHintVec,
+}
+
 // 0 - ckb hash (Default)
 // 1 - sha256
 struct HashAlgorithm {
@@ -66,6 +83,8 @@ union InvoiceAttr {
     HashAlgorithm,
     PaymentSecret,
     LiquidityProvider,
+    JitOpenFee,
+    HopHints,
 }
 
 vector InvoiceAttrsVec <InvoiceAttr>;

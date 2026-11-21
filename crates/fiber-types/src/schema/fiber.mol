@@ -228,9 +228,11 @@ struct TxCompleteV2 {
 }
 
 // Session-scoped JIT registration. Empty `funding_udt_type_script` means CKB.
+// `open_fee` is the liquidity node's fee. The receiver sends 0; the acknowledgement carries the real fee.
 table JitChannelRegister {
     funding_udt_type_script: ScriptOpt,
     max_amount: Uint128,
+    open_fee: Uint128,
 }
 
 // Removed V1 message IDs remain reserved; never renumber the wire protocol.

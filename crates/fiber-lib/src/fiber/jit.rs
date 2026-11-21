@@ -30,6 +30,7 @@ pub(crate) struct JitSession {
     registrations: HashMap<Pubkey, JitChannelRegister>,
     pending_registers: HashMap<Pubkey, JitChannelRegister>,
     registered_lsp: Option<Pubkey>,
+    lsp_open_fee: Option<u128>,
     opens_in_flight: HashMap<Pubkey, Hash256>,
     waiting_payments: HashMap<Pubkey, HashSet<Hash256>>,
     direct_route_retried: HashSet<Hash256>,
@@ -42,6 +43,7 @@ impl JitSession {
             registrations: HashMap::new(),
             pending_registers: HashMap::new(),
             registered_lsp: None,
+            lsp_open_fee: None,
             opens_in_flight: HashMap::new(),
             waiting_payments: HashMap::new(),
             direct_route_retried: HashSet::new(),
@@ -64,7 +66,20 @@ impl JitSession {
         JitChannelRegister {
             funding_udt_type_script: None,
             max_amount: self.config.max_amount.unwrap_or(u128::MAX),
+            open_fee: 0,
         }
+    }
+
+    pub(crate) fn quoted_open_fee(&self) -> Result<u128, &'static str> {
+        if self.config.open_fee_required() {
+            Err("JIT open fee is not configured")
+        } else {
+            Ok(self.config.open_fee_amount())
+        }
+    }
+
+    pub(crate) fn lsp_open_fee(&self) -> Option<u128> {
+        self.lsp_open_fee
     }
 
     pub(crate) fn queue_register(&mut self, peer: Pubkey, register: JitChannelRegister) {
@@ -80,7 +95,14 @@ impl JitSession {
         if register.funding_udt_type_script.is_some() || register.max_amount != expected {
             return false;
         }
+        // The first acknowledgement sets the fee quoted on invoices. A later
+        // message can repeat that fee. A different fee waits until the session
+        // is cleared, so a live session cannot reprice invoices already being built.
+        if let Some(registered) = self.registered_lsp {
+            return registered == peer && self.lsp_open_fee == Some(register.open_fee);
+        }
         self.registered_lsp = Some(peer);
+        self.lsp_open_fee = Some(register.open_fee);
         true
     }
 
@@ -102,6 +124,7 @@ impl JitSession {
         self.pending_registers.remove(&peer);
         if self.registered_lsp == Some(peer) {
             self.registered_lsp = None;
+            self.lsp_open_fee = None;
         }
         self.registrations.remove(&peer).is_some()
     }
@@ -225,5 +248,39 @@ impl JitSession {
 
     pub(crate) fn begin_direct_retry(&mut self, payment_hash: Hash256) -> bool {
         self.direct_route_retried.insert(payment_hash)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fiber::config::JitChannelConfig;
+    use crate::fiber::types::JitChannelRegister;
+    use crate::gen_rand_fiber_public_key;
+
+    fn register(open_fee: u128) -> JitChannelRegister {
+        JitChannelRegister {
+            funding_udt_type_script: None,
+            max_amount: u128::MAX,
+            open_fee,
+        }
+    }
+
+    #[test]
+    fn lsp_ack_keeps_the_first_open_fee() {
+        let peer = gen_rand_fiber_public_key();
+        let mut session = JitSession::new(JitChannelConfig {
+            lsp_pubkey: Some(peer),
+            ..JitChannelConfig::default()
+        });
+        assert!(session.accept_lsp(peer, &register(100)));
+        assert_eq!(session.lsp_open_fee(), Some(100));
+        assert!(!session.accept_lsp(peer, &register(500)));
+        assert_eq!(session.lsp_open_fee(), Some(100));
+        assert!(session.accept_lsp(peer, &register(100)));
+        session.clear_session(peer);
+        assert!(session.lsp_open_fee().is_none());
+        assert!(session.accept_lsp(peer, &register(500)));
+        assert_eq!(session.lsp_open_fee(), Some(500));
     }
 }

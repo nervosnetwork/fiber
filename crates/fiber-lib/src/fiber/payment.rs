@@ -49,6 +49,83 @@ const MAX_TRAMPOLINE_HOPS_LIMIT: u16 = 5;
 const DEFAULT_MAX_FEE_RATE: u64 = 5;
 pub(crate) const MAX_FEE_RATE_DENOMINATOR: u128 = 1000;
 
+fn split_trampoline_hop_hints(hints: Vec<HopHint>) -> (Vec<Pubkey>, Vec<HopHint>) {
+    let mut trampoline = Vec::new();
+    let mut routes = Vec::new();
+    for hint in hints {
+        // Zero outpoint: trampoline to this pubkey. The channel does not exist yet.
+        if hint.channel_outpoint == OutPoint::default() {
+            trampoline.push(hint.pubkey);
+        } else {
+            routes.push(hint);
+        }
+    }
+    (trampoline, routes)
+}
+
+/// Fee cap for one payment.
+///
+/// A JIT open fee is added on top of the routing allowance from the default rate.
+/// An explicit `max_fee_amount` or `max_fee_rate` stays a ceiling: it has to cover
+/// the open fee, and the route finder still has to fit the path in what remains.
+fn payment_max_fee(
+    amount: u128,
+    open_fee: u128,
+    requested_max_fee: Option<u128>,
+    max_fee_rate: Option<u64>,
+) -> Result<u128, String> {
+    let rate = max_fee_rate.unwrap_or(DEFAULT_MAX_FEE_RATE) as u128;
+    if open_fee == 0 {
+        let rate_cap = calculate_fee_with_base(amount, rate, MAX_FEE_RATE_DENOMINATOR)?;
+        return Ok(match requested_max_fee {
+            Some(requested) => requested.min(rate_cap),
+            None => rate_cap,
+        });
+    }
+
+    if let Some(requested) = requested_max_fee {
+        if requested < open_fee {
+            return Err(format!(
+                "max_fee_amount is below the invoice JIT open fee: {requested} < {open_fee}"
+            ));
+        }
+    }
+
+    if let Some(explicit_rate) = max_fee_rate {
+        let rate_cap =
+            calculate_fee_with_base(amount, explicit_rate as u128, MAX_FEE_RATE_DENOMINATOR)?;
+        if rate_cap < open_fee {
+            return Err(format!(
+                "max fee rate does not cover the invoice JIT open fee: {rate_cap} < {open_fee}"
+            ));
+        }
+        let cap = match requested_max_fee {
+            Some(requested) => requested.min(rate_cap),
+            None => rate_cap,
+        };
+        if cap < open_fee {
+            return Err(format!(
+                "max fee rate does not cover the invoice JIT open fee: {cap} < {open_fee}"
+            ));
+        }
+        return Ok(cap);
+    }
+
+    let routed_amount = amount.checked_add(open_fee).ok_or_else(|| {
+        format!("amount + JIT open fee overflow: amount = {amount}, open_fee = {open_fee}")
+    })?;
+    let routing_allowance = calculate_fee_with_base(routed_amount, rate, MAX_FEE_RATE_DENOMINATOR)?;
+    let total = routing_allowance.checked_add(open_fee).ok_or_else(|| {
+        format!(
+            "routing allowance + JIT open fee overflow: routing = {routing_allowance}, open_fee = {open_fee}"
+        )
+    })?;
+    Ok(match requested_max_fee {
+        Some(requested) => requested.min(total),
+        None => total,
+    })
+}
+
 fn check_trampoline_outgoing_tlc_expiry(
     session: &mut PaymentSession,
     hops: &[PaymentHopData],
@@ -436,14 +513,16 @@ impl SendPaymentDataExt for SendPaymentData {
             "amount",
         )?;
 
-        let max_fee_rate = command.max_fee_rate.unwrap_or(DEFAULT_MAX_FEE_RATE) as u128;
-        let max_fee_amount_by_rate =
-            calculate_fee_with_base(amount, max_fee_rate, MAX_FEE_RATE_DENOMINATOR)?;
-
-        let max_fee_amount = match command.max_fee_amount {
-            Some(max_fee_amount) => Some(max_fee_amount.min(max_fee_amount_by_rate)),
-            None => Some(max_fee_amount_by_rate),
-        };
+        let open_fee = invoice
+            .as_ref()
+            .and_then(|inv| inv.jit_open_fee())
+            .unwrap_or(0);
+        let max_fee_amount = Some(payment_max_fee(
+            amount,
+            open_fee,
+            command.max_fee_amount,
+            command.max_fee_rate,
+        )?);
 
         let udt_type_script = match validate_field(
             command.udt_type_script.clone(),
@@ -509,11 +588,22 @@ impl SendPaymentDataExt for SendPaymentData {
             (payment_hash, Some(preimage))
         };
 
-        let hop_hints = command.hop_hints.unwrap_or_default();
-        if !hop_hints.is_empty()
-            && invoice
-                .as_ref()
-                .is_some_and(|inv| !inv.allow_trampoline_routing())
+        let invoice_hints = invoice
+            .as_ref()
+            .map(|inv| inv.hop_hints())
+            .unwrap_or_default();
+        let (invoice_trampoline, invoice_routes) = split_trampoline_hop_hints(invoice_hints);
+        let (command_trampoline, hop_hints) = match command.hop_hints {
+            Some(hints) => {
+                let (trampoline, routes) = split_trampoline_hop_hints(hints);
+                (trampoline, routes)
+            }
+            None => (Vec::new(), invoice_routes),
+        };
+        if invoice
+            .as_ref()
+            .is_some_and(|inv| !inv.allow_trampoline_routing())
+            && (!hop_hints.is_empty() || !command_trampoline.is_empty())
         {
             return Err("invoice does not support hop hints".to_string());
         }
@@ -548,11 +638,25 @@ impl SendPaymentDataExt for SendPaymentData {
 
         let trampoline_hops = match command.trampoline_hops {
             Some(hops) => Some(hops),
-            None => invoice
-                .as_ref()
-                .filter(|inv| inv.udt_type_script().is_none())
-                .and_then(|inv| inv.liquidity_provider().copied().map(Pubkey::from))
-                .map(|lsp| vec![lsp]),
+            None => {
+                let hops = if !command_trampoline.is_empty() {
+                    command_trampoline
+                } else if !invoice_trampoline.is_empty() {
+                    invoice_trampoline
+                } else {
+                    invoice
+                        .as_ref()
+                        .filter(|inv| inv.udt_type_script().is_none())
+                        .and_then(|inv| inv.liquidity_provider().copied().map(Pubkey::from))
+                        .map(|lsp| vec![lsp])
+                        .unwrap_or_default()
+                };
+                if hops.is_empty() {
+                    None
+                } else {
+                    Some(hops)
+                }
+            }
         };
 
         SendPaymentDataBuilder::new(target, amount, payment_hash)

@@ -615,3 +615,30 @@ fn test_invoice_liquidity_provider_roundtrip() {
     assert_eq!(decoded.liquidity_provider(), Some(&public_key));
     assert!(decoded.allow_trampoline_routing());
 }
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_invoice_jit_open_fee_and_hop_hint_roundtrip() {
+    let (private_key, public_key) = gen_rand_secp256k1_keypair_tuple();
+    let lsp = gen_rand_fiber_public_key();
+    let hint = fiber_types::HopHint {
+        pubkey: lsp,
+        channel_outpoint: ckb_types::packed::OutPoint::default(),
+        fee_rate: 0,
+        tlc_expiry_delta: 0,
+    };
+    let invoice = InvoiceBuilder::new(Currency::Fibb)
+        .amount(Some(1280))
+        .payment_hash(gen_rand_sha256_hash())
+        .payee_pub_key(public_key)
+        .jit_open_fee(2_500)
+        .hop_hints(vec![hint.clone()])
+        .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
+        .unwrap();
+
+    assert_eq!(invoice.jit_open_fee(), Some(2_500));
+    assert_eq!(invoice.hop_hints(), vec![hint]);
+    let decoded = invoice.to_string().parse::<CkbInvoice>().unwrap();
+    assert_eq!(decoded.jit_open_fee(), Some(2_500));
+    assert_eq!(decoded.hop_hints(), invoice.hop_hints());
+}

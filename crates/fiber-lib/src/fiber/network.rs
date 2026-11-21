@@ -1041,6 +1041,8 @@ pub enum NetworkActorCommand {
     ),
     // Open a JIT channel for a trampoline child payment that has no route.
     MaybeOpenJitChannel(Hash256, Pubkey),
+    // Open fee confirmed by the liquidity node, for a JIT invoice.
+    GetJitInvoiceTerms(RpcReplyPort<Result<u128, String>>),
     // A received TLC was removed. Drop a JIT open that was waiting on it.
     JitUpstreamTlcRemoved(Hash256),
     // Abandon a channel, channel_id maybe temp_channel_id or normal channel_id
@@ -3447,6 +3449,11 @@ where
                 state
                     .maybe_open_jit_channel(&myself, payment_hash, target, network_graph)
                     .await;
+            }
+            NetworkActorCommand::GetJitInvoiceTerms(reply) => {
+                let _ = reply.send(state.jit.lsp_open_fee().ok_or_else(|| {
+                    "JIT liquidity node has not confirmed the open fee".to_string()
+                }));
             }
             NetworkActorCommand::JitUpstreamTlcRemoved(payment_hash) => {
                 if state.jit_payment_is_waiting(payment_hash)
@@ -6421,8 +6428,14 @@ where
             return;
         }
 
+        if self.jit.config().open_fee_required() {
+            self.fail_jit_payment(payment_hash, "JIT open fee is not configured")
+                .await;
+            return;
+        }
+
         let max_fee = session.request.max_fee_amount.unwrap_or(0);
-        if max_fee < self.jit.config().open_fee {
+        if max_fee < self.jit.config().open_fee_amount() {
             self.fail_jit_payment(payment_hash, "trampoline fee does not cover JIT open fee")
                 .await;
             return;
@@ -6572,6 +6585,19 @@ where
             debug_event!(self.network, "JitChannelRegisterRejected");
             return;
         }
+        let open_fee = match self.jit.quoted_open_fee() {
+            Ok(open_fee) => open_fee,
+            Err(reason) => {
+                debug!(
+                    peer = format!("{peer_pubkey:?}"),
+                    "Rejecting JitChannelRegister: {reason}"
+                );
+                debug_event!(self.network, "JitChannelRegisterRejected");
+                return;
+            }
+        };
+        let mut register = register;
+        register.open_fee = open_fee;
         self.jit.insert_registration(peer_pubkey, register.clone());
         debug_event!(self.network, "JitChannelRegistered");
         let ack =

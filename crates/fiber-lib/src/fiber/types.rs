@@ -133,10 +133,12 @@ impl TryFrom<molecule_fiber::Init> for Init {
 ///
 /// An empty `funding_udt_type_script` requests a CKB channel. `max_amount` is
 /// the largest inbound amount the receiver wants on a just-in-time channel.
+/// The receiver sends `open_fee` as 0. The acknowledgement carries the liquidity node's fee.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JitChannelRegister {
     pub funding_udt_type_script: Option<Script>,
     pub max_amount: u128,
+    pub open_fee: u128,
 }
 
 impl From<JitChannelRegister> for molecule_fiber::JitChannelRegister {
@@ -144,6 +146,7 @@ impl From<JitChannelRegister> for molecule_fiber::JitChannelRegister {
         Self::new_builder()
             .funding_udt_type_script(m.funding_udt_type_script.pack())
             .max_amount(m.max_amount.pack())
+            .open_fee(m.open_fee.pack())
             .build()
     }
 }
@@ -155,6 +158,7 @@ impl TryFrom<molecule_fiber::JitChannelRegister> for JitChannelRegister {
         Ok(Self {
             funding_udt_type_script: m.funding_udt_type_script().to_opt(),
             max_amount: m.max_amount().unpack(),
+            open_fee: m.open_fee().unpack(),
         })
     }
 }

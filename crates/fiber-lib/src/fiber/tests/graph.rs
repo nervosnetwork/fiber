@@ -17,7 +17,7 @@ use crate::fiber::{
     Hash256, HopHint, HopRequire, NodeAnnouncement, Privkey, Pubkey, RouterHop, SendPaymentData,
     SessionRoute,
 };
-use crate::invoice::Currency;
+use crate::invoice::{Currency, InvoiceBuilder};
 use crate::store::Store;
 use ckb_types::{
     packed::{OutPoint, Script},
@@ -1382,6 +1382,102 @@ fn test_graph_trampoline_routing_fee_fields_match_precompute() {
             assert_eq!(build_max_fee_amount, exp_build_max_fee_amounts[2]);
         }
         other => panic!("unexpected payload at t3: {other:?}"),
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_graph_jit_open_fee_is_reserved_for_the_liquidity_node() {
+    init_tracing();
+
+    // sender -> router -> liquidity node, with a fee on the forwarding hop.
+    // The quoted open fee must still arrive intact. The payer pays that fee plus
+    // the real forwarding fee, not the whole fee cap.
+    let mut network = MockNetworkGraph::new(4);
+    network.graph.set_fixed_rand_expiry_delta(0);
+    let sender = network.keys[1];
+    network.set_source(sender);
+    let lsp = network.keys[3];
+    let recipient = network.keys[4];
+    network.add_edge_with_config(
+        1,
+        2,
+        Some(1_000_000_000),
+        Some(1_000),
+        Some(0),
+        None,
+        Some(1_000),
+        None,
+    );
+    network.add_edge_with_config(
+        2,
+        3,
+        Some(1_000_000_000),
+        Some(1_000),
+        Some(0),
+        None,
+        Some(1_000),
+        None,
+    );
+
+    let open_fee = 50_000u128;
+    let amount = 1_000u128;
+    let invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(amount))
+        .payment_preimage(Hash256::default())
+        .payee_pub_key(recipient)
+        .final_expiry_delta(FINAL_TLC_EXPIRY_DELTA_IN_TESTS)
+        .hop_hints(vec![HopHint {
+            pubkey: lsp.into(),
+            channel_outpoint: OutPoint::default(),
+            fee_rate: 0,
+            tlc_expiry_delta: 0,
+        }])
+        .jit_open_fee(open_fee)
+        .allow_trampoline_routing(true)
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &network.secret_keys[4]))
+        .expect("build jit invoice");
+    let payment = SendPaymentData::new(
+        SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            ..Default::default()
+        },
+        Currency::Fibd,
+    )
+    .expect("build payment");
+    assert_eq!(payment.max_fee_amount, Some(50_255));
+    let payment_state: SendPaymentState = payment.into();
+
+    let route = network
+        .graph
+        .build_route(payment_state.amount, None, None, &payment_state)
+        .expect("jit trampoline route");
+    assert!(route.len() >= 2);
+    let lsp_amount = route[route.len() - 2].amount;
+    assert_eq!(lsp_amount, amount + open_fee);
+    let sender_amount = route[0].amount;
+    assert!(sender_amount > lsp_amount);
+    assert!(sender_amount - amount < payment_state.max_fee_amount.unwrap());
+
+    let peeled = TrampolineOnionPacket::new(route.last().unwrap().trampoline_onion().unwrap())
+        .peel(
+            &Privkey(network.secret_keys[3]),
+            Some(payment_state.payment_hash.as_ref()),
+            SECP256K1,
+        )
+        .expect("peel liquidity node");
+    match peeled.current {
+        crate::fiber::types::TrampolineHopPayload::Forward {
+            next_node_id,
+            amount_to_forward,
+            build_max_fee_amount,
+            ..
+        } => {
+            assert_eq!(next_node_id, recipient.into());
+            assert_eq!(amount_to_forward, amount);
+            assert_eq!(build_max_fee_amount, open_fee);
+        }
+        other => panic!("unexpected payload: {other:?}"),
     }
 }
 

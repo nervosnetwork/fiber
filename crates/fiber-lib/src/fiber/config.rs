@@ -221,7 +221,7 @@ pub struct FiberConfig {
         name = "FIBER_JIT_OPEN_FEE",
         long = "fiber-jit-open-fee",
         env,
-        help = "Fee charged for opening a JIT channel, in the channel asset [default: 0]"
+        help = "Fee charged for opening a JIT channel, in the channel asset. Required when JIT funding is enabled; unset refuses funded opens. Explicit 0 charges nothing"
     )]
     pub jit_open_fee: Option<u128>,
 
@@ -646,8 +646,10 @@ impl FiberConfig {
         self.jit_service_enabled.unwrap_or(false)
     }
 
-    pub fn jit_open_fee(&self) -> u128 {
-        self.jit_open_fee.unwrap_or(0)
+    /// Configured JIT open fee. `None` means the operator did not set one.
+    /// Unset refuses a funded open. Explicit 0 charges nothing.
+    pub fn jit_open_fee(&self) -> Option<u128> {
+        self.jit_open_fee
     }
 
     pub fn jit_min_amount(&self) -> u128 {
@@ -671,7 +673,7 @@ impl FiberConfig {
         JitChannelConfig {
             lsp_pubkey: self.jit_lsp_pubkey(),
             service_enabled: self.jit_service_enabled(),
-            open_fee: self.jit_open_fee(),
+            open_fee: self.jit_open_fee,
             min_amount: self.jit_min_amount(),
             max_funding: self.jit_max_funding(),
             max_amount: self.jit_max_amount(),
@@ -758,11 +760,21 @@ impl FiberConfig {
 pub struct JitChannelConfig {
     pub lsp_pubkey: Option<Pubkey>,
     pub service_enabled: bool,
-    pub open_fee: u128,
+    pub open_fee: Option<u128>,
     pub min_amount: u128,
     pub max_funding: u128,
     /// `None` means the receiver places no cap on a JIT payment.
     pub max_amount: Option<u128>,
+}
+
+impl JitChannelConfig {
+    pub fn open_fee_amount(&self) -> u128 {
+        self.open_fee.unwrap_or(0)
+    }
+
+    pub fn open_fee_required(&self) -> bool {
+        self.service_enabled && self.max_funding > 0 && self.open_fee.is_none()
+    }
 }
 
 fn parse_jit_pubkey(raw: &str) -> Result<Pubkey> {

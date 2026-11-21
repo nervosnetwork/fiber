@@ -333,6 +333,7 @@ fn test_wire_jit_channel_register() {
         let value = JitChannelRegister {
             funding_udt_type_script,
             max_amount: 42,
+            open_fee: 7,
         };
         let bytes = FiberMessage::jit_channel_register(value.clone()).to_molecule_bytes();
         assert_eq!(u32::from_le_bytes(bytes[..4].try_into().unwrap()), 28);

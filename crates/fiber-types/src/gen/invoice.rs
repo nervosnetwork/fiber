@@ -4512,6 +4512,1132 @@ impl molecule::prelude::Builder for LiquidityProviderBuilder {
     }
 }
 #[derive(Clone)]
+pub struct JitOpenFee(molecule::bytes::Bytes);
+impl ::core::fmt::LowerHex for JitOpenFee {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        use molecule::hex_string;
+        if f.alternate() {
+            write!(f, "0x")?;
+        }
+        write!(f, "{}", hex_string(self.as_slice()))
+    }
+}
+impl ::core::fmt::Debug for JitOpenFee {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{}({:#x})", Self::NAME, self)
+    }
+}
+impl ::core::fmt::Display for JitOpenFee {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{} {{ ", Self::NAME)?;
+        write!(f, "{}: {}", "value", self.value())?;
+        let extra_count = self.count_extra_fields();
+        if extra_count != 0 {
+            write!(f, ", .. ({} fields)", extra_count)?;
+        }
+        write!(f, " }}")
+    }
+}
+impl ::core::default::Default for JitOpenFee {
+    fn default() -> Self {
+        let v = molecule::bytes::Bytes::from_static(&Self::DEFAULT_VALUE);
+        JitOpenFee::new_unchecked(v)
+    }
+}
+impl JitOpenFee {
+    const DEFAULT_VALUE: [u8; 24] = [
+        24, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
+    pub const FIELD_COUNT: usize = 1;
+    pub fn total_size(&self) -> usize {
+        molecule::unpack_number(self.as_slice()) as usize
+    }
+    pub fn field_count(&self) -> usize {
+        if self.total_size() == molecule::NUMBER_SIZE {
+            0
+        } else {
+            (molecule::unpack_number(&self.as_slice()[molecule::NUMBER_SIZE..]) as usize / 4) - 1
+        }
+    }
+    pub fn count_extra_fields(&self) -> usize {
+        self.field_count() - Self::FIELD_COUNT
+    }
+    pub fn has_extra_fields(&self) -> bool {
+        Self::FIELD_COUNT != self.field_count()
+    }
+    pub fn value(&self) -> Uint128 {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[4..]) as usize;
+        if self.has_extra_fields() {
+            let end = molecule::unpack_number(&slice[8..]) as usize;
+            Uint128::new_unchecked(self.0.slice(start..end))
+        } else {
+            Uint128::new_unchecked(self.0.slice(start..))
+        }
+    }
+    pub fn as_reader<'r>(&'r self) -> JitOpenFeeReader<'r> {
+        JitOpenFeeReader::new_unchecked(self.as_slice())
+    }
+}
+impl molecule::prelude::Entity for JitOpenFee {
+    type Builder = JitOpenFeeBuilder;
+    const NAME: &'static str = "JitOpenFee";
+    fn new_unchecked(data: molecule::bytes::Bytes) -> Self {
+        JitOpenFee(data)
+    }
+    fn as_bytes(&self) -> molecule::bytes::Bytes {
+        self.0.clone()
+    }
+    fn as_slice(&self) -> &[u8] {
+        &self.0[..]
+    }
+    fn from_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
+        JitOpenFeeReader::from_slice(slice).map(|reader| reader.to_entity())
+    }
+    fn from_compatible_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
+        JitOpenFeeReader::from_compatible_slice(slice).map(|reader| reader.to_entity())
+    }
+    fn new_builder() -> Self::Builder {
+        ::core::default::Default::default()
+    }
+    fn as_builder(self) -> Self::Builder {
+        Self::new_builder().value(self.value())
+    }
+}
+#[derive(Clone, Copy)]
+pub struct JitOpenFeeReader<'r>(&'r [u8]);
+impl<'r> ::core::fmt::LowerHex for JitOpenFeeReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        use molecule::hex_string;
+        if f.alternate() {
+            write!(f, "0x")?;
+        }
+        write!(f, "{}", hex_string(self.as_slice()))
+    }
+}
+impl<'r> ::core::fmt::Debug for JitOpenFeeReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{}({:#x})", Self::NAME, self)
+    }
+}
+impl<'r> ::core::fmt::Display for JitOpenFeeReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{} {{ ", Self::NAME)?;
+        write!(f, "{}: {}", "value", self.value())?;
+        let extra_count = self.count_extra_fields();
+        if extra_count != 0 {
+            write!(f, ", .. ({} fields)", extra_count)?;
+        }
+        write!(f, " }}")
+    }
+}
+impl<'r> JitOpenFeeReader<'r> {
+    pub const FIELD_COUNT: usize = 1;
+    pub fn total_size(&self) -> usize {
+        molecule::unpack_number(self.as_slice()) as usize
+    }
+    pub fn field_count(&self) -> usize {
+        if self.total_size() == molecule::NUMBER_SIZE {
+            0
+        } else {
+            (molecule::unpack_number(&self.as_slice()[molecule::NUMBER_SIZE..]) as usize / 4) - 1
+        }
+    }
+    pub fn count_extra_fields(&self) -> usize {
+        self.field_count() - Self::FIELD_COUNT
+    }
+    pub fn has_extra_fields(&self) -> bool {
+        Self::FIELD_COUNT != self.field_count()
+    }
+    pub fn value(&self) -> Uint128Reader<'r> {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[4..]) as usize;
+        if self.has_extra_fields() {
+            let end = molecule::unpack_number(&slice[8..]) as usize;
+            Uint128Reader::new_unchecked(&self.as_slice()[start..end])
+        } else {
+            Uint128Reader::new_unchecked(&self.as_slice()[start..])
+        }
+    }
+}
+impl<'r> molecule::prelude::Reader<'r> for JitOpenFeeReader<'r> {
+    type Entity = JitOpenFee;
+    const NAME: &'static str = "JitOpenFeeReader";
+    fn to_entity(&self) -> Self::Entity {
+        Self::Entity::new_unchecked(self.as_slice().to_owned().into())
+    }
+    fn new_unchecked(slice: &'r [u8]) -> Self {
+        JitOpenFeeReader(slice)
+    }
+    fn as_slice(&self) -> &'r [u8] {
+        self.0
+    }
+    fn verify(slice: &[u8], compatible: bool) -> molecule::error::VerificationResult<()> {
+        use molecule::verification_error as ve;
+        let slice_len = slice.len();
+        if slice_len < molecule::NUMBER_SIZE {
+            return ve!(Self, HeaderIsBroken, molecule::NUMBER_SIZE, slice_len);
+        }
+        let total_size = molecule::unpack_number(slice) as usize;
+        if slice_len != total_size {
+            return ve!(Self, TotalSizeNotMatch, total_size, slice_len);
+        }
+        if slice_len < molecule::NUMBER_SIZE * 2 {
+            return ve!(Self, HeaderIsBroken, molecule::NUMBER_SIZE * 2, slice_len);
+        }
+        let offset_first = molecule::unpack_number(&slice[molecule::NUMBER_SIZE..]) as usize;
+        if offset_first % molecule::NUMBER_SIZE != 0 || offset_first < molecule::NUMBER_SIZE * 2 {
+            return ve!(Self, OffsetsNotMatch);
+        }
+        if slice_len < offset_first {
+            return ve!(Self, HeaderIsBroken, offset_first, slice_len);
+        }
+        let field_count = offset_first / molecule::NUMBER_SIZE - 1;
+        if field_count < Self::FIELD_COUNT {
+            return ve!(Self, FieldCountNotMatch, Self::FIELD_COUNT, field_count);
+        } else if !compatible && field_count > Self::FIELD_COUNT {
+            return ve!(Self, FieldCountNotMatch, Self::FIELD_COUNT, field_count);
+        };
+        let mut offsets: Vec<usize> = slice[molecule::NUMBER_SIZE..offset_first]
+            .chunks_exact(molecule::NUMBER_SIZE)
+            .map(|x| molecule::unpack_number(x) as usize)
+            .collect();
+        offsets.push(total_size);
+        if offsets.windows(2).any(|i| i[0] > i[1]) {
+            return ve!(Self, OffsetsNotMatch);
+        }
+        Uint128Reader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
+        Ok(())
+    }
+}
+#[derive(Clone, Debug, Default)]
+pub struct JitOpenFeeBuilder {
+    pub(crate) value: Uint128,
+}
+impl JitOpenFeeBuilder {
+    pub const FIELD_COUNT: usize = 1;
+    pub fn value(mut self, v: Uint128) -> Self {
+        self.value = v;
+        self
+    }
+}
+impl molecule::prelude::Builder for JitOpenFeeBuilder {
+    type Entity = JitOpenFee;
+    const NAME: &'static str = "JitOpenFeeBuilder";
+    fn expected_length(&self) -> usize {
+        molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1) + self.value.as_slice().len()
+    }
+    fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
+        let mut total_size = molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1);
+        let mut offsets = Vec::with_capacity(Self::FIELD_COUNT);
+        offsets.push(total_size);
+        total_size += self.value.as_slice().len();
+        writer.write_all(&molecule::pack_number(total_size as molecule::Number))?;
+        for offset in offsets.into_iter() {
+            writer.write_all(&molecule::pack_number(offset as molecule::Number))?;
+        }
+        writer.write_all(self.value.as_slice())?;
+        Ok(())
+    }
+    fn build(&self) -> Self::Entity {
+        let mut inner = Vec::with_capacity(self.expected_length());
+        self.write(&mut inner)
+            .unwrap_or_else(|_| panic!("{} build should be ok", Self::NAME));
+        JitOpenFee::new_unchecked(inner.into())
+    }
+}
+#[derive(Clone)]
+pub struct InvoiceHopHint(molecule::bytes::Bytes);
+impl ::core::fmt::LowerHex for InvoiceHopHint {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        use molecule::hex_string;
+        if f.alternate() {
+            write!(f, "0x")?;
+        }
+        write!(f, "{}", hex_string(self.as_slice()))
+    }
+}
+impl ::core::fmt::Debug for InvoiceHopHint {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{}({:#x})", Self::NAME, self)
+    }
+}
+impl ::core::fmt::Display for InvoiceHopHint {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{} {{ ", Self::NAME)?;
+        write!(f, "{}: {}", "pubkey", self.pubkey())?;
+        write!(f, ", {}: {}", "channel_outpoint", self.channel_outpoint())?;
+        write!(f, ", {}: {}", "fee_rate", self.fee_rate())?;
+        write!(f, ", {}: {}", "tlc_expiry_delta", self.tlc_expiry_delta())?;
+        let extra_count = self.count_extra_fields();
+        if extra_count != 0 {
+            write!(f, ", .. ({} fields)", extra_count)?;
+        }
+        write!(f, " }}")
+    }
+}
+impl ::core::default::Default for InvoiceHopHint {
+    fn default() -> Self {
+        let v = molecule::bytes::Bytes::from_static(&Self::DEFAULT_VALUE);
+        InvoiceHopHint::new_unchecked(v)
+    }
+}
+impl InvoiceHopHint {
+    const DEFAULT_VALUE: [u8; 44] = [
+        44, 0, 0, 0, 20, 0, 0, 0, 24, 0, 0, 0, 28, 0, 0, 0, 36, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
+    pub const FIELD_COUNT: usize = 4;
+    pub fn total_size(&self) -> usize {
+        molecule::unpack_number(self.as_slice()) as usize
+    }
+    pub fn field_count(&self) -> usize {
+        if self.total_size() == molecule::NUMBER_SIZE {
+            0
+        } else {
+            (molecule::unpack_number(&self.as_slice()[molecule::NUMBER_SIZE..]) as usize / 4) - 1
+        }
+    }
+    pub fn count_extra_fields(&self) -> usize {
+        self.field_count() - Self::FIELD_COUNT
+    }
+    pub fn has_extra_fields(&self) -> bool {
+        Self::FIELD_COUNT != self.field_count()
+    }
+    pub fn pubkey(&self) -> Bytes {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[4..]) as usize;
+        let end = molecule::unpack_number(&slice[8..]) as usize;
+        Bytes::new_unchecked(self.0.slice(start..end))
+    }
+    pub fn channel_outpoint(&self) -> Bytes {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[8..]) as usize;
+        let end = molecule::unpack_number(&slice[12..]) as usize;
+        Bytes::new_unchecked(self.0.slice(start..end))
+    }
+    pub fn fee_rate(&self) -> Uint64 {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[12..]) as usize;
+        let end = molecule::unpack_number(&slice[16..]) as usize;
+        Uint64::new_unchecked(self.0.slice(start..end))
+    }
+    pub fn tlc_expiry_delta(&self) -> Uint64 {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[16..]) as usize;
+        if self.has_extra_fields() {
+            let end = molecule::unpack_number(&slice[20..]) as usize;
+            Uint64::new_unchecked(self.0.slice(start..end))
+        } else {
+            Uint64::new_unchecked(self.0.slice(start..))
+        }
+    }
+    pub fn as_reader<'r>(&'r self) -> InvoiceHopHintReader<'r> {
+        InvoiceHopHintReader::new_unchecked(self.as_slice())
+    }
+}
+impl molecule::prelude::Entity for InvoiceHopHint {
+    type Builder = InvoiceHopHintBuilder;
+    const NAME: &'static str = "InvoiceHopHint";
+    fn new_unchecked(data: molecule::bytes::Bytes) -> Self {
+        InvoiceHopHint(data)
+    }
+    fn as_bytes(&self) -> molecule::bytes::Bytes {
+        self.0.clone()
+    }
+    fn as_slice(&self) -> &[u8] {
+        &self.0[..]
+    }
+    fn from_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
+        InvoiceHopHintReader::from_slice(slice).map(|reader| reader.to_entity())
+    }
+    fn from_compatible_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
+        InvoiceHopHintReader::from_compatible_slice(slice).map(|reader| reader.to_entity())
+    }
+    fn new_builder() -> Self::Builder {
+        ::core::default::Default::default()
+    }
+    fn as_builder(self) -> Self::Builder {
+        Self::new_builder()
+            .pubkey(self.pubkey())
+            .channel_outpoint(self.channel_outpoint())
+            .fee_rate(self.fee_rate())
+            .tlc_expiry_delta(self.tlc_expiry_delta())
+    }
+}
+#[derive(Clone, Copy)]
+pub struct InvoiceHopHintReader<'r>(&'r [u8]);
+impl<'r> ::core::fmt::LowerHex for InvoiceHopHintReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        use molecule::hex_string;
+        if f.alternate() {
+            write!(f, "0x")?;
+        }
+        write!(f, "{}", hex_string(self.as_slice()))
+    }
+}
+impl<'r> ::core::fmt::Debug for InvoiceHopHintReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{}({:#x})", Self::NAME, self)
+    }
+}
+impl<'r> ::core::fmt::Display for InvoiceHopHintReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{} {{ ", Self::NAME)?;
+        write!(f, "{}: {}", "pubkey", self.pubkey())?;
+        write!(f, ", {}: {}", "channel_outpoint", self.channel_outpoint())?;
+        write!(f, ", {}: {}", "fee_rate", self.fee_rate())?;
+        write!(f, ", {}: {}", "tlc_expiry_delta", self.tlc_expiry_delta())?;
+        let extra_count = self.count_extra_fields();
+        if extra_count != 0 {
+            write!(f, ", .. ({} fields)", extra_count)?;
+        }
+        write!(f, " }}")
+    }
+}
+impl<'r> InvoiceHopHintReader<'r> {
+    pub const FIELD_COUNT: usize = 4;
+    pub fn total_size(&self) -> usize {
+        molecule::unpack_number(self.as_slice()) as usize
+    }
+    pub fn field_count(&self) -> usize {
+        if self.total_size() == molecule::NUMBER_SIZE {
+            0
+        } else {
+            (molecule::unpack_number(&self.as_slice()[molecule::NUMBER_SIZE..]) as usize / 4) - 1
+        }
+    }
+    pub fn count_extra_fields(&self) -> usize {
+        self.field_count() - Self::FIELD_COUNT
+    }
+    pub fn has_extra_fields(&self) -> bool {
+        Self::FIELD_COUNT != self.field_count()
+    }
+    pub fn pubkey(&self) -> BytesReader<'r> {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[4..]) as usize;
+        let end = molecule::unpack_number(&slice[8..]) as usize;
+        BytesReader::new_unchecked(&self.as_slice()[start..end])
+    }
+    pub fn channel_outpoint(&self) -> BytesReader<'r> {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[8..]) as usize;
+        let end = molecule::unpack_number(&slice[12..]) as usize;
+        BytesReader::new_unchecked(&self.as_slice()[start..end])
+    }
+    pub fn fee_rate(&self) -> Uint64Reader<'r> {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[12..]) as usize;
+        let end = molecule::unpack_number(&slice[16..]) as usize;
+        Uint64Reader::new_unchecked(&self.as_slice()[start..end])
+    }
+    pub fn tlc_expiry_delta(&self) -> Uint64Reader<'r> {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[16..]) as usize;
+        if self.has_extra_fields() {
+            let end = molecule::unpack_number(&slice[20..]) as usize;
+            Uint64Reader::new_unchecked(&self.as_slice()[start..end])
+        } else {
+            Uint64Reader::new_unchecked(&self.as_slice()[start..])
+        }
+    }
+}
+impl<'r> molecule::prelude::Reader<'r> for InvoiceHopHintReader<'r> {
+    type Entity = InvoiceHopHint;
+    const NAME: &'static str = "InvoiceHopHintReader";
+    fn to_entity(&self) -> Self::Entity {
+        Self::Entity::new_unchecked(self.as_slice().to_owned().into())
+    }
+    fn new_unchecked(slice: &'r [u8]) -> Self {
+        InvoiceHopHintReader(slice)
+    }
+    fn as_slice(&self) -> &'r [u8] {
+        self.0
+    }
+    fn verify(slice: &[u8], compatible: bool) -> molecule::error::VerificationResult<()> {
+        use molecule::verification_error as ve;
+        let slice_len = slice.len();
+        if slice_len < molecule::NUMBER_SIZE {
+            return ve!(Self, HeaderIsBroken, molecule::NUMBER_SIZE, slice_len);
+        }
+        let total_size = molecule::unpack_number(slice) as usize;
+        if slice_len != total_size {
+            return ve!(Self, TotalSizeNotMatch, total_size, slice_len);
+        }
+        if slice_len < molecule::NUMBER_SIZE * 2 {
+            return ve!(Self, HeaderIsBroken, molecule::NUMBER_SIZE * 2, slice_len);
+        }
+        let offset_first = molecule::unpack_number(&slice[molecule::NUMBER_SIZE..]) as usize;
+        if offset_first % molecule::NUMBER_SIZE != 0 || offset_first < molecule::NUMBER_SIZE * 2 {
+            return ve!(Self, OffsetsNotMatch);
+        }
+        if slice_len < offset_first {
+            return ve!(Self, HeaderIsBroken, offset_first, slice_len);
+        }
+        let field_count = offset_first / molecule::NUMBER_SIZE - 1;
+        if field_count < Self::FIELD_COUNT {
+            return ve!(Self, FieldCountNotMatch, Self::FIELD_COUNT, field_count);
+        } else if !compatible && field_count > Self::FIELD_COUNT {
+            return ve!(Self, FieldCountNotMatch, Self::FIELD_COUNT, field_count);
+        };
+        let mut offsets: Vec<usize> = slice[molecule::NUMBER_SIZE..offset_first]
+            .chunks_exact(molecule::NUMBER_SIZE)
+            .map(|x| molecule::unpack_number(x) as usize)
+            .collect();
+        offsets.push(total_size);
+        if offsets.windows(2).any(|i| i[0] > i[1]) {
+            return ve!(Self, OffsetsNotMatch);
+        }
+        BytesReader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
+        BytesReader::verify(&slice[offsets[1]..offsets[2]], compatible)?;
+        Uint64Reader::verify(&slice[offsets[2]..offsets[3]], compatible)?;
+        Uint64Reader::verify(&slice[offsets[3]..offsets[4]], compatible)?;
+        Ok(())
+    }
+}
+#[derive(Clone, Debug, Default)]
+pub struct InvoiceHopHintBuilder {
+    pub(crate) pubkey: Bytes,
+    pub(crate) channel_outpoint: Bytes,
+    pub(crate) fee_rate: Uint64,
+    pub(crate) tlc_expiry_delta: Uint64,
+}
+impl InvoiceHopHintBuilder {
+    pub const FIELD_COUNT: usize = 4;
+    pub fn pubkey(mut self, v: Bytes) -> Self {
+        self.pubkey = v;
+        self
+    }
+    pub fn channel_outpoint(mut self, v: Bytes) -> Self {
+        self.channel_outpoint = v;
+        self
+    }
+    pub fn fee_rate(mut self, v: Uint64) -> Self {
+        self.fee_rate = v;
+        self
+    }
+    pub fn tlc_expiry_delta(mut self, v: Uint64) -> Self {
+        self.tlc_expiry_delta = v;
+        self
+    }
+}
+impl molecule::prelude::Builder for InvoiceHopHintBuilder {
+    type Entity = InvoiceHopHint;
+    const NAME: &'static str = "InvoiceHopHintBuilder";
+    fn expected_length(&self) -> usize {
+        molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1)
+            + self.pubkey.as_slice().len()
+            + self.channel_outpoint.as_slice().len()
+            + self.fee_rate.as_slice().len()
+            + self.tlc_expiry_delta.as_slice().len()
+    }
+    fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
+        let mut total_size = molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1);
+        let mut offsets = Vec::with_capacity(Self::FIELD_COUNT);
+        offsets.push(total_size);
+        total_size += self.pubkey.as_slice().len();
+        offsets.push(total_size);
+        total_size += self.channel_outpoint.as_slice().len();
+        offsets.push(total_size);
+        total_size += self.fee_rate.as_slice().len();
+        offsets.push(total_size);
+        total_size += self.tlc_expiry_delta.as_slice().len();
+        writer.write_all(&molecule::pack_number(total_size as molecule::Number))?;
+        for offset in offsets.into_iter() {
+            writer.write_all(&molecule::pack_number(offset as molecule::Number))?;
+        }
+        writer.write_all(self.pubkey.as_slice())?;
+        writer.write_all(self.channel_outpoint.as_slice())?;
+        writer.write_all(self.fee_rate.as_slice())?;
+        writer.write_all(self.tlc_expiry_delta.as_slice())?;
+        Ok(())
+    }
+    fn build(&self) -> Self::Entity {
+        let mut inner = Vec::with_capacity(self.expected_length());
+        self.write(&mut inner)
+            .unwrap_or_else(|_| panic!("{} build should be ok", Self::NAME));
+        InvoiceHopHint::new_unchecked(inner.into())
+    }
+}
+#[derive(Clone)]
+pub struct InvoiceHopHintVec(molecule::bytes::Bytes);
+impl ::core::fmt::LowerHex for InvoiceHopHintVec {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        use molecule::hex_string;
+        if f.alternate() {
+            write!(f, "0x")?;
+        }
+        write!(f, "{}", hex_string(self.as_slice()))
+    }
+}
+impl ::core::fmt::Debug for InvoiceHopHintVec {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{}({:#x})", Self::NAME, self)
+    }
+}
+impl ::core::fmt::Display for InvoiceHopHintVec {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{} [", Self::NAME)?;
+        for i in 0..self.len() {
+            if i == 0 {
+                write!(f, "{}", self.get_unchecked(i))?;
+            } else {
+                write!(f, ", {}", self.get_unchecked(i))?;
+            }
+        }
+        write!(f, "]")
+    }
+}
+impl ::core::default::Default for InvoiceHopHintVec {
+    fn default() -> Self {
+        let v = molecule::bytes::Bytes::from_static(&Self::DEFAULT_VALUE);
+        InvoiceHopHintVec::new_unchecked(v)
+    }
+}
+impl InvoiceHopHintVec {
+    const DEFAULT_VALUE: [u8; 4] = [4, 0, 0, 0];
+    pub fn total_size(&self) -> usize {
+        molecule::unpack_number(self.as_slice()) as usize
+    }
+    pub fn item_count(&self) -> usize {
+        if self.total_size() == molecule::NUMBER_SIZE {
+            0
+        } else {
+            (molecule::unpack_number(&self.as_slice()[molecule::NUMBER_SIZE..]) as usize / 4) - 1
+        }
+    }
+    pub fn len(&self) -> usize {
+        self.item_count()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    pub fn get(&self, idx: usize) -> Option<InvoiceHopHint> {
+        if idx >= self.len() {
+            None
+        } else {
+            Some(self.get_unchecked(idx))
+        }
+    }
+    pub fn get_unchecked(&self, idx: usize) -> InvoiceHopHint {
+        let slice = self.as_slice();
+        let start_idx = molecule::NUMBER_SIZE * (1 + idx);
+        let start = molecule::unpack_number(&slice[start_idx..]) as usize;
+        if idx == self.len() - 1 {
+            InvoiceHopHint::new_unchecked(self.0.slice(start..))
+        } else {
+            let end_idx = start_idx + molecule::NUMBER_SIZE;
+            let end = molecule::unpack_number(&slice[end_idx..]) as usize;
+            InvoiceHopHint::new_unchecked(self.0.slice(start..end))
+        }
+    }
+    pub fn as_reader<'r>(&'r self) -> InvoiceHopHintVecReader<'r> {
+        InvoiceHopHintVecReader::new_unchecked(self.as_slice())
+    }
+}
+impl molecule::prelude::Entity for InvoiceHopHintVec {
+    type Builder = InvoiceHopHintVecBuilder;
+    const NAME: &'static str = "InvoiceHopHintVec";
+    fn new_unchecked(data: molecule::bytes::Bytes) -> Self {
+        InvoiceHopHintVec(data)
+    }
+    fn as_bytes(&self) -> molecule::bytes::Bytes {
+        self.0.clone()
+    }
+    fn as_slice(&self) -> &[u8] {
+        &self.0[..]
+    }
+    fn from_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
+        InvoiceHopHintVecReader::from_slice(slice).map(|reader| reader.to_entity())
+    }
+    fn from_compatible_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
+        InvoiceHopHintVecReader::from_compatible_slice(slice).map(|reader| reader.to_entity())
+    }
+    fn new_builder() -> Self::Builder {
+        ::core::default::Default::default()
+    }
+    fn as_builder(self) -> Self::Builder {
+        Self::new_builder().extend(self.into_iter())
+    }
+}
+#[derive(Clone, Copy)]
+pub struct InvoiceHopHintVecReader<'r>(&'r [u8]);
+impl<'r> ::core::fmt::LowerHex for InvoiceHopHintVecReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        use molecule::hex_string;
+        if f.alternate() {
+            write!(f, "0x")?;
+        }
+        write!(f, "{}", hex_string(self.as_slice()))
+    }
+}
+impl<'r> ::core::fmt::Debug for InvoiceHopHintVecReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{}({:#x})", Self::NAME, self)
+    }
+}
+impl<'r> ::core::fmt::Display for InvoiceHopHintVecReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{} [", Self::NAME)?;
+        for i in 0..self.len() {
+            if i == 0 {
+                write!(f, "{}", self.get_unchecked(i))?;
+            } else {
+                write!(f, ", {}", self.get_unchecked(i))?;
+            }
+        }
+        write!(f, "]")
+    }
+}
+impl<'r> InvoiceHopHintVecReader<'r> {
+    pub fn total_size(&self) -> usize {
+        molecule::unpack_number(self.as_slice()) as usize
+    }
+    pub fn item_count(&self) -> usize {
+        if self.total_size() == molecule::NUMBER_SIZE {
+            0
+        } else {
+            (molecule::unpack_number(&self.as_slice()[molecule::NUMBER_SIZE..]) as usize / 4) - 1
+        }
+    }
+    pub fn len(&self) -> usize {
+        self.item_count()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    pub fn get(&self, idx: usize) -> Option<InvoiceHopHintReader<'r>> {
+        if idx >= self.len() {
+            None
+        } else {
+            Some(self.get_unchecked(idx))
+        }
+    }
+    pub fn get_unchecked(&self, idx: usize) -> InvoiceHopHintReader<'r> {
+        let slice = self.as_slice();
+        let start_idx = molecule::NUMBER_SIZE * (1 + idx);
+        let start = molecule::unpack_number(&slice[start_idx..]) as usize;
+        if idx == self.len() - 1 {
+            InvoiceHopHintReader::new_unchecked(&self.as_slice()[start..])
+        } else {
+            let end_idx = start_idx + molecule::NUMBER_SIZE;
+            let end = molecule::unpack_number(&slice[end_idx..]) as usize;
+            InvoiceHopHintReader::new_unchecked(&self.as_slice()[start..end])
+        }
+    }
+}
+impl<'r> molecule::prelude::Reader<'r> for InvoiceHopHintVecReader<'r> {
+    type Entity = InvoiceHopHintVec;
+    const NAME: &'static str = "InvoiceHopHintVecReader";
+    fn to_entity(&self) -> Self::Entity {
+        Self::Entity::new_unchecked(self.as_slice().to_owned().into())
+    }
+    fn new_unchecked(slice: &'r [u8]) -> Self {
+        InvoiceHopHintVecReader(slice)
+    }
+    fn as_slice(&self) -> &'r [u8] {
+        self.0
+    }
+    fn verify(slice: &[u8], compatible: bool) -> molecule::error::VerificationResult<()> {
+        use molecule::verification_error as ve;
+        let slice_len = slice.len();
+        if slice_len < molecule::NUMBER_SIZE {
+            return ve!(Self, HeaderIsBroken, molecule::NUMBER_SIZE, slice_len);
+        }
+        let total_size = molecule::unpack_number(slice) as usize;
+        if slice_len != total_size {
+            return ve!(Self, TotalSizeNotMatch, total_size, slice_len);
+        }
+        if slice_len == molecule::NUMBER_SIZE {
+            return Ok(());
+        }
+        if slice_len < molecule::NUMBER_SIZE * 2 {
+            return ve!(
+                Self,
+                TotalSizeNotMatch,
+                molecule::NUMBER_SIZE * 2,
+                slice_len
+            );
+        }
+        let offset_first = molecule::unpack_number(&slice[molecule::NUMBER_SIZE..]) as usize;
+        if offset_first % molecule::NUMBER_SIZE != 0 || offset_first < molecule::NUMBER_SIZE * 2 {
+            return ve!(Self, OffsetsNotMatch);
+        }
+        if slice_len < offset_first {
+            return ve!(Self, HeaderIsBroken, offset_first, slice_len);
+        }
+        let mut offsets: Vec<usize> = slice[molecule::NUMBER_SIZE..offset_first]
+            .chunks_exact(molecule::NUMBER_SIZE)
+            .map(|x| molecule::unpack_number(x) as usize)
+            .collect();
+        offsets.push(total_size);
+        if offsets.windows(2).any(|i| i[0] > i[1]) {
+            return ve!(Self, OffsetsNotMatch);
+        }
+        for pair in offsets.windows(2) {
+            let start = pair[0];
+            let end = pair[1];
+            InvoiceHopHintReader::verify(&slice[start..end], compatible)?;
+        }
+        Ok(())
+    }
+}
+#[derive(Clone, Debug, Default)]
+pub struct InvoiceHopHintVecBuilder(pub(crate) Vec<InvoiceHopHint>);
+impl InvoiceHopHintVecBuilder {
+    pub fn set(mut self, v: Vec<InvoiceHopHint>) -> Self {
+        self.0 = v;
+        self
+    }
+    pub fn push(mut self, v: InvoiceHopHint) -> Self {
+        self.0.push(v);
+        self
+    }
+    pub fn extend<T: ::core::iter::IntoIterator<Item = InvoiceHopHint>>(mut self, iter: T) -> Self {
+        for elem in iter {
+            self.0.push(elem);
+        }
+        self
+    }
+    pub fn replace(&mut self, index: usize, v: InvoiceHopHint) -> Option<InvoiceHopHint> {
+        self.0
+            .get_mut(index)
+            .map(|item| ::core::mem::replace(item, v))
+    }
+}
+impl molecule::prelude::Builder for InvoiceHopHintVecBuilder {
+    type Entity = InvoiceHopHintVec;
+    const NAME: &'static str = "InvoiceHopHintVecBuilder";
+    fn expected_length(&self) -> usize {
+        molecule::NUMBER_SIZE * (self.0.len() + 1)
+            + self
+                .0
+                .iter()
+                .map(|inner| inner.as_slice().len())
+                .sum::<usize>()
+    }
+    fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
+        let item_count = self.0.len();
+        if item_count == 0 {
+            writer.write_all(&molecule::pack_number(
+                molecule::NUMBER_SIZE as molecule::Number,
+            ))?;
+        } else {
+            let (total_size, offsets) = self.0.iter().fold(
+                (
+                    molecule::NUMBER_SIZE * (item_count + 1),
+                    Vec::with_capacity(item_count),
+                ),
+                |(start, mut offsets), inner| {
+                    offsets.push(start);
+                    (start + inner.as_slice().len(), offsets)
+                },
+            );
+            writer.write_all(&molecule::pack_number(total_size as molecule::Number))?;
+            for offset in offsets.into_iter() {
+                writer.write_all(&molecule::pack_number(offset as molecule::Number))?;
+            }
+            for inner in self.0.iter() {
+                writer.write_all(inner.as_slice())?;
+            }
+        }
+        Ok(())
+    }
+    fn build(&self) -> Self::Entity {
+        let mut inner = Vec::with_capacity(self.expected_length());
+        self.write(&mut inner)
+            .unwrap_or_else(|_| panic!("{} build should be ok", Self::NAME));
+        InvoiceHopHintVec::new_unchecked(inner.into())
+    }
+}
+pub struct InvoiceHopHintVecIterator(InvoiceHopHintVec, usize, usize);
+impl ::core::iter::Iterator for InvoiceHopHintVecIterator {
+    type Item = InvoiceHopHint;
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.1 >= self.2 {
+            None
+        } else {
+            let ret = self.0.get_unchecked(self.1);
+            self.1 += 1;
+            Some(ret)
+        }
+    }
+}
+impl ::core::iter::ExactSizeIterator for InvoiceHopHintVecIterator {
+    fn len(&self) -> usize {
+        self.2 - self.1
+    }
+}
+impl ::core::iter::IntoIterator for InvoiceHopHintVec {
+    type Item = InvoiceHopHint;
+    type IntoIter = InvoiceHopHintVecIterator;
+    fn into_iter(self) -> Self::IntoIter {
+        let len = self.len();
+        InvoiceHopHintVecIterator(self, 0, len)
+    }
+}
+impl<'r> InvoiceHopHintVecReader<'r> {
+    pub fn iter<'t>(&'t self) -> InvoiceHopHintVecReaderIterator<'t, 'r> {
+        InvoiceHopHintVecReaderIterator(&self, 0, self.len())
+    }
+}
+pub struct InvoiceHopHintVecReaderIterator<'t, 'r>(&'t InvoiceHopHintVecReader<'r>, usize, usize);
+impl<'t: 'r, 'r> ::core::iter::Iterator for InvoiceHopHintVecReaderIterator<'t, 'r> {
+    type Item = InvoiceHopHintReader<'t>;
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.1 >= self.2 {
+            None
+        } else {
+            let ret = self.0.get_unchecked(self.1);
+            self.1 += 1;
+            Some(ret)
+        }
+    }
+}
+impl<'t: 'r, 'r> ::core::iter::ExactSizeIterator for InvoiceHopHintVecReaderIterator<'t, 'r> {
+    fn len(&self) -> usize {
+        self.2 - self.1
+    }
+}
+impl ::core::iter::FromIterator<InvoiceHopHint> for InvoiceHopHintVec {
+    fn from_iter<T: IntoIterator<Item = InvoiceHopHint>>(iter: T) -> Self {
+        Self::new_builder().extend(iter).build()
+    }
+}
+#[derive(Clone)]
+pub struct HopHints(molecule::bytes::Bytes);
+impl ::core::fmt::LowerHex for HopHints {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        use molecule::hex_string;
+        if f.alternate() {
+            write!(f, "0x")?;
+        }
+        write!(f, "{}", hex_string(self.as_slice()))
+    }
+}
+impl ::core::fmt::Debug for HopHints {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{}({:#x})", Self::NAME, self)
+    }
+}
+impl ::core::fmt::Display for HopHints {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{} {{ ", Self::NAME)?;
+        write!(f, "{}: {}", "value", self.value())?;
+        let extra_count = self.count_extra_fields();
+        if extra_count != 0 {
+            write!(f, ", .. ({} fields)", extra_count)?;
+        }
+        write!(f, " }}")
+    }
+}
+impl ::core::default::Default for HopHints {
+    fn default() -> Self {
+        let v = molecule::bytes::Bytes::from_static(&Self::DEFAULT_VALUE);
+        HopHints::new_unchecked(v)
+    }
+}
+impl HopHints {
+    const DEFAULT_VALUE: [u8; 12] = [12, 0, 0, 0, 8, 0, 0, 0, 4, 0, 0, 0];
+    pub const FIELD_COUNT: usize = 1;
+    pub fn total_size(&self) -> usize {
+        molecule::unpack_number(self.as_slice()) as usize
+    }
+    pub fn field_count(&self) -> usize {
+        if self.total_size() == molecule::NUMBER_SIZE {
+            0
+        } else {
+            (molecule::unpack_number(&self.as_slice()[molecule::NUMBER_SIZE..]) as usize / 4) - 1
+        }
+    }
+    pub fn count_extra_fields(&self) -> usize {
+        self.field_count() - Self::FIELD_COUNT
+    }
+    pub fn has_extra_fields(&self) -> bool {
+        Self::FIELD_COUNT != self.field_count()
+    }
+    pub fn value(&self) -> InvoiceHopHintVec {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[4..]) as usize;
+        if self.has_extra_fields() {
+            let end = molecule::unpack_number(&slice[8..]) as usize;
+            InvoiceHopHintVec::new_unchecked(self.0.slice(start..end))
+        } else {
+            InvoiceHopHintVec::new_unchecked(self.0.slice(start..))
+        }
+    }
+    pub fn as_reader<'r>(&'r self) -> HopHintsReader<'r> {
+        HopHintsReader::new_unchecked(self.as_slice())
+    }
+}
+impl molecule::prelude::Entity for HopHints {
+    type Builder = HopHintsBuilder;
+    const NAME: &'static str = "HopHints";
+    fn new_unchecked(data: molecule::bytes::Bytes) -> Self {
+        HopHints(data)
+    }
+    fn as_bytes(&self) -> molecule::bytes::Bytes {
+        self.0.clone()
+    }
+    fn as_slice(&self) -> &[u8] {
+        &self.0[..]
+    }
+    fn from_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
+        HopHintsReader::from_slice(slice).map(|reader| reader.to_entity())
+    }
+    fn from_compatible_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
+        HopHintsReader::from_compatible_slice(slice).map(|reader| reader.to_entity())
+    }
+    fn new_builder() -> Self::Builder {
+        ::core::default::Default::default()
+    }
+    fn as_builder(self) -> Self::Builder {
+        Self::new_builder().value(self.value())
+    }
+}
+#[derive(Clone, Copy)]
+pub struct HopHintsReader<'r>(&'r [u8]);
+impl<'r> ::core::fmt::LowerHex for HopHintsReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        use molecule::hex_string;
+        if f.alternate() {
+            write!(f, "0x")?;
+        }
+        write!(f, "{}", hex_string(self.as_slice()))
+    }
+}
+impl<'r> ::core::fmt::Debug for HopHintsReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{}({:#x})", Self::NAME, self)
+    }
+}
+impl<'r> ::core::fmt::Display for HopHintsReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{} {{ ", Self::NAME)?;
+        write!(f, "{}: {}", "value", self.value())?;
+        let extra_count = self.count_extra_fields();
+        if extra_count != 0 {
+            write!(f, ", .. ({} fields)", extra_count)?;
+        }
+        write!(f, " }}")
+    }
+}
+impl<'r> HopHintsReader<'r> {
+    pub const FIELD_COUNT: usize = 1;
+    pub fn total_size(&self) -> usize {
+        molecule::unpack_number(self.as_slice()) as usize
+    }
+    pub fn field_count(&self) -> usize {
+        if self.total_size() == molecule::NUMBER_SIZE {
+            0
+        } else {
+            (molecule::unpack_number(&self.as_slice()[molecule::NUMBER_SIZE..]) as usize / 4) - 1
+        }
+    }
+    pub fn count_extra_fields(&self) -> usize {
+        self.field_count() - Self::FIELD_COUNT
+    }
+    pub fn has_extra_fields(&self) -> bool {
+        Self::FIELD_COUNT != self.field_count()
+    }
+    pub fn value(&self) -> InvoiceHopHintVecReader<'r> {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[4..]) as usize;
+        if self.has_extra_fields() {
+            let end = molecule::unpack_number(&slice[8..]) as usize;
+            InvoiceHopHintVecReader::new_unchecked(&self.as_slice()[start..end])
+        } else {
+            InvoiceHopHintVecReader::new_unchecked(&self.as_slice()[start..])
+        }
+    }
+}
+impl<'r> molecule::prelude::Reader<'r> for HopHintsReader<'r> {
+    type Entity = HopHints;
+    const NAME: &'static str = "HopHintsReader";
+    fn to_entity(&self) -> Self::Entity {
+        Self::Entity::new_unchecked(self.as_slice().to_owned().into())
+    }
+    fn new_unchecked(slice: &'r [u8]) -> Self {
+        HopHintsReader(slice)
+    }
+    fn as_slice(&self) -> &'r [u8] {
+        self.0
+    }
+    fn verify(slice: &[u8], compatible: bool) -> molecule::error::VerificationResult<()> {
+        use molecule::verification_error as ve;
+        let slice_len = slice.len();
+        if slice_len < molecule::NUMBER_SIZE {
+            return ve!(Self, HeaderIsBroken, molecule::NUMBER_SIZE, slice_len);
+        }
+        let total_size = molecule::unpack_number(slice) as usize;
+        if slice_len != total_size {
+            return ve!(Self, TotalSizeNotMatch, total_size, slice_len);
+        }
+        if slice_len < molecule::NUMBER_SIZE * 2 {
+            return ve!(Self, HeaderIsBroken, molecule::NUMBER_SIZE * 2, slice_len);
+        }
+        let offset_first = molecule::unpack_number(&slice[molecule::NUMBER_SIZE..]) as usize;
+        if offset_first % molecule::NUMBER_SIZE != 0 || offset_first < molecule::NUMBER_SIZE * 2 {
+            return ve!(Self, OffsetsNotMatch);
+        }
+        if slice_len < offset_first {
+            return ve!(Self, HeaderIsBroken, offset_first, slice_len);
+        }
+        let field_count = offset_first / molecule::NUMBER_SIZE - 1;
+        if field_count < Self::FIELD_COUNT {
+            return ve!(Self, FieldCountNotMatch, Self::FIELD_COUNT, field_count);
+        } else if !compatible && field_count > Self::FIELD_COUNT {
+            return ve!(Self, FieldCountNotMatch, Self::FIELD_COUNT, field_count);
+        };
+        let mut offsets: Vec<usize> = slice[molecule::NUMBER_SIZE..offset_first]
+            .chunks_exact(molecule::NUMBER_SIZE)
+            .map(|x| molecule::unpack_number(x) as usize)
+            .collect();
+        offsets.push(total_size);
+        if offsets.windows(2).any(|i| i[0] > i[1]) {
+            return ve!(Self, OffsetsNotMatch);
+        }
+        InvoiceHopHintVecReader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
+        Ok(())
+    }
+}
+#[derive(Clone, Debug, Default)]
+pub struct HopHintsBuilder {
+    pub(crate) value: InvoiceHopHintVec,
+}
+impl HopHintsBuilder {
+    pub const FIELD_COUNT: usize = 1;
+    pub fn value(mut self, v: InvoiceHopHintVec) -> Self {
+        self.value = v;
+        self
+    }
+}
+impl molecule::prelude::Builder for HopHintsBuilder {
+    type Entity = HopHints;
+    const NAME: &'static str = "HopHintsBuilder";
+    fn expected_length(&self) -> usize {
+        molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1) + self.value.as_slice().len()
+    }
+    fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
+        let mut total_size = molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1);
+        let mut offsets = Vec::with_capacity(Self::FIELD_COUNT);
+        offsets.push(total_size);
+        total_size += self.value.as_slice().len();
+        writer.write_all(&molecule::pack_number(total_size as molecule::Number))?;
+        for offset in offsets.into_iter() {
+            writer.write_all(&molecule::pack_number(offset as molecule::Number))?;
+        }
+        writer.write_all(self.value.as_slice())?;
+        Ok(())
+    }
+    fn build(&self) -> Self::Entity {
+        let mut inner = Vec::with_capacity(self.expected_length());
+        self.write(&mut inner)
+            .unwrap_or_else(|_| panic!("{} build should be ok", Self::NAME));
+        HopHints::new_unchecked(inner.into())
+    }
+}
+#[derive(Clone)]
 pub struct HashAlgorithm(molecule::bytes::Bytes);
 impl ::core::fmt::LowerHex for HashAlgorithm {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
@@ -4841,7 +5967,7 @@ impl ::core::default::Default for InvoiceAttr {
 }
 impl InvoiceAttr {
     const DEFAULT_VALUE: [u8; 12] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-    pub const ITEMS_COUNT: usize = 11;
+    pub const ITEMS_COUNT: usize = 13;
     pub fn item_id(&self) -> molecule::Number {
         molecule::unpack_number(self.as_slice())
     }
@@ -4859,6 +5985,8 @@ impl InvoiceAttr {
             8 => HashAlgorithm::new_unchecked(inner).into(),
             9 => PaymentSecret::new_unchecked(inner).into(),
             10 => LiquidityProvider::new_unchecked(inner).into(),
+            11 => JitOpenFee::new_unchecked(inner).into(),
+            12 => HopHints::new_unchecked(inner).into(),
             _ => panic!("{}: invalid data", Self::NAME),
         }
     }
@@ -4915,7 +6043,7 @@ impl<'r> ::core::fmt::Display for InvoiceAttrReader<'r> {
     }
 }
 impl<'r> InvoiceAttrReader<'r> {
-    pub const ITEMS_COUNT: usize = 11;
+    pub const ITEMS_COUNT: usize = 13;
     pub fn item_id(&self) -> molecule::Number {
         molecule::unpack_number(self.as_slice())
     }
@@ -4933,6 +6061,8 @@ impl<'r> InvoiceAttrReader<'r> {
             8 => HashAlgorithmReader::new_unchecked(inner).into(),
             9 => PaymentSecretReader::new_unchecked(inner).into(),
             10 => LiquidityProviderReader::new_unchecked(inner).into(),
+            11 => JitOpenFeeReader::new_unchecked(inner).into(),
+            12 => HopHintsReader::new_unchecked(inner).into(),
             _ => panic!("{}: invalid data", Self::NAME),
         }
     }
@@ -4969,6 +6099,8 @@ impl<'r> molecule::prelude::Reader<'r> for InvoiceAttrReader<'r> {
             8 => HashAlgorithmReader::verify(inner_slice, compatible),
             9 => PaymentSecretReader::verify(inner_slice, compatible),
             10 => LiquidityProviderReader::verify(inner_slice, compatible),
+            11 => JitOpenFeeReader::verify(inner_slice, compatible),
+            12 => HopHintsReader::verify(inner_slice, compatible),
             _ => ve!(Self, UnknownItem, Self::ITEMS_COUNT, item_id),
         }?;
         Ok(())
@@ -4977,7 +6109,7 @@ impl<'r> molecule::prelude::Reader<'r> for InvoiceAttrReader<'r> {
 #[derive(Clone, Debug, Default)]
 pub struct InvoiceAttrBuilder(pub(crate) InvoiceAttrUnion);
 impl InvoiceAttrBuilder {
-    pub const ITEMS_COUNT: usize = 11;
+    pub const ITEMS_COUNT: usize = 13;
     pub fn set<I>(mut self, v: I) -> Self
     where
         I: ::core::convert::Into<InvoiceAttrUnion>,
@@ -5016,6 +6148,8 @@ pub enum InvoiceAttrUnion {
     HashAlgorithm(HashAlgorithm),
     PaymentSecret(PaymentSecret),
     LiquidityProvider(LiquidityProvider),
+    JitOpenFee(JitOpenFee),
+    HopHints(HopHints),
 }
 #[derive(Debug, Clone, Copy)]
 pub enum InvoiceAttrUnionReader<'r> {
@@ -5030,6 +6164,8 @@ pub enum InvoiceAttrUnionReader<'r> {
     HashAlgorithm(HashAlgorithmReader<'r>),
     PaymentSecret(PaymentSecretReader<'r>),
     LiquidityProvider(LiquidityProviderReader<'r>),
+    JitOpenFee(JitOpenFeeReader<'r>),
+    HopHints(HopHintsReader<'r>),
 }
 impl ::core::default::Default for InvoiceAttrUnion {
     fn default() -> Self {
@@ -5078,6 +6214,12 @@ impl ::core::fmt::Display for InvoiceAttrUnion {
             InvoiceAttrUnion::LiquidityProvider(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, LiquidityProvider::NAME, item)
             }
+            InvoiceAttrUnion::JitOpenFee(ref item) => {
+                write!(f, "{}::{}({})", Self::NAME, JitOpenFee::NAME, item)
+            }
+            InvoiceAttrUnion::HopHints(ref item) => {
+                write!(f, "{}::{}({})", Self::NAME, HopHints::NAME, item)
+            }
         }
     }
 }
@@ -5123,6 +6265,12 @@ impl<'r> ::core::fmt::Display for InvoiceAttrUnionReader<'r> {
             InvoiceAttrUnionReader::LiquidityProvider(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, LiquidityProvider::NAME, item)
             }
+            InvoiceAttrUnionReader::JitOpenFee(ref item) => {
+                write!(f, "{}::{}({})", Self::NAME, JitOpenFee::NAME, item)
+            }
+            InvoiceAttrUnionReader::HopHints(ref item) => {
+                write!(f, "{}::{}({})", Self::NAME, HopHints::NAME, item)
+            }
         }
     }
 }
@@ -5140,6 +6288,8 @@ impl InvoiceAttrUnion {
             InvoiceAttrUnion::HashAlgorithm(ref item) => write!(f, "{}", item),
             InvoiceAttrUnion::PaymentSecret(ref item) => write!(f, "{}", item),
             InvoiceAttrUnion::LiquidityProvider(ref item) => write!(f, "{}", item),
+            InvoiceAttrUnion::JitOpenFee(ref item) => write!(f, "{}", item),
+            InvoiceAttrUnion::HopHints(ref item) => write!(f, "{}", item),
         }
     }
 }
@@ -5157,6 +6307,8 @@ impl<'r> InvoiceAttrUnionReader<'r> {
             InvoiceAttrUnionReader::HashAlgorithm(ref item) => write!(f, "{}", item),
             InvoiceAttrUnionReader::PaymentSecret(ref item) => write!(f, "{}", item),
             InvoiceAttrUnionReader::LiquidityProvider(ref item) => write!(f, "{}", item),
+            InvoiceAttrUnionReader::JitOpenFee(ref item) => write!(f, "{}", item),
+            InvoiceAttrUnionReader::HopHints(ref item) => write!(f, "{}", item),
         }
     }
 }
@@ -5213,6 +6365,16 @@ impl ::core::convert::From<PaymentSecret> for InvoiceAttrUnion {
 impl ::core::convert::From<LiquidityProvider> for InvoiceAttrUnion {
     fn from(item: LiquidityProvider) -> Self {
         InvoiceAttrUnion::LiquidityProvider(item)
+    }
+}
+impl ::core::convert::From<JitOpenFee> for InvoiceAttrUnion {
+    fn from(item: JitOpenFee) -> Self {
+        InvoiceAttrUnion::JitOpenFee(item)
+    }
+}
+impl ::core::convert::From<HopHints> for InvoiceAttrUnion {
+    fn from(item: HopHints) -> Self {
+        InvoiceAttrUnion::HopHints(item)
     }
 }
 impl<'r> ::core::convert::From<ExpiryTimeReader<'r>> for InvoiceAttrUnionReader<'r> {
@@ -5272,6 +6434,16 @@ impl<'r> ::core::convert::From<LiquidityProviderReader<'r>> for InvoiceAttrUnion
         InvoiceAttrUnionReader::LiquidityProvider(item)
     }
 }
+impl<'r> ::core::convert::From<JitOpenFeeReader<'r>> for InvoiceAttrUnionReader<'r> {
+    fn from(item: JitOpenFeeReader<'r>) -> Self {
+        InvoiceAttrUnionReader::JitOpenFee(item)
+    }
+}
+impl<'r> ::core::convert::From<HopHintsReader<'r>> for InvoiceAttrUnionReader<'r> {
+    fn from(item: HopHintsReader<'r>) -> Self {
+        InvoiceAttrUnionReader::HopHints(item)
+    }
+}
 impl InvoiceAttrUnion {
     pub const NAME: &'static str = "InvoiceAttrUnion";
     pub fn as_bytes(&self) -> molecule::bytes::Bytes {
@@ -5287,6 +6459,8 @@ impl InvoiceAttrUnion {
             InvoiceAttrUnion::HashAlgorithm(item) => item.as_bytes(),
             InvoiceAttrUnion::PaymentSecret(item) => item.as_bytes(),
             InvoiceAttrUnion::LiquidityProvider(item) => item.as_bytes(),
+            InvoiceAttrUnion::JitOpenFee(item) => item.as_bytes(),
+            InvoiceAttrUnion::HopHints(item) => item.as_bytes(),
         }
     }
     pub fn as_slice(&self) -> &[u8] {
@@ -5302,6 +6476,8 @@ impl InvoiceAttrUnion {
             InvoiceAttrUnion::HashAlgorithm(item) => item.as_slice(),
             InvoiceAttrUnion::PaymentSecret(item) => item.as_slice(),
             InvoiceAttrUnion::LiquidityProvider(item) => item.as_slice(),
+            InvoiceAttrUnion::JitOpenFee(item) => item.as_slice(),
+            InvoiceAttrUnion::HopHints(item) => item.as_slice(),
         }
     }
     pub fn item_id(&self) -> molecule::Number {
@@ -5317,6 +6493,8 @@ impl InvoiceAttrUnion {
             InvoiceAttrUnion::HashAlgorithm(_) => 8,
             InvoiceAttrUnion::PaymentSecret(_) => 9,
             InvoiceAttrUnion::LiquidityProvider(_) => 10,
+            InvoiceAttrUnion::JitOpenFee(_) => 11,
+            InvoiceAttrUnion::HopHints(_) => 12,
         }
     }
     pub fn item_name(&self) -> &str {
@@ -5332,6 +6510,8 @@ impl InvoiceAttrUnion {
             InvoiceAttrUnion::HashAlgorithm(_) => "HashAlgorithm",
             InvoiceAttrUnion::PaymentSecret(_) => "PaymentSecret",
             InvoiceAttrUnion::LiquidityProvider(_) => "LiquidityProvider",
+            InvoiceAttrUnion::JitOpenFee(_) => "JitOpenFee",
+            InvoiceAttrUnion::HopHints(_) => "HopHints",
         }
     }
     pub fn as_reader<'r>(&'r self) -> InvoiceAttrUnionReader<'r> {
@@ -5347,6 +6527,8 @@ impl InvoiceAttrUnion {
             InvoiceAttrUnion::HashAlgorithm(item) => item.as_reader().into(),
             InvoiceAttrUnion::PaymentSecret(item) => item.as_reader().into(),
             InvoiceAttrUnion::LiquidityProvider(item) => item.as_reader().into(),
+            InvoiceAttrUnion::JitOpenFee(item) => item.as_reader().into(),
+            InvoiceAttrUnion::HopHints(item) => item.as_reader().into(),
         }
     }
 }
@@ -5365,6 +6547,8 @@ impl<'r> InvoiceAttrUnionReader<'r> {
             InvoiceAttrUnionReader::HashAlgorithm(item) => item.as_slice(),
             InvoiceAttrUnionReader::PaymentSecret(item) => item.as_slice(),
             InvoiceAttrUnionReader::LiquidityProvider(item) => item.as_slice(),
+            InvoiceAttrUnionReader::JitOpenFee(item) => item.as_slice(),
+            InvoiceAttrUnionReader::HopHints(item) => item.as_slice(),
         }
     }
     pub fn item_id(&self) -> molecule::Number {
@@ -5380,6 +6564,8 @@ impl<'r> InvoiceAttrUnionReader<'r> {
             InvoiceAttrUnionReader::HashAlgorithm(_) => 8,
             InvoiceAttrUnionReader::PaymentSecret(_) => 9,
             InvoiceAttrUnionReader::LiquidityProvider(_) => 10,
+            InvoiceAttrUnionReader::JitOpenFee(_) => 11,
+            InvoiceAttrUnionReader::HopHints(_) => 12,
         }
     }
     pub fn item_name(&self) -> &str {
@@ -5395,6 +6581,8 @@ impl<'r> InvoiceAttrUnionReader<'r> {
             InvoiceAttrUnionReader::HashAlgorithm(_) => "HashAlgorithm",
             InvoiceAttrUnionReader::PaymentSecret(_) => "PaymentSecret",
             InvoiceAttrUnionReader::LiquidityProvider(_) => "LiquidityProvider",
+            InvoiceAttrUnionReader::JitOpenFee(_) => "JitOpenFee",
+            InvoiceAttrUnionReader::HopHints(_) => "HopHints",
         }
     }
 }
@@ -5450,6 +6638,16 @@ impl From<PaymentSecret> for InvoiceAttr {
 }
 impl From<LiquidityProvider> for InvoiceAttr {
     fn from(value: LiquidityProvider) -> Self {
+        Self::new_builder().set(value).build()
+    }
+}
+impl From<JitOpenFee> for InvoiceAttr {
+    fn from(value: JitOpenFee) -> Self {
+        Self::new_builder().set(value).build()
+    }
+}
+impl From<HopHints> for InvoiceAttr {
+    fn from(value: HopHints) -> Self {
         Self::new_builder().set(value).build()
     }
 }

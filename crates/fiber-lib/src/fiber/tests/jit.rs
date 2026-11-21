@@ -17,6 +17,8 @@ use crate::test_utils::{
 };
 use crate::FiberConfig;
 use crate::NetworkServiceEvent;
+use ckb_types::packed::OutPoint;
+use fiber_types::HopHint;
 use fiber_types::{ChannelState, Hash256, SendPaymentData};
 
 fn sample_pubkey_hex() -> (String, crate::fiber::types::Pubkey) {
@@ -29,10 +31,22 @@ fn test_jit_config_defaults_do_not_advertise() {
     let config = FiberConfig::default();
     assert!(config.jit_lsp_pubkey().is_none());
     assert!(!config.jit_service_enabled());
-    assert_eq!(config.jit_open_fee(), 0);
+    assert!(config.jit_open_fee().is_none());
+    assert!(!config.jit_channel_config().open_fee_required());
     assert_eq!(config.jit_min_amount(), 0);
     assert_eq!(config.jit_max_funding(), 0);
     assert!(config.jit_max_amount().is_none());
+    let funded = FiberConfig {
+        jit_service_enabled: Some(true),
+        jit_max_funding: Some(1),
+        ..FiberConfig::default()
+    };
+    assert!(funded.jit_channel_config().open_fee_required());
+    let priced = FiberConfig {
+        jit_open_fee: Some(0),
+        ..funded
+    };
+    assert!(!priced.jit_channel_config().open_fee_required());
     assert!(!config.jit_channel_advertised());
     assert!(!config.gen_node_features().supports_jit_channel());
 }
@@ -63,7 +77,7 @@ jit_max_amount: 500
         serde_yaml::from_str(yaml).expect("parse fiber config");
     let config = FiberConfig::from(opt);
     assert!(config.jit_service_enabled());
-    assert_eq!(config.jit_open_fee(), 1000);
+    assert_eq!(config.jit_open_fee(), Some(1000));
     assert_eq!(config.jit_min_amount(), 50);
     assert_eq!(config.jit_max_funding(), 25_000_000_000);
     assert_eq!(config.jit_max_amount(), Some(500));
@@ -87,6 +101,7 @@ async fn start_jit_lsp() -> NetworkNode {
             .fiber_config_updater(|config| {
                 config.jit_service_enabled = Some(true);
                 config.jit_max_funding = Some(HUGE_CKB_AMOUNT);
+                config.jit_open_fee = Some(0);
             })
             .build(),
     )
@@ -214,8 +229,10 @@ async fn test_jit_unregister_on_disconnect() {
 
 #[tokio::test]
 async fn test_jit_new_invoice_embeds_liquidity_provider() {
-    let lsp = start_jit_lsp().await;
-    let receiver = start_jit_receiver(lsp.pubkey).await;
+    let mut lsp = start_jit_lsp().await;
+    let mut receiver = start_jit_receiver(lsp.pubkey).await;
+    receiver.connect_to(&mut lsp).await;
+    wait_jit_registration(&mut receiver, &mut lsp).await;
     let rpc = InvoiceRpcServerImpl::new(
         receiver.store.clone(),
         Some(receiver.network_actor.clone()),
@@ -244,6 +261,16 @@ async fn test_jit_new_invoice_embeds_liquidity_provider() {
         invoice.liquidity_provider().copied().map(Into::into),
         Some(lsp.pubkey)
     );
+    assert_eq!(invoice.jit_open_fee(), Some(0));
+    assert_eq!(
+        invoice.hop_hints(),
+        vec![HopHint {
+            pubkey: lsp.pubkey,
+            channel_outpoint: OutPoint::default(),
+            fee_rate: 0,
+            tlc_expiry_delta: 0,
+        }]
+    );
     assert!(invoice.allow_trampoline_routing());
 
     let opted_out = rpc
@@ -265,6 +292,8 @@ async fn test_jit_new_invoice_embeds_liquidity_provider() {
         .expect("direct invoice");
     let opted_out: CkbInvoice = opted_out.invoice_address.parse().unwrap();
     assert!(opted_out.liquidity_provider().is_none());
+    assert!(opted_out.jit_open_fee().is_none());
+    assert!(opted_out.hop_hints().is_empty());
     assert!(!opted_out.allow_trampoline_routing());
 
     let mpp_rejected = rpc
@@ -330,6 +359,162 @@ fn test_send_payment_uses_invoice_liquidity_provider_as_trampoline_hop() {
         payment.trampoline_hops.as_deref(),
         Some([other_hop.into()].as_slice())
     );
+}
+
+#[test]
+fn test_send_payment_uses_jit_hop_hint_without_liquidity_provider() {
+    let (payee_sk, payee_pk) = crate::gen_rand_secp256k1_keypair_tuple();
+    let lsp_pk: PublicKey = crate::gen_rand_fiber_public_key().into();
+    let invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(1000))
+        .payment_preimage(gen_rand_sha256_hash())
+        .payee_pub_key(payee_pk)
+        .hop_hints(vec![HopHint {
+            pubkey: lsp_pk.into(),
+            channel_outpoint: OutPoint::default(),
+            fee_rate: 0,
+            tlc_expiry_delta: 0,
+        }])
+        .allow_trampoline_routing(true)
+        .jit_open_fee(50_000)
+        .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &payee_sk))
+        .expect("build jit invoice");
+
+    let payment = SendPaymentData::new(
+        SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            ..Default::default()
+        },
+        Currency::Fibd,
+    )
+    .expect("build payment");
+    assert_eq!(
+        payment.trampoline_hops.as_deref(),
+        Some([lsp_pk.into()].as_slice())
+    );
+    assert!(payment.hop_hints.is_empty());
+    // Default routing allowance is 0.5% of (amount + open fee), added on top of the quote.
+    assert_eq!(payment.max_fee_amount, Some(50_255));
+
+    let capped = SendPaymentData::new(
+        SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            max_fee_amount: Some(60_000),
+            ..Default::default()
+        },
+        Currency::Fibd,
+    )
+    .expect("cap above the quote");
+    assert_eq!(capped.max_fee_amount, Some(50_255));
+
+    let rejected = SendPaymentData::new(
+        SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            max_fee_amount: Some(10),
+            ..Default::default()
+        },
+        Currency::Fibd,
+    );
+    assert!(rejected
+        .expect_err("fee below invoice")
+        .contains("JIT open fee"));
+
+    let rate_rejected = SendPaymentData::new(
+        SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            max_fee_rate: Some(1),
+            ..Default::default()
+        },
+        Currency::Fibd,
+    );
+    assert!(rate_rejected
+        .expect_err("rate below invoice")
+        .contains("JIT open fee"));
+
+    let direct = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(1000))
+        .payment_preimage(gen_rand_sha256_hash())
+        .payee_pub_key(payee_pk)
+        .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &payee_sk))
+        .expect("build direct invoice");
+    let hinted = SendPaymentData::new(
+        SendPaymentCommand {
+            invoice: Some(direct.to_string()),
+            hop_hints: Some(vec![HopHint {
+                pubkey: lsp_pk.into(),
+                channel_outpoint: OutPoint::default(),
+                fee_rate: 0,
+                tlc_expiry_delta: 0,
+            }]),
+            ..Default::default()
+        },
+        Currency::Fibd,
+    );
+    assert!(hinted
+        .expect_err("sentinel hint on an invoice that disallows trampoline")
+        .contains("hop hints"));
+}
+
+#[tokio::test]
+async fn test_jit_invoice_quotes_lsp_open_fee() {
+    let mut lsp = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .node_name(Some("jit-lsp-fee".to_string()))
+            .fiber_config_updater(|config| {
+                config.jit_service_enabled = Some(true);
+                config.jit_max_funding = Some(HUGE_CKB_AMOUNT);
+                config.jit_open_fee = Some(2_500);
+            })
+            .build(),
+    )
+    .await;
+    let mut receiver = start_jit_receiver(lsp.pubkey).await;
+    receiver.connect_to(&mut lsp).await;
+    wait_jit_registration(&mut receiver, &mut lsp).await;
+
+    let rpc = InvoiceRpcServerImpl::new(
+        receiver.store.clone(),
+        Some(receiver.network_actor.clone()),
+        Some(receiver.fiber_config.clone()),
+    );
+    let result = rpc
+        .new_invoice(NewInvoiceParams {
+            amount: 1000,
+            description: Some("jit fee".to_string()),
+            currency: fiber_json_types::Currency::Fibd,
+            payment_preimage: Some(gen_rand_sha256_hash().into()),
+            payment_hash: None,
+            expiry: None,
+            fallback_address: None,
+            final_expiry_delta: None,
+            udt_type_script: None,
+            hash_algorithm: None,
+            allow_mpp: None,
+            allow_trampoline_routing: None,
+        })
+        .await
+        .expect("new invoice");
+    let invoice: CkbInvoice = result.invoice_address.parse().unwrap();
+    assert_eq!(invoice.jit_open_fee(), Some(2_500));
+    assert_eq!(invoice.hop_hints()[0].pubkey, lsp.pubkey);
+}
+
+#[tokio::test]
+async fn test_jit_funded_service_without_open_fee_rejects_registration() {
+    let mut lsp = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .node_name(Some("jit-lsp-no-fee".to_string()))
+            .fiber_config_updater(|config| {
+                config.jit_service_enabled = Some(true);
+                config.jit_max_funding = Some(HUGE_CKB_AMOUNT);
+            })
+            .build(),
+    )
+    .await;
+    let mut receiver = start_jit_receiver(lsp.pubkey).await;
+    receiver.connect_to(&mut lsp).await;
+    receiver.expect_debug_event("JitChannelRegisterSent").await;
+    lsp.expect_debug_event("JitChannelRegisterRejected").await;
 }
 
 #[tokio::test]
@@ -805,15 +990,18 @@ async fn test_jit_insufficient_open_fee_does_not_open_channel() {
     wait_jit_registration(&mut receiver, &mut lsp).await;
 
     let invoice = new_receiver_jit_invoice(&receiver, 1000).await;
-    let res = payer
+    let err = payer
         .send_payment(SendPaymentCommand {
             invoice: Some(invoice.to_string()),
             max_fee_amount: Some(1_000),
             ..Default::default()
         })
         .await
-        .expect("send payment");
-    payer.wait_until_failed(res.payment_hash).await;
+        .expect_err("fee below the invoice quote");
+    assert!(
+        err.contains("JIT open fee"),
+        "unexpected payment error: {err}"
+    );
     assert!(channel_ids_with_peer(&receiver, lsp.pubkey).is_empty());
     assert!(channel_ids_with_peer(&lsp, receiver.pubkey).is_empty());
 }

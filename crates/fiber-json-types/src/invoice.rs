@@ -1,5 +1,6 @@
 //! Invoice types for the Fiber Network JSON-RPC API.
 
+use crate::payment::HopHint;
 use crate::schema_helpers::*;
 use crate::serde_utils::{duration_hex, Hash256, Pubkey, U128Hex, U64Hex};
 use ckb_jsonrpc_types::Script;
@@ -78,6 +79,12 @@ pub enum Attribute {
     PaymentSecret(String),
     /// The liquidity provider that can open a JIT channel for this invoice
     LiquidityProvider(Pubkey),
+    #[serde(with = "U128Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    /// Fee the liquidity node charges to open a JIT channel. The payer also pays the route to that node.
+    JitOpenFee(u128),
+    /// Route hints. A zero channel outpoint names the liquidity node that opens the channel
+    HopHints(Vec<HopHint>),
 }
 
 /// The metadata of the invoice.
