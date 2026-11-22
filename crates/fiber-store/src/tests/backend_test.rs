@@ -36,11 +36,7 @@ mod testrocksdb_tests {
         // Perform Restore
         // In physical restore, we drop the store to release file locks
         drop(store);
-        let store_for_restore = RocksdbStore::open_db(&db_path).unwrap();
-        store_for_restore
-            .restore(&backup_dir, &db_path)
-            .expect("Restore failed");
-        drop(store_for_restore);
+        RocksdbStore::restore(&backup_dir, &db_path).expect("Restore failed");
 
         // Verify restored data
         let restored_store = RocksdbStore::open_db(&db_path).unwrap();
@@ -59,10 +55,8 @@ mod testrocksdb_tests {
         drop(store);
 
         // Attempt restore from invalid path
-        let store_for_restore = RocksdbStore::open_db(&db_path).unwrap();
-        let result = store_for_restore.restore(&invalid_backup, &db_path);
+        let result = RocksdbStore::restore(&invalid_backup, &db_path);
         assert!(result.is_err());
-        drop(store_for_restore);
 
         // Verify original data was preserved (safety backup worked)
         let restored_store = RocksdbStore::open_db(&db_path).unwrap();
@@ -167,16 +161,11 @@ mod sqlite_tests {
 
         // Perform Restore
         drop(store);
-        let store_for_restore = SqliteStore::open_db(&db_path).unwrap();
-        store_for_restore
-            .restore(&backup_dir, &db_path)
-            .expect("SQLite Restore failed");
+        SqliteStore::restore(&backup_dir, &db_path).expect("SQLite Restore failed");
 
         // WAL and SHM files should be cleaned up during restore
         assert!(!db_path.join("data.sqlite-wal").exists());
         assert!(!db_path.join("data.sqlite-shm").exists());
-
-        drop(store_for_restore);
 
         // Verify restored data and sidecar files removal
         let restored_store = SqliteStore::open_db(&db_path).unwrap();

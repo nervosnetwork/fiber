@@ -198,7 +198,7 @@ impl StorageBackend for Store {
         Ok(())
     }
 
-    fn restore(&self, restore_path: &Path, db_path: &Path) -> Result<(), StoreError> {
+    fn restore(restore_path: &Path, db_path: &Path) -> Result<(), StoreError> {
         // Restore source: restore_path/data.sqlite
         let source_file = restore_path.join("data.sqlite");
         // Target db file: db_path/data.sqlite

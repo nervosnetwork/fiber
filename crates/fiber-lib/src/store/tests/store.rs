@@ -3126,7 +3126,7 @@ mod store_actor_tests {
         ) -> Vec<KVPair> {
             todo!()
         }
-        fn restore(&self, _: &Path, _: &Path) -> Result<(), StoreError> {
+        fn restore(_: &Path, _: &Path) -> Result<(), StoreError> {
             todo!()
         }
 

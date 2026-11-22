@@ -84,6 +84,10 @@ pub trait StorageBackend: Send + Sync {
     /// Backup the node database to a specified path.
     fn backup(&self, path: &Path) -> Result<(), StoreError>;
 
-    /// Restore the node database with a specified path.
-    fn restore(&self, restore_path: &Path, db_path: &Path) -> Result<(), StoreError>;
+    /// Restore the node database at `db_path` from the backup at `restore_path`.
+    ///
+    /// The database already at `db_path`, if any, is moved aside first. Nothing may have
+    /// `db_path` open while this runs: when a store that was open there closes, it can delete
+    /// the restored files.
+    fn restore(restore_path: &Path, db_path: &Path) -> Result<(), StoreError>;
 }

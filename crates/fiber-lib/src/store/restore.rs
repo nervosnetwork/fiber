@@ -1,6 +1,6 @@
 use crate::errors::{Error, Result};
 use crate::fiber::channel::ChannelActorStateStore;
-use crate::store::open_store;
+use crate::store::{open_store, Store};
 use fiber_store::StorageBackend;
 use fiber_types::ChannelState;
 use std::path::Path;
@@ -15,10 +15,7 @@ pub fn restore(
 ) -> Result<()> {
     #[cfg(not(target_arch = "wasm32"))]
     restore_node_keys(restore_path, fiber_key_path, ckb_key_path)?;
-    {
-        let store = open_store(base_path).map_err(Error::DBInternalError)?;
-        store.restore(restore_path, base_path)?;
-    }
+    Store::restore(restore_path, base_path)?;
     let store = open_store(base_path).map_err(Error::DBInternalError)?;
 
     info!("Scanning stale channels.");
