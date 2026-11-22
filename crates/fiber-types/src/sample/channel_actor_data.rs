@@ -40,7 +40,6 @@ fn sample_v2(seed: u64) -> ChannelActorData {
     own.public_nonce =
         crate::channel_v2_validation::secret_nonce_v2(&own, &signer.funding_key).public_nonce();
     let session = crate::ChannelSessionV2 {
-        marker: 0x56320001,
         own,
         own_retired: vec![],
         remote_nonce: None,

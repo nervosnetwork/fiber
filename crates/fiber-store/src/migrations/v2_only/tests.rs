@@ -210,24 +210,56 @@ fn test_migration_resumes_after_partial_v2_conversion_and_v1_archive() {
 }
 
 #[test]
-fn test_truncated_or_invalid_v2_is_never_repaired() {
-    for truncate in [true, false] {
-        let (_dir, store) = database();
-        let channel = sample(77);
-        let mut stored = released_v2(channel);
-        if !truncate {
-            stored.1.as_mut().unwrap().marker = 0;
-        }
-        let key = actor_key(&stored.0.id);
-        let mut value = bincode::serialize(&stored).unwrap();
-        if truncate {
-            value.pop();
-        }
-        store.put(&key, value);
-        let original = snapshot(&store);
-        assert!(migrate(&store).is_err());
-        assert_eq!(snapshot(&store), original);
-    }
+fn test_released_v2_with_an_unusable_session_is_never_repaired() {
+    let (_dir, store) = database();
+    let channel = sample(79);
+    let id = channel.id;
+    // A valid key, just not the one that signed this nonce.
+    let foreign_owner = channel.remote_pubkey;
+    let (old, session) = released_v2(channel);
+    let (marker, mut session) = session.unwrap();
+    session.own.owner = foreign_owner;
+    store.put(
+        actor_key(&id),
+        bincode::serialize(&(old, Some((marker, session)))).unwrap(),
+    );
+
+    let original = snapshot(&store);
+    assert!(migrate(&store).is_err());
+    assert_eq!(snapshot(&store), original);
+}
+
+#[test]
+fn test_released_v2_with_a_corrupted_marker_is_refused() {
+    let (_dir, store) = database();
+    let channel = sample(80);
+    let id = channel.id;
+    let (old, session) = released_v2(channel);
+    let (marker, session) = session.unwrap();
+    store.put(
+        actor_key(&id),
+        bincode::serialize(&(old, Some((marker ^ 1, session)))).unwrap(),
+    );
+
+    let original = snapshot(&store);
+    let error = migrate(&store).unwrap_err().to_string();
+    // The released layout is recognised, so its own error is reported instead of "trailing bytes".
+    assert!(error.contains("session marker"), "{error}");
+    assert_eq!(snapshot(&store), original);
+}
+
+#[test]
+fn test_truncated_v2_is_never_repaired() {
+    let (_dir, store) = database();
+    let channel = sample(77);
+    let stored = released_v2(channel);
+    let key = actor_key(&stored.0.id);
+    let mut value = bincode::serialize(&stored).unwrap();
+    value.pop();
+    store.put(&key, value);
+    let original = snapshot(&store);
+    assert!(migrate(&store).is_err());
+    assert_eq!(snapshot(&store), original);
 }
 
 #[test]
@@ -242,7 +274,7 @@ fn test_preflight_checks_every_page_before_any_writes() {
     }
     keys.sort();
     let key = keys.last().unwrap();
-    let (mut last, _): (OldChannelActorData, Option<ChannelSessionV2>) =
+    let (mut last, _): (OldChannelActorData, Option<(u32, ChannelSessionV2)>) =
         decode_exact(&store.get(key).unwrap()).unwrap();
     last.state = OldChannelState::ChannelReady;
     store.put(key, bincode::serialize(&last).unwrap());
