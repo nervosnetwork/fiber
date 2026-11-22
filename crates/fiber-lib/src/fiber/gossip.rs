@@ -2956,7 +2956,7 @@ where
         self.next_active_sync_id += 1;
         let sync_actor = Actor::spawn_linked(
             Some(format!(
-                "gossip syncing actor to peer {:?} supervised by {:?}",
+                "gossip syncing actor {sync_id} to peer {:?} supervised by {:?}",
                 pubkey,
                 self.myself.get_id()
             )),

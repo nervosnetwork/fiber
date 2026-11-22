@@ -1,10 +1,12 @@
+use std::time::Duration;
+
 use clap_serde_derive::ClapSerde;
 use ractor::call;
 use secp256k1::{PublicKey, Secp256k1, SecretKey, SECP256K1};
 
 use crate::fiber::channel::ChannelActorStateStore;
 use crate::fiber::graph::NetworkGraphStateStore;
-use crate::fiber::network::{OpenChannelCommand, PeerDisconnectReason};
+use crate::fiber::network::{DebugEvent, OpenChannelCommand, PeerDisconnectReason};
 use crate::fiber::payment::{SendPaymentCommand, SendPaymentDataExt};
 use crate::fiber::types::Privkey;
 use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
@@ -1071,14 +1073,14 @@ async fn test_jit_payment_completes_after_lsp_restart() {
         jit_tracking_has_payment(&lsp, payment_hash),
         "the pending open is stored before the channel is ready"
     );
-    wait_until_funding_started(&receiver, channel_id).await;
+    wait_until_jit_open_survives_disconnect(&lsp, receiver.pubkey, channel_id).await;
 
     lsp.restart().await;
     assert!(
         jit_tracking_has_payment(&lsp, payment_hash),
         "restart reloads the pending open and its reservation"
     );
-    receiver.connect_to(&mut lsp).await;
+    reconnect_receiver_to_lsp(&mut receiver, &mut lsp).await;
     wait_channel_ready(&receiver, channel_id).await;
     payer.wait_until_success(payment_hash).await;
 
@@ -1087,17 +1089,129 @@ async fn test_jit_payment_completes_after_lsp_restart() {
     assert_eq!(channel_ids_with_peer(&lsp, receiver.pubkey).len(), 1);
 }
 
-async fn wait_until_funding_started(node: &NetworkNode, channel_id: Hash256) {
-    for _ in 0..50 {
-        if !matches!(
-            node.get_channel_actor_state(channel_id).state,
-            ChannelState::NegotiatingFunding(_)
-        ) {
+fn lsp_jit_channel_state(
+    lsp: &NetworkNode,
+    receiver: crate::fiber::types::Pubkey,
+    channel_id: Hash256,
+) -> Option<ChannelState> {
+    if let Some(state) = lsp.get_channel_actor_state_unchecked(channel_id) {
+        return Some(state.state);
+    }
+    channel_ids_with_peer(lsp, receiver)
+        .into_iter()
+        .find_map(|id| {
+            lsp.get_channel_actor_state_unchecked(id)
+                .map(|state| state.state)
+        })
+}
+
+async fn wait_until_jit_open_survives_disconnect(
+    lsp: &NetworkNode,
+    receiver: crate::fiber::types::Pubkey,
+    channel_id: Hash256,
+) {
+    for _ in 0..100 {
+        if lsp_jit_channel_state(lsp, receiver, channel_id)
+            .is_some_and(|state| !state.can_abort_funding())
+        {
             return;
         }
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    panic!("channel stayed in funding negotiation");
+    panic!(
+        "JIT channel {channel_id:?} stayed abortable in {:?}",
+        lsp_jit_channel_state(lsp, receiver, channel_id)
+    );
+}
+
+async fn reconnect_receiver_to_lsp(receiver: &mut NetworkNode, lsp: &mut NetworkNode) {
+    let lsp_pubkey = lsp.pubkey;
+    wait_for_peer_disconnect(receiver, lsp_pubkey).await;
+    drain_pending_events(lsp).await;
+    for _ in 0..4 {
+        receiver.connect_to_nonblocking(lsp).await;
+        let connected = event_matches(
+            receiver,
+            Duration::from_secs(3),
+            |event| matches!(event, NetworkServiceEvent::PeerConnected(id, _) if id == &lsp_pubkey),
+        )
+        .await;
+        if !connected {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            continue;
+        }
+        let receiver_ready = event_matches(receiver, Duration::from_secs(3), |event| {
+            matches!(event, NetworkServiceEvent::DebugEvent(DebugEvent::Common(msg)) if msg == "PeerInit")
+        })
+        .await;
+        if receiver_ready && lsp_channel_is_reachable(lsp, receiver.pubkey).await {
+            return;
+        }
+    }
+    panic!("receiver did not reconnect to the restarted LSP");
+}
+
+async fn lsp_channel_is_reachable(
+    lsp: &NetworkNode,
+    receiver: crate::fiber::types::Pubkey,
+) -> bool {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        let reachable = channel_ids_with_peer(lsp, receiver)
+            .into_iter()
+            .any(|channel_id| {
+                lsp.get_channel_actor_state_unchecked(channel_id)
+                    .is_some_and(|state| {
+                        state.connectivity_state != fiber_types::ChannelConnectivityState::Offline
+                    })
+            });
+        if reachable {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    false
+}
+
+async fn drain_pending_events(node: &mut NetworkNode) {
+    while next_event(node, Duration::from_millis(20)).await.is_some() {}
+}
+
+async fn wait_for_peer_disconnect(node: &mut NetworkNode, peer: crate::fiber::types::Pubkey) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while tokio::time::Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let Some(event) = next_event(node, remaining).await else {
+            return;
+        };
+        if matches!(event, NetworkServiceEvent::PeerDisConnected(id, _) if id == peer) {
+            return;
+        }
+    }
+}
+
+async fn event_matches<F>(node: &mut NetworkNode, wait: Duration, mut matches_event: F) -> bool
+where
+    F: FnMut(&NetworkServiceEvent) -> bool,
+{
+    let deadline = tokio::time::Instant::now() + wait;
+    while tokio::time::Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let Some(event) = next_event(node, remaining).await else {
+            return false;
+        };
+        if matches_event(&event) {
+            return true;
+        }
+    }
+    false
+}
+
+async fn next_event(node: &mut NetworkNode, wait: Duration) -> Option<NetworkServiceEvent> {
+    match tokio::time::timeout(wait, node.event_emitter.recv()).await {
+        Ok(Some(event)) => Some(event),
+        _ => None,
+    }
 }
 
 async fn wait_channel_ready(node: &NetworkNode, channel_id: Hash256) {

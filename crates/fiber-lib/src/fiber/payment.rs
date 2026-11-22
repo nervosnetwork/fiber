@@ -2284,6 +2284,26 @@ where
             return Ok(());
         }
         let Some(attempt_id) = attempt_id else {
+            let orphan_created: Vec<u64> = session
+                .attempts()
+                .filter(|attempt| attempt.status == AttemptStatus::Created)
+                .map(|attempt| attempt.id)
+                .collect();
+            for attempt_id in orphan_created {
+                if state.pending_add_results.contains(&attempt_id) {
+                    continue;
+                }
+                let Some(mut attempt) = self.store.get_attempt(session.payment_hash(), attempt_id)
+                else {
+                    continue;
+                };
+                if attempt.status != AttemptStatus::Created || self.channel_owns_attempt(&attempt) {
+                    continue;
+                }
+                state.attempts_with_retry_work.insert(attempt_id);
+                self.send_attempt(myself.clone(), state, session, &mut attempt)
+                    .await?;
+            }
             return Ok(());
         };
         if state.pending_add_results.contains(&attempt_id) {

@@ -1738,7 +1738,6 @@ where
             }
             FiberMessage::JitChannelRegister(register) => {
                 if state.on_jit_channel_register(peer_pubkey, register) {
-                    state.flush_ready_jit_payments(&myself, peer_pubkey);
                     let network_graph = self.network_graph.clone();
                     state
                         .resume_waiting_jit_payments(&myself, peer_pubkey, network_graph)
@@ -2262,6 +2261,14 @@ where
             }
             NetworkActorEvent::RetrySendPayment(payment_hash, attempt_id) => {
                 if state.jit_retry_should_wait(payment_hash) {
+                    if state.jit_upstream_still_held(payment_hash) {
+                        std::mem::drop(myself.send_after(Duration::from_millis(50), move || {
+                            NetworkActorMessage::new_event(NetworkActorEvent::RetrySendPayment(
+                                payment_hash,
+                                attempt_id,
+                            ))
+                        }));
+                    }
                     return Ok(());
                 }
                 self.resume_payment_actor_and_send_command(
@@ -6294,23 +6301,6 @@ where
         }
     }
 
-    fn flush_ready_jit_payments(&mut self, myself: &ActorRef<NetworkActorMessage>, peer: Pubkey) {
-        for payment_hash in self.jit.take_ready_retries(&peer) {
-            if !self.jit_upstream_still_held(payment_hash) {
-                self.jit.release_reservation(payment_hash);
-                continue;
-            }
-            if let Err(err) = myself.send_message(NetworkActorMessage::new_event(
-                NetworkActorEvent::RetrySendPayment(payment_hash, None),
-            )) {
-                debug!(
-                    "Failed to retry restored JIT payment {payment_hash:?} for {peer:?}: {err:?}"
-                );
-            }
-        }
-        self.persist_jit();
-    }
-
     fn restore_persisted_jit(&mut self) {
         let Some(saved) = self.store.get_jit_tracking() else {
             return;
@@ -6354,13 +6344,7 @@ where
             return;
         };
         match channel.state {
-            ChannelState::ChannelReady => {
-                self.jit.reserve_channel(peer, channel_id, payment_hash);
-                self.jit.push_ready_retry(peer, payment_hash);
-            }
-            ChannelState::Stale => {
-                // The channel is quarantined until reestablish. Keep the open so the
-                // ready event retries this payment instead of funding a second channel.
+            ChannelState::ChannelReady | ChannelState::Stale => {
                 self.jit.record_open(peer, channel_id, payment_hash);
                 self.jit.reserve_channel(peer, channel_id, payment_hash);
             }
@@ -6441,6 +6425,23 @@ where
         self.jit.is_waiting(payment_hash)
     }
 
+    fn jit_downstream_is_routable(&self, peer: &Pubkey, payment_hash: Hash256) -> bool {
+        self.peer_channel_index
+            .get_channels(peer)
+            .into_iter()
+            .flatten()
+            .any(|channel_id| {
+                self.jit
+                    .allows_channel_for_payment(channel_id, payment_hash)
+                    && self.is_channel_online(&channel_id)
+                    && self
+                        .store
+                        .get_channel_actor_state(&channel_id)
+                        .and_then(|channel| channel.get_funding_transaction_outpoint())
+                        .is_some_and(|outpoint| self.outpoint_channel_map.contains_key(&outpoint))
+            })
+    }
+
     fn jit_retry_should_wait(&self, payment_hash: Hash256) -> bool {
         if !self.jit.tracks_payment(payment_hash) {
             return false;
@@ -6451,6 +6452,9 @@ where
         let Some(session) = self.store.get_payment_session(payment_hash) else {
             return false;
         };
+        if !self.jit_downstream_is_routable(&peer, payment_hash) {
+            return true;
+        }
         !self.peer_ckb_channel_can_forward(&peer, session.request.amount, payment_hash)
     }
 
@@ -8931,7 +8935,6 @@ where
             .take_pending_register(&peer_pubkey)
             .is_some_and(|register| self.apply_jit_channel_register(peer_pubkey, register));
         if registered {
-            self.flush_ready_jit_payments(&myself, peer_pubkey);
             self.resume_waiting_jit_payments(&myself, peer_pubkey, network_graph)
                 .await;
         }

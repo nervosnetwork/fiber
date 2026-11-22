@@ -41,7 +41,6 @@ pub(crate) struct JitSession {
     draining: bool,
     direct_route_retried: HashSet<Hash256>,
     reserved: HashMap<Hash256, (Pubkey, Hash256)>,
-    ready_retries: Vec<(Pubkey, Hash256)>,
 }
 
 impl JitSession {
@@ -60,7 +59,6 @@ impl JitSession {
             draining: false,
             direct_route_retried: HashSet::new(),
             reserved: HashMap::new(),
-            ready_retries: Vec::new(),
         }
     }
 
@@ -229,32 +227,6 @@ impl JitSession {
         self.reserved
             .get(&channel_id)
             .is_none_or(|(_, owner)| *owner == payment_hash)
-    }
-
-    pub(crate) fn push_ready_retry(&mut self, peer: Pubkey, payment_hash: Hash256) {
-        if !self
-            .ready_retries
-            .iter()
-            .any(|(queued_peer, queued_payment)| {
-                *queued_peer == peer && *queued_payment == payment_hash
-            })
-        {
-            self.ready_retries.push((peer, payment_hash));
-        }
-    }
-
-    pub(crate) fn take_ready_retries(&mut self, peer: &Pubkey) -> Vec<Hash256> {
-        let mut kept = Vec::new();
-        let mut taken = Vec::new();
-        for (queued_peer, payment_hash) in self.ready_retries.drain(..) {
-            if &queued_peer == peer {
-                taken.push(payment_hash);
-            } else {
-                kept.push((queued_peer, payment_hash));
-            }
-        }
-        self.ready_retries = kept;
-        taken
     }
 
     pub(crate) fn snapshot(&self) -> PersistedJit {
