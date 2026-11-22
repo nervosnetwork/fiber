@@ -1078,6 +1078,7 @@ async fn test_jit_payment_completes_after_lsp_restart() {
         jit_tracking_has_payment(&lsp, payment_hash),
         "restart reloads the pending open and its reservation"
     );
+    receiver.connect_to(&mut lsp).await;
     wait_channel_ready(&receiver, channel_id).await;
     payer.wait_until_success(payment_hash).await;
 
