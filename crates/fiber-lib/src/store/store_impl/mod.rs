@@ -222,8 +222,8 @@ impl StorageBackend for Store {
         self.inner.backup(path)
     }
 
-    fn restore(&self, restore_path: &Path, db_path: &Path) -> Result<(), StoreError> {
-        self.inner.restore(restore_path, db_path)
+    fn restore(restore_path: &Path, db_path: &Path) -> Result<(), StoreError> {
+        fiber_store::Store::restore(restore_path, db_path)
     }
 }
 

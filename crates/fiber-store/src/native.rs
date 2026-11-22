@@ -161,7 +161,7 @@ impl StorageBackend for Store {
     }
 
     /// Restore the RocksDB database from a checkpoint.
-    fn restore(&self, restore_path: &Path, db_path: &Path) -> Result<(), StoreError> {
+    fn restore(restore_path: &Path, db_path: &Path) -> Result<(), StoreError> {
         // Usually, the actual RocksDB data is stored in a 'db' subdirectory of the backup
         let source_dir = restore_path.join("db");
 

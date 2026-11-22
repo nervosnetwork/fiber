@@ -120,7 +120,7 @@ impl StorageBackend for Store {
         ))
     }
 
-    fn restore(&self, _restore_path: &Path, _db_path: &Path) -> Result<(), StoreError> {
+    fn restore(_restore_path: &Path, _db_path: &Path) -> Result<(), StoreError> {
         Err(StoreError::RestoreError(
             "Not supported on browser yet".into(),
         ))
