@@ -2261,6 +2261,9 @@ where
                 .await;
             }
             NetworkActorEvent::RetrySendPayment(payment_hash, attempt_id) => {
+                if state.jit_retry_should_wait(payment_hash) {
+                    return Ok(());
+                }
                 self.resume_payment_actor_and_send_command(
                     myself,
                     state,
@@ -6200,6 +6203,9 @@ where
             .store
             .get_pending_attempts_by_channel_outpoint(channel_outpoint)
         {
+            if self.jit.tracks_payment(attempt.payment_hash) {
+                continue;
+            }
             debug!(
                 "Retrying payment attempt {:?} for channel {:?} reestablished",
                 attempt.payment_hash, channel_outpoint
@@ -6277,7 +6283,15 @@ where
     }
 
     fn persist_jit(&self) {
-        self.store.insert_jit_tracking(self.jit.snapshot());
+        let snapshot = self.jit.snapshot();
+        let saved = self.store.get_jit_tracking();
+        let unchanged = match &saved {
+            Some(saved) => saved == &snapshot,
+            None => snapshot == Default::default(),
+        };
+        if !unchanged {
+            self.store.insert_jit_tracking(snapshot);
+        }
     }
 
     fn flush_ready_jit_payments(&mut self, myself: &ActorRef<NetworkActorMessage>, peer: Pubkey) {
@@ -6425,6 +6439,19 @@ where
 
     fn jit_payment_is_waiting(&self, payment_hash: Hash256) -> bool {
         self.jit.is_waiting(payment_hash)
+    }
+
+    fn jit_retry_should_wait(&self, payment_hash: Hash256) -> bool {
+        if !self.jit.tracks_payment(payment_hash) {
+            return false;
+        }
+        let Some(peer) = self.jit.peer_for_payment(payment_hash) else {
+            return false;
+        };
+        let Some(session) = self.store.get_payment_session(payment_hash) else {
+            return false;
+        };
+        !self.peer_ckb_channel_can_forward(&peer, session.request.amount, payment_hash)
     }
 
     fn jit_upstream_still_held(&self, payment_hash: Hash256) -> bool {
@@ -9350,6 +9377,9 @@ where
         myself: ActorRef<Self::Msg>,
         args: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
+        if let Err(err) = args.config.validate() {
+            return Err(Box::new(crate::Error::InvalidParameter(err)));
+        }
         let NetworkActorStartArguments {
             config,
             #[cfg(not(target_arch = "wasm32"))]
@@ -9753,13 +9783,17 @@ where
             let Some(session) = self.store.get_payment_session(payment_hash) else {
                 continue;
             };
-            if !session.status.is_final() || session.has_pending_payment_work(&self.store) {
+            let waiting_for_jit =
+                state.jit.tracks_payment(payment_hash) && !session.status.is_final();
+            if !waiting_for_jit
+                && (!session.status.is_final() || session.has_pending_payment_work(&self.store))
+            {
                 myself
                     .send_message(NetworkActorMessage::new_command(
                         NetworkActorCommand::PaymentTlcUpdated(session.payment_hash()),
                     ))
                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-            } else {
+            } else if !waiting_for_jit {
                 // A crash may leave only the index after all work and the final
                 // result were committed. Retire that stale recovery entry.
                 if session.status == PaymentStatus::Failed {

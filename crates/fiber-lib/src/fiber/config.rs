@@ -251,7 +251,7 @@ pub struct FiberConfig {
         name = "FIBER_JIT_MAX_AMOUNT",
         long = "fiber-jit-max-amount",
         env,
-        help = "Largest inbound JIT payment this receiver will accept. Unset refuses JIT opens"
+        help = "Largest funded balance above the cell reserve that this receiver will accept on a JIT channel. Unset refuses JIT opens"
     )]
     pub jit_max_amount: Option<u128>,
 
@@ -657,10 +657,16 @@ impl FiberConfig {
             .unwrap_or(DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT)
     }
 
+    pub fn validate(&self) -> std::result::Result<(), String> {
+        if let Some(raw) = &self.jit_lsp_pubkey {
+            parse_jit_pubkey(raw).map_err(|err| format!("invalid fiber-jit-lsp-pubkey: {err}"))?;
+        }
+        Ok(())
+    }
+
     pub fn jit_lsp_pubkey(&self) -> Option<Pubkey> {
-        self.jit_lsp_pubkey
-            .as_deref()
-            .map(|raw| parse_jit_pubkey(raw).expect("invalid fiber-jit-lsp-pubkey"))
+        let raw = self.jit_lsp_pubkey.as_deref()?;
+        parse_jit_pubkey(raw).ok()
     }
 
     pub fn jit_service_enabled(&self) -> bool {

@@ -950,6 +950,11 @@ fn test_serde_node_announcement() {
     );
 }
 
+// One-byte feature vector from before the JIT bit. The signed fixtures use these bytes.
+fn historical_node_announcement_features() -> FeatureVector {
+    FeatureVector::from(vec![0x15])
+}
+
 // There was a bug in the node announcement verification logic which uses local udt whitelist to
 // verify the signature. This bug causes different nodes to have different results on signature verification.
 // We add a few hard coded node announcements with different udt_cfg_infos to ensure the verification logic is correct.
@@ -962,7 +967,7 @@ fn test_verify_hard_coded_node_announcement() {
         let node_id = privkey.pubkey();
         let mut node_announcement = NodeAnnouncement {
             signature: None,
-            features: FeatureVector::default(),
+            features: historical_node_announcement_features(),
             timestamp: 1737451664358,
             node_id,
             version: "1.0".to_string(),
@@ -1033,7 +1038,7 @@ fn test_verify_hard_coded_node_announcement() {
         let privkey = gen_deterministic_fiber_private_key();
         let mut node_announcement = NodeAnnouncement {
             signature: None,
-            features: FeatureVector::default(),
+            features: historical_node_announcement_features(),
             timestamp: 1737449487183,
             node_id: privkey.pubkey(),
             version: "1.0".to_string(),
@@ -1100,6 +1105,32 @@ fn test_verify_hard_coded_node_announcement() {
         );
         assert!(node_announcement.verify(), "node announcement verification failed");
     }
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_jit_channel_node_announcement_verifies() {
+    let historical = historical_node_announcement_features();
+    assert_eq!(historical.bytes(), vec![0x15]);
+    assert!(!historical.supports_jit_channel());
+    assert_eq!(FeatureVector::default().bytes().len(), 2);
+
+    let mut features = FeatureVector::default();
+    features.set_jit_channel_optional();
+    assert!(features.supports_jit_channel());
+    let privkey = gen_rand_fiber_private_key();
+    let node_announcement = NodeAnnouncement::new_signed(
+        AnnouncedNodeName::from_string("jit-node").expect("valid name"),
+        features,
+        vec![],
+        &privkey,
+        get_chain_hash(),
+        now_timestamp_as_millis_u64(),
+        0,
+        Default::default(),
+        env!("CARGO_PKG_VERSION").to_string(),
+    );
+    assert!(node_announcement.verify());
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

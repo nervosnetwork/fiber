@@ -3,6 +3,7 @@ use ractor::call;
 use secp256k1::{PublicKey, Secp256k1, SecretKey, SECP256K1};
 
 use crate::fiber::channel::ChannelActorStateStore;
+use crate::fiber::graph::NetworkGraphStateStore;
 use crate::fiber::network::{OpenChannelCommand, PeerDisconnectReason};
 use crate::fiber::payment::{SendPaymentCommand, SendPaymentDataExt};
 use crate::fiber::types::Privkey;
@@ -98,16 +99,35 @@ fn test_jit_config_pubkey_accepts_0x_prefix() {
         serde_yaml::from_str(&format!("jit_lsp_pubkey: 0x{hex_pk}")).expect("parse fiber config");
     let config = FiberConfig::from(opt);
     assert_eq!(config.jit_lsp_pubkey(), Some(pubkey));
+    assert!(config.validate().is_ok());
+}
+
+#[test]
+fn test_jit_config_rejects_invalid_lsp_pubkey() {
+    let config = FiberConfig {
+        jit_lsp_pubkey: Some("not-a-key".to_string()),
+        ..FiberConfig::default()
+    };
+    let err = config.validate().unwrap_err();
+    assert!(
+        err.contains("fiber-jit-lsp-pubkey"),
+        "the error names the field: {err}"
+    );
+    assert!(config.jit_lsp_pubkey().is_none());
 }
 
 async fn start_jit_lsp() -> NetworkNode {
+    start_jit_lsp_with_fee(0).await
+}
+
+async fn start_jit_lsp_with_fee(open_fee: u128) -> NetworkNode {
     NetworkNode::new_with_config(
         NetworkNodeConfigBuilder::new()
             .node_name(Some("jit-lsp".to_string()))
-            .fiber_config_updater(|config| {
+            .fiber_config_updater(move |config| {
                 config.jit_service_enabled = Some(true);
                 config.jit_max_funding = Some(HUGE_CKB_AMOUNT);
-                config.jit_open_fee = Some(0);
+                config.jit_open_fee = Some(open_fee);
             })
             .build(),
     )
@@ -881,7 +901,13 @@ fn channel_ids_with_peer(node: &NetworkNode, peer: crate::fiber::types::Pubkey) 
 }
 
 async fn start_jit_payment_nodes() -> (NetworkNode, NetworkNode, NetworkNode) {
-    let mut lsp = start_jit_lsp().await;
+    start_jit_payment_nodes_with_fee(0).await
+}
+
+async fn start_jit_payment_nodes_with_fee(
+    open_fee: u128,
+) -> (NetworkNode, NetworkNode, NetworkNode) {
+    let mut lsp = start_jit_lsp_with_fee(open_fee).await;
     let mut payer = NetworkNode::new_with_node_name("jit-payer").await;
     let mut receiver = start_jit_receiver(lsp.pubkey).await;
 
@@ -963,6 +989,140 @@ async fn test_jit_payment_opens_private_channel_and_succeeds() {
     assert!(!receiver_state.is_one_way);
     assert_eq!(receiver.get_local_balance_from_channel(channel_id), amount);
     assert_eq!(channel_ids_with_peer(&receiver, lsp.pubkey).len(), 1);
+}
+
+#[tokio::test]
+async fn test_jit_payment_retries_after_open_fee_refusal() {
+    init_tracing();
+
+    let open_fee = 2_500;
+    let (payer, lsp, mut receiver) = start_jit_payment_nodes_with_fee(open_fee).await;
+    let amount = 1000;
+    let invoice = new_receiver_jit_invoice(&receiver, amount).await;
+    assert_eq!(invoice.jit_open_fee(), Some(open_fee));
+
+    let res = payer
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            max_fee_amount: Some(10_000),
+            ..Default::default()
+        })
+        .await
+        .expect("send payment");
+    let payment_hash = res.payment_hash;
+
+    let channel_id = receiver
+        .expect_to_process_event(|event| match event {
+            NetworkServiceEvent::ChannelCreated(pubkey, channel_id) if *pubkey == lsp.pubkey => {
+                Some(*channel_id)
+            }
+            _ => None,
+        })
+        .await;
+    receiver
+        .expect_event(|event| {
+            matches!(
+                event,
+                NetworkServiceEvent::ChannelReady(pubkey, id, _)
+                    if *pubkey == lsp.pubkey && *id == channel_id
+            )
+        })
+        .await;
+
+    payer.wait_until_success(payment_hash).await;
+
+    let session = payer.get_payment_session(payment_hash).unwrap();
+    assert!(
+        session.attempts().any(|attempt| attempt.tried_times >= 1),
+        "the liquidity node refuses the route that omits the open fee"
+    );
+    assert!(session.fee_paid() >= open_fee);
+    assert!(session.fee_paid() <= 10_000);
+    assert_eq!(receiver.get_local_balance_from_channel(channel_id), amount);
+    assert_eq!(channel_ids_with_peer(&receiver, lsp.pubkey).len(), 1);
+}
+
+#[tokio::test]
+async fn test_jit_payment_completes_after_lsp_restart() {
+    init_tracing();
+
+    let (payer, mut lsp, mut receiver) = start_jit_payment_nodes().await;
+    let amount = 1000;
+    let invoice = new_receiver_jit_invoice(&receiver, amount).await;
+    let res = payer
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            max_fee_amount: Some(10_000),
+            ..Default::default()
+        })
+        .await
+        .expect("send payment");
+    let payment_hash = res.payment_hash;
+
+    let channel_id = receiver
+        .expect_to_process_event(|event| match event {
+            NetworkServiceEvent::ChannelCreated(pubkey, channel_id) if *pubkey == lsp.pubkey => {
+                Some(*channel_id)
+            }
+            _ => None,
+        })
+        .await;
+    assert!(
+        jit_tracking_has_payment(&lsp, payment_hash),
+        "the pending open is stored before the channel is ready"
+    );
+    wait_until_funding_started(&receiver, channel_id).await;
+
+    lsp.restart().await;
+    assert!(
+        jit_tracking_has_payment(&lsp, payment_hash),
+        "restart reloads the pending open and its reservation"
+    );
+    wait_channel_ready(&receiver, channel_id).await;
+    payer.wait_until_success(payment_hash).await;
+
+    assert_eq!(receiver.get_local_balance_from_channel(channel_id), amount);
+    assert_eq!(channel_ids_with_peer(&receiver, lsp.pubkey).len(), 1);
+    assert_eq!(channel_ids_with_peer(&lsp, receiver.pubkey).len(), 1);
+}
+
+async fn wait_until_funding_started(node: &NetworkNode, channel_id: Hash256) {
+    for _ in 0..50 {
+        if !matches!(
+            node.get_channel_actor_state(channel_id).state,
+            ChannelState::NegotiatingFunding(_)
+        ) {
+            return;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    }
+    panic!("channel stayed in funding negotiation");
+}
+
+async fn wait_channel_ready(node: &NetworkNode, channel_id: Hash256) {
+    for _ in 0..50 {
+        if node.get_channel_actor_state(channel_id).state == ChannelState::ChannelReady {
+            return;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    }
+    panic!(
+        "channel {channel_id:?} did not become ready, state {:?}",
+        node.get_channel_actor_state(channel_id).state
+    );
+}
+
+fn jit_tracking_has_payment(node: &NetworkNode, payment_hash: Hash256) -> bool {
+    node.store.get_jit_tracking().is_some_and(|saved| {
+        saved
+            .opens
+            .iter()
+            .any(|open| open.payment_hash == payment_hash)
+            || saved
+                .reserved
+                .iter()
+                .any(|reservation| reservation.payment_hash == payment_hash)
+    })
 }
 
 #[tokio::test]

@@ -1771,9 +1771,9 @@ where
         let target = payment_data.target_pubkey;
         if payment_data.payment_invoice().is_some_and(|invoice| {
             invoice.jit_open_fee().is_some()
-                && !invoice
+                && invoice
                     .liquidity_provider()
-                    .is_some_and(|provider| hops.last().copied() == Some(Pubkey::from(*provider)))
+                    .is_none_or(|provider| hops.last().copied() != Some(Pubkey::from(*provider)))
         }) {
             return Err(PathFindError::Other(
                 "JIT open fee must be paid to the invoice liquidity provider".to_string(),
@@ -3370,6 +3370,8 @@ pub trait NetworkGraphStateStore {
     /// when the channel state does not already own a matching TLC or queued AddTlc.
     fn get_pending_attempts_by_channel_outpoint(&self, channel_outpoint: &OutPoint)
         -> Vec<Attempt>;
+    /// Saved JIT opens, queue, and channel reservations. `None` means nothing has been stored.
     fn get_jit_tracking(&self) -> Option<PersistedJit>;
+    /// Replaces the saved JIT tracking snapshot.
     fn insert_jit_tracking(&self, tracking: PersistedJit);
 }

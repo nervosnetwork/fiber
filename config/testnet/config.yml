@@ -41,9 +41,11 @@ fiber:
   ## Do not set jit_open_fee here. The fee comes from the liquidity node.
   ## Replace PASTE_LIQUIDITY_NODE_PUBKEY with that node's hex public key before uncommenting.
   ## The node will not start if that value is left as written.
-  ## jit_max_amount is the largest funded amount this node accepts, payment plus reserved
-  ## cell capacity. Set it at least as high as the liquidity node's jit_max_funding.
+  ## jit_max_open_fee is the largest open fee this node will quote. Match the liquidity
+  ## node's jit_open_fee. Unset accepts only 0.
+  ## jit_max_amount is the funded balance above the cell reserve.
   # jit_lsp_pubkey: "PASTE_LIQUIDITY_NODE_PUBKEY"
+  # jit_max_open_fee: 1000
   # jit_max_amount: 100000000000
 
   ## SOCKS5 proxy settings

@@ -353,6 +353,18 @@ impl JitSession {
                 .any(|queue| queue.contains(&payment_hash))
     }
 
+    pub(crate) fn peer_for_payment(&self, payment_hash: Hash256) -> Option<Pubkey> {
+        self.routing_peer.get(&payment_hash).copied()
+    }
+
+    pub(crate) fn tracks_payment(&self, payment_hash: Hash256) -> bool {
+        self.is_waiting(payment_hash)
+            || self
+                .reserved
+                .values()
+                .any(|(_, owner)| *owner == payment_hash)
+    }
+
     pub(crate) fn detach(&mut self, payment_hash: Hash256) -> (Option<Pubkey>, Vec<Hash256>) {
         let Some(peer) = self.routing_peer.remove(&payment_hash) else {
             return (None, Vec::new());
