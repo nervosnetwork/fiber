@@ -35,6 +35,18 @@ pub trait StorageBackend: Send + Sync {
     /// Delete a key.
     fn delete<K: AsRef<[u8]>>(&self, key: K);
 
+    /// Read several values from one consistent view of the store.
+    ///
+    /// A batch commit that touches more than one of these keys must not be observed half applied:
+    /// records that belong together (the two halves of a channel) are written and deleted in one
+    /// batch, so reading them one by one could return a pair that never existed. Every backend has
+    /// to provide that view (a snapshot, a transaction, a single query), which is why this has no
+    /// default implementation.
+    ///
+    /// A backend may bound how many keys one call accepts (SQLite's `IN` list is limited by
+    /// `SQLITE_MAX_VARIABLE_NUMBER`, 999 by default); keep the batch small or chunk the call.
+    fn multi_get<K: AsRef<[u8]>>(&self, keys: &[K]) -> Vec<Option<Vec<u8>>>;
+
     /// Create a new batch writer.
     fn batch(&self) -> Self::Batch;
 

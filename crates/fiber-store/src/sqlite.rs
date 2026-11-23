@@ -100,6 +100,34 @@ impl StorageBackend for Store {
         }
     }
 
+    fn multi_get<K: AsRef<[u8]>>(&self, keys: &[K]) -> Vec<Option<Vec<u8>>> {
+        if keys.is_empty() {
+            return Vec::new();
+        }
+        // One statement over all keys, so the values come from one database state even if a commit
+        // lands right after. The connection is shared through this lock because `Connection` is not
+        // `Sync`, and commits take the same lock, so a batch is never observed half applied.
+        let conn = self.conn.lock().expect("lock poisoned");
+        let placeholders = vec!["?"; keys.len()].join(",");
+        let mut statement = conn
+            .prepare(&format!(
+                "SELECT key, value FROM kv_store WHERE key IN ({placeholders})"
+            ))
+            .expect("prepare should be OK");
+        // SQLite returns the rows in its own order, so map them back onto the requested order.
+        let found: std::collections::HashMap<Vec<u8>, Vec<u8>> = statement
+            .query_map(
+                rusqlite::params_from_iter(keys.iter().map(|key| key.as_ref())),
+                |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)),
+            )
+            .expect("query should be OK")
+            .collect::<Result<_, _>>()
+            .expect("row should be OK");
+        keys.iter()
+            .map(|key| found.get(key.as_ref()).cloned())
+            .collect()
+    }
+
     fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&self, key: K, value: V) {
         let conn = self.conn.lock().expect("lock poisoned");
         conn.execute(
@@ -294,5 +322,28 @@ impl BatchWriter for Batch {
             }
         }
         tx.commit().expect("commit transaction");
+    }
+}
+
+#[cfg(all(test, feature = "sqlite"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn multi_get_returns_values_in_the_requested_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_db(dir.path()).unwrap();
+        let mut batch = store.batch();
+        batch.put(b"b", b"second");
+        batch.put(b"a", b"first");
+        batch.commit();
+
+        // Missing keys stay in place, and the result follows the request order rather than the
+        // order SQLite happens to return.
+        assert_eq!(
+            store.multi_get(&[b"b".as_slice(), b"missing", b"a"]),
+            vec![Some(b"second".to_vec()), None, Some(b"first".to_vec()),]
+        );
+        assert!(store.multi_get::<&[u8]>(&[]).is_empty());
     }
 }

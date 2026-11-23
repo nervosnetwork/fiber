@@ -43,6 +43,12 @@ pub(crate) struct MockStore {
 }
 
 impl MockStore {
+    /// Test doubles keep the whole state in memory, so seeding an already
+    /// established channel needs no separate fixed-field record.
+    pub(crate) fn insert_channel_actor_state_for_test(&self, state: ChannelActorState) {
+        self.insert_channel_actor_state(state);
+    }
+
     pub(crate) fn new() -> Self {
         Self {
             invoices: RefCell::new(HashMap::new()),

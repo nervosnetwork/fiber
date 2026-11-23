@@ -1,8 +1,8 @@
 use ckb_types::prelude::Entity;
-use fiber_types::channel_v2_validation::decode_and_validate_channel_actor_data;
+use fiber_types::channel_v2_validation::decode_and_validate_channel_actor_data_parts;
 use fiber_types::sample::StoreSample;
 use fiber_types::schema::{
-    CHANNEL_OPEN_RECORD_PREFIX, CHANNEL_OUTPOINT_CHANNEL_ID_PREFIX,
+    CHANNEL_IMMUTABLE_STATE_PREFIX, CHANNEL_OPEN_RECORD_PREFIX, CHANNEL_OUTPOINT_CHANNEL_ID_PREFIX,
     CHANNEL_SHUTDOWN_SETTLEMENT_PREFIX, PUBKEY_CHANNEL_ID_PREFIX, WATCHTOWER_CHANNEL_PREFIX,
     WATCHTOWER_SUPERSEDED_SETTLEMENT_PREFIX,
 };
@@ -29,8 +29,9 @@ fn database() -> (tempfile::TempDir, crate::Store) {
 }
 
 fn migrate(store: &crate::Store) -> Result<(), crate::migration::MigrateError> {
+    // Unit tests of this migration only: later migrations change the stored layout.
     let mut migrations = DbMigrate::new();
-    crate::migrations::register_all_migrations(&mut migrations);
+    migrations.add_migration(std::sync::Arc::new(super::MigrationObj::new()));
     migrations.auto_migrate(store, Box::new(|_| true), Box::new(|_| {}))
 }
 
@@ -60,8 +61,34 @@ fn local_watchtower_pair(seed: u64) -> (OldChannelActorData, super::OldChannelDa
     (channel, watch)
 }
 
+/// Assert the channel is stored as a mutable and an immutable record that merge back to `expected`.
+fn assert_split_channel(store: &crate::Store, expected: &ChannelActorData) -> ChannelActorData {
+    let mutable = store
+        .get(actor_key(&expected.id))
+        .expect("mutable channel record");
+    let immutable = store
+        .get([&[CHANNEL_IMMUTABLE_STATE_PREFIX], expected.id.as_ref()].concat())
+        .expect("immutable channel record");
+    let restored = decode_and_validate_channel_actor_data_parts(&expected.id, &mutable, &immutable)
+        .expect("valid split channel record");
+    assert_eq!(
+        bincode::serialize(&restored).unwrap(),
+        bincode::serialize(expected).unwrap()
+    );
+    restored
+}
+
 fn snapshot(store: &crate::Store) -> Vec<(Vec<u8>, Vec<u8>)> {
     store.prefix_iterator(Vec::new()).collect()
+}
+
+/// Snapshot without the version key, which `auto_migrate` stamps once nothing is
+/// pending for this migration alone.
+fn records(store: &crate::Store) -> Vec<(Vec<u8>, Vec<u8>)> {
+    snapshot(store)
+        .into_iter()
+        .filter(|(key, _)| key.as_slice() != MIGRATION_VERSION_KEY)
+        .collect()
 }
 
 #[test]
@@ -72,9 +99,7 @@ fn test_released_v2_migrates_without_changing_signing_state() {
     let encoded = bincode::serialize(&released_v2(channel.clone())).unwrap();
     store.put(&key, &encoded);
     migrate(&store).unwrap();
-    let value = store.get(&key).unwrap();
-    assert_eq!(value, bincode::serialize(&channel).unwrap());
-    let restored = decode_and_validate_channel_actor_data(&value).unwrap();
+    let restored = assert_split_channel(&store, &channel);
     assert_eq!(
         bincode::serialize(&restored.session).unwrap(),
         bincode::serialize(&channel.session).unwrap()
@@ -83,7 +108,8 @@ fn test_released_v2_migrates_without_changing_signing_state() {
         store.get(MIGRATION_VERSION_KEY).unwrap(),
         MIGRATION_DB_VERSION.as_bytes()
     );
-    assert_eq!(snapshot(&store).len(), 2);
+    // Mutable block, immutable block and the version key.
+    assert_eq!(snapshot(&store).len(), 3);
 }
 
 #[test]
@@ -195,18 +221,34 @@ fn test_migration_resumes_after_partial_v2_conversion_and_v1_archive() {
     let encoded = bincode::serialize(&opening).unwrap();
     store.put(&open_key, &encoded);
     migrate(&store).unwrap();
-    assert_eq!(
-        store.get(actor_key(&current.id)).unwrap(),
-        bincode::serialize(&current).unwrap()
-    );
-    assert_eq!(
-        store.get(actor_key(&old.id)).unwrap(),
-        bincode::serialize(&old).unwrap()
-    );
+    assert_split_channel(&store, &current);
+    assert_split_channel(&store, &old);
     assert_eq!(store.get(archive_key(&open_key)).unwrap(), encoded);
-    let completed = snapshot(&store);
+    let completed = records(&store);
     migrate(&store).unwrap();
-    assert_eq!(snapshot(&store), completed);
+    assert_eq!(records(&store), completed);
+}
+
+#[test]
+fn test_already_split_records_are_validated_and_skipped() {
+    let (_dir, store) = database();
+    // One channel is already split (a resumed run), the other still holds a released record.
+    let split = sample(20);
+    let (immutable, mutable) = split.clone().into_parts();
+    store.put(actor_key(&split.id), bincode::serialize(&mutable).unwrap());
+    store.put(
+        [&[CHANNEL_IMMUTABLE_STATE_PREFIX], split.id.as_ref()].concat(),
+        bincode::serialize(&immutable).unwrap(),
+    );
+    let pending = sample(21);
+    store.put(
+        actor_key(&pending.id),
+        bincode::serialize(&released_v2(pending.clone())).unwrap(),
+    );
+
+    migrate(&store).unwrap();
+    assert_split_channel(&store, &split);
+    assert_split_channel(&store, &pending);
 }
 
 #[test]
@@ -246,6 +288,47 @@ fn test_released_v2_with_a_corrupted_marker_is_refused() {
     // The released layout is recognised, so its own error is reported instead of "trailing bytes".
     assert!(error.contains("session marker"), "{error}");
     assert_eq!(snapshot(&store), original);
+}
+
+#[test]
+fn test_active_channel_and_its_opening_record_survive_the_split() {
+    let (_dir, store) = database();
+    let channel = sample(81);
+    let id = channel.id;
+    store.put(
+        actor_key(&id),
+        bincode::serialize(&released_v2(channel.clone())).unwrap(),
+    );
+    // An established channel keeps its opening record, and the migration converts the actor first;
+    // reading that record afterwards must not go back to the whole-record layout.
+    let opening = OldChannelOpenRecord {
+        channel_id: decode_as_new(id).unwrap(),
+        pubkey: decode_as_new(channel.remote_pubkey).unwrap(),
+        is_acceptor: false,
+        status: OldChannelOpeningStatus::ChannelReady,
+        funding_amount: 1,
+        failure_detail: None,
+        created_at: 1,
+        last_updated_at: 1,
+        // A V2 channel, so the released record carries the V2 feature byte.
+        commitment_contract_features:
+            fiber_types_0100::CommitmentContractFeatures::ONCHAIN_FULL_PAYMENT_HASH,
+    };
+    let open_key = [&[CHANNEL_OPEN_RECORD_PREFIX], id.as_ref()].concat();
+    store.put(open_key.clone(), bincode::serialize(&opening).unwrap());
+
+    migrate(&store).unwrap();
+
+    assert_split_channel(&store, &channel);
+    assert_eq!(
+        store.get(MIGRATION_VERSION_KEY).unwrap(),
+        MIGRATION_DB_VERSION.as_bytes()
+    );
+    assert!(store.get(&open_key).is_some(), "the opening record is kept");
+    // A second run has nothing left to do.
+    let completed = snapshot(&store);
+    migrate(&store).unwrap();
+    assert_eq!(snapshot(&store), completed);
 }
 
 #[test]
@@ -458,9 +541,9 @@ fn test_closed_local_v1_watchtower_history_is_archived_and_resumes() {
             assert!(store.get(key).is_none());
             assert_eq!(store.get(archive_key(key)).unwrap(), *bytes);
         }
-        let completed = snapshot(&store);
+        let completed = records(&store);
         migrate(&store).unwrap();
-        assert_eq!(snapshot(&store), completed);
+        assert_eq!(records(&store), completed);
     }
 }
 
@@ -705,8 +788,5 @@ fn test_funding_evidence_for_another_channel_does_not_block_orphan_retirement() 
     migrate(&store).unwrap();
     assert!(store.get(&key).is_none());
     assert_eq!(store.get(archive_key(&key)).unwrap(), encoded);
-    assert_eq!(
-        store.get(actor_key(&other.id)).unwrap(),
-        bincode::serialize(&other).unwrap()
-    );
+    assert_split_channel(&store, &other);
 }

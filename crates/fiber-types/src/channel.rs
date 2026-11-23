@@ -301,6 +301,17 @@ impl ChannelState {
         )
     }
 
+    /// Whether the channel moved past opening, so [`ChannelImmutableData`] is final.
+    pub fn is_established(&self) -> bool {
+        matches!(
+            self,
+            ChannelState::ChannelReady
+                | ChannelState::ShuttingDown(_)
+                | ChannelState::Closed(_)
+                | ChannelState::Stale
+        )
+    }
+
     pub fn can_abort_funding(&self) -> bool {
         match self {
             ChannelState::NegotiatingFunding(_)
@@ -1778,6 +1789,435 @@ pub struct ChannelActorData {
     pub channel_features: ChannelFeatures,
     /// Independent owner signing sessions.
     pub session: ChannelSessionV2,
+}
+
+/// Channel fields that no message can change after the channel is established.
+///
+/// Stored under its own key so that message-time persistence only serializes
+/// [`ChannelMutableData`]. The store only rewrites this block while the channel
+/// is still opening (`!ChannelState::is_established`), so every field here must
+/// be final by `ChannelReady`. `remote_tlc_info` is excluded for that reason:
+/// `UpdateTlcInfo` can arrive on a live channel.
+#[serde_as]
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ChannelImmutableData {
+    pub id: Hash256,
+
+    /// The local public key used to establish p2p network connection.
+    pub local_pubkey: Pubkey,
+    /// The remote public key used to establish p2p network connection.
+    pub remote_pubkey: Pubkey,
+
+    #[serde_as(as = "Option<EntityHex>")]
+    pub funding_tx: Option<Transaction>,
+
+    #[serde_as(as = "Option<EntityHex>")]
+    pub funding_udt_type_script: Option<Script>,
+
+    /// Is this channel initially inbound?
+    /// An inbound channel is one where the counterparty is the funder of the channel.
+    pub is_acceptor: bool,
+
+    /// Is this channel one-way?
+    /// Combines with is_acceptor to determine if the channel able to send payment to the counterparty or not.
+    pub is_one_way: bool,
+
+    /// These two amounts used to keep the minimal ckb amount for the two parties.
+    /// TLC operations will not affect these two amounts, only used to keep the commitment transactions
+    /// to be valid, so that any party can close the channel at any time.
+    pub local_reserved_ckb_amount: u64,
+    pub remote_reserved_ckb_amount: u64,
+
+    /// The commitment fee rate is used to calculate the fee for the commitment transactions.
+    /// The side who want to submit the commitment transaction will pay fee.
+    pub commitment_fee_rate: u64,
+
+    /// The delay time for the commitment transaction, this value is set by the initiator of the channel.
+    /// It must be a relative EpochNumberWithFraction in u64 format.
+    pub commitment_delay_epoch: u64,
+
+    /// The fee rate used for funding transaction, the initiator may set it as `funding_fee_rate` option,
+    /// if it's not set, DEFAULT_FEE_RATE will be used as default value, two sides will use the same fee rate.
+    pub funding_fee_rate: u64,
+
+    /// Signer is used to sign the commitment transactions.
+    pub signer: InMemorySigner,
+
+    /// Cached channel public keys for easier of access.
+    pub local_channel_public_keys: ChannelBasePublicKeys,
+    pub remote_channel_public_keys: Option<ChannelBasePublicKeys>,
+
+    pub local_constraints: ChannelConstraints,
+    pub remote_constraints: ChannelConstraints,
+
+    /// The remote lock script for close channel, setup during the channel establishment.
+    #[serde_as(as = "Option<EntityHex>")]
+    pub remote_shutdown_script: Option<Script>,
+    /// The local lock script for close channel.
+    #[serde_as(as = "EntityHex")]
+    pub local_shutdown_script: Script,
+
+    pub created_at: SystemTime,
+
+    /// Channel features decided once at channel-open and never changed.
+    #[serde(default)]
+    pub channel_features: ChannelFeatures,
+}
+
+#[cfg(debug_assertions)]
+impl ChannelImmutableData {
+    /// Names of the fields that differ, to catch a late write to an immutable field.
+    pub fn differing_fields(&self, other: &Self) -> Vec<&'static str> {
+        use ckb_types::prelude::Entity;
+
+        let mut names = Vec::new();
+        macro_rules! changed {
+            ($name:literal, $left:expr, $right:expr) => {
+                if $left != $right {
+                    names.push($name);
+                }
+            };
+        }
+        changed!("id", self.id, other.id);
+        changed!("local_pubkey", self.local_pubkey, other.local_pubkey);
+        changed!("remote_pubkey", self.remote_pubkey, other.remote_pubkey);
+        changed!(
+            "funding_tx",
+            self.funding_tx.as_ref().map(|tx| tx.as_slice()),
+            other.funding_tx.as_ref().map(|tx| tx.as_slice())
+        );
+        changed!(
+            "funding_udt_type_script",
+            self.funding_udt_type_script.as_ref().map(|s| s.as_slice()),
+            other.funding_udt_type_script.as_ref().map(|s| s.as_slice())
+        );
+        changed!("is_acceptor", self.is_acceptor, other.is_acceptor);
+        changed!("is_one_way", self.is_one_way, other.is_one_way);
+        changed!(
+            "local_reserved_ckb_amount",
+            self.local_reserved_ckb_amount,
+            other.local_reserved_ckb_amount
+        );
+        changed!(
+            "remote_reserved_ckb_amount",
+            self.remote_reserved_ckb_amount,
+            other.remote_reserved_ckb_amount
+        );
+        changed!(
+            "commitment_fee_rate",
+            self.commitment_fee_rate,
+            other.commitment_fee_rate
+        );
+        changed!(
+            "commitment_delay_epoch",
+            self.commitment_delay_epoch,
+            other.commitment_delay_epoch
+        );
+        changed!(
+            "funding_fee_rate",
+            self.funding_fee_rate,
+            other.funding_fee_rate
+        );
+        changed!("signer", self.signer, other.signer);
+        changed!(
+            "local_channel_public_keys",
+            self.local_channel_public_keys,
+            other.local_channel_public_keys
+        );
+        changed!(
+            "remote_channel_public_keys",
+            self.remote_channel_public_keys,
+            other.remote_channel_public_keys
+        );
+        changed!(
+            "local_constraints",
+            self.local_constraints,
+            other.local_constraints
+        );
+        changed!(
+            "remote_constraints",
+            self.remote_constraints,
+            other.remote_constraints
+        );
+        changed!(
+            "remote_shutdown_script",
+            self.remote_shutdown_script.as_ref().map(|s| s.as_slice()),
+            other.remote_shutdown_script.as_ref().map(|s| s.as_slice())
+        );
+        changed!(
+            "local_shutdown_script",
+            self.local_shutdown_script.as_slice(),
+            other.local_shutdown_script.as_slice()
+        );
+        changed!("created_at", self.created_at, other.created_at);
+        changed!(
+            "channel_features",
+            self.channel_features,
+            other.channel_features
+        );
+        names
+    }
+}
+
+/// Channel fields that any message may change; rewritten on every persist.
+#[serde_as]
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ChannelMutableData {
+    pub state: ChannelState,
+    /// The data below are only relevant if the channel is public.
+    pub public_channel_info: Option<PublicChannelInfo>,
+
+    pub remote_tlc_info: Option<ChannelTlcInfo>,
+
+    pub funding_tx_confirmed_at: Option<(H256, u32, u64)>,
+
+    /// Updated whenever we broadcast a channel update or change our TLC limits.
+    pub local_tlc_info: ChannelTlcInfo,
+
+    /// The amount of CKB/UDT that we own in the channel.
+    /// This value will only change after we have resolved a tlc.
+    pub to_local_amount: u128,
+    /// The amount of CKB/UDT that the remote owns in the channel.
+    /// This value will only change after we have resolved a tlc.
+    pub to_remote_amount: u128,
+
+    /// Commitment numbers that are used to derive keys.
+    /// This value is guaranteed to be 0 when channel is just created.
+    pub commitment_numbers: CommitmentNumbers,
+
+    /// All the TLC related information.
+    pub tlc_state: TlcState,
+
+    /// The retryable tlc operations that are waiting to be processed.
+    pub retryable_tlc_operations: VecDeque<RetryableTlcOperation>,
+    pub waiting_forward_tlc_tasks: HashMap<TLCId, [u8; 32]>,
+
+    /// All the commitment point that are sent from the counterparty.
+    /// We need to save all these points to derive the keys for the commitment transactions.
+    pub remote_commitment_points: Vec<(u64, Pubkey)>,
+
+    /// The shutdown info for both local and remote, setup by the shutdown command or message.
+    pub local_shutdown_info: Option<ShutdownInfo>,
+    pub remote_shutdown_info: Option<ShutdownInfo>,
+
+    /// Transaction hash of the shutdown transaction.
+    /// The shutdown transaction can be COOPERATIVE or UNCOOPERATIVE.
+    pub shutdown_transaction_hash: Option<H256>,
+
+    /// A flag to indicate whether the channel is reestablishing,
+    /// we won't process any messages until the channel is reestablished.
+    pub reestablishing: bool,
+
+    /// TLC updates awaiting the next local CommitmentSigned, in wire order.
+    /// V2 publishes them only after the outgoing commitment is stored.
+    #[serde(default)]
+    pub pending_replay_updates: Vec<TlcReplayUpdate>,
+
+    /// Tracks whether the last outbound sync message was RevokeAndAck.
+    #[serde(default)]
+    pub last_was_revoke: bool,
+
+    /// Runtime connectivity state persisted for restart recovery.
+    pub connectivity_state: ChannelConnectivityState,
+
+    /// Persisted state for an in-progress external funding flow.
+    #[serde(default)]
+    pub external_funding: Option<ExternalFundingPersistState>,
+
+    /// Independent owner signing sessions.
+    pub session: ChannelSessionV2,
+}
+
+impl ChannelActorData {
+    /// Split the persisted view without cloning, for the two-record store layout.
+    pub fn into_parts(self) -> (ChannelImmutableData, ChannelMutableData) {
+        let Self {
+            state,
+            public_channel_info,
+            local_tlc_info,
+            remote_tlc_info,
+            local_pubkey,
+            remote_pubkey,
+            id,
+            funding_tx,
+            funding_tx_confirmed_at,
+            funding_udt_type_script,
+            is_acceptor,
+            is_one_way,
+            to_local_amount,
+            to_remote_amount,
+            local_reserved_ckb_amount,
+            remote_reserved_ckb_amount,
+            commitment_fee_rate,
+            commitment_delay_epoch,
+            funding_fee_rate,
+            signer,
+            local_channel_public_keys,
+            commitment_numbers,
+            local_constraints,
+            remote_constraints,
+            tlc_state,
+            retryable_tlc_operations,
+            waiting_forward_tlc_tasks,
+            remote_shutdown_script,
+            local_shutdown_script,
+            remote_commitment_points,
+            remote_channel_public_keys,
+            local_shutdown_info,
+            remote_shutdown_info,
+            shutdown_transaction_hash,
+            reestablishing,
+            created_at,
+            pending_replay_updates,
+            last_was_revoke,
+            connectivity_state,
+            external_funding,
+            channel_features,
+            session,
+        } = self;
+        (
+            ChannelImmutableData {
+                id,
+                local_pubkey,
+                remote_pubkey,
+                funding_tx,
+                funding_udt_type_script,
+                is_acceptor,
+                is_one_way,
+                local_reserved_ckb_amount,
+                remote_reserved_ckb_amount,
+                commitment_fee_rate,
+                commitment_delay_epoch,
+                funding_fee_rate,
+                signer,
+                local_channel_public_keys,
+                remote_channel_public_keys,
+                local_constraints,
+                remote_constraints,
+                local_shutdown_script,
+                remote_shutdown_script,
+                created_at,
+                channel_features,
+            },
+            ChannelMutableData {
+                state,
+                public_channel_info,
+                remote_tlc_info,
+                funding_tx_confirmed_at,
+                local_tlc_info,
+                to_local_amount,
+                to_remote_amount,
+                commitment_numbers,
+                tlc_state,
+                retryable_tlc_operations,
+                waiting_forward_tlc_tasks,
+                remote_commitment_points,
+                local_shutdown_info,
+                remote_shutdown_info,
+                shutdown_transaction_hash,
+                reestablishing,
+                pending_replay_updates,
+                last_was_revoke,
+                connectivity_state,
+                external_funding,
+                session,
+            },
+        )
+    }
+
+    /// Merge the two stored records back into the single in-memory view.
+    pub fn from_parts(immutable: ChannelImmutableData, mutable: ChannelMutableData) -> Self {
+        let ChannelImmutableData {
+            id,
+            local_pubkey,
+            remote_pubkey,
+            funding_tx,
+            funding_udt_type_script,
+            is_acceptor,
+            is_one_way,
+            local_reserved_ckb_amount,
+            remote_reserved_ckb_amount,
+            commitment_fee_rate,
+            commitment_delay_epoch,
+            funding_fee_rate,
+            signer,
+            local_channel_public_keys,
+            remote_channel_public_keys,
+            local_constraints,
+            remote_constraints,
+            local_shutdown_script,
+            remote_shutdown_script,
+            created_at,
+            channel_features,
+        } = immutable;
+        let ChannelMutableData {
+            state,
+            public_channel_info,
+            remote_tlc_info,
+            funding_tx_confirmed_at,
+            local_tlc_info,
+            to_local_amount,
+            to_remote_amount,
+            commitment_numbers,
+            tlc_state,
+            retryable_tlc_operations,
+            waiting_forward_tlc_tasks,
+            remote_commitment_points,
+            local_shutdown_info,
+            remote_shutdown_info,
+            shutdown_transaction_hash,
+            reestablishing,
+            pending_replay_updates,
+            last_was_revoke,
+            connectivity_state,
+            external_funding,
+            session,
+        } = mutable;
+        Self {
+            state,
+            public_channel_info,
+            local_tlc_info,
+            remote_tlc_info,
+            local_pubkey,
+            remote_pubkey,
+            id,
+            funding_tx,
+            funding_tx_confirmed_at,
+            funding_udt_type_script,
+            is_acceptor,
+            is_one_way,
+            to_local_amount,
+            to_remote_amount,
+            local_reserved_ckb_amount,
+            remote_reserved_ckb_amount,
+            commitment_fee_rate,
+            commitment_delay_epoch,
+            funding_fee_rate,
+            signer,
+            local_channel_public_keys,
+            commitment_numbers,
+            local_constraints,
+            remote_constraints,
+            tlc_state,
+            retryable_tlc_operations,
+            waiting_forward_tlc_tasks,
+            remote_shutdown_script,
+            local_shutdown_script,
+            remote_commitment_points,
+            remote_channel_public_keys,
+            local_shutdown_info,
+            remote_shutdown_info,
+            shutdown_transaction_hash,
+            reestablishing,
+            created_at,
+            pending_replay_updates,
+            last_was_revoke,
+            connectivity_state,
+            external_funding,
+            channel_features,
+            session,
+        }
+    }
 }
 
 impl ChannelActorData {

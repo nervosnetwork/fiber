@@ -69,6 +69,17 @@ impl StorageBackend for Store {
             .expect("get should be OK")
     }
 
+    fn multi_get<K: AsRef<[u8]>>(&self, keys: &[K]) -> Vec<Option<Vec<u8>>> {
+        // One snapshot: a batch that writes or deletes several of these keys is never seen
+        // half applied.
+        let snapshot = self.db.snapshot();
+        snapshot
+            .multi_get(keys)
+            .into_iter()
+            .map(|value| value.expect("get should be OK").map(|value| value.to_vec()))
+            .collect()
+    }
+
     fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&self, key: K, value: V) {
         self.db
             .put_opt(key, value, &write_options(self.sync_writes))

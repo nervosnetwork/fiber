@@ -11,14 +11,17 @@ use std::sync::Arc;
 use ckb_types::prelude::Entity;
 use fiber_store::backend::{BatchWriter, StorageBackend};
 use fiber_types::schema::{
-    CHANNEL_ACTOR_STATE_PREFIX, CHANNEL_OUTPOINT_CHANNEL_ID_PREFIX,
-    CHANNEL_SHUTDOWN_SETTLEMENT_PREFIX, PUBKEY_CHANNEL_ID_PREFIX,
+    CHANNEL_OUTPOINT_CHANNEL_ID_PREFIX, CHANNEL_SHUTDOWN_SETTLEMENT_PREFIX,
+    PUBKEY_CHANNEL_ID_PREFIX,
 };
 use fiber_types::{ChannelState, Hash256};
 
 use crate::fiber::channel::ChannelActorState;
 
-use super::store_impl::{KeyValue, Store, StoreKeyValue};
+use super::store_impl::{
+    channel_immutable_key, channel_mutable_key, deserialize_channel_state_parts,
+    stage_channel_actor_state, Store,
+};
 
 /// The channel records of one store.
 pub(crate) struct ChannelStates<'a> {
@@ -31,26 +34,31 @@ impl<'a> ChannelStates<'a> {
         Self { store, cache }
     }
 
-    /// Decode a channel state from the stored record, bypassing the cache.
+    /// Decode a channel state from its two stored records, bypassing the cache.
     fn load(&self, id: &Hash256) -> Option<ChannelActorState> {
-        let key = [&[CHANNEL_ACTOR_STATE_PREFIX], id.as_ref()].concat();
-        self.store
-            .get(key)
-            .map(|v| deserialize_channel_state(v.as_ref()))
+        // Both records are written and deleted in one batch, so they have to be read from one
+        // snapshot: a delete or a move between two reads would otherwise hand back half a channel.
+        let [mutable, immutable] = self
+            .store
+            .multi_get(&[channel_mutable_key(id), channel_immutable_key(id)])
+            .try_into()
+            .expect("two keys were requested");
+        match (mutable, immutable) {
+            (Some(mutable), Some(immutable)) => {
+                Some(deserialize_channel_state_parts(id, &mutable, &immutable))
+            }
+            (None, None) => None,
+            (Some(_), None) => panic!(
+                "channel {id}: mutable record without its fixed record; run the database migration first"
+            ),
+            (None, Some(_)) => panic!("channel {id}: fixed record without its mutable record"),
+        }
     }
 
-    /// Write the channel record without touching the cache.
-    fn write(&self, state: ChannelActorState) {
+    /// Write the channel records without touching the cache.
+    fn write(&self, state: ChannelActorState, write_immutable: bool) {
         let mut batch = self.store.batch();
-
-        let kv = KeyValue::PubkeyChannelId((state.get_remote_pubkey(), state.id), state.state);
-        batch.put(kv.key(), kv.value());
-        if let Some(outpoint) = state.get_funding_transaction_outpoint() {
-            let kv = KeyValue::OutPointChannelId(outpoint, state.id);
-            batch.put(kv.key(), kv.value());
-        }
-        let kv = KeyValue::ChannelActorState(state.id, state);
-        batch.put(kv.key(), kv.value());
+        stage_channel_actor_state(self.store, &mut batch, state, write_immutable);
         batch.commit();
     }
 
@@ -60,7 +68,8 @@ impl<'a> ChannelStates<'a> {
             return;
         };
         let mut batch = self.store.batch();
-        batch.delete([&[CHANNEL_ACTOR_STATE_PREFIX], id.as_ref()].concat());
+        batch.delete(channel_mutable_key(id));
+        batch.delete(channel_immutable_key(id));
         let remote_pubkey_bytes = existing.get_remote_pubkey().serialize();
         batch.delete(
             [
@@ -87,9 +96,26 @@ impl<'a> ChannelStates<'a> {
             .or_else(|| self.load(id))
     }
 
+    /// Persist a channel state.
+    ///
+    /// The fixed record is written only while the channel is opening, so the caller has to arrive
+    /// with one already there: a channel whose first write is already established (a fixture, or a
+    /// caller that lost the opening write) would leave a record that cannot be read back.
     pub(super) fn insert(&self, state: ChannelActorState) {
+        self.insert_with(state, false)
+    }
+
+    /// Test-only write that always refreshes the fixed record, in the same batch as the mutable
+    /// one, so a fixture may inject a fixed field of an established channel.
+    #[cfg(any(test, feature = "sample", feature = "bench"))]
+    pub(super) fn insert_for_test(&self, state: ChannelActorState) {
+        self.insert_with(state, true)
+    }
+
+    fn insert_with(&self, state: ChannelActorState, force_immutable: bool) {
+        let write_immutable = force_immutable || !state.state.is_established();
         let Some(cache) = self.cache else {
-            return self.write(state);
+            return self.write(state, write_immutable);
         };
         // Only a ready channel is cached: its id is final (a channel id changes once, during the
         // opening handshake) and its record is what the message path reads back.
@@ -107,13 +133,13 @@ impl<'a> ChannelStates<'a> {
                 let cached = cache
                     .has_room(&slot)
                     .then(|| channel_cache_snapshot(&state));
-                self.write(state);
+                self.write(state, write_immutable);
                 if let Some(cached) = cached {
                     cache.install(&mut slot, cached);
                 }
             } else {
                 cache.unpublish(&mut slot);
-                self.write(state);
+                self.write(state, write_immutable);
             }
         }
         cache.discard_if_empty(&id);
@@ -167,7 +193,8 @@ impl<'a> ChannelStates<'a> {
     ) {
         let mut batch = self.store.batch();
         if let Some(old_state) = old_state {
-            batch.delete([&[CHANNEL_ACTOR_STATE_PREFIX], old_id.as_ref()].concat());
+            batch.delete(channel_mutable_key(old_id));
+            batch.delete(channel_immutable_key(old_id));
             let remote_pubkey_bytes = old_state.get_remote_pubkey().serialize();
             batch.delete(
                 [
@@ -181,14 +208,8 @@ impl<'a> ChannelStates<'a> {
                 batch.delete([&[CHANNEL_OUTPOINT_CHANNEL_ID_PREFIX], outpoint.as_slice()].concat());
             }
         }
-        let kv = KeyValue::PubkeyChannelId((state.get_remote_pubkey(), state.id), state.state);
-        batch.put(kv.key(), kv.value());
-        if let Some(outpoint) = state.get_funding_transaction_outpoint() {
-            let kv = KeyValue::OutPointChannelId(outpoint, state.id);
-            batch.put(kv.key(), kv.value());
-        }
-        let kv = KeyValue::ChannelActorState(state.id, state);
-        batch.put(kv.key(), kv.value());
+        // `new_id` did not exist before this batch, so it needs both records whatever the state is.
+        stage_channel_actor_state(self.store, &mut batch, state, true);
         batch.commit();
     }
 
@@ -239,12 +260,6 @@ impl<'a> ChannelStates<'a> {
             .and_then(|cache| cache.peek(id))
             .map(|hit| (*hit).clone())
     }
-}
-
-pub(super) fn deserialize_channel_state(bytes: &[u8]) -> ChannelActorState {
-    fiber_types::channel_v2_validation::decode_channel_actor_data(bytes)
-        .unwrap_or_else(|e| panic!("deserialization of ChannelActorState failed: {e}"))
-        .into()
 }
 
 /// Bounded read cache of channel state snapshots with per-channel locking.
