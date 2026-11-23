@@ -523,9 +523,8 @@ impl SendPaymentCommand {
                 return Err("keysend payment should not have payment_hash".to_string());
             }
             // generate a random preimage for keysend payment
-            let mut rng = rand::rng();
             let mut result = [0u8; 32];
-            rng.fill(&mut result[..]);
+            crate::with_random(|rng| rng.fill(&mut result));
             let preimage: Hash256 = result.into();
             // use the default payment hash algorithm here for keysend payment
             let payment_hash: Hash256 = blake2b_256(preimage).into();
@@ -1144,6 +1143,8 @@ where
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
+        #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+        crate::simulation::before_actor_message(myself.get_id()).await;
         #[cfg(feature = "metrics")]
         let start = crate::now_timestamp_as_millis_u64();
         #[cfg(feature = "metrics")]
@@ -1207,6 +1208,11 @@ where
         max_fee_amount: Option<u128>,
         request: SendPaymentState,
     ) -> Result<Vec<PaymentHopData>, PathFindError> {
+        #[cfg(feature = "simulation")]
+        if crate::simulation::is_running() {
+            let graph = self.network_graph.read().await;
+            return graph.build_route(amount, amount_low_bound, max_fee_amount, &request);
+        }
         let network_graph = self.network_graph.clone();
         tokio::task::spawn_blocking(move || {
             let graph = network_graph.blocking_read();
@@ -1930,8 +1936,24 @@ where
 
         assert_ne!(attempt.route_hops[0].funding_tx_hash, Hash256::default());
 
+        #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+        let deterministic_key = crate::simulation::is_running().then(|| {
+            let context = [
+                attempt.payment_hash.as_ref(),
+                &attempt.id.to_le_bytes(),
+                &attempt.tried_times.to_le_bytes(),
+            ]
+            .concat();
+            crate::simulation::keyed_random(b"payment-onion", &context)
+        });
         let peeled_onion_packet = match PeeledPaymentOnionPacket::create_with_session_key_fn(
-            || Privkey::from_slice(KeyPair::generate_random_key().as_ref()),
+            || {
+                #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+                if let Some(key) = deterministic_key {
+                    return Privkey::from_slice(&key);
+                }
+                Privkey::from_slice(KeyPair::generate_random_key().as_ref())
+            },
             attempt.route_hops.clone(),
             Some(attempt.hash.as_ref().to_vec()),
             &Secp256k1::signing_only(),

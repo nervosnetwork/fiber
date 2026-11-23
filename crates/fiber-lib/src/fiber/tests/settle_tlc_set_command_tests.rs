@@ -461,6 +461,8 @@ pub(crate) fn create_test_channel_state_with_tlc(
         scheduled_channel_update_handle: None,
         pending_notify_settle_tlcs: vec![],
         pending_remove_effects_v2: 0,
+        #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+        simulation_tlc_settlements: None,
         pending_payment_notifications: Default::default(),
         replayed_tlc_updates_v2: 0,
         resigning_outgoing_v2: false,

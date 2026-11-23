@@ -28,7 +28,16 @@ impl Store {
             let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
         }
         let db_file = path.join("data.sqlite");
-        let conn = Connection::open(&db_file).map_err(|e| e.to_string())?;
+        #[cfg(feature = "simulation")]
+        let connection = match crate::simulation::vfs_for(path)? {
+            Some(vfs) => {
+                Connection::open_with_flags_and_vfs(&db_file, rusqlite::OpenFlags::default(), vfs)
+            }
+            None => Connection::open(&db_file),
+        };
+        #[cfg(not(feature = "simulation"))]
+        let connection = Connection::open(&db_file);
+        let conn = connection.map_err(|e| e.to_string())?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

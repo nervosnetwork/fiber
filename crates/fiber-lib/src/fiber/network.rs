@@ -1,3 +1,9 @@
+#[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+mod simulation;
+
+#[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+pub use simulation::{start_node, SimulatedChain, SimulatedNode};
+
 use crate::fiber_types::{PaymentSessionKey, UpstreamTlcKey};
 use crate::store::actor::StoreActorMessage;
 use ckb_hash::blake2b_256;
@@ -1314,6 +1320,20 @@ pub enum FiberActorCommand {
     ActivateInProcessPeer(Pubkey, RpcReplyPort<Result<(), String>>),
     /// Remove a previously registered co-located Fiber endpoint.
     UnregisterInProcessPeer(Pubkey),
+    /// Register the output queue for a simulated TCP link.
+    #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+    RegisterSimulatedPeer {
+        pubkey: Pubkey,
+        sender: crate::simulation::SimulatedPeerSender,
+        features: FeatureVector,
+        reply: RpcReplyPort<Result<(), String>>,
+    },
+    /// Resume channels after the simulated peer link is ready.
+    #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+    ActivateSimulatedPeer(Pubkey, RpcReplyPort<Result<(), String>>),
+    /// Disconnect channels from the simulated peer.
+    #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+    UnregisterSimulatedPeer(Pubkey),
     /// Disconnect the peer of a local channel whose external-signing buffer overflowed.
     DisconnectPeerForChannelOverflow(Hash256),
     // Check hold tlcs that have expired and need to be removed.
@@ -1397,7 +1417,11 @@ pub enum FiberActorCommand {
         SubmitChannelSignatureCommand,
         RpcReplyPort<Result<fiber_types::SubmitSignatureOutcome, String>>,
     ),
-    #[cfg(any(test, feature = "bench"))]
+    #[cfg(any(
+        test,
+        feature = "bench",
+        all(feature = "simulation", not(target_arch = "wasm32"))
+    ))]
     GetChannelActor(Hash256, RpcReplyPort<Option<ActorRef<ChannelActorMessage>>>),
     // Send an onion packet to the next hop. The `PeeledPaymentOnionPacket::current` contains
     // the hop data for the current node.
@@ -2066,6 +2090,8 @@ pub(crate) struct FiberActorCore<S, C> {
     store_actor: Option<ActorRef<StoreActorMessage>>,
     network_graph: Arc<RwLock<NetworkGraph<S>>>,
     chain_client: C,
+    #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+    simulation: Option<simulation::SimulatedTransport>,
 }
 
 struct PublicNetworkRuntimeState {
@@ -2132,6 +2158,8 @@ where
             store_actor,
             network_graph,
             chain_client,
+            #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+            simulation: None,
         }
     }
 
@@ -2166,6 +2194,8 @@ where
             p2p_peers: Default::default(),
             p2p_peer_features: Default::default(),
             in_process_peers: Default::default(),
+            #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+            simulated_peers: Default::default(),
             peer_channel_index,
             channels: Default::default(),
             channels_funding_lock_script_cache: Default::default(),
@@ -3404,6 +3434,22 @@ where
             FiberActorCommand::UnregisterInProcessPeer(pubkey) => {
                 state.disconnect_in_process_peer(pubkey);
             }
+            #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+            FiberActorCommand::RegisterSimulatedPeer {
+                pubkey,
+                sender,
+                features,
+                reply,
+            } => {
+                state
+                    .simulated_peers
+                    .insert(pubkey, SimulatedPeer { sender, features });
+                let _ = reply.send(Ok(()));
+            }
+            #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+            FiberActorCommand::UnregisterSimulatedPeer(pubkey) => {
+                state.disconnect_simulated_peer(pubkey);
+            }
             FiberActorCommand::CheckChannelsShutdown => {
                 for (_pubkey, channel_id, channel_state) in self.store.get_channel_states(None) {
                     if matches!(
@@ -3544,7 +3590,11 @@ where
                     ),
                 ))?;
             }
-            #[cfg(any(test, feature = "bench"))]
+            #[cfg(any(
+                test,
+                feature = "bench",
+                all(feature = "simulation", not(target_arch = "wasm32"))
+            ))]
             FiberActorCommand::GetChannelActor(channel_id, reply) => {
                 let _ = reply.send(state.channels.get(&channel_id).cloned());
             }
@@ -3697,6 +3747,10 @@ where
             | FiberActorCommand::DisconnectPeerForChannelOverflow(..)) => Box::pin(
                 Self::handle_network_peer_and_message_command(state, command),
             ),
+            #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+            command @ FiberActorCommand::ActivateSimulatedPeer(..) => Box::pin(
+                Self::handle_network_peer_and_message_command(state, command),
+            ),
             #[cfg(test)]
             command @ FiberActorCommand::ReleaseTestHeldFiberMessages(..) => Box::pin(
                 Self::handle_network_peer_and_message_command(state, command),
@@ -3820,6 +3874,27 @@ where
                         }
                     }
                     Ok(())
+                };
+                let _ = reply.send(result);
+            }
+            #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+            FiberActorCommand::ActivateSimulatedPeer(pubkey, reply) => {
+                let result = if state.simulated_peers.contains_key(&pubkey) {
+                    let mut channels: Vec<_> = state
+                        .peer_channel_index
+                        .get_channels(&pubkey)
+                        .into_iter()
+                        .flatten()
+                        .collect();
+                    channels.sort();
+                    for channel in channels {
+                        if let Err(error) = Box::pin(state.reestablish_channel(channel)).await {
+                            debug!(%error, %channel, "Unable to reestablish simulated peer channel");
+                        }
+                    }
+                    Ok(())
+                } else {
+                    Err(format!("simulated peer {pubkey:?} is not registered"))
                 };
                 let _ = reply.send(result);
             }
@@ -4068,6 +4143,14 @@ where
                     return Ok(());
                 }
                 if let Some((upstream, upstream_tlc)) = tlc.forwarding_tlc {
+                    #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+                    if matches!(&reason, RemoveTlcReason::RemoveTlcFulfill(_)) {
+                        crate::simulation::before_forwarding_fulfill(
+                            state.get_public_key(),
+                            channel_id,
+                        )
+                        .await;
+                    }
                     let Ok(backward) = reason.backward(&tlc.shared_secret) else {
                         return Ok(());
                     };
@@ -5503,6 +5586,8 @@ where
         self.retry_hold_tlc_sets(myself, true);
         // Recover only channel-owned work and indexed attempts. Scanning payment
         // history here makes every restart grow with the node's lifetime traffic.
+        let mut payment_hashes: Vec<_> = payment_hashes.into_iter().collect();
+        payment_hashes.sort();
         for payment_hash in payment_hashes {
             let Some(session) = self.store.get_payment_session(payment_hash) else {
                 continue;
@@ -6886,12 +6971,13 @@ where
             session_key,
             init_command,
         };
+        let name = || format!("Payment-{} Node({:?})", session_key, myself.get_name());
+        #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+        let name = self.simulation.is_none().then(name);
+        #[cfg(not(all(feature = "simulation", not(target_arch = "wasm32"))))]
+        let name = Some(name());
         match Actor::spawn_linked(
-            Some(format!(
-                "Payment-{} Node({:?})",
-                session_key,
-                myself.get_name(),
-            )),
+            name,
             PaymentActor::new(
                 self.store.clone(),
                 self.network_graph.clone(),
@@ -7335,6 +7421,27 @@ where
                 Ok(())
             }
             PublicNetworkEvent::GossipMessageUpdates(gossip_message_updates) => {
+                #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+                if self.core.simulation.is_some() {
+                    for message in &gossip_message_updates.messages {
+                        match message {
+                            BroadcastMessageWithTimestamp::ChannelAnnouncement(
+                                timestamp,
+                                announcement,
+                            ) => {
+                                self.core
+                                    .store
+                                    .save_channel_announcement(*timestamp, announcement.clone());
+                            }
+                            BroadcastMessageWithTimestamp::ChannelUpdate(update) => {
+                                self.core.store.save_channel_update(update.clone());
+                            }
+                            BroadcastMessageWithTimestamp::NodeAnnouncement(announcement) => {
+                                self.core.store.save_node_announcement(announcement.clone());
+                            }
+                        }
+                    }
+                }
                 let mut graph = self.core.network_graph.write().await;
                 graph.update_for_messages(gossip_message_updates.messages);
                 debug_event!(
@@ -7581,6 +7688,11 @@ where
                 Ok(())
             }
             PublicNetworkCommand::BroadcastMessages(message) => {
+                #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+                if let Some(simulation) = &self.core.simulation {
+                    let _ = simulation.broadcast.send(message);
+                    return Ok(());
+                }
                 if let Some(gossip_actor) = state.public.gossip_actor.as_ref() {
                     gossip_actor
                         .send_message(GossipActorMessage::TryBroadcastMessages(message))
@@ -7780,6 +7892,8 @@ pub struct FiberActorState<S, C> {
     p2p_peers: HashMap<Pubkey, P2pFiberPeer>,
     p2p_peer_features: HashMap<Pubkey, FeatureVector>,
     in_process_peers: HashMap<Pubkey, InProcessPeer>,
+    #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+    simulated_peers: HashMap<Pubkey, SimulatedPeer>,
     peer_channel_index: PeerChannelIndex,
     channels: HashMap<Hash256, ActorRef<ChannelActorMessage>>,
     // Channels funding lock script cache
@@ -7859,6 +7973,12 @@ pub struct ConnectedPeer {
 #[derive(Clone, Debug)]
 struct InProcessPeer {
     actor: FiberActorRef,
+    features: FeatureVector,
+}
+
+#[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+struct SimulatedPeer {
+    sender: crate::simulation::SimulatedPeerSender,
     features: FeatureVector,
 }
 
@@ -9214,6 +9334,10 @@ where
     }
 
     fn is_peer_available(&self, pubkey: &Pubkey) -> bool {
+        #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+        if self.simulated_peers.contains_key(pubkey) {
+            return true;
+        }
         self.p2p_peers.contains_key(pubkey) || self.in_process_peers.contains_key(pubkey)
     }
 
@@ -9246,10 +9370,15 @@ where
     }
 
     fn check_feature_compatibility(&self, pubkey: &Pubkey) -> ProcessingChannelResult {
+        #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+        let simulated_features = self.simulated_peers.get(pubkey).map(|peer| &peer.features);
+        #[cfg(not(all(feature = "simulation", not(target_arch = "wasm32"))))]
+        let simulated_features: Option<&FeatureVector> = None;
         let peer_features = self
             .in_process_peers
             .get(pubkey)
             .map(|peer| &peer.features)
+            .or(simulated_features)
             .or_else(|| self.p2p_peer_features.get(pubkey));
         if let Some(peer_features) = peer_features {
             // check peer features
@@ -9567,6 +9696,14 @@ where
                 )))
                 .map_err(|error| Error::InternalError(anyhow::anyhow!(error.to_string())))?;
             return Ok(());
+        }
+        #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+        if let Some(peer) = self.simulated_peers.get(pubkey) {
+            return peer
+                .sender
+                .send(message)
+                .await
+                .map_err(|_| Error::PeerNotFound(*pubkey));
         }
         if let Some(peer) = self.p2p_peers.get(pubkey) {
             peer.control
@@ -10005,6 +10142,8 @@ where
             return;
         }
         if let Some(channel_ids) = self.peer_channel_index.get_channels(&pubkey) {
+            let mut channel_ids: Vec<_> = channel_ids.into_iter().collect();
+            channel_ids.sort_unstable();
             for channel_id in channel_ids {
                 if let Some(channel) = self.channels.get(&channel_id) {
                     if let Err(error) = channel
@@ -10012,6 +10151,32 @@ where
                     {
                         error!(
                             "Failed to disconnect in-process channel actor {:x}: {:?}",
+                            channel_id, error
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+    fn disconnect_simulated_peer(&mut self, pubkey: Pubkey) {
+        if self.simulated_peers.remove(&pubkey).is_none() {
+            return;
+        }
+        if self.p2p_peers.contains_key(&pubkey) || self.in_process_peers.contains_key(&pubkey) {
+            return;
+        }
+        if let Some(channel_ids) = self.peer_channel_index.get_channels(&pubkey) {
+            let mut channel_ids: Vec<_> = channel_ids.into_iter().collect();
+            channel_ids.sort_unstable();
+            for channel_id in channel_ids {
+                if let Some(channel) = self.channels.get(&channel_id) {
+                    if let Err(error) = channel
+                        .send_message(ChannelActorMessage::Event(ChannelEvent::PeerDisconnected))
+                    {
+                        error!(
+                            "Failed to disconnect simulated channel actor {:x}: {:?}",
                             channel_id, error
                         );
                     }
@@ -10961,6 +11126,53 @@ where
             default_shutdown_script,
             ..
         } = args;
+        #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+        if let Some(simulation) = &self.core.simulation {
+            let policy = Arc::new(StdMutex::new(PeerMessagePolicy::new(
+                config.peer_message_policy,
+            )));
+            let service = ServiceBuilder::<SecioKeyPair>::default()
+                .build(NetworkServiceHandle::new(myself.clone(), policy.clone()));
+            let private_key = simulation.key.clone();
+            let features = config.gen_node_features();
+            let state_to_be_persisted = self
+                .core
+                .store
+                .get_network_actor_state(&private_key.pubkey())
+                .unwrap_or_default();
+            let fiber = self.core.build_actor_state(
+                &config,
+                FiberActorStateArgs {
+                    private_key,
+                    entropy: simulation.entropy,
+                    default_shutdown_script,
+                    network: FiberActorRef::from_network(&myself),
+                    peer_channel_index: PeerChannelIndex::build(&self.core.store),
+                    features,
+                },
+            );
+            let public = PublicNetworkRuntimeState {
+                state_to_be_persisted,
+                node_name: config.announced_node_name,
+                announced_addrs: vec![],
+                auto_announce: config.auto_announce_node(),
+                last_node_announcement_message: None,
+                control: service.control().clone(),
+                peer_message_policy: policy,
+                #[cfg(not(target_arch = "wasm32"))]
+                onion_service_token: None,
+                peer_session_map: Default::default(),
+                pending_save_peer_addresses: Default::default(),
+                gossip_actor: None,
+                synced_to_graph: None,
+                max_inbound_peers: config.max_inbound_peers(),
+                min_outbound_peers: config.min_outbound_peers(),
+                enable_peer_reconnect_backoff: false,
+                peer_reconnect_backoff_attempts: Default::default(),
+                requested_disconnect_peers: Default::default(),
+            };
+            return Ok(NetworkActorState { fiber, public });
+        }
         let kp = config
             .read_or_generate_secret_key()
             .expect("read or generate secret key");
@@ -11304,15 +11516,21 @@ where
     ) -> Result<(), ActorProcessingErr> {
         let payment_hashes = state.fiber.restore_persisted_offline_channels().await;
 
-        // MAINTAINING_CONNECTIONS_INTERVAL is long, we need to trigger when start
-        myself
-            .send_message(NetworkActorMessage::new_command(
-                PublicNetworkCommand::MaintainConnections,
-            ))
-            .expect(ASSUME_NETWORK_MYSELF_ALIVE);
-        myself.send_interval(MAINTAINING_CONNECTIONS_INTERVAL, || {
-            NetworkActorMessage::new_command(PublicNetworkCommand::MaintainConnections)
-        });
+        #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+        let maintain_connections = self.core.simulation.is_none();
+        #[cfg(not(all(feature = "simulation", not(target_arch = "wasm32"))))]
+        let maintain_connections = true;
+        if maintain_connections {
+            // MAINTAINING_CONNECTIONS_INTERVAL is long, we need to trigger when start
+            myself
+                .send_message(NetworkActorMessage::new_command(
+                    PublicNetworkCommand::MaintainConnections,
+                ))
+                .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+            myself.send_interval(MAINTAINING_CONNECTIONS_INTERVAL, || {
+                NetworkActorMessage::new_command(PublicNetworkCommand::MaintainConnections)
+            });
+        }
         myself.send_interval(CHECK_CHANNELS_INTERVAL, || {
             NetworkActorMessage::new_command(FiberActorCommand::CheckChannels)
         });
@@ -11334,6 +11552,8 @@ where
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
+        #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+        crate::simulation::before_actor_message(myself.get_id()).await;
         let _handle_log_guard = ActorHandleLogGuard::new(
             "NetworkActor",
             message.to_string(),
@@ -11451,6 +11671,10 @@ where
                     .fiber
                     .inflight_payments
                     .retain(|_, actor| actor.get_id() != who.get_id());
+                #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+                if self.core.simulation.is_some() {
+                    return Err(format!("Fiber child {:?} failed: {err}", who.get_name()).into());
+                }
                 log_actor_failed(who, err);
             }
             _ => {}

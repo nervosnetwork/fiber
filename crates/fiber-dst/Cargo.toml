@@ -1,0 +1,21 @@
+[package]
+name = "fiber-dst"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+description = "Deterministic simulation testing for the Fiber Network"
+publish = false
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+anyhow = "1"
+fnn = { path = "../fiber-lib", features = ["simulation", "sqlite"] }
+jsonrpsee = { version = "0.25", features = ["client-core", "server"] }
+rand = "0.9"
+ractor = { version = "0.15", features = ["async-trait"] }
+secp256k1 = { version = "0.30", features = ["global-context", "recovery"] }
+serde = "1"
+serde_json = "1"
+tempfile = "3"
+tokio = { version = "1", features = ["io-util", "macros", "rt", "sync", "time"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+turmoil = "=0.7.2"

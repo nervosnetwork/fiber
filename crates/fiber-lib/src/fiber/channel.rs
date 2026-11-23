@@ -111,7 +111,7 @@ use ractor::{
 };
 use secp256k1::{XOnlyPublicKey, SECP256K1};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::iter;
 #[cfg(test)]
 #[path = "tests/channel_session.rs"]
@@ -274,7 +274,11 @@ pub enum ChannelCommand {
     SubmitExternalFundingTx(Transaction, RpcReplyPort<Result<Hash256, String>>),
     #[cfg(any(test, feature = "bench"))]
     SetDeferPeerTlcUpdates(bool),
-    #[cfg(any(test, feature = "bench"))]
+    #[cfg(any(
+        test,
+        feature = "bench",
+        all(feature = "simulation", not(target_arch = "wasm32"))
+    ))]
     TestBarrier(RpcReplyPort<()>),
     /// Pause local processing until the test releases the returned sender.
     #[cfg(test)]
@@ -306,7 +310,11 @@ impl Display for ChannelCommand {
             ChannelCommand::SetDeferPeerTlcUpdates(enabled) => {
                 write!(f, "SetDeferPeerTlcUpdates [{enabled}]")
             }
-            #[cfg(any(test, feature = "bench"))]
+            #[cfg(any(
+                test,
+                feature = "bench",
+                all(feature = "simulation", not(target_arch = "wasm32"))
+            ))]
             ChannelCommand::TestBarrier(_) => write!(f, "TestBarrier"),
             #[cfg(test)]
             ChannelCommand::TestPause(_) => write!(f, "TestPause"),
@@ -577,7 +585,10 @@ where
         let signing_update = self.signing_events.prepare(state);
         self.store.insert_channel_actor_state(state.clone());
         signing_update.publish();
-        let updated_payments = std::mem::take(&mut state.pending_payment_notifications);
+        let mut updated_payments: Vec<_> = std::mem::take(&mut state.pending_payment_notifications)
+            .into_iter()
+            .collect();
+        updated_payments.sort();
         for payment_hash in updated_payments {
             self.network
                 .send_message(FiberActorMessage::new_command(
@@ -3171,7 +3182,11 @@ where
                 }
                 Ok(())
             }
-            #[cfg(any(test, feature = "bench"))]
+            #[cfg(any(
+                test,
+                feature = "bench",
+                all(feature = "simulation", not(target_arch = "wasm32"))
+            ))]
             ChannelCommand::TestBarrier(reply) => {
                 let _ = reply.send(());
                 Ok(())
@@ -4157,7 +4172,7 @@ where
             tx.calc_tx_hash()
         );
         state.ephemeral_config.external_funding.unsigned_funding_tx = Some(tx);
-        state.ephemeral_config.external_funding.started_at = Some(SystemTime::now());
+        state.ephemeral_config.external_funding.started_at = Some(fiber_types::system_time_now());
         state.persist_external_funding_state();
         state.update_state(ChannelState::NegotiatingFunding(
             NegotiatingFundingFlags::AWAITING_EXTERNAL_FUNDING,
@@ -4600,8 +4615,12 @@ where
         timeout_seconds: u64,
     ) {
         let event_factory = || ChannelActorMessage::Event(ChannelEvent::CheckFundingTimeout);
-        match funding_timeout_check_delay(created_at.elapsed().unwrap_or_default(), timeout_seconds)
-        {
+        match funding_timeout_check_delay(
+            fiber_types::system_time_now()
+                .duration_since(created_at)
+                .unwrap_or_default(),
+            timeout_seconds,
+        ) {
             Some(timeout) => {
                 // timeout in future
                 myself.send_after(timeout, event_factory);
@@ -5450,6 +5469,8 @@ where
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
+        #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+        crate::simulation::before_actor_message(myself.get_id()).await;
         trace!(
             "Channel actor processing message: peer: {:?} id: {:?}, state: {:?}, message: {:?}",
             state.get_local_pubkey(),
@@ -5539,6 +5560,10 @@ where
             state.persist_external_funding_state();
         }
         self.persist_state_and_publish_pending_effects(state);
+        #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+        if matches!(state.state, ChannelState::AwaitingChannelReady(_)) {
+            crate::simulation::after_funding_state(state.get_local_pubkey(), state.get_id()).await;
+        }
         if matches!(state.state, ChannelState::Closed(_))
             && !state.is_waiting_onchain_settlement()
             && !state.has_pending_tlc_delivery()
@@ -5556,8 +5581,9 @@ where
         }
 
         let channel_id = state.get_id();
-        let mut immediate_tlc_sets = HashMap::<Hash256, Vec<(Hash256, u64)>>::new();
-        let mut hold_tlc_sets = HashSet::new();
+        // A commitment can release several invoices. Keep their mailbox order stable.
+        let mut immediate_tlc_sets = BTreeMap::<Hash256, Vec<(Hash256, u64)>>::new();
+        let mut hold_tlc_sets = BTreeSet::new();
         // try to settle down tlc set
         for pending_notify_tlc in pending_notify_tlcs {
             // Hold the tlc
@@ -5834,6 +5860,10 @@ pub struct ChannelActorState {
     #[doc = "skip_store"]
     pub pending_remove_effects_v2: usize,
 
+    #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+    #[doc = "skip_store"]
+    pub(crate) simulation_tlc_settlements: Option<crate::simulation::PendingTlcSettlements>,
+
     /// Payment wake-ups to publish once the current message's mutations are saved.
     #[doc = "skip_store"]
     pub pending_payment_notifications: HashSet<PaymentSessionKey>,
@@ -5959,6 +5989,8 @@ impl From<ChannelActorData> for ChannelActorState {
             private_key: None,
             needs_backup: false,
             pending_remove_effects_v2: 0,
+            #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+            simulation_tlc_settlements: None,
             pending_payment_notifications: Default::default(),
             replayed_tlc_updates_v2: 0,
             resigning_outgoing_v2: false,
@@ -7332,7 +7364,7 @@ impl ChannelActorState {
                 last_was_revoke: false,
                 external_funding: None,
                 channel_features: ChannelFeatures::V2,
-                created_at: SystemTime::now(),
+                created_at: fiber_types::system_time_now(),
             },
             waiting_peer_response: None,
             reestablish_timer: None,
@@ -7349,6 +7381,8 @@ impl ChannelActorState {
             musig2_agg_context_local_first: Default::default(),
             musig2_agg_context_remote_first: Default::default(),
             pending_remove_effects_v2: 0,
+            #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+            simulation_tlc_settlements: None,
             pending_payment_notifications: Default::default(),
             replayed_tlc_updates_v2: 0,
             resigning_outgoing_v2: false,
@@ -7463,7 +7497,7 @@ impl ChannelActorState {
                 last_was_revoke: false,
                 external_funding: None,
                 channel_features: ChannelFeatures::V2,
-                created_at: SystemTime::now(),
+                created_at: fiber_types::system_time_now(),
             },
             waiting_peer_response: None,
             reestablish_timer: None,
@@ -7480,6 +7514,8 @@ impl ChannelActorState {
             musig2_agg_context_local_first: Default::default(),
             musig2_agg_context_remote_first: Default::default(),
             pending_remove_effects_v2: 0,
+            #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+            simulation_tlc_settlements: None,
             pending_payment_notifications: Default::default(),
             replayed_tlc_updates_v2: 0,
             resigning_outgoing_v2: false,
@@ -7881,6 +7917,25 @@ impl ChannelActorState {
         Some(result)
     }
 
+    fn replay_channel_announcement_signatures(&self) {
+        let Some((node_signature, partial_signature)) = self
+            .public_channel_info
+            .as_ref()
+            .and_then(|info| info.local_channel_announcement_signature.clone())
+        else {
+            return;
+        };
+
+        self.send_message_to_peer(FiberMessage::announcement_signatures(
+            AnnouncementSignatures {
+                channel_id: self.get_id(),
+                channel_outpoint: self.must_get_funding_transaction_outpoint(),
+                node_signature,
+                partial_signature,
+            },
+        ));
+    }
+
     fn public_channel_state_mut(&mut self) -> &mut PublicChannelInfo {
         self.public_channel_info
             .as_mut()
@@ -8222,6 +8277,17 @@ impl ChannelActorState {
             self.to_local_amount = to_local_amount;
             self.to_remote_amount = to_remote_amount;
 
+            #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+            {
+                let node = self.get_local_pubkey();
+                let channel = self.id;
+                crate::simulation::stage_tlc_settlement(
+                    &mut self.simulation_tlc_settlements,
+                    node,
+                    channel,
+                    &current,
+                );
+            }
             debug!("Updated local balance to {} and remote balance to {} by removing tlc {:?} with reason {:?}",
                             to_local_amount, to_remote_amount, tlc_id, reason);
             self.apply_remove_tlc(tlc_id);
@@ -9748,6 +9814,9 @@ impl ChannelActorState {
                     self.send_message_to_peer(message);
                 }
                 if flags.contains(AwaitingChannelReadyFlags::CHANNEL_READY) {
+                    // A previous signature can have been persisted before its frame reached
+                    // the peer. Reuse it across reconnects without signing again.
+                    self.replay_channel_announcement_signatures();
                     self.maybe_channel_is_ready(myself);
                 } else {
                     // Trace the funding tx again
@@ -10621,7 +10690,10 @@ impl ChannelActorState {
                 self.ephemeral_config.funding_timeout_seconds,
             )
         };
-        started_at.elapsed().unwrap_or_default() >= Duration::from_secs(timeout_seconds)
+        fiber_types::system_time_now()
+            .duration_since(started_at)
+            .unwrap_or_default()
+            >= Duration::from_secs(timeout_seconds)
     }
 
     pub fn has_pending_operations(&self) -> bool {
@@ -12359,6 +12431,7 @@ where
                 self.store.insert_channel_actor_state(state.clone());
             }
             state.send_message_to_peer(ready);
+            state.replay_channel_announcement_signatures();
             debug_event!(self.network, "Replayed ChannelReady after reestablishment");
         }
         // The peer has not accepted our outstanding CS (`next_commitment_number == local`).
@@ -12970,6 +13043,10 @@ where
         state.last_was_revoke = response.is_some();
         // Staging/signing is local; commit the accepted session before publishing its results.
         self.store.insert_channel_actor_state(state.clone());
+        #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+        if response.is_some() {
+            crate::simulation::after_commit_before_ack(state.get_local_pubkey(), state.id).await;
+        }
         self.network
             .send_message(FiberActorMessage::new_notification(
                 NetworkServiceEvent::RemoteCommitmentSigned(
@@ -13571,7 +13648,7 @@ mod tests {
                 remote_shutdown_info: None,
                 shutdown_transaction_hash: None,
                 reestablishing: false,
-                created_at: SystemTime::now(),
+                created_at: fiber_types::system_time_now(),
                 pending_replay_updates: vec![],
                 last_was_revoke: false,
                 connectivity_state: ChannelConnectivityState::Online,
@@ -13593,6 +13670,8 @@ mod tests {
             musig2_agg_context_local_first: Default::default(),
             musig2_agg_context_remote_first: Default::default(),
             pending_remove_effects_v2: 0,
+            #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+            simulation_tlc_settlements: None,
             pending_payment_notifications: Default::default(),
             replayed_tlc_updates_v2: 0,
             resigning_outgoing_v2: false,

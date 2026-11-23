@@ -6,6 +6,7 @@ use fiber_types::{
     INITIAL_COMMITMENT_NUMBER,
 };
 use musig2::{AggNonce, BinaryEncoding, KeyAggContext, PartialSignature, PubNonce, SecNonce};
+use rand::Rng;
 
 /// Allocate the initial owner-bound signing session before constructing a channel.
 pub(crate) fn new_session(
@@ -67,7 +68,23 @@ pub(super) fn allocate_nonce(
     purpose: NoncePurposeV2,
     key: &Privkey,
 ) -> SigningNonceV2 {
-    let seed = rand::random::<[u8; 32]>();
+    #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+    let seed = if crate::simulation::is_running() {
+        let purpose = match purpose {
+            NoncePurposeV2::Commitment => 0,
+            NoncePurposeV2::Revocation => 1,
+            NoncePurposeV2::Closing => 2,
+        };
+        let mut context = channel_id.as_ref().to_vec();
+        context.extend_from_slice(&owner.serialize());
+        context.extend_from_slice(&number.to_le_bytes());
+        context.push(purpose);
+        crate::simulation::keyed_random(b"channel-signing-nonce", &context)
+    } else {
+        crate::with_random(|rng| rng.random::<[u8; 32]>())
+    };
+    #[cfg(not(all(feature = "simulation", not(target_arch = "wasm32"))))]
+    let seed = crate::with_random(|rng| rng.random::<[u8; 32]>());
     let public_nonce =
         secret_nonce_v2_parts(seed, channel_id, owner, number, purpose, key).public_nonce();
     SigningNonceV2 {

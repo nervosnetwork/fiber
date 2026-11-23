@@ -1,5 +1,8 @@
 mod actor;
+mod chain;
 mod signer;
+#[cfg(feature = "simulation")]
+pub(crate) mod simulation;
 mod store;
 
 #[cfg(test)]

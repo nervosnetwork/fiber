@@ -708,6 +708,15 @@ pub(crate) fn validate_stored_channel_record(
     }
 }
 
+#[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+impl Store {
+    pub(crate) fn simulation_channel_bytes(&self, id: &Hash256) -> Option<Vec<u8>> {
+        let mut bytes = self.get(channel_mutable_key(id))?;
+        bytes.extend(self.get(channel_immutable_key(id))?);
+        Some(bytes)
+    }
+}
+
 /// Open a store at `path`, running auto-migration with auto-confirm.
 /// Use this when no user interaction is needed (e.g. tests, simple setups).
 pub fn open_store<P: AsRef<Path>>(path: P) -> Result<Store, String> {
@@ -1751,7 +1760,15 @@ impl ChannelActorStateStore for Store {
     }
 
     fn insert_channel_actor_state(&self, state: ChannelActorState) {
-        self.channel_states().insert(state)
+        #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+        let (state, settlements) = {
+            let mut state = state;
+            let settlements = state.simulation_tlc_settlements.take();
+            (state, settlements)
+        };
+        self.channel_states().insert(state);
+        #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+        crate::simulation::publish_tlc_settlements(settlements);
     }
 
     fn move_channel_actor_state(&self, old_id: &Hash256, state: ChannelActorState) {

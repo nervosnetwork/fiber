@@ -884,10 +884,7 @@ impl CkbInvoice {
                 .timestamp
                 .checked_add(expiry.as_millis())
                 .is_some_and(|expiry_time| {
-                    let now = crate::crate_time::UNIX_EPOCH
-                        .elapsed()
-                        .expect("Duration since unix epoch")
-                        .as_millis();
+                    let now = u128::from(crate::now_timestamp_as_millis_u64());
                     expiry_time < now
                 })
         })
@@ -895,10 +892,7 @@ impl CkbInvoice {
 
     /// Returns whether the TLC expiry is too soon for the given invoice.
     pub fn is_tlc_expire_too_soon(&self, tlc_expiry: u64) -> bool {
-        let now = crate::crate_time::UNIX_EPOCH
-            .elapsed()
-            .expect("Duration since unix epoch")
-            .as_millis();
+        let now = u128::from(crate::now_timestamp_as_millis_u64());
         let required_expiry = now + u128::from(self.final_tlc_minimum_expiry_delta_or_default());
         (tlc_expiry as u128) < required_expiry
     }

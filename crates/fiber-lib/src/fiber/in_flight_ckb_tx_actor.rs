@@ -149,6 +149,8 @@ where
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
+        #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+        crate::simulation::before_actor_message(myself.get_id()).await;
         let _handle_log_guard = ActorHandleLogGuard::new(
             "InFlightCkbTxActor",
             message.as_ref().to_string(),

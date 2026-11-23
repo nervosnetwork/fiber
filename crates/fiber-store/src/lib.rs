@@ -31,6 +31,12 @@ pub use native::{Batch, Store};
 mod sqlite;
 #[cfg(all(not(target_arch = "wasm32"), feature = "sqlite"))]
 pub use sqlite::{Batch, Store};
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    feature = "sqlite",
+    feature = "simulation"
+))]
+pub mod simulation;
 
 #[cfg(all(target_arch = "wasm32", not(feature = "browser-test")))]
 mod browser;

@@ -75,9 +75,40 @@ pub(crate) use std::time as crate_time;
 #[cfg(target_arch = "wasm32")]
 pub(crate) use web_time as crate_time;
 
+#[cfg(feature = "simulation")]
+type SimulationClock = fn() -> Option<u64>;
+
+#[cfg(feature = "simulation")]
+thread_local! {
+    static SIMULATION_CLOCK: std::cell::Cell<Option<SimulationClock>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Use a virtual Unix clock while running a single-threaded simulation.
+#[cfg(feature = "simulation")]
+pub fn with_simulation_clock<T>(clock: fn() -> Option<u64>, run: impl FnOnce() -> T) -> T {
+    struct Restore(Option<SimulationClock>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            SIMULATION_CLOCK.set(self.0);
+        }
+    }
+    let _restore = Restore(SIMULATION_CLOCK.replace(Some(clock)));
+    run()
+}
+
+/// Get the current system time, using the simulation clock when installed.
+pub fn system_time_now() -> crate_time::SystemTime {
+    #[cfg(feature = "simulation")]
+    if let Some(millis) = SIMULATION_CLOCK.get().and_then(|clock| clock()) {
+        return crate_time::UNIX_EPOCH + crate_time::Duration::from_millis(millis);
+    }
+    crate_time::SystemTime::now()
+}
+
 /// Get the current timestamp as milliseconds since the Unix epoch.
 pub fn now_timestamp_as_millis_u64() -> u64 {
-    crate_time::SystemTime::now()
+    system_time_now()
         .duration_since(crate_time::UNIX_EPOCH)
         .expect("Duration since unix epoch")
         .as_millis() as u64

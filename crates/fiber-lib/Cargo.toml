@@ -116,7 +116,7 @@ web-time = { version = "1.1.0", features = ["serde"] }
 wasm-bindgen-futures = "0.4"
 
 [features]
-bench = ["tempfile", "ckb-testtool"]
+bench = ["tempfile", "dep:ckb-testtool"]
 # A crate that depends on `fnn` with `default-features = false` (fiber-bin,
 # fiber-wasm) has to forward these itself; keep that mirror in sync when adding a
 # default feature.
@@ -127,6 +127,7 @@ lsp = ["watchtower"]
 portable = ["fiber-store/portable"]
 rocksdb = ["fiber-store/rocksdb"]
 sample = ["fiber-types/sample"]
+simulation = ["watchtower", "dep:ckb-testtool", "fiber-types/simulation", "fiber-store/simulation"]
 sqlite = ["fiber-store/sqlite"]
 watchtower = []
 metrics = ["dep:metrics", "tentacle/metrics", "tokio-metrics", "metrics-exporter-prometheus"]

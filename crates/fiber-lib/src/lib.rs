@@ -45,6 +45,8 @@ pub(crate) mod lsp;
 pub mod invoice;
 pub mod rpc;
 pub mod signing;
+#[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+pub mod simulation;
 pub mod store;
 #[cfg(feature = "watchtower")]
 pub mod watchtower;
@@ -82,11 +84,14 @@ pub fn get_node_prefix() -> &'static str {
     static INSTANCE: once_cell::sync::OnceCell<String> = once_cell::sync::OnceCell::new();
     INSTANCE.get_or_init(|| std::env::var("LOG_PREFIX").unwrap_or_else(|_| "".to_string()))
 }
-pub fn now_timestamp_as_millis_u64() -> u64 {
-    time::SystemTime::now()
-        .duration_since(time::UNIX_EPOCH)
-        .expect("Duration since unix epoch")
-        .as_millis() as u64
+pub use fiber_types::now_timestamp_as_millis_u64;
+
+pub(crate) fn with_random<T>(f: impl FnOnce(&mut dyn rand::RngCore) -> T) -> T {
+    #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+    if simulation::is_running() {
+        return simulation::with_random(f);
+    }
+    f(&mut rand::rng())
 }
 
 #[cfg(test)]

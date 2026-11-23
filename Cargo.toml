@@ -2,6 +2,7 @@
 members = [
     "crates/fiber-lsp-sdk",
     "crates/fiber-lib",
+    "crates/fiber-dst",
     "crates/fiber-bin",
     "crates/fiber-store",
     "crates/fiber-wasm",

@@ -1,6 +1,6 @@
-#[cfg(not(any(feature = "bench")))]
+#[cfg(all(test, not(feature = "bench")))]
 mod actor;
-#[cfg(not(any(feature = "bench")))]
+#[cfg(all(test, not(feature = "bench")))]
 mod config;
 #[cfg(test)]
 mod error;

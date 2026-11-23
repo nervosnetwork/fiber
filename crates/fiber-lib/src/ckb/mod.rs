@@ -31,5 +31,9 @@ pub mod client;
 pub mod config;
 pub mod contracts;
 
-#[cfg(any(test, feature = "bench"))]
+#[cfg(any(
+    test,
+    feature = "bench",
+    all(feature = "simulation", not(target_arch = "wasm32"))
+))]
 pub mod tests;

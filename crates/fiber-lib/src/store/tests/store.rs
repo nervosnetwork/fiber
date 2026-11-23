@@ -2417,6 +2417,8 @@ fn test_channel_actor_state_store() {
         musig2_agg_context_local_first: Default::default(),
         musig2_agg_context_remote_first: Default::default(),
         pending_remove_effects_v2: 0,
+        #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+        simulation_tlc_settlements: None,
         pending_payment_notifications: Default::default(),
         replayed_tlc_updates_v2: 0,
         resigning_outgoing_v2: false,
@@ -2561,6 +2563,8 @@ fn sample_channel_actor_state(
         musig2_agg_context_local_first: Default::default(),
         musig2_agg_context_remote_first: Default::default(),
         pending_remove_effects_v2: 0,
+        #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+        simulation_tlc_settlements: None,
         pending_payment_notifications: Default::default(),
         replayed_tlc_updates_v2: 0,
         resigning_outgoing_v2: false,

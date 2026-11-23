@@ -22,6 +22,8 @@ use crate::utils::arithmetic::{
     ArithmeticError,
 };
 use ckb_types::packed::{OutPoint, Script};
+#[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+use ckb_types::prelude::Entity;
 use fiber_types::protocol::AnnouncedNodeName;
 pub use fiber_types::ChannelUpdateInfo;
 use fiber_types::{
@@ -30,7 +32,7 @@ use fiber_types::{
     Pubkey, RouterHop, SendPaymentData, TlcErr, UdtCfgInfos,
 };
 use parking_lot::Mutex;
-use rand::{rng, Rng};
+use rand::Rng;
 use secp256k1::SECP256K1;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
@@ -2068,7 +2070,8 @@ where
             }
             Ok(())
         };
-        let mut rand_tlc_expiry_delta = self.rand_tlc_expiry_delta(route, max_random_expiry_delta);
+        let mut rand_tlc_expiry_delta =
+            self.rand_tlc_expiry_delta(route, max_random_expiry_delta, payment_data.payment_hash);
         if let Some(max_expiry) = payment_data
             .trampoline_context
             .as_ref()
@@ -2186,7 +2189,12 @@ where
             })
     }
 
-    fn rand_tlc_expiry_delta(&self, route: &[RouterHop], max_random_expiry_delta: u64) -> u64 {
+    fn rand_tlc_expiry_delta(
+        &self,
+        route: &[RouterHop],
+        max_random_expiry_delta: u64,
+        _payment_hash: Hash256,
+    ) -> u64 {
         #[cfg(test)]
         if let Some(expiry_delta) = self.fixed_rand_expiry_delta {
             return expiry_delta;
@@ -2199,7 +2207,18 @@ where
             .min(max_random_expiry_delta)
             / DEFAULT_TLC_EXPIRY_DELTA;
 
-        rng().random_range(1..max_rand_expiry_num.max(2)) * DEFAULT_TLC_EXPIRY_DELTA
+        let upper = max_rand_expiry_num.max(2);
+        #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+        if crate::simulation::is_running() {
+            let mut context = _payment_hash.as_ref().to_vec();
+            for hop in route {
+                context.extend_from_slice(hop.channel_outpoint.as_slice());
+            }
+            let random = crate::simulation::keyed_random(b"payment-expiry", &context);
+            let value = u64::from_le_bytes(random[..8].try_into().expect("eight bytes"));
+            return (value % (upper - 1) + 1) * DEFAULT_TLC_EXPIRY_DELTA;
+        }
+        crate::with_random(|rng| rng.random_range(1..upper)) * DEFAULT_TLC_EXPIRY_DELTA
     }
 
     // A helper function to evaluate whether an edge should be added to the heap of nodes to visit.

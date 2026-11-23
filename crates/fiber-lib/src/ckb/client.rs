@@ -102,7 +102,7 @@ impl From<Pagination<Cell>> for GetCellsResponse {
     }
 }
 
-fn first_input_tx_hash(txs: &[Tx]) -> Option<H256> {
+pub(crate) fn first_input_tx_hash(txs: &[Tx]) -> Option<H256> {
     txs.iter().find_map(|tx_item| match tx_item {
         Tx::Ungrouped(tx) if matches!(tx.io_type, CellType::Input) => Some(tx.tx_hash.clone()),
         _ => None,
@@ -139,7 +139,7 @@ impl CkbRpcClient {
     }
 }
 
-fn new_shutdown_tx_search_key(funding_lock_script: &Script) -> SearchKey {
+pub(crate) fn new_shutdown_tx_search_key(funding_lock_script: &Script) -> SearchKey {
     SearchKey {
         script: funding_lock_script.clone().into(),
         script_type: ScriptType::Lock,
