@@ -138,20 +138,18 @@ pub async fn fiber(
     if let Some(ref mut value) = config.ckb {
         value.wasm_secret_key = Some(ckb_secret_key);
     }
-    let store_path = config
-        .fiber
-        .as_ref()
-        .ok_or_else(|| {
-            exit_to_js(ExitMessage(
-                "fiber config is required but absent".to_string(),
-            ))
-        })?
-        .store_path();
+    let fiber_config = config.fiber.as_ref().ok_or_else(|| {
+        exit_to_js(ExitMessage(
+            "fiber config is required but absent".to_string(),
+        ))
+    })?;
+    let store_path = fiber_config.store_path();
 
     // The browser store has no sync setting.
     let store = open_store_with_migration(
         store_path,
         false,
+        fiber_config.store_channel_cache_capacity(),
         Box::new(wasm_confirm),
         Box::new(wasm_progress),
     )
