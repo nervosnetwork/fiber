@@ -2059,6 +2059,9 @@ where
                 && !was_waiting_forward
                 && self.store.get_invoice(&tlc_info.payment_hash).is_some()
             {
+                // Persist `Paid` before `persist_state_and_publish_pending_effects` saves the
+                // channel state with this TLC removed. `SettleTlcSetCommand::run()` relies on
+                // this write order by re-checking invoice status after scanning channels.
                 self.store
                     .update_invoice_status(&tlc_info.payment_hash, CkbInvoiceStatus::Paid)
                     .expect("update invoice status failed");

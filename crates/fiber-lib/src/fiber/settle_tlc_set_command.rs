@@ -193,6 +193,18 @@ where
                 self.tlcs
                     .retain(|tlc| !already.keys.contains(&(tlc.channel_id, tlc.id)));
             }
+            // Re-read invoice status after scanning channels. ChannelActor persists
+            // `CkbInvoiceStatus::Paid` before saving the ChannelActorState that retires a
+            // fulfilled received TLC, so if a concurrent completion removed the winner before
+            // `already_fulfilled_received_tlcs()` observed it, this read is guaranteed to see
+            // `Paid` (or another terminal status) instead of authorizing another held TLC.
+            let Some(latest_invoice_status) = self.store.get_invoice_status(&self.payment_hash)
+            else {
+                return self.reject_all(TlcErrorCode::InvoiceCancelled);
+            };
+            if let Err(error_code) = self.verify_invoice_status(&invoice, &latest_invoice_status) {
+                return self.reject_all(error_code);
+            }
             already
         } else {
             AlreadyFulfilledTlcs::default()

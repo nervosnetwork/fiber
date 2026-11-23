@@ -28,6 +28,8 @@ use std::collections::HashMap;
 
 const TEST_SHARED_SECRET: [u8; 32] = [42u8; 32];
 
+type ChannelStatesHook = Box<dyn FnOnce(&MockStore)>;
+
 /// Mock store for testing that implements PreimageStore, InvoiceStore, and ChannelActorStateStore
 pub(crate) struct MockStore {
     invoices: RefCell<HashMap<Hash256, CkbInvoice>>,
@@ -40,6 +42,7 @@ pub(crate) struct MockStore {
     pub(crate) onchain_settlements: RefCell<HashMap<(Hash256, TLCId), OnChainTlcSettlement>>,
     pub(crate) shutdown_settlements: RefCell<HashMap<Hash256, ShutdownSettlementRecord>>,
     pub(crate) watch_channels: RefCell<HashMap<Hash256, fiber_types::ChannelData>>,
+    on_get_channel_states: RefCell<Option<ChannelStatesHook>>,
 }
 
 impl MockStore {
@@ -55,7 +58,16 @@ impl MockStore {
             onchain_settlements: RefCell::new(HashMap::new()),
             shutdown_settlements: RefCell::new(HashMap::new()),
             watch_channels: RefCell::new(HashMap::new()),
+            on_get_channel_states: RefCell::new(None),
         }
+    }
+
+    fn with_on_get_channel_states<F>(self, hook: F) -> Self
+    where
+        F: FnOnce(&MockStore) + 'static,
+    {
+        *self.on_get_channel_states.borrow_mut() = Some(Box::new(hook));
+        self
     }
 
     fn with_hold_tlc(self, payment_hash: Hash256, channel_id: Hash256, tlc_id: u64) -> Self {
@@ -250,6 +262,10 @@ impl ChannelActorStateStore for MockStore {
     }
 
     fn get_channel_states(&self, _pubkey: Option<Pubkey>) -> Vec<(Pubkey, Hash256, ChannelState)> {
+        let hook = self.on_get_channel_states.borrow_mut().take();
+        if let Some(hook) = hook {
+            hook(self);
+        }
         self.channel_states
             .borrow()
             .values()
@@ -1921,4 +1937,132 @@ fn test_mpp_received_completes_remaining_part_after_hold_removed() {
     assert_eq!(settlements.len(), 1);
     assert!(is_fulfill_settlement(&settlements[0]));
     assert_eq!(settlements[0].channel_id(), ch_1);
+}
+
+#[test]
+fn test_non_mpp_received_rejects_extra_tlc_when_winner_retires_concurrently() {
+    let preimage = gen_rand_sha256_hash();
+    let payment_hash = Hash256::from(ckb_hash::blake2b_256(preimage));
+    let ch_a = Hash256::from([1u8; 32]);
+    let ch_b = Hash256::from([2u8; 32]);
+
+    let mut state_b = create_test_channel_state_with_tlc(ch_b, 0, 1000, payment_hash, None);
+    state_b
+        .tlc_state
+        .received_tlcs
+        .tlcs
+        .iter_mut()
+        .find(|t| t.tlc_id == TLCId::Received(0))
+        .unwrap()
+        .removed_reason = Some(RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+        payment_preimage: preimage,
+    }));
+
+    // Simulate `ChannelActor(ch_b)` completing the winning TLC after `SettleTlcSetCommand::run()`
+    // read `Received` and before `already_fulfilled_received_tlcs()` scans channels: it commits
+    // `Paid` and retires the fulfilled TLC from `ch_b`, while leaving the preimage intact because
+    // `ch_a` still holds an unfulfilled TLC for the same payment hash.
+    let store = MockStore::new()
+        .with_invoice(
+            create_test_invoice(payment_hash, Some(1000), false),
+            CkbInvoiceStatus::Received,
+        )
+        .with_preimage(payment_hash, preimage)
+        .with_channel_state(create_test_channel_state_with_tlc(
+            ch_a,
+            0,
+            1000,
+            payment_hash,
+            None,
+        ))
+        .with_channel_state(state_b)
+        .with_hold_tlc(payment_hash, ch_a, 0)
+        .with_on_get_channel_states(move |store| {
+            store
+                .update_invoice_status(&payment_hash, CkbInvoiceStatus::Paid)
+                .unwrap();
+            let mut retired_b = store.get_channel_actor_state(&ch_b).unwrap();
+            retired_b.tlc_state.apply_remove_tlc(TLCId::Received(0));
+            store.insert_channel_actor_state(retired_b);
+        });
+
+    let settlements = SettleTlcSetCommand::new_received_hold_tlc_set(payment_hash, &store).run();
+    assert_eq!(settlements.len(), 1);
+    assert_eq!(settlements[0].channel_id(), ch_a);
+    assert!(!is_fulfill_settlement(&settlements[0]));
+    assert_eq!(
+        get_error_code(&settlements[0]),
+        Some(TlcErrorCode::HoldTlcTimeout),
+        "extra non-MPP TLC must be rejected once winner commits Paid and retires"
+    );
+}
+
+#[test]
+fn test_mpp_received_rejects_extra_tlc_when_fulfilled_part_retires_concurrently() {
+    let preimage = gen_rand_sha256_hash();
+    let payment_hash = Hash256::from(ckb_hash::blake2b_256(preimage));
+    let ch_a = Hash256::from([1u8; 32]);
+    let ch_b = Hash256::from([2u8; 32]);
+    let ch_c = Hash256::from([3u8; 32]);
+
+    let mut state_b = create_test_channel_state_with_tlc(ch_b, 0, 600, payment_hash, Some(1000));
+    state_b
+        .tlc_state
+        .received_tlcs
+        .tlcs
+        .iter_mut()
+        .find(|t| t.tlc_id == TLCId::Received(0))
+        .unwrap()
+        .removed_reason = Some(RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+        payment_preimage: preimage,
+    }));
+    let mut state_c = create_test_channel_state_with_tlc(ch_c, 0, 400, payment_hash, Some(1000));
+    state_c
+        .tlc_state
+        .received_tlcs
+        .tlcs
+        .iter_mut()
+        .find(|t| t.tlc_id == TLCId::Received(0))
+        .unwrap()
+        .removed_reason = Some(RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+        payment_preimage: preimage,
+    }));
+
+    // Simulate `ch_b` (600) retiring concurrently with `Paid` after `SettleTlcSetCommand::run()`
+    // read `Received`: `already_fulfilled_received_tlcs()` sees only `ch_c` (400 < 1000), so
+    // without re-checking invoice status it would fulfill the extra `ch_a` (600) shard.
+    let store = MockStore::new()
+        .with_invoice(
+            create_test_invoice(payment_hash, Some(1000), true),
+            CkbInvoiceStatus::Received,
+        )
+        .with_preimage(payment_hash, preimage)
+        .with_channel_state(create_test_channel_state_with_tlc(
+            ch_a,
+            0,
+            600,
+            payment_hash,
+            Some(1000),
+        ))
+        .with_channel_state(state_b)
+        .with_channel_state(state_c)
+        .with_hold_tlc(payment_hash, ch_a, 0)
+        .with_on_get_channel_states(move |store| {
+            store
+                .update_invoice_status(&payment_hash, CkbInvoiceStatus::Paid)
+                .unwrap();
+            let mut retired_b = store.get_channel_actor_state(&ch_b).unwrap();
+            retired_b.tlc_state.apply_remove_tlc(TLCId::Received(0));
+            store.insert_channel_actor_state(retired_b);
+        });
+
+    let settlements = SettleTlcSetCommand::new_received_hold_tlc_set(payment_hash, &store).run();
+    assert_eq!(settlements.len(), 1);
+    assert_eq!(settlements[0].channel_id(), ch_a);
+    assert!(!is_fulfill_settlement(&settlements[0]));
+    assert_eq!(
+        get_error_code(&settlements[0]),
+        Some(TlcErrorCode::HoldTlcTimeout),
+        "extra MPP TLC must be rejected once a fulfilled shard commits Paid and retires"
+    );
 }
