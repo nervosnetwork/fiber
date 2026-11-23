@@ -269,7 +269,7 @@ pub struct SendPaymentCommandParams {
 
 /// A hop hint is a hint for a node to use a specific channel.
 #[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct HopHint {
     /// The public key of the node
     pub pubkey: Pubkey,

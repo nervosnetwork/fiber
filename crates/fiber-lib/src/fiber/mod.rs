@@ -12,6 +12,7 @@ pub mod types;
 mod fee;
 pub(crate) mod gossip_policy;
 mod in_flight_ckb_tx_actor;
+mod jit;
 mod key;
 pub(crate) mod onchain_tlc_reconcile;
 #[cfg(not(target_arch = "wasm32"))]
@@ -23,7 +24,7 @@ pub(crate) mod proxy;
 pub(crate) mod session;
 mod settle_tlc_set_command;
 
-pub use config::FiberConfig;
+pub use config::{FiberConfig, JitChannelConfig};
 pub use fiber_types::*;
 pub use in_flight_ckb_tx_actor::{
     InFlightCkbTxActor, InFlightCkbTxActorArguments, InFlightCkbTxActorMessage, InFlightCkbTxKind,

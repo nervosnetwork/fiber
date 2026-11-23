@@ -1,6 +1,6 @@
 use fiber_types::{
-    Attribute, CkbInvoice, CkbScript, Currency, FeatureVector, Hash256, HashAlgorithm, InvoiceData,
-    InvoiceError, MAX_DESCRIPTION_LENGTH,
+    Attribute, CkbInvoice, CkbScript, Currency, FeatureVector, Hash256, HashAlgorithm, HopHint,
+    InvoiceData, InvoiceError, MAX_DESCRIPTION_LENGTH,
 };
 
 use crate::time::UNIX_EPOCH;
@@ -94,6 +94,9 @@ impl InvoiceBuilder {
 
     attr_setter!(description, Description, String);
     attr_setter!(payee_pub_key, PayeePublicKey, PublicKey);
+    attr_setter!(liquidity_provider, LiquidityProvider, PublicKey);
+    attr_setter!(jit_open_fee, JitOpenFee, u128);
+    attr_setter!(hop_hints, HopHints, Vec<HopHint>);
     attr_setter!(expiry_time, ExpiryTime, Duration);
     attr_setter!(fallback_address, FallbackAddr, String);
     attr_setter!(final_expiry_delta, FinalHtlcMinimumExpiryDelta, u64);

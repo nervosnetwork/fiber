@@ -49,6 +49,89 @@ const MAX_TRAMPOLINE_HOPS_LIMIT: u16 = 5;
 const DEFAULT_MAX_FEE_RATE: u64 = 5;
 pub(crate) const MAX_FEE_RATE_DENOMINATOR: u128 = 1000;
 
+fn split_trampoline_hop_hints(hints: Vec<HopHint>) -> (Vec<Pubkey>, Vec<HopHint>) {
+    let mut trampoline = Vec::new();
+    let mut routes = Vec::new();
+    for hint in hints {
+        // Zero outpoint: trampoline to this pubkey. The channel does not exist yet.
+        if hint.channel_outpoint == OutPoint::default() {
+            trampoline.push(hint.pubkey);
+        } else {
+            routes.push(hint);
+        }
+    }
+    (trampoline, routes)
+}
+
+/// Fee cap for one payment.
+///
+/// A non-zero JIT open fee requires an explicit `max_fee_amount` or `max_fee_rate`,
+/// and that ceiling has to cover the open fee.
+fn payment_max_fee(
+    amount: u128,
+    open_fee: u128,
+    requested_max_fee: Option<u128>,
+    max_fee_rate: Option<u64>,
+) -> Result<u128, String> {
+    let rate = max_fee_rate.unwrap_or(DEFAULT_MAX_FEE_RATE) as u128;
+    if open_fee == 0 {
+        let rate_cap = calculate_fee_with_base(amount, rate, MAX_FEE_RATE_DENOMINATOR)?;
+        return Ok(match requested_max_fee {
+            Some(requested) => requested.min(rate_cap),
+            None => rate_cap,
+        });
+    }
+
+    if requested_max_fee.is_none() && max_fee_rate.is_none() {
+        return Err(
+            "invoice JIT open fee requires max_fee_amount or max_fee_rate; set one to pay it"
+                .to_string(),
+        );
+    }
+
+    if let Some(requested) = requested_max_fee {
+        if requested < open_fee {
+            return Err(format!(
+                "max_fee_amount is below the invoice JIT open fee: {requested} < {open_fee}"
+            ));
+        }
+    }
+
+    if let Some(explicit_rate) = max_fee_rate {
+        let rate_cap =
+            calculate_fee_with_base(amount, explicit_rate as u128, MAX_FEE_RATE_DENOMINATOR)?;
+        if rate_cap < open_fee {
+            return Err(format!(
+                "max fee rate does not cover the invoice JIT open fee: {rate_cap} < {open_fee}"
+            ));
+        }
+        let cap = match requested_max_fee {
+            Some(requested) => requested.min(rate_cap),
+            None => rate_cap,
+        };
+        if cap < open_fee {
+            return Err(format!(
+                "max fee rate does not cover the invoice JIT open fee: {cap} < {open_fee}"
+            ));
+        }
+        return Ok(cap);
+    }
+
+    let routed_amount = amount.checked_add(open_fee).ok_or_else(|| {
+        format!("amount + JIT open fee overflow: amount = {amount}, open_fee = {open_fee}")
+    })?;
+    let routing_allowance = calculate_fee_with_base(routed_amount, rate, MAX_FEE_RATE_DENOMINATOR)?;
+    let total = routing_allowance.checked_add(open_fee).ok_or_else(|| {
+        format!(
+            "routing allowance + JIT open fee overflow: routing = {routing_allowance}, open_fee = {open_fee}"
+        )
+    })?;
+    Ok(match requested_max_fee {
+        Some(requested) => requested.min(total),
+        None => total,
+    })
+}
+
 fn check_trampoline_outgoing_tlc_expiry(
     session: &mut PaymentSession,
     hops: &[PaymentHopData],
@@ -436,15 +519,8 @@ impl SendPaymentDataExt for SendPaymentData {
             "amount",
         )?;
 
-        let max_fee_rate = command.max_fee_rate.unwrap_or(DEFAULT_MAX_FEE_RATE) as u128;
-        let max_fee_amount_by_rate =
-            calculate_fee_with_base(amount, max_fee_rate, MAX_FEE_RATE_DENOMINATOR)?;
-
-        let max_fee_amount = match command.max_fee_amount {
-            Some(max_fee_amount) => Some(max_fee_amount.min(max_fee_amount_by_rate)),
-            None => Some(max_fee_amount_by_rate),
-        };
-
+        // Resolve the asset before quoting a JIT open fee. The open fee is a CKB
+        // amount, so it must not be added to a UDT payment.
         let udt_type_script = match validate_field(
             command.udt_type_script.clone(),
             invoice.as_ref().and_then(|i| i.udt_type_script().cloned()),
@@ -454,6 +530,19 @@ impl SendPaymentDataExt for SendPaymentData {
             Err(e) if e == "udt_type_script is missing" => None,
             Err(e) => return Err(e),
         };
+        let open_fee = invoice
+            .as_ref()
+            .and_then(|inv| inv.jit_open_fee())
+            .unwrap_or(0);
+        if udt_type_script.is_some() && open_fee != 0 {
+            return Err("JIT open fee is only valid for CKB payments".to_string());
+        }
+        let max_fee_amount = Some(payment_max_fee(
+            amount,
+            open_fee,
+            command.max_fee_amount,
+            command.max_fee_rate,
+        )?);
 
         // check htlc expiry delta and limit are both valid if it is set
         let final_tlc_expiry_delta = match invoice.as_ref() {
@@ -509,11 +598,22 @@ impl SendPaymentDataExt for SendPaymentData {
             (payment_hash, Some(preimage))
         };
 
-        let hop_hints = command.hop_hints.unwrap_or_default();
-        if !hop_hints.is_empty()
-            && invoice
-                .as_ref()
-                .is_some_and(|inv| !inv.allow_trampoline_routing())
+        let invoice_hints = invoice
+            .as_ref()
+            .map(|inv| inv.hop_hints())
+            .unwrap_or_default();
+        let (invoice_trampoline, invoice_routes) = split_trampoline_hop_hints(invoice_hints);
+        let (command_trampoline, hop_hints) = match command.hop_hints {
+            Some(hints) => {
+                let (trampoline, routes) = split_trampoline_hop_hints(hints);
+                (trampoline, routes)
+            }
+            None => (Vec::new(), invoice_routes),
+        };
+        if invoice
+            .as_ref()
+            .is_some_and(|inv| !inv.allow_trampoline_routing())
+            && (!hop_hints.is_empty() || !command_trampoline.is_empty())
         {
             return Err("invoice does not support hop hints".to_string());
         }
@@ -546,6 +646,49 @@ impl SendPaymentDataExt for SendPaymentData {
             BasicMppPaymentData::new(payment_secret, amount).write(records);
         }
 
+        let trampoline_hops = match command.trampoline_hops {
+            Some(hops) => Some(hops),
+            None => {
+                let hops = if !command_trampoline.is_empty() {
+                    command_trampoline
+                } else if !invoice_trampoline.is_empty() {
+                    invoice_trampoline
+                } else {
+                    invoice
+                        .as_ref()
+                        .filter(|inv| inv.udt_type_script().is_none())
+                        .and_then(|inv| inv.liquidity_provider().copied().map(Pubkey::from))
+                        .map(|lsp| vec![lsp])
+                        .unwrap_or_default()
+                };
+                if hops.is_empty() {
+                    None
+                } else {
+                    Some(hops)
+                }
+            }
+        };
+        if invoice
+            .as_ref()
+            .is_some_and(|invoice| invoice.jit_open_fee().is_some())
+        {
+            let Some(provider) = invoice
+                .as_ref()
+                .and_then(|invoice| invoice.liquidity_provider().copied().map(Pubkey::from))
+            else {
+                return Err("JIT open fee requires the invoice liquidity provider".to_string());
+            };
+            let pays_provider = trampoline_hops
+                .as_ref()
+                .and_then(|hops| hops.last())
+                .is_some_and(|hop| *hop == provider);
+            if !pays_provider {
+                return Err(
+                    "JIT open fee must be paid to the invoice liquidity provider".to_string(),
+                );
+            }
+        }
+
         SendPaymentDataBuilder::new(target, amount, payment_hash)
             .invoice(command.invoice)
             .final_tlc_expiry_delta(final_tlc_expiry_delta)
@@ -561,7 +704,7 @@ impl SendPaymentDataExt for SendPaymentData {
             .hop_hints(hop_hints)
             .allow_mpp(allow_mpp)
             .dry_run(command.dry_run)
-            .trampoline_hops(command.trampoline_hops)
+            .trampoline_hops(trampoline_hops)
             .build()
     }
 
@@ -948,6 +1091,8 @@ pub struct PaymentActorState {
     // result arrives, the channel's persisted state may not own the attempt yet.
     // On restart those mailboxes disappear and durable channel ownership wins.
     pending_add_results: HashSet<u64>,
+    // Set after the liquidity node rejects a route that omitted the invoice open fee.
+    charge_jit_open_fee: bool,
 }
 
 impl PaymentActorState {
@@ -965,8 +1110,35 @@ impl PaymentActorState {
             processed_closed_adds: HashSet::new(),
             attempts_with_retry_work: HashSet::new(),
             pending_add_results: HashSet::new(),
+            charge_jit_open_fee: false,
         }
     }
+}
+
+fn invoice_jit_open_fee(session: &PaymentSession) -> u128 {
+    session
+        .request
+        .payment_invoice()
+        .and_then(|invoice| invoice.jit_open_fee())
+        .unwrap_or(0)
+}
+
+fn charge_jit_open_fee_on_route(session: &PaymentSession, state: &PaymentActorState) -> bool {
+    session.is_dry_run() || state.charge_jit_open_fee || invoice_jit_open_fee(session) == 0
+}
+
+fn jit_open_fee_refusal(session: &PaymentSession, error: &TlcErr) -> bool {
+    if error.error_code != TlcErrorCode::FeeInsufficient || invoice_jit_open_fee(session) == 0 {
+        return false;
+    }
+    let Some(provider) = session
+        .request
+        .payment_invoice()
+        .and_then(|invoice| invoice.liquidity_provider().copied().map(Pubkey::from))
+    else {
+        return false;
+    };
+    error.error_node_id() == Some(provider)
 }
 
 pub struct PaymentActorArguments {
@@ -1532,9 +1704,11 @@ where
                 graph.channel_stats()
             };
 
-            let channel_stats = GraphChannelStat::new(Some(channel_stats));
-            let payment_state =
+            let mut channel_stats = GraphChannelStat::new(Some(channel_stats));
+            self.exclude_reserved_jit_channels(&mut channel_stats, session.payment_hash());
+            let mut payment_state =
                 SendPaymentState::with_channel_stats(session.request.clone(), channel_stats);
+            payment_state.charge_jit_open_fee = charge_jit_open_fee_on_route(session, state);
             #[cfg(not(target_arch = "wasm32"))]
             let hops = self
                 .build_route_in_spawn_task(amount, None, max_fee, payment_state)
@@ -1559,9 +1733,33 @@ where
         Ok(())
     }
 
+    fn exclude_reserved_jit_channels(
+        &self,
+        channel_stats: &mut GraphChannelStat,
+        payment_hash: Hash256,
+    ) {
+        let Some(saved) = self.store.get_jit_tracking() else {
+            return;
+        };
+        for reservation in saved.reserved {
+            if reservation.payment_hash == payment_hash {
+                continue;
+            }
+            let Some(outpoint) = self
+                .store
+                .get_channel_actor_state(&reservation.channel_id)
+                .and_then(|channel| channel.get_funding_transaction_outpoint())
+            else {
+                continue;
+            };
+            channel_stats.block_channel(outpoint);
+        }
+    }
+
     async fn build_payment_routes(
         &self,
         session: &mut PaymentSession,
+        charge_jit_open_fee: bool,
     ) -> Result<Vec<Attempt>, Error> {
         let (source, channel_stats) = {
             let graph = self.network_graph.read().await;
@@ -1579,6 +1777,7 @@ where
         }
 
         let mut channel_stats = GraphChannelStat::new(Some(channel_stats));
+        self.exclude_reserved_jit_channels(&mut channel_stats, session.payment_hash());
         let amount_low_bound = Some(1);
         // Derive the next id from the highest retained id: a retried session can
         // keep settled attempts, so ids may not be contiguous and `attempts_count`
@@ -1595,10 +1794,12 @@ where
         if session.max_parts() > 1 && !is_self_pay {
             let path_max = {
                 let graph = self.network_graph.read().await;
-                graph.find_path_max_capacity(&SendPaymentState::with_channel_stats(
+                let mut payment_state = SendPaymentState::with_channel_stats(
                     session.request.clone(),
                     channel_stats.clone(),
-                ))?
+                );
+                payment_state.charge_jit_open_fee = charge_jit_open_fee;
+                graph.find_path_max_capacity(&payment_state)?
             };
             if path_max
                 .checked_mul(session.max_parts() as u128)
@@ -1633,10 +1834,11 @@ where
                 session.max_parts(),
                 max_fee,
             );
-            let payment_state = SendPaymentState::with_channel_stats(
+            let mut payment_state = SendPaymentState::with_channel_stats(
                 session.request.clone(),
                 channel_stats.clone(),
             );
+            payment_state.charge_jit_open_fee = charge_jit_open_fee;
             #[cfg(not(target_arch = "wasm32"))]
             let build_route_result = self
                 .build_route_in_spawn_task(
@@ -1654,6 +1856,12 @@ where
             match build_route_result {
                 Err(e) => {
                     error!("build_payment_routes failed to build route: {}", e);
+                    if matches!(e, PathFindError::NoPathFound)
+                        && session.request.trampoline_context.is_some()
+                        && session.request.udt_type_script.is_none()
+                    {
+                        return Err(Error::NeedJitChannel);
+                    }
                     let error = if session.request.trampoline_context.is_some() {
                         session
                             .last_error_code
@@ -2034,12 +2242,28 @@ where
         // it depends on the path finding algorithm to create how many of attempts,
         // if a payment can not be met in the network graph, an build path error will be returned
         // and no attempts be stored in the payment session and db.
-        let mut attempts = self
-            .build_payment_routes(&mut session)
+        let charge_open_fee = charge_jit_open_fee_on_route(&session, state);
+        let mut attempts = match self
+            .build_payment_routes(&mut session, charge_open_fee)
             .await
-            .inspect_err(|e| {
+        {
+            Ok(attempts) => attempts,
+            Err(Error::NeedJitChannel) => {
+                self.network
+                    .send_message(NetworkActorMessage::new_command(
+                        NetworkActorCommand::MaybeOpenJitChannel(
+                            payment_hash,
+                            session.request.target_pubkey,
+                        ),
+                    ))
+                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                return Ok(());
+            }
+            Err(e) => {
                 self.set_payment_fail_with_error(&mut session, &e.to_string(), None);
-            })?;
+                return Err(e);
+            }
+        };
 
         for attempt in attempts.iter_mut() {
             self.send_attempt(myself.clone(), state, &mut session, attempt)
@@ -2064,6 +2288,26 @@ where
             return Ok(());
         }
         let Some(attempt_id) = attempt_id else {
+            let orphan_created: Vec<u64> = session
+                .attempts()
+                .filter(|attempt| attempt.status == AttemptStatus::Created)
+                .map(|attempt| attempt.id)
+                .collect();
+            for attempt_id in orphan_created {
+                if state.pending_add_results.contains(&attempt_id) {
+                    continue;
+                }
+                let Some(mut attempt) = self.store.get_attempt(session.payment_hash(), attempt_id)
+                else {
+                    continue;
+                };
+                if attempt.status != AttemptStatus::Created || self.channel_owns_attempt(&attempt) {
+                    continue;
+                }
+                state.attempts_with_retry_work.insert(attempt_id);
+                self.send_attempt(myself.clone(), state, session, &mut attempt)
+                    .await?;
+            }
             return Ok(());
         };
         if state.pending_add_results.contains(&attempt_id) {
@@ -2405,7 +2649,17 @@ where
                             }
                         }
                     };
-                    let need_to_retry = if let Some(route_index) = route_index {
+                    let attach_open_fee =
+                        jit_open_fee_refusal(&session, &tlc_error) && !state.charge_jit_open_fee;
+                    let need_to_retry = if attach_open_fee {
+                        // Skip record_attempt_fail so this node is not blacklisted.
+                        state.charge_jit_open_fee = true;
+                        self.network_graph
+                            .write()
+                            .await
+                            .untrack_attempt_router(&attempt);
+                        true
+                    } else if let Some(route_index) = route_index {
                         self.network_graph.write().await.record_attempt_fail_at_hop(
                             &attempt,
                             tlc_error.clone(),
@@ -2658,7 +2912,9 @@ where
         // will not store the payment session and send the onion packet
         if payment_data.dry_run {
             let mut payment_session = PaymentSession::new_session(&self.store, payment_data, 0);
-            self.build_payment_routes(&mut payment_session).await?;
+            let charge_open_fee = charge_jit_open_fee_on_route(&payment_session, state);
+            self.build_payment_routes(&mut payment_session, charge_open_fee)
+                .await?;
             return Ok(SendPaymentResponse::from_session(
                 payment_session,
                 &self.store,

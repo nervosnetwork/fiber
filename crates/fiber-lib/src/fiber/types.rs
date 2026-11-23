@@ -129,6 +129,40 @@ impl TryFrom<molecule_fiber::Init> for Init {
     }
 }
 
+/// Session-scoped JIT registration sent after `Init`.
+///
+/// An empty `funding_udt_type_script` requests a CKB channel. `max_amount` is
+/// the largest inbound amount the receiver wants on a just-in-time channel.
+/// The receiver sends `open_fee` as 0. The acknowledgement carries the liquidity node's fee.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JitChannelRegister {
+    pub funding_udt_type_script: Option<Script>,
+    pub max_amount: u128,
+    pub open_fee: u128,
+}
+
+impl From<JitChannelRegister> for molecule_fiber::JitChannelRegister {
+    fn from(m: JitChannelRegister) -> Self {
+        Self::new_builder()
+            .funding_udt_type_script(m.funding_udt_type_script.pack())
+            .max_amount(m.max_amount.pack())
+            .open_fee(m.open_fee.pack())
+            .build()
+    }
+}
+
+impl TryFrom<molecule_fiber::JitChannelRegister> for JitChannelRegister {
+    type Error = Error;
+
+    fn try_from(m: molecule_fiber::JitChannelRegister) -> Result<Self, Self::Error> {
+        Ok(Self {
+            funding_udt_type_script: m.funding_udt_type_script().to_opt(),
+            max_amount: m.max_amount().unpack(),
+            open_fee: m.open_fee().unpack(),
+        })
+    }
+}
+
 impl OpenChannelV2 {
     pub fn all_ckb_amount(&self) -> Result<u64, ProcessingChannelError> {
         if self.funding_udt_type_script.is_none() {
@@ -884,6 +918,7 @@ pub enum FiberMessage {
     Init(Init),
     ChannelNormalOperation(FiberChannelMessage),
     ChannelInitializationV2(OpenChannelV2),
+    JitChannelRegister(JitChannelRegister),
 }
 
 impl FiberMessage {
@@ -934,6 +969,10 @@ impl FiberMessage {
 
     pub fn init(init_message: Init) -> Self {
         FiberMessage::Init(init_message)
+    }
+
+    pub fn jit_channel_register(message: JitChannelRegister) -> Self {
+        Self::JitChannelRegister(message)
     }
 
     pub fn tx_signatures(tx_signatures: TxSignatures) -> Self {
@@ -1653,6 +1692,7 @@ impl From<FiberMessage> for molecule_fiber::FiberMessageUnion {
         match fiber_message {
             FiberMessage::ChannelInitializationV2(m) => Self::OpenChannelV2(m.into()),
             FiberMessage::Init(init) => molecule_fiber::FiberMessageUnion::Init(init.into()),
+            FiberMessage::JitChannelRegister(m) => Self::JitChannelRegister(m.into()),
 
             FiberMessage::ChannelNormalOperation(m) => match m {
                 FiberChannelMessage::AcceptChannelV2(m) => Self::AcceptChannelV2(m.into()),
@@ -1735,6 +1775,9 @@ impl TryFrom<molecule_fiber::FiberMessageUnion> for FiberMessage {
                 Self::tx_complete_v2(m.try_into()?)
             }
             molecule_fiber::FiberMessageUnion::Init(init) => FiberMessage::Init(init.try_into()?),
+            molecule_fiber::FiberMessageUnion::JitChannelRegister(m) => {
+                FiberMessage::JitChannelRegister(m.try_into()?)
+            }
 
             molecule_fiber::FiberMessageUnion::TxSignatures(tx_signatures) => {
                 FiberMessage::ChannelNormalOperation(FiberChannelMessage::TxSignatures(

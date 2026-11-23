@@ -25,8 +25,8 @@ use fiber_types::protocol::AnnouncedNodeName;
 pub use fiber_types::ChannelUpdateInfo;
 use fiber_types::{
     Attempt, BroadcastMessageID, ChannelAnnouncement, ChannelUpdate, Cursor, FeatureVector,
-    Hash256, HopHint, NodeAnnouncement, PaymentHopData, PaymentSession, PaymentStatus, Privkey,
-    Pubkey, RouterHop, SendPaymentData, TlcErr, UdtCfgInfos,
+    Hash256, HopHint, NodeAnnouncement, PaymentHopData, PaymentSession, PaymentStatus,
+    PersistedJit, Privkey, Pubkey, RouterHop, SendPaymentData, TlcErr, UdtCfgInfos,
 };
 use parking_lot::Mutex;
 use rand::{rng, Rng};
@@ -322,6 +322,7 @@ impl ChannelStatElem {
 pub struct GraphChannelStat {
     base: Option<Arc<Mutex<GraphChannelStat>>>,
     inner: HashMap<OutPoint, ChannelStatElem>,
+    blocked: HashSet<OutPoint>,
 }
 
 impl GraphChannelStat {
@@ -329,7 +330,16 @@ impl GraphChannelStat {
         Self {
             inner: HashMap::new(),
             base,
+            blocked: HashSet::new(),
         }
+    }
+
+    pub fn block_channel(&mut self, outpoint: OutPoint) {
+        self.blocked.insert(outpoint);
+    }
+
+    pub fn blocks_channel(&self, outpoint: &OutPoint) -> bool {
+        self.blocked.contains(outpoint)
     }
 
     pub fn get_channel_count(&self, channel_outpoint: &OutPoint) -> usize {
@@ -402,6 +412,8 @@ pub struct SendPaymentState {
     pub request: SendPaymentData,
     /// Runtime channel usage statistics for path-finding (overlay on global stats).
     pub channel_stats: GraphChannelStat,
+    /// When false, a quoted JIT open fee is omitted from this route.
+    pub charge_jit_open_fee: bool,
 }
 
 impl SendPaymentState {
@@ -410,6 +422,7 @@ impl SendPaymentState {
         Self {
             request,
             channel_stats: Default::default(),
+            charge_jit_open_fee: true,
         }
     }
 
@@ -418,6 +431,7 @@ impl SendPaymentState {
         Self {
             request,
             channel_stats,
+            charge_jit_open_fee: true,
         }
     }
 }
@@ -1540,13 +1554,38 @@ where
             ));
         }
 
-        let low_total_trampoline_fee = self.estimate_trampoline_fee(final_amount, 1, hops)?;
-        let mut fees = vec![0u128; hops.len()];
         let Some(max_fee_amount) = max_fee_amount else {
             return Err(PathFindError::Other(
                 "max_fee_amount is required for trampoline routing".to_string(),
             ));
         };
+        // `Some(0)` is a quote of zero. A missing attribute uses ordinary fee splitting.
+        let jit_open_fee = payment_data
+            .payment_invoice()
+            .and_then(|invoice| invoice.jit_open_fee());
+        if let Some(open_fee) = jit_open_fee {
+            let routed_fee = if payment_data.charge_jit_open_fee || open_fee == 0 {
+                open_fee
+            } else {
+                let probe = self.jit_probe_hop_fee(final_amount)?;
+                if probe >= open_fee {
+                    open_fee
+                } else {
+                    probe
+                }
+            };
+            return self.find_jit_trampoline_route(
+                source,
+                final_amount,
+                max_fee_amount,
+                routed_fee,
+                hops,
+                payment_data,
+            );
+        }
+
+        let low_total_trampoline_fee = self.estimate_trampoline_fee(final_amount, 1, hops)?;
+        let mut fees = vec![0u128; hops.len()];
 
         if max_fee_amount < low_total_trampoline_fee {
             let high_total_trampoline_fee = self.estimate_trampoline_fee(final_amount, 10, hops)?;
@@ -1714,6 +1753,190 @@ where
             trampoline_onion: Some(trampoline_onion),
             final_hop_expiry_delta_override: Some(trampoline_forward_expiry_delta),
         });
+    }
+
+    /// Route a JIT payment so the liquidity node is paid exactly `open_fee`.
+    ///
+    /// Hops before that node are paid from the rest of the fee cap. The unused
+    /// part of the cap is not added to the liquidity node's trampoline fee.
+    fn find_jit_trampoline_route(
+        &self,
+        source: Pubkey,
+        final_amount: u128,
+        max_fee_amount: u128,
+        open_fee: u128,
+        hops: &[Pubkey],
+        payment_data: &SendPaymentState,
+    ) -> Result<ResolvedRoute, PathFindError> {
+        let target = payment_data.target_pubkey;
+        if payment_data.payment_invoice().is_some_and(|invoice| {
+            invoice.jit_open_fee().is_some()
+                && invoice
+                    .liquidity_provider()
+                    .is_none_or(|provider| hops.last().copied() != Some(Pubkey::from(*provider)))
+        }) {
+            return Err(PathFindError::Other(
+                "JIT open fee must be paid to the invoice liquidity provider".to_string(),
+            ));
+        }
+        let routing_budget = max_fee_amount.checked_sub(open_fee).ok_or_else(|| {
+            PathFindError::Other(format!(
+                "max_fee_amount {max_fee_amount} does not cover the invoice JIT open fee {open_fee}"
+            ))
+        })?;
+        let fees = self.jit_trampoline_hop_fees(final_amount, open_fee, hops)?;
+        let intermediate_fees = checked_sum_u128(
+            fees[..fees.len() - 1].iter().copied(),
+            "JIT trampoline routing fees",
+        )?;
+        if intermediate_fees > routing_budget {
+            return Err(PathFindError::Other(format!(
+                "max_fee_amount is too low for the route to the JIT liquidity node: open fee {open_fee}, trampoline routing {intermediate_fees}, fee cap {max_fee_amount}"
+            )));
+        }
+        let path_max_fee = routing_budget - intermediate_fees;
+        let delivered = checked_add_u128(
+            final_amount,
+            checked_sum_u128(fees.iter().copied(), "JIT trampoline fees")?,
+            "JIT amount delivered to liquidity node",
+        )?;
+
+        let route_tlc_expiry_limit = self.route_tlc_expiry_limit(payment_data.tlc_expiry_limit)?;
+        let trampoline_forward_expiry_delta = self.trampoline_forward_expiry_delta(
+            payment_data.final_tlc_expiry_delta,
+            hops,
+            route_tlc_expiry_limit,
+        )?;
+        let route_to_trampoline = self
+            .find_path(
+                source,
+                hops[0],
+                Some(delivered),
+                Some(path_max_fee),
+                payment_data.udt_type_script.clone(),
+                trampoline_forward_expiry_delta,
+                route_tlc_expiry_limit,
+                payment_data.allow_self_payment,
+                &payment_data.hop_hints,
+                &payment_data.channel_stats,
+                false,
+            )
+            .map_err(|err| match err {
+                PathFindError::NoPathFound => PathFindError::Other(format!(
+                    "no route to the JIT liquidity node that leaves the open fee {open_fee} intact"
+                )),
+                other => other,
+            })?;
+        if route_to_trampoline.is_empty() {
+            return Err(PathFindError::NoPathFound);
+        }
+        let received = route_to_trampoline
+            .last()
+            .expect("route has a hop")
+            .amount_received;
+        if received != delivered {
+            return Err(PathFindError::Other(format!(
+                "JIT route delivered {received}, expected {delivered}"
+            )));
+        }
+
+        let mut payloads: Vec<TrampolineHopPayload> = Vec::with_capacity(hops.len() + 1);
+        for (idx, _node) in hops.iter().enumerate() {
+            let is_last_trampoline = idx + 1 == hops.len();
+            let next_node_id = if is_last_trampoline {
+                target
+            } else {
+                hops[idx + 1]
+            };
+            let remaining_trampoline_hops = if is_last_trampoline {
+                &[][..]
+            } else {
+                &hops[(idx + 1)..]
+            };
+            payloads.push(TrampolineHopPayload::Forward {
+                next_node_id,
+                amount_to_forward: checked_add_u128(
+                    final_amount,
+                    checked_sum_u128(fees[idx + 1..].iter().copied(), "JIT trampoline fees")?,
+                    "JIT trampoline forward amount",
+                )?,
+                build_max_fee_amount: fees[idx],
+                hash_algorithm: payment_data.hash_algorithm(),
+                tlc_expiry_limit: payment_data.tlc_expiry_limit,
+                tlc_expiry_delta: self.trampoline_forward_expiry_delta(
+                    payment_data.final_tlc_expiry_delta,
+                    remaining_trampoline_hops,
+                    route_tlc_expiry_limit,
+                )?,
+                max_parts: if payment_data.allow_mpp() {
+                    Some(payment_data.max_parts() as u64)
+                } else {
+                    None
+                },
+            });
+        }
+        payloads.push(TrampolineHopPayload::Final {
+            final_amount,
+            final_tlc_expiry_delta: payment_data.final_tlc_expiry_delta,
+            payment_preimage: payment_data.preimage,
+            custom_records: payment_data.custom_records.clone(),
+        });
+
+        let mut trampoline_path: Vec<Pubkey> = hops.to_vec();
+        trampoline_path.push(target);
+        let (trampoline_packet, _session_key) = TrampolineOnionPacket::create_with_session_key_fn(
+            || Privkey::from_slice(KeyPair::generate_random_key().as_ref()),
+            trampoline_path,
+            payloads,
+            Some(payment_data.payment_hash.as_ref().to_vec()),
+            SECP256K1,
+        )
+        .map_err(|err| {
+            PathFindError::Other(format!("failed to build trampoline onion packet: {err}"))
+        })?;
+
+        Ok(ResolvedRoute {
+            hops: route_to_trampoline,
+            amount: delivered,
+            trampoline_onion: Some(trampoline_packet.into_bytes()),
+            final_hop_expiry_delta_override: Some(trampoline_forward_expiry_delta),
+        })
+    }
+
+    /// Routing fee for one trampoline hop when the open fee is not being charged.
+    fn jit_probe_hop_fee(&self, final_amount: u128) -> Result<u128, PathFindError> {
+        let one_hop_fee = calculate_tlc_forward_fee(final_amount, DEFAULT_FEE_RATE as u128)
+            .map_err(|err| PathFindError::Other(format!("invalid JIT probe fee: {err}")))?;
+        Ok(checked_mul_u128(
+            one_hop_fee.max(1),
+            10,
+            "JIT probe hop fee",
+        )?)
+    }
+
+    /// Last hop fee is the quoted JIT open fee. Earlier trampoline hops get a
+    /// routing budget based on the default fee rate, paid from the fee cap above that quote.
+    fn jit_trampoline_hop_fees(
+        &self,
+        final_amount: u128,
+        open_fee: u128,
+        hops: &[Pubkey],
+    ) -> Result<Vec<u128>, PathFindError> {
+        let mut fees = vec![0u128; hops.len()];
+        let last = hops.len() - 1;
+        fees[last] = open_fee;
+        let mut amount_to_deliver = checked_add_u128(final_amount, open_fee, "JIT open fee")?;
+        for idx in (0..last).rev() {
+            let one_hop_fee =
+                calculate_tlc_forward_fee(amount_to_deliver, DEFAULT_FEE_RATE as u128).map_err(
+                    |err| PathFindError::Other(format!("invalid JIT trampoline fee: {err}")),
+                )?;
+            let fee = checked_mul_u128(one_hop_fee.max(1), 10, "JIT trampoline hop fee")?;
+            fees[idx] = fee;
+            amount_to_deliver =
+                checked_add_u128(amount_to_deliver, fee, "JIT trampoline forward amount")?;
+        }
+        Ok(fees)
     }
 
     #[allow(unused)]
@@ -2490,19 +2713,24 @@ where
             // of these channels is sufficiently large.
             let sufficiently_large_capacity = u128::MAX;
 
-            // hop hint only referring to private channels for sender node,
-            // if we get public channel information for this hophint, we just ignore this hophint
+            // Unknown hints may be private hops. A known channel is used only when
+            // the hinted peer is on it, the asset matches, and it is not already a
+            // public edge.
             let filtered_hints = hop_hints.iter().filter(|hint| {
-                match self.get_outbound_channel_info_and_update(&hint.channel_outpoint, hint.pubkey)
-                {
-                    (Some(channel_info), Some(channel_update)) => {
-                        channel_info.udt_type_script == udt_type_script && !channel_update.enabled
-                    }
-                    _ => true,
-                }
+                let Some(channel_info) = self.get_channel(&hint.channel_outpoint) else {
+                    return true;
+                };
+                let (outbound, update) =
+                    self.get_outbound_channel_info_and_update(&hint.channel_outpoint, hint.pubkey);
+                outbound.is_some()
+                    && channel_info.udt_type_script == udt_type_script
+                    && !update.is_some_and(|update| update.enabled)
             });
 
             for hint in filtered_hints {
+                if channel_stats.blocks_channel(&hint.channel_outpoint) {
+                    continue;
+                }
                 // Say we have a payment path A -- channel 1 --> B -- channel 2 --> C.
                 // For now, all the fees that B will receive are calculated based on the fee rate B sets in channel 1.
                 // We didn't use the outbound fees for B in channel 2 at all. This is different from lnd,
@@ -2608,6 +2836,9 @@ where
                 None => self.get_node_inbounds(cur_hop.node_id).collect(),
             };
             for (from, to, channel_info, channel_update) in edges {
+                if channel_stats.blocks_channel(channel_info.out_point()) {
+                    continue;
+                }
                 let is_source = from == source;
                 if allow_mpp && !self.is_node_support_mpp(&from) {
                     continue;
@@ -2808,7 +3039,8 @@ where
     ) -> Vec<(RouterHop, Pubkey, u64, u128)> {
         self.get_node_inbounds(source)
             .filter(|(from, _, channel_info, channel_update)| {
-                udt_type_script == channel_info.udt_type_script()
+                !channel_stats.blocks_channel(channel_info.out_point())
+                    && udt_type_script == channel_info.udt_type_script()
                     && self.check_channel_amount_and_expiry(
                         amount,
                         channel_info,
@@ -3140,4 +3372,8 @@ pub trait NetworkGraphStateStore {
     /// when the channel state does not already own a matching TLC or queued AddTlc.
     fn get_pending_attempts_by_channel_outpoint(&self, channel_outpoint: &OutPoint)
         -> Vec<Attempt>;
+    /// Saved JIT opens, queue, and channel reservations. `None` means nothing has been stored.
+    fn get_jit_tracking(&self) -> Option<PersistedJit>;
+    /// Replaces the saved JIT tracking snapshot.
+    fn insert_jit_tracking(&self, tracking: PersistedJit);
 }

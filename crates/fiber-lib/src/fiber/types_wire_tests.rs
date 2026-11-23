@@ -8,7 +8,8 @@ use musig2::{PartialSignature, PubNonce};
 
 use super::{
     AcceptChannelV2, ChannelReadyV2, ClosingSignedV2, CommitmentSignedV2, FiberChannelMessage,
-    FiberMessage, OpenChannelV2, ReestablishChannelV2, RevokeAndAckV2, ShutdownV2, TxCompleteV2,
+    FiberMessage, JitChannelRegister, OpenChannelV2, ReestablishChannelV2, RevokeAndAckV2,
+    ShutdownV2, TxCompleteV2,
 };
 
 fn nonce(seed: u8) -> PubNonce {
@@ -321,6 +322,26 @@ fn test_wire_shared_discriminants_stable() {
         UpdateTlcInfo = 11,
         AddTlc = 12,
         RemoveTlc = 13,
-        AnnouncementSignatures = 18
+        AnnouncementSignatures = 18,
+        JitChannelRegister = 28
     );
+}
+
+#[test]
+fn test_wire_jit_channel_register() {
+    for funding_udt_type_script in [None, Some(Script::default())] {
+        let value = JitChannelRegister {
+            funding_udt_type_script,
+            max_amount: 42,
+            open_fee: 7,
+        };
+        let bytes = FiberMessage::jit_channel_register(value.clone()).to_molecule_bytes();
+        assert_eq!(u32::from_le_bytes(bytes[..4].try_into().unwrap()), 28);
+        let FiberMessage::JitChannelRegister(actual) =
+            FiberMessage::from_molecule_slice(&bytes).unwrap()
+        else {
+            panic!("wrong decoded variant");
+        };
+        assert_eq!(actual, value);
+    }
 }

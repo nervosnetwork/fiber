@@ -241,6 +241,11 @@ pub mod native {
                 ckb.unwrap_or(CkbConfig::from(&mut args.ckb)),
             );
 
+            if let Err(err) = fiber.validate() {
+                error!("invalid fiber config: {err}");
+                exit(1);
+            }
+
             let (fiber, disabled_fiber) = if services.contains(&Service::FIBER) {
                 (Some(fiber), None)
             } else {
@@ -304,7 +309,11 @@ mod wasm {
                 )
             };
 
-            let fiber_config = Some(FiberConfig::from(fiber));
+            let fiber_config = FiberConfig::from(fiber);
+            if let Err(err) = fiber_config.validate() {
+                panic!("invalid fiber config: {err}");
+            }
+            let fiber_config = Some(fiber_config);
             let (fiber, disabled_fiber) = if services.contains(&Service::FIBER) {
                 (fiber_config, None)
             } else {

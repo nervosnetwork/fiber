@@ -11,6 +11,7 @@ mod history;
 mod in_flight_ckb_tx_actor_tests;
 #[cfg(not(target_arch = "wasm32"))]
 mod invoice_settlement;
+mod jit;
 #[cfg(not(target_arch = "wasm32"))]
 mod mpp;
 mod network;

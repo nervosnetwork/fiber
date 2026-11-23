@@ -2152,7 +2152,7 @@ where
         &self,
         state: &mut ChannelActorState,
         command: RemoveTlcCommand,
-    ) -> ProcessingChannelResult {
+    ) -> Result<Hash256, ProcessingChannelError> {
         state.check_for_tlc_update(TlcUpdateAction::RemoveTlcCommand)?;
         state.check_remove_tlc_with_reason(TLCId::Received(command.id), &command.reason)?;
         let reason = command.reason;
@@ -2172,7 +2172,15 @@ where
         };
 
         state.record_pending_replay_update(TlcReplayUpdate::Remove(remove_tlc));
-        Ok(())
+        Ok(payment_hash)
+    }
+
+    fn notify_jit_upstream_removed(&self, payment_hash: Hash256) {
+        self.network
+            .send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::JitUpstreamTlcRemoved(payment_hash),
+            ))
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
     }
 
     pub async fn handle_shutdown_command(
@@ -11583,16 +11591,29 @@ where
         {
             return;
         }
+        let mut removed_payments = Vec::new();
         for update in state
             .pending_replay_updates
             .iter()
             .skip(state.replayed_tlc_updates_v2)
         {
-            if let fiber_types::TlcReplayUpdate::Remove(remove) = update {
-                state.send_message_to_peer(FiberMessage::remove_tlc(remove.clone()));
+            let fiber_types::TlcReplayUpdate::Remove(remove) = update else {
+                continue;
+            };
+            if let Some(payment_hash) = state
+                .tlc_state
+                .get(&TLCId::Received(remove.tlc_id))
+                .filter(|tlc| tlc.removed_reason.is_some())
+                .map(|tlc| tlc.payment_hash)
+            {
+                removed_payments.push(payment_hash);
             }
+            state.send_message_to_peer(FiberMessage::remove_tlc(remove.clone()));
         }
         state.replayed_tlc_updates_v2 = state.pending_replay_updates.len();
+        for payment_hash in removed_payments {
+            self.notify_jit_upstream_removed(payment_hash);
+        }
     }
 
     fn replay_remove_effects_v2(&self, state: &ChannelActorState) {
@@ -11663,7 +11684,28 @@ where
         }
         state.last_was_revoke = false;
         let replayed = std::mem::take(&mut state.replayed_tlc_updates_v2);
+        let newly_removed_payments = state
+            .session
+            .outgoing
+            .as_ref()
+            .map(|outgoing| {
+                outgoing.updates[replayed..]
+                    .iter()
+                    .filter_map(|update| match update {
+                        fiber_types::TlcReplayUpdate::Remove(remove) => state
+                            .tlc_state
+                            .get(&TLCId::Received(remove.tlc_id))
+                            .filter(|tlc| tlc.removed_reason.is_some())
+                            .map(|tlc| tlc.payment_hash),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         self.store.insert_channel_actor_state(state.clone());
+        for payment_hash in newly_removed_payments {
+            self.notify_jit_upstream_removed(payment_hash);
+        }
         // Publish only after IDs, contents and the exact signing intent are durable.
         for update in &state.session.outgoing.as_ref().expect("signed CS").updates[replayed..] {
             state.send_message_to_peer(match update {

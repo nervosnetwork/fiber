@@ -21,6 +21,7 @@ pub mod channel_v2_validation;
 pub mod config;
 pub mod gen;
 pub mod invoice;
+mod jit;
 pub mod network;
 pub mod onion;
 pub mod payment;
@@ -39,6 +40,7 @@ pub use cch::{
 pub use channel::*;
 pub use config::*;
 pub use invoice::*;
+pub use jit::{PersistedJit, PersistedJitOpen, PersistedJitQueue, PersistedJitReservation};
 pub use network::{HopRequire, PersistentNetworkActorState};
 pub use onion::*;
 pub use payment::*;
