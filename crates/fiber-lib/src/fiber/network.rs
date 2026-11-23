@@ -1,17 +1,17 @@
 use crate::store::actor::StoreActorMessage;
 use ckb_hash::blake2b_256;
 use ckb_sdk::rpc::ckb_indexer::{Order, ScriptType, SearchKey, SearchMode};
-use ckb_types::H256;
 use ckb_types::core::tx_pool::TxStatus;
 use ckb_types::core::{EpochNumberWithFraction, TransactionView};
 use ckb_types::packed::{self, Byte32, OutPoint, Script, Transaction};
 use ckb_types::prelude::{Builder, Entity, IntoTransactionView, Pack, Unpack};
+use ckb_types::H256;
 use either::Either;
 use once_cell::sync::OnceCell;
 use ractor::concurrency::Duration;
 use ractor::{
-    Actor, ActorCell, ActorId, ActorProcessingErr, ActorRef, RpcReplyPort, SupervisionEvent,
-    call_t, forward,
+    call_t, forward, Actor, ActorCell, ActorId, ActorProcessingErr, ActorRef, RpcReplyPort,
+    SupervisionEvent,
 };
 use rand::seq::{IndexedRandom, IteratorRandom};
 use secp256k1::SECP256K1;
@@ -30,10 +30,10 @@ use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
 use strum::AsRefStr;
 use tentacle::multiaddr::{MultiAddr, Protocol};
 use tentacle::service::SessionType;
-use tentacle::utils::TransportType;
 use tentacle::utils::extract_peer_id;
+use tentacle::utils::TransportType;
 use tentacle::{
-    ProtocolId, SessionId, async_trait,
+    async_trait,
     builder::{MetaBuilder, ServiceBuilder},
     bytes::Bytes,
     context::SessionContext,
@@ -46,8 +46,9 @@ use tentacle::{
         TargetProtocol,
     },
     traits::{ServiceHandle, ServiceProtocol},
+    ProtocolId, SessionId,
 };
-use tokio::sync::{RwLock, mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, RwLock};
 use tokio_util::codec::length_delimited;
 use tokio_util::task::TaskTracker;
 use tracing::{debug, error, info, trace, warn};
@@ -55,25 +56,25 @@ use tracing::{debug, error, info, trace, warn};
 pub(crate) const CHANNEL_REESTABLISH_INTERVAL: Duration = Duration::from_millis(10);
 
 use super::channel::{
-    AcceptChannelParameter, ChannelActor, ChannelActorMessage, ChannelActorStateStore,
-    ChannelCommand, ChannelCommandWithId, ChannelEvent, ChannelInitializationParameter,
-    ChannelOpenRecordStore, DEFAULT_MAX_TLC_VALUE_IN_FLIGHT, OpenChannelParameter,
-    PEER_CHANNEL_RESPONSE_TIMEOUT, ProcessingChannelError, ProcessingChannelResult,
-    RemoveTlcCommand, StopReason, get_funding_and_reserved_amount, reserved_capacity,
+    get_funding_and_reserved_amount, reserved_capacity, AcceptChannelParameter, ChannelActor,
+    ChannelActorMessage, ChannelActorStateStore, ChannelCommand, ChannelCommandWithId,
+    ChannelEvent, ChannelInitializationParameter, ChannelOpenRecordStore, OpenChannelParameter,
+    ProcessingChannelError, ProcessingChannelResult, RemoveTlcCommand, StopReason,
+    DEFAULT_MAX_TLC_VALUE_IN_FLIGHT, PEER_CHANNEL_RESPONSE_TIMEOUT,
 };
 use super::gossip::{
-    GossipActorMessage, GossipMessageStore, GossipMessageUpdates,
-    get_latest_startup_broadcast_message_cursor,
+    get_latest_startup_broadcast_message_cursor, GossipActorMessage, GossipMessageStore,
+    GossipMessageUpdates,
 };
 use super::graph::{ChannelInfo, NetworkGraph, NetworkGraphStateStore, OwnedChannelUpdateEvent};
-use super::jit::{JitInboundOpen, JitSession, channel_confirmation_slack_ms};
+use super::jit::{channel_confirmation_slack_ms, JitInboundOpen, JitSession};
 use super::types::{
     BroadcastMessageWithTimestamp, FiberMessage, ForwardTlcResult, GossipMessage, Init,
     JitChannelRegister, OpenChannelV2,
 };
 use super::{
-    ASSUME_NETWORK_ACTOR_ALIVE, FiberConfig, InFlightCkbTxActor, InFlightCkbTxActorArguments,
-    InFlightCkbTxActorMessage, InFlightCkbTxKind,
+    FiberConfig, InFlightCkbTxActor, InFlightCkbTxActorArguments, InFlightCkbTxActorMessage,
+    InFlightCkbTxKind, ASSUME_NETWORK_ACTOR_ALIVE,
 };
 use crate::actors::log_actor_failed;
 use crate::ckb::client::CkbChainClient;
@@ -83,19 +84,21 @@ use crate::ckb::contracts::{
 };
 use crate::ckb::{CkbChainMessage, FundingError, FundingRequest, FundingTx, GetShutdownTxResponse};
 use crate::fiber::channel::{
-    AddTlcResponse, ChannelActorState, ChannelEphemeralConfig, ChannelInitializationOperation,
-    MAX_TLC_NUMBER_IN_FLIGHT, OfflineChannelRestoreMode, OpenChannelWithExternalFundingParameter,
-    TxCollaborationCommand, TxUpdateCommand, tlc_expiry_delay,
+    tlc_expiry_delay, AddTlcResponse, ChannelActorState, ChannelEphemeralConfig,
+    ChannelInitializationOperation, OfflineChannelRestoreMode,
+    OpenChannelWithExternalFundingParameter, TxCollaborationCommand, TxUpdateCommand,
+    MAX_TLC_NUMBER_IN_FLIGHT,
 };
 use crate::fiber::config::{DEFAULT_COMMITMENT_DELAY_EPOCHS, MIN_TLC_EXPIRY_DELTA};
 use crate::fiber::fee::{check_open_channel_parameters, check_tlc_delta_with_epochs};
 use crate::fiber::gossip::{GossipConfig, GossipService, SubscribableGossipMessageStore};
 use crate::fiber::onchain_tlc_reconcile::{
-    OnChainConfirmedPayerTlc, OnChainTimeoutTlcRole, collect_onchain_confirmed_payer_tlcs,
-    collect_onchain_excluded_tlcs, collect_onchain_fulfilled_tlcs, collect_onchain_payer_failures,
+    collect_onchain_confirmed_payer_tlcs, collect_onchain_excluded_tlcs,
+    collect_onchain_fulfilled_tlcs, collect_onchain_payer_failures,
     collect_onchain_received_timeout_settled_tlcs, collect_onchain_timeout_settled_tlcs,
     confirm_onchain_payer_fulfill, has_unresolved_onchain_tlcs, onchain_fulfilled_preimage,
     recover_shutdown_settlement_data_with_superseded, verify_and_select_settlement_data,
+    OnChainConfirmedPayerTlc, OnChainTimeoutTlcRole,
 };
 use crate::fiber::payment::{
     PaymentActor, PaymentActorArguments, PaymentActorMessage, PaymentSessionExt,
@@ -104,32 +107,32 @@ use crate::fiber::payment::{
 };
 use crate::fiber::peer_message_policy::{PeerMessageAdmission, PeerMessagePolicy};
 use crate::fiber::types::{
-    FiberChannelMessage, TrampolineHopPayload, TrampolineOnionPacket, TxAbort, TxSignatures,
-    pubkey_to_tentacle,
+    pubkey_to_tentacle, FiberChannelMessage, TrampolineHopPayload, TrampolineOnionPacket, TxAbort,
+    TxSignatures,
 };
 use crate::fiber::{
-    SettleTlcSetCommand,
     settle_tlc_set_command::{SettleOnChainFulfilledInvoiceCommand, TlcSettlement},
+    SettleTlcSetCommand,
 };
 use crate::invoice::{
     CancelInvoiceError, CkbInvoice, CkbInvoiceStatus, Currency, InvoiceError, InvoiceStore,
     PreimageStore, SettleInvoiceError,
 };
 use crate::utils::actor::ActorHandleLogGuard;
-use crate::{Error, now_timestamp_as_millis_u64};
+use crate::{now_timestamp_as_millis_u64, Error};
+use fiber_types::protocol::AnnouncedNodeName;
 pub use fiber_types::HopRequire;
 #[cfg(any(debug_assertions, test, feature = "bench"))]
 use fiber_types::SessionRoute;
-use fiber_types::protocol::AnnouncedNodeName;
 use fiber_types::{
-    AddTlcCommand, AppliedFlags, AwaitingChannelReadyFlags, AwaitingTxSignaturesFlags,
-    ChannelConnectivityState, ChannelFeatures, ChannelOpenRecord, ChannelOpeningStatus,
-    ChannelState, ChannelTlcInfo, CloseFlags, EcdsaSignature, EntityHex, FeatureVector, Hash256,
-    HashAlgorithm, NO_SHARED_SECRET, NodeAnnouncement, PaymentCustomRecords, PaymentStatus,
+    blake2b_hash_with_salt, AddTlcCommand, AppliedFlags, AwaitingChannelReadyFlags,
+    AwaitingTxSignaturesFlags, ChannelConnectivityState, ChannelFeatures, ChannelOpenRecord,
+    ChannelOpeningStatus, ChannelState, ChannelTlcInfo, CloseFlags, EcdsaSignature, EntityHex,
+    FeatureVector, Hash256, HashAlgorithm, NodeAnnouncement, PaymentCustomRecords, PaymentStatus,
     PeeledPaymentOnionPacket, PersistentNetworkActorState, PrevTlcInfo, Privkey, Pubkey,
     PublicChannelInfo, RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation, RevocationData,
     RouterHop, SettlementData, ShutdownSettlementRecord, ShuttingDownFlags, TLCId, TlcErr,
-    TlcErrPacket, TlcErrorCode, TrampolineContext, UdtCfgInfos, blake2b_hash_with_salt,
+    TlcErrPacket, TlcErrorCode, TrampolineContext, UdtCfgInfos, NO_SHARED_SECRET,
 };
 
 pub const FIBER_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
@@ -5422,7 +5425,8 @@ where
         );
         trace!(
             "Sending AddTlcCommand to {}, command {:?}",
-            channel_id, command
+            channel_id,
+            command
         );
         // we have already checked the channel_id is valid,
         match state.send_command_to_channel(channel_id, command).await {

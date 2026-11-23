@@ -2138,11 +2138,10 @@ where
         state: &mut ChannelActorState,
         command: RemoveTlcCommand,
     ) -> ProcessingChannelResult {
-        let payment_hash = self.remove_tlc_update(state, command)?;
+        self.remove_tlc_update(state, command)?;
         if matches!(state.state, ChannelState::ShuttingDown(flags) if flags.contains(ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION))
         {
-            self.store.insert_channel_actor_state(state.clone());
-            self.notify_jit_upstream_removed(payment_hash);
+            // The published close transaction precludes a new CS; notify after the next save.
             return Ok(());
         }
         self.handle_commitment_signed_command(myself, state).await?;
@@ -11592,16 +11591,29 @@ where
         {
             return;
         }
+        let mut removed_payments = Vec::new();
         for update in state
             .pending_replay_updates
             .iter()
             .skip(state.replayed_tlc_updates_v2)
         {
-            if let fiber_types::TlcReplayUpdate::Remove(remove) = update {
-                state.send_message_to_peer(FiberMessage::remove_tlc(remove.clone()));
+            let fiber_types::TlcReplayUpdate::Remove(remove) = update else {
+                continue;
+            };
+            if let Some(payment_hash) = state
+                .tlc_state
+                .get(&TLCId::Received(remove.tlc_id))
+                .filter(|tlc| tlc.removed_reason.is_some())
+                .map(|tlc| tlc.payment_hash)
+            {
+                removed_payments.push(payment_hash);
             }
+            state.send_message_to_peer(FiberMessage::remove_tlc(remove.clone()));
         }
         state.replayed_tlc_updates_v2 = state.pending_replay_updates.len();
+        for payment_hash in removed_payments {
+            self.notify_jit_upstream_removed(payment_hash);
+        }
     }
 
     fn replay_remove_effects_v2(&self, state: &ChannelActorState) {
