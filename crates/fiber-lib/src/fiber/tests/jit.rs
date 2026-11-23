@@ -410,6 +410,28 @@ fn test_send_payment_uses_invoice_liquidity_provider_as_trampoline_hop() {
     assert!(mismatch
         .expect_err("open fee paid to a different hop")
         .contains("liquidity provider"));
+
+    let udt_invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(1000))
+        .payment_preimage(gen_rand_sha256_hash())
+        .payee_pub_key(payee_pk)
+        .liquidity_provider(lsp_pk)
+        .allow_trampoline_routing(true)
+        .jit_open_fee(50_000)
+        .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &payee_sk))
+        .expect("build quoted jit invoice");
+    let udt_payment = SendPaymentData::new(
+        SendPaymentCommand {
+            invoice: Some(udt_invoice.to_string()),
+            udt_type_script: Some(ckb_types::packed::Script::default()),
+            max_fee_amount: Some(60_000),
+            ..Default::default()
+        },
+        Currency::Fibd,
+    );
+    assert!(udt_payment
+        .expect_err("UDT payment must not quote a CKB JIT open fee")
+        .contains("only valid for CKB"));
 }
 
 #[test]

@@ -519,17 +519,8 @@ impl SendPaymentDataExt for SendPaymentData {
             "amount",
         )?;
 
-        let open_fee = invoice
-            .as_ref()
-            .and_then(|inv| inv.jit_open_fee())
-            .unwrap_or(0);
-        let max_fee_amount = Some(payment_max_fee(
-            amount,
-            open_fee,
-            command.max_fee_amount,
-            command.max_fee_rate,
-        )?);
-
+        // Resolve the asset before quoting a JIT open fee. The open fee is a CKB
+        // amount, so it must not be added to a UDT payment.
         let udt_type_script = match validate_field(
             command.udt_type_script.clone(),
             invoice.as_ref().and_then(|i| i.udt_type_script().cloned()),
@@ -539,6 +530,19 @@ impl SendPaymentDataExt for SendPaymentData {
             Err(e) if e == "udt_type_script is missing" => None,
             Err(e) => return Err(e),
         };
+        let open_fee = invoice
+            .as_ref()
+            .and_then(|inv| inv.jit_open_fee())
+            .unwrap_or(0);
+        if udt_type_script.is_some() && open_fee != 0 {
+            return Err("JIT open fee is only valid for CKB payments".to_string());
+        }
+        let max_fee_amount = Some(payment_max_fee(
+            amount,
+            open_fee,
+            command.max_fee_amount,
+            command.max_fee_rate,
+        )?);
 
         // check htlc expiry delta and limit are both valid if it is set
         let final_tlc_expiry_delta = match invoice.as_ref() {

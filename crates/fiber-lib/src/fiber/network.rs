@@ -1,17 +1,17 @@
 use crate::store::actor::StoreActorMessage;
 use ckb_hash::blake2b_256;
 use ckb_sdk::rpc::ckb_indexer::{Order, ScriptType, SearchKey, SearchMode};
+use ckb_types::H256;
 use ckb_types::core::tx_pool::TxStatus;
 use ckb_types::core::{EpochNumberWithFraction, TransactionView};
 use ckb_types::packed::{self, Byte32, OutPoint, Script, Transaction};
 use ckb_types::prelude::{Builder, Entity, IntoTransactionView, Pack, Unpack};
-use ckb_types::H256;
 use either::Either;
 use once_cell::sync::OnceCell;
 use ractor::concurrency::Duration;
 use ractor::{
-    call_t, forward, Actor, ActorCell, ActorId, ActorProcessingErr, ActorRef, RpcReplyPort,
-    SupervisionEvent,
+    Actor, ActorCell, ActorId, ActorProcessingErr, ActorRef, RpcReplyPort, SupervisionEvent,
+    call_t, forward,
 };
 use rand::seq::{IndexedRandom, IteratorRandom};
 use secp256k1::SECP256K1;
@@ -30,10 +30,10 @@ use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
 use strum::AsRefStr;
 use tentacle::multiaddr::{MultiAddr, Protocol};
 use tentacle::service::SessionType;
-use tentacle::utils::extract_peer_id;
 use tentacle::utils::TransportType;
+use tentacle::utils::extract_peer_id;
 use tentacle::{
-    async_trait,
+    ProtocolId, SessionId, async_trait,
     builder::{MetaBuilder, ServiceBuilder},
     bytes::Bytes,
     context::SessionContext,
@@ -46,9 +46,8 @@ use tentacle::{
         TargetProtocol,
     },
     traits::{ServiceHandle, ServiceProtocol},
-    ProtocolId, SessionId,
 };
-use tokio::sync::{mpsc, oneshot, RwLock};
+use tokio::sync::{RwLock, mpsc, oneshot};
 use tokio_util::codec::length_delimited;
 use tokio_util::task::TaskTracker;
 use tracing::{debug, error, info, trace, warn};
@@ -56,25 +55,25 @@ use tracing::{debug, error, info, trace, warn};
 pub(crate) const CHANNEL_REESTABLISH_INTERVAL: Duration = Duration::from_millis(10);
 
 use super::channel::{
-    get_funding_and_reserved_amount, reserved_capacity, AcceptChannelParameter, ChannelActor,
-    ChannelActorMessage, ChannelActorStateStore, ChannelCommand, ChannelCommandWithId,
-    ChannelEvent, ChannelInitializationParameter, ChannelOpenRecordStore, OpenChannelParameter,
-    ProcessingChannelError, ProcessingChannelResult, RemoveTlcCommand, StopReason,
-    DEFAULT_MAX_TLC_VALUE_IN_FLIGHT, PEER_CHANNEL_RESPONSE_TIMEOUT,
+    AcceptChannelParameter, ChannelActor, ChannelActorMessage, ChannelActorStateStore,
+    ChannelCommand, ChannelCommandWithId, ChannelEvent, ChannelInitializationParameter,
+    ChannelOpenRecordStore, DEFAULT_MAX_TLC_VALUE_IN_FLIGHT, OpenChannelParameter,
+    PEER_CHANNEL_RESPONSE_TIMEOUT, ProcessingChannelError, ProcessingChannelResult,
+    RemoveTlcCommand, StopReason, get_funding_and_reserved_amount, reserved_capacity,
 };
 use super::gossip::{
-    get_latest_startup_broadcast_message_cursor, GossipActorMessage, GossipMessageStore,
-    GossipMessageUpdates,
+    GossipActorMessage, GossipMessageStore, GossipMessageUpdates,
+    get_latest_startup_broadcast_message_cursor,
 };
 use super::graph::{ChannelInfo, NetworkGraph, NetworkGraphStateStore, OwnedChannelUpdateEvent};
-use super::jit::{channel_confirmation_slack_ms, JitInboundOpen, JitSession};
+use super::jit::{JitInboundOpen, JitSession, channel_confirmation_slack_ms};
 use super::types::{
     BroadcastMessageWithTimestamp, FiberMessage, ForwardTlcResult, GossipMessage, Init,
     JitChannelRegister, OpenChannelV2,
 };
 use super::{
-    FiberConfig, InFlightCkbTxActor, InFlightCkbTxActorArguments, InFlightCkbTxActorMessage,
-    InFlightCkbTxKind, ASSUME_NETWORK_ACTOR_ALIVE,
+    ASSUME_NETWORK_ACTOR_ALIVE, FiberConfig, InFlightCkbTxActor, InFlightCkbTxActorArguments,
+    InFlightCkbTxActorMessage, InFlightCkbTxKind,
 };
 use crate::actors::log_actor_failed;
 use crate::ckb::client::CkbChainClient;
@@ -84,21 +83,19 @@ use crate::ckb::contracts::{
 };
 use crate::ckb::{CkbChainMessage, FundingError, FundingRequest, FundingTx, GetShutdownTxResponse};
 use crate::fiber::channel::{
-    tlc_expiry_delay, AddTlcResponse, ChannelActorState, ChannelEphemeralConfig,
-    ChannelInitializationOperation, OfflineChannelRestoreMode,
-    OpenChannelWithExternalFundingParameter, TxCollaborationCommand, TxUpdateCommand,
-    MAX_TLC_NUMBER_IN_FLIGHT,
+    AddTlcResponse, ChannelActorState, ChannelEphemeralConfig, ChannelInitializationOperation,
+    MAX_TLC_NUMBER_IN_FLIGHT, OfflineChannelRestoreMode, OpenChannelWithExternalFundingParameter,
+    TxCollaborationCommand, TxUpdateCommand, tlc_expiry_delay,
 };
 use crate::fiber::config::{DEFAULT_COMMITMENT_DELAY_EPOCHS, MIN_TLC_EXPIRY_DELTA};
 use crate::fiber::fee::{check_open_channel_parameters, check_tlc_delta_with_epochs};
 use crate::fiber::gossip::{GossipConfig, GossipService, SubscribableGossipMessageStore};
 use crate::fiber::onchain_tlc_reconcile::{
-    collect_onchain_confirmed_payer_tlcs, collect_onchain_excluded_tlcs,
-    collect_onchain_fulfilled_tlcs, collect_onchain_payer_failures,
+    OnChainConfirmedPayerTlc, OnChainTimeoutTlcRole, collect_onchain_confirmed_payer_tlcs,
+    collect_onchain_excluded_tlcs, collect_onchain_fulfilled_tlcs, collect_onchain_payer_failures,
     collect_onchain_received_timeout_settled_tlcs, collect_onchain_timeout_settled_tlcs,
     confirm_onchain_payer_fulfill, has_unresolved_onchain_tlcs, onchain_fulfilled_preimage,
     recover_shutdown_settlement_data_with_superseded, verify_and_select_settlement_data,
-    OnChainConfirmedPayerTlc, OnChainTimeoutTlcRole,
 };
 use crate::fiber::payment::{
     PaymentActor, PaymentActorArguments, PaymentActorMessage, PaymentSessionExt,
@@ -107,32 +104,32 @@ use crate::fiber::payment::{
 };
 use crate::fiber::peer_message_policy::{PeerMessageAdmission, PeerMessagePolicy};
 use crate::fiber::types::{
-    pubkey_to_tentacle, FiberChannelMessage, TrampolineHopPayload, TrampolineOnionPacket, TxAbort,
-    TxSignatures,
+    FiberChannelMessage, TrampolineHopPayload, TrampolineOnionPacket, TxAbort, TxSignatures,
+    pubkey_to_tentacle,
 };
 use crate::fiber::{
-    settle_tlc_set_command::{SettleOnChainFulfilledInvoiceCommand, TlcSettlement},
     SettleTlcSetCommand,
+    settle_tlc_set_command::{SettleOnChainFulfilledInvoiceCommand, TlcSettlement},
 };
 use crate::invoice::{
     CancelInvoiceError, CkbInvoice, CkbInvoiceStatus, Currency, InvoiceError, InvoiceStore,
     PreimageStore, SettleInvoiceError,
 };
 use crate::utils::actor::ActorHandleLogGuard;
-use crate::{now_timestamp_as_millis_u64, Error};
-use fiber_types::protocol::AnnouncedNodeName;
+use crate::{Error, now_timestamp_as_millis_u64};
 pub use fiber_types::HopRequire;
 #[cfg(any(debug_assertions, test, feature = "bench"))]
 use fiber_types::SessionRoute;
+use fiber_types::protocol::AnnouncedNodeName;
 use fiber_types::{
-    blake2b_hash_with_salt, AddTlcCommand, AppliedFlags, AwaitingChannelReadyFlags,
-    AwaitingTxSignaturesFlags, ChannelFeatures, ChannelOpenRecord, ChannelOpeningStatus,
+    AddTlcCommand, AppliedFlags, AwaitingChannelReadyFlags, AwaitingTxSignaturesFlags,
+    ChannelConnectivityState, ChannelFeatures, ChannelOpenRecord, ChannelOpeningStatus,
     ChannelState, ChannelTlcInfo, CloseFlags, EcdsaSignature, EntityHex, FeatureVector, Hash256,
-    HashAlgorithm, NodeAnnouncement, PaymentCustomRecords, PaymentStatus, PeeledPaymentOnionPacket,
-    PersistentNetworkActorState, PrevTlcInfo, Privkey, Pubkey, PublicChannelInfo, RemoveTlcFulfill,
-    RemoveTlcReason, RetryableTlcOperation, RevocationData, RouterHop, SettlementData,
-    ShutdownSettlementRecord, ShuttingDownFlags, TLCId, TlcErr, TlcErrPacket, TlcErrorCode,
-    TrampolineContext, UdtCfgInfos, NO_SHARED_SECRET,
+    HashAlgorithm, NO_SHARED_SECRET, NodeAnnouncement, PaymentCustomRecords, PaymentStatus,
+    PeeledPaymentOnionPacket, PersistentNetworkActorState, PrevTlcInfo, Privkey, Pubkey,
+    PublicChannelInfo, RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation, RevocationData,
+    RouterHop, SettlementData, ShutdownSettlementRecord, ShuttingDownFlags, TLCId, TlcErr,
+    TlcErrPacket, TlcErrorCode, TrampolineContext, UdtCfgInfos, blake2b_hash_with_salt,
 };
 
 pub const FIBER_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
@@ -333,9 +330,64 @@ fn should_reconcile_closed_channel_without_live_actor(channel_state: ChannelStat
     )
 }
 
+/// A replayed success may settle only the forward stored on that session.
+fn trampoline_success_is_this_forward(
+    session: &fiber_types::PaymentSession,
+    prev_tlc: &PrevTlcInfo,
+    amount_to_forward: u128,
+    next_node_id: Pubkey,
+    hash_algorithm: HashAlgorithm,
+) -> bool {
+    if session.status != PaymentStatus::Success
+        || session.request.amount != amount_to_forward
+        || session.request.target_pubkey != next_node_id
+    {
+        return false;
+    }
+    let Some(context) = session.request.trampoline_context.as_ref() else {
+        return false;
+    };
+    context.hash_algorithm == hash_algorithm
+        && context.previous_tlcs.iter().any(|previous| {
+            previous.prev_channel_id == prev_tlc.prev_channel_id
+                && previous.prev_tlc_id == prev_tlc.prev_tlc_id
+        })
+}
+
+/// `expected_peer` is set only when this node originated the payment.
+fn outgoing_channel_can_carry_hop(
+    channel_peer: Pubkey,
+    channel_udt: &Option<Script>,
+    expected_peer: Option<Pubkey>,
+    expected_udt: &Option<Script>,
+) -> Result<(), TlcErrorCode> {
+    if expected_peer.is_some_and(|peer| peer != channel_peer) {
+        return Err(TlcErrorCode::UnknownNextPeer);
+    }
+    if channel_udt != expected_udt {
+        return Err(TlcErrorCode::TemporaryChannelFailure);
+    }
+    Ok(())
+}
+
+const JIT_RETRY_MIN_DELAY_MS: u64 = 50;
+const JIT_RETRY_MAX_DELAY_MS: u64 = 5_000;
+
+fn jit_retry_backoff(previous_delay_ms: Option<u64>) -> (u64, u64) {
+    let current = previous_delay_ms
+        .unwrap_or(JIT_RETRY_MIN_DELAY_MS)
+        .clamp(JIT_RETRY_MIN_DELAY_MS, JIT_RETRY_MAX_DELAY_MS);
+    let next = current
+        .saturating_mul(2)
+        .clamp(JIT_RETRY_MIN_DELAY_MS, JIT_RETRY_MAX_DELAY_MS);
+    (current, next)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fiber::payment::SendPaymentDataBuilder;
+    use fiber_types::PaymentSession;
 
     fn expect_admitted(admission: InboundFiberAdmission) -> FiberIngressPermit {
         match admission {
@@ -354,6 +406,14 @@ mod tests {
             max_in_flight_messages,
             max_in_flight_bytes,
         )))
+    }
+
+    #[test]
+    fn jit_retry_backoff_grows_then_stays_at_five_seconds() {
+        assert_eq!(jit_retry_backoff(None), (50, 100));
+        assert_eq!(jit_retry_backoff(Some(100)), (100, 200));
+        assert_eq!(jit_retry_backoff(Some(4_000)), (4_000, 5_000));
+        assert_eq!(jit_retry_backoff(Some(5_000)), (5_000, 5_000));
     }
 
     #[test]
@@ -434,6 +494,104 @@ mod tests {
         let completed = ChannelState::Closed(CloseFlags::UNCOOPERATIVE_REMOTE);
         assert!(!should_reconcile_closed_channel_without_live_actor(
             completed
+        ));
+    }
+
+    fn success_session(
+        target: Pubkey,
+        amount: u128,
+        payment_hash: Hash256,
+        context: Option<TrampolineContext>,
+    ) -> PaymentSession {
+        let request = SendPaymentDataBuilder::new(target, amount, payment_hash)
+            .max_fee_amount(Some(1))
+            .trampoline_context(context)
+            .build()
+            .expect("payment data");
+        PaymentSession {
+            request,
+            last_error: None,
+            last_error_code: None,
+            try_limit: 1,
+            status: PaymentStatus::Success,
+            created_at: 0,
+            last_updated_at: 0,
+            cached_attempts: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn outgoing_channel_must_match_hop_peer_and_asset() {
+        let peer = Privkey::from_slice(&[4u8; 32]).pubkey();
+        let other = Privkey::from_slice(&[5u8; 32]).pubkey();
+        let ckb = None;
+        let udt = Some(Script::default());
+
+        assert!(outgoing_channel_can_carry_hop(peer, &ckb, Some(peer), &ckb).is_ok());
+        assert!(outgoing_channel_can_carry_hop(peer, &ckb, None, &ckb).is_ok());
+        assert_eq!(
+            outgoing_channel_can_carry_hop(peer, &ckb, Some(other), &ckb),
+            Err(TlcErrorCode::UnknownNextPeer)
+        );
+        assert_eq!(
+            outgoing_channel_can_carry_hop(peer, &udt, Some(peer), &ckb),
+            Err(TlcErrorCode::TemporaryChannelFailure)
+        );
+        assert!(outgoing_channel_can_carry_hop(peer, &udt, Some(peer), &udt).is_ok());
+    }
+
+    #[test]
+    fn trampoline_replay_requires_the_same_forward() {
+        let next = Privkey::from_slice(&[3u8; 32]).pubkey();
+        let amount = 1_000u128;
+        let payment_hash = Hash256::from([4u8; 32]);
+        let prev = PrevTlcInfo {
+            prev_channel_id: Hash256::from([5u8; 32]),
+            prev_tlc_id: 7,
+            forwarding_fee: 10,
+            shared_secret: None,
+        };
+        let context = TrampolineContext {
+            remaining_trampoline_onion: Vec::new(),
+            previous_tlcs: vec![prev],
+            hash_algorithm: HashAlgorithm::CkbHash,
+            max_outgoing_tlc_expiry: None,
+        };
+        let session = success_session(next, amount, payment_hash, Some(context));
+        assert!(trampoline_success_is_this_forward(
+            &session,
+            &prev,
+            amount,
+            next,
+            HashAlgorithm::CkbHash,
+        ));
+
+        let other_prev = PrevTlcInfo {
+            prev_tlc_id: 8,
+            ..prev
+        };
+        assert!(!trampoline_success_is_this_forward(
+            &session,
+            &other_prev,
+            amount,
+            next,
+            HashAlgorithm::CkbHash,
+        ));
+        assert!(!trampoline_success_is_this_forward(
+            &session,
+            &prev,
+            amount + 1,
+            next,
+            HashAlgorithm::CkbHash,
+        ));
+
+        let local = success_session(next, amount, payment_hash, None);
+        assert!(!trampoline_success_is_this_forward(
+            &local,
+            &prev,
+            amount,
+            next,
+            HashAlgorithm::CkbHash,
         ));
     }
 }
@@ -2262,15 +2420,31 @@ where
             NetworkActorEvent::RetrySendPayment(payment_hash, attempt_id) => {
                 if state.jit_retry_should_wait(payment_hash) {
                     if state.jit_upstream_still_held(payment_hash) {
-                        std::mem::drop(myself.send_after(Duration::from_millis(50), move || {
-                            NetworkActorMessage::new_event(NetworkActorEvent::RetrySendPayment(
-                                payment_hash,
-                                attempt_id,
-                            ))
-                        }));
+                        // Stretch the wait so a parked payment does not wake the actor
+                        // every 50 ms for the whole TLC lifetime. ChannelReady resets it.
+                        let (delay_ms, next_delay_ms) =
+                            jit_retry_backoff(state.jit_retry_delay_ms.get(&payment_hash).copied());
+                        state.jit_retry_delay_ms.insert(payment_hash, next_delay_ms);
+                        std::mem::drop(myself.send_after(
+                            Duration::from_millis(delay_ms),
+                            move || {
+                                NetworkActorMessage::new_event(NetworkActorEvent::RetrySendPayment(
+                                    payment_hash,
+                                    attempt_id,
+                                ))
+                            },
+                        ));
+                    } else {
+                        state.jit_retry_delay_ms.remove(&payment_hash);
+                        state
+                            .fail_jit_payment(payment_hash, "upstream TLC is no longer held")
+                            .await;
+                        let network_graph = self.network_graph.clone();
+                        state.drain_jit_pumps(&myself, network_graph).await;
                     }
                     return Ok(());
                 }
+                state.jit_retry_delay_ms.remove(&payment_hash);
                 self.resume_payment_actor_and_send_command(
                     myself,
                     state,
@@ -2905,9 +3079,9 @@ where
 
                 if num_outbound_peers >= state.min_outbound_peers {
                     debug!(
-                                "Already connected to {} outbound peers, wants a minimal of {} peers, skipping connecting to more peers",
-                                num_outbound_peers, state.min_outbound_peers
-                            );
+                        "Already connected to {} outbound peers, wants a minimal of {} peers, skipping connecting to more peers",
+                        num_outbound_peers, state.min_outbound_peers
+                    );
                     return Ok(());
                 }
 
@@ -2945,9 +3119,9 @@ where
                     debug!("Peer to connect: {:?}, {:?}", pubkey, addresses);
                     if let Some(peer) = state.peer_session_map.get(&pubkey) {
                         debug!(
-                                    "Randomly selected peer {:?} already connected with session id {:?}, skipping connection",
-                                    pubkey, peer.session_id
-                                );
+                            "Randomly selected peer {:?} already connected with session id {:?}, skipping connection",
+                            pubkey, peer.session_id
+                        );
                         continue;
                     }
                     if state.requested_disconnect_peers.contains(&pubkey) {
@@ -4495,7 +4669,9 @@ where
                 self.store.delete_shutdown_settlement_record(&channel_id);
                 if let Some(ref store_actor) = state.store_actor {
                     if let Err(err) = store_actor.cast(StoreActorMessage::RequestBackup) {
-                        error!("Failed to request store backup after on-chain settlement finalization: {err}");
+                        error!(
+                            "Failed to request store backup after on-chain settlement finalization: {err}"
+                        );
                     }
                 }
                 settlement_state_changed = false;
@@ -4508,7 +4684,9 @@ where
             self.store.insert_channel_actor_state(actor_state.clone());
             if let Some(ref store_actor) = state.store_actor {
                 if let Err(err) = store_actor.cast(StoreActorMessage::RequestBackup) {
-                    error!("Failed to request store backup after on-chain settlement finalization: {err}");
+                    error!(
+                        "Failed to request store backup after on-chain settlement finalization: {err}"
+                    );
                 }
             }
         }
@@ -4573,9 +4751,7 @@ where
         if !hold_still_owned {
             trace!(
                 "Ignoring stale hold timeout after ownership handoff: payment_hash={:?} channel_id={:?} tlc_id={:?}",
-                payment_hash,
-                channel_id,
-                tlc_id,
+                payment_hash, channel_id, tlc_id,
             );
             return;
         }
@@ -5126,6 +5302,107 @@ where
                 return Err(tlc_err);
             }
         };
+        if !state
+            .jit
+            .allows_channel_for_payment(channel_id, payment_hash)
+        {
+            error!(
+                "Channel {:?} is reserved for a different JIT payment than {:?}",
+                channel_id, payment_hash
+            );
+            return Err(TlcErr::new_channel_fail(
+                TlcErrorCode::TemporaryChannelFailure,
+                state.get_public_key(),
+                channel_outpoint,
+                None,
+            ));
+        }
+        let Some(channel_state) = state.store.get_channel_actor_state(&channel_id) else {
+            return Err(TlcErr::new_channel_fail(
+                TlcErrorCode::UnknownNextPeer,
+                state.get_public_key(),
+                channel_outpoint,
+                None,
+            ));
+        };
+        let expected_udt = if let Some(prev) = previous_tlc {
+            let Some(prev_state) = state.store.get_channel_actor_state(&prev.prev_channel_id)
+            else {
+                return Err(TlcErr::new_node_fail(
+                    TlcErrorCode::TemporaryNodeFailure,
+                    state.get_public_key(),
+                ));
+            };
+            prev_state.funding_udt_type_script.clone()
+        } else {
+            let Some(session) = state.store.get_payment_session(payment_hash) else {
+                return Err(TlcErr::new_node_fail(
+                    TlcErrorCode::TemporaryNodeFailure,
+                    state.get_public_key(),
+                ));
+            };
+            session.request.udt_type_script.clone()
+        };
+        let expected_peer = if previous_tlc.is_none() {
+            let Some(attempt_id) = attempt_id else {
+                return Err(TlcErr::new_node_fail(
+                    TlcErrorCode::TemporaryNodeFailure,
+                    state.get_public_key(),
+                ));
+            };
+            let Some(attempt) = state.store.get_attempt(payment_hash, attempt_id) else {
+                return Err(TlcErr::new_node_fail(
+                    TlcErrorCode::TemporaryNodeFailure,
+                    state.get_public_key(),
+                ));
+            };
+            let Some(first_hop) = attempt.route_hops.first() else {
+                return Err(TlcErr::new_node_fail(
+                    TlcErrorCode::TemporaryNodeFailure,
+                    state.get_public_key(),
+                ));
+            };
+            if first_hop.funding_tx_hash != info.funding_tx_hash {
+                return Err(TlcErr::new_channel_fail(
+                    TlcErrorCode::UnknownNextPeer,
+                    state.get_public_key(),
+                    channel_outpoint,
+                    None,
+                ));
+            }
+            let Some(peer) = first_hop.next_hop else {
+                return Err(TlcErr::new_channel_fail(
+                    TlcErrorCode::UnknownNextPeer,
+                    state.get_public_key(),
+                    channel_outpoint,
+                    None,
+                ));
+            };
+            Some(peer)
+        } else {
+            None
+        };
+        if let Err(code) = outgoing_channel_can_carry_hop(
+            channel_state.remote_pubkey,
+            &channel_state.funding_udt_type_script,
+            expected_peer,
+            &expected_udt,
+        ) {
+            error!(
+                "Channel {:?} cannot carry payment {:?}: peer {:?} route peer {:?}, asset mismatch is {}",
+                channel_id,
+                payment_hash,
+                channel_state.remote_pubkey,
+                expected_peer,
+                channel_state.funding_udt_type_script != expected_udt
+            );
+            return Err(TlcErr::new_channel_fail(
+                code,
+                state.get_public_key(),
+                channel_outpoint,
+                None,
+            ));
+        }
 
         let (send, recv) = oneshot::channel();
         let rpc_reply = RpcReplyPort::from(send);
@@ -5145,8 +5422,7 @@ where
         );
         trace!(
             "Sending AddTlcCommand to {}, command {:?}",
-            channel_id,
-            command
+            channel_id, command
         );
         // we have already checked the channel_id is valid,
         match state.send_command_to_channel(channel_id, command).await {
@@ -5211,8 +5487,12 @@ where
                 tlc_expiry_limit,
                 max_parts,
             } => {
+                // JIT opens are CKB channels. A UDT forward is a normal route and
+                // must not be priced with the CKB open fee.
+                let jit_ckb_forward = udt_type_script.is_none();
                 if incoming_amount < amount_to_forward
-                    || (incoming_amount == amount_to_forward
+                    || (jit_ckb_forward
+                        && incoming_amount == amount_to_forward
                         && !state.jit.allows_zero_open_fee(&next_node_id))
                 {
                     error!(
@@ -5225,11 +5505,6 @@ where
                     ));
                 }
                 let available_fee_amount = incoming_amount.saturating_sub(amount_to_forward);
-                let channel_can_forward = state.peer_ckb_channel_can_forward(
-                    &next_node_id,
-                    amount_to_forward,
-                    payment_hash,
-                );
                 if available_fee_amount != build_max_fee_amount {
                     error!(
                         "Trampoline forwarding fee mismatch: available {}, build max {}",
@@ -5240,10 +5515,15 @@ where
                         state.get_public_key(),
                     ));
                 }
-                // An existing channel that can carry the payment pays a routing fee only.
-                if state.jit.service_enabled()
+                // An existing CKB channel pays a routing fee only, even when that
+                // channel is not reestablished yet. A missing channel must cover
+                // the JIT open fee.
+                let has_ckb_channel = jit_ckb_forward
+                    && state.peer_has_ckb_channel(&next_node_id, amount_to_forward, payment_hash);
+                if jit_ckb_forward
+                    && state.jit.service_enabled()
                     && state.jit.is_registered(&next_node_id)
-                    && !channel_can_forward
+                    && !has_ckb_channel
                     && (state.jit.config().open_fee_required()
                         || available_fee_amount < state.jit.config().open_fee_amount())
                 {
@@ -5306,19 +5586,29 @@ where
                     return Err(TlcErr::new(TlcErrorCode::IncorrectTlcExpiry));
                 }
 
-                if state
-                    .store
-                    .get_payment_session(payment_hash)
-                    .is_some_and(|session| session.status == PaymentStatus::Success)
-                {
-                    return self
-                        .settle_paid_trampoline_replay(
-                            state,
-                            payment_hash,
-                            hash_algorithm,
+                if let Some(session) = state.store.get_payment_session(payment_hash) {
+                    if session.status == PaymentStatus::Success {
+                        if trampoline_success_is_this_forward(
+                            &session,
                             &prev_tlc,
-                        )
-                        .await;
+                            amount_to_forward,
+                            next_node_id,
+                            hash_algorithm,
+                        ) {
+                            return self
+                                .settle_paid_trampoline_replay(
+                                    state,
+                                    payment_hash,
+                                    hash_algorithm,
+                                    &prev_tlc,
+                                )
+                                .await;
+                        }
+                        return Err(TlcErr::new_node_fail(
+                            TlcErrorCode::IncorrectOrUnknownPaymentDetails,
+                            state.get_public_key(),
+                        ));
+                    }
                 }
 
                 let payment_data =
@@ -6053,9 +6343,7 @@ where
     ) -> Result<FundingTx, FundingError> {
         trace!(
             "Forwarding Fund request to ckb chain actor: local_amount={}, remote_amount={}, fee_rate={}",
-            request.local_amount,
-            request.remote_amount,
-            request.funding_fee_rate,
+            request.local_amount, request.remote_amount, request.funding_fee_rate,
         );
         call_t!(
             self.chain_actor.clone(),
@@ -6137,6 +6425,8 @@ pub struct NetworkActorState<S, C> {
     // The features of the node, used to indicate the capabilities of the node.
     features: FeatureVector,
     jit: JitSession,
+    // Next parked JIT retry delay, in milliseconds. Not persisted.
+    jit_retry_delay_ms: HashMap<Hash256, u64>,
     channel_ephemeral_config: ChannelEphemeralConfig,
 
     // Inflight payment actors
@@ -6202,10 +6492,11 @@ where
     C: CkbChainClient + Clone + Send + Sync + 'static,
 {
     fn retry_pending_payments_for_channel(
-        &self,
+        &mut self,
         myself: &ActorRef<NetworkActorMessage>,
         channel_outpoint: &OutPoint,
     ) {
+        self.wake_existing_channel_waits(myself, channel_outpoint);
         for attempt in self
             .store
             .get_pending_attempts_by_channel_outpoint(channel_outpoint)
@@ -6223,6 +6514,32 @@ where
                 debug!(
                     "Failed to register payment retry for {:?}: {:?}",
                     attempt.payment_hash, err
+                );
+            }
+        }
+    }
+
+    fn wake_existing_channel_waits(
+        &mut self,
+        myself: &ActorRef<NetworkActorMessage>,
+        channel_outpoint: &OutPoint,
+    ) {
+        let Some(channel_id) = self.outpoint_channel_map.get(channel_outpoint).copied() else {
+            return;
+        };
+        let Some(channel) = self.store.get_channel_actor_state(&channel_id) else {
+            return;
+        };
+        let peer = channel.get_remote_pubkey();
+        for payment_hash in self.jit.waiting_existing_for_peer(&peer) {
+            // The next hop is back. Check it now instead of waiting out a long backoff.
+            self.jit_retry_delay_ms.remove(&payment_hash);
+            if let Err(err) = myself.send_message(NetworkActorMessage::new_event(
+                NetworkActorEvent::RetrySendPayment(payment_hash, None),
+            )) {
+                debug!(
+                    "Failed to wake JIT payment {:?} for peer {:?}: {:?}",
+                    payment_hash, peer, err
                 );
             }
         }
@@ -6394,6 +6711,66 @@ where
         amount: u128,
         payment_hash: Hash256,
     ) -> bool {
+        self.peer_ckb_channels(peer, amount, payment_hash)
+            .into_iter()
+            .any(|(_, routable)| routable)
+    }
+
+    fn peer_has_ckb_channel(&self, peer: &Pubkey, amount: u128, payment_hash: Hash256) -> bool {
+        self.peer_ckb_channels(peer, amount, payment_hash)
+            .into_iter()
+            .any(|(candidate, _)| candidate)
+    }
+
+    /// `(ready or stale with enough balance, routable after reestablishment)`.
+    fn peer_ckb_channels(
+        &self,
+        peer: &Pubkey,
+        amount: u128,
+        payment_hash: Hash256,
+    ) -> Vec<(bool, bool)> {
+        self.peer_channel_index
+            .get_channels(peer)
+            .into_iter()
+            .flatten()
+            .filter_map(|channel_id| {
+                if !self
+                    .jit
+                    .allows_channel_for_payment(channel_id, payment_hash)
+                {
+                    return None;
+                }
+                let channel = self.store.get_channel_actor_state(&channel_id)?;
+                if channel.funding_udt_type_script.is_some() {
+                    return None;
+                }
+                let Ok(offered) = channel.get_offered_tlc_balance() else {
+                    return None;
+                };
+                if channel.get_local_balance().saturating_sub(offered) < amount {
+                    return None;
+                }
+                let candidate = matches!(
+                    channel.state,
+                    ChannelState::ChannelReady | ChannelState::Stale
+                );
+                let routable = channel.state == ChannelState::ChannelReady
+                    && channel.connectivity_state == ChannelConnectivityState::Online
+                    && !channel.reestablishing
+                    && self.is_channel_online(&channel_id)
+                    && channel
+                        .get_funding_transaction_outpoint()
+                        .is_some_and(|outpoint| self.outpoint_channel_map.contains_key(&outpoint));
+                Some((candidate, routable))
+            })
+            .collect()
+    }
+
+    fn jit_payment_is_waiting(&self, payment_hash: Hash256) -> bool {
+        self.jit.is_waiting(payment_hash) || self.jit.is_waiting_for_existing_channel(payment_hash)
+    }
+
+    fn jit_downstream_is_routable(&self, peer: &Pubkey, payment_hash: Hash256) -> bool {
         self.peer_channel_index
             .get_channels(peer)
             .into_iter()
@@ -6405,45 +6782,25 @@ where
                 {
                     return false;
                 }
-                self.store
-                    .get_channel_actor_state(&channel_id)
-                    .is_some_and(|channel| {
-                        if channel.state != ChannelState::ChannelReady
-                            || channel.funding_udt_type_script.is_some()
-                        {
-                            return false;
-                        }
-                        let Ok(offered) = channel.get_offered_tlc_balance() else {
-                            return false;
-                        };
-                        channel.get_local_balance().saturating_sub(offered) >= amount
-                    })
-            })
-    }
-
-    fn jit_payment_is_waiting(&self, payment_hash: Hash256) -> bool {
-        self.jit.is_waiting(payment_hash)
-    }
-
-    fn jit_downstream_is_routable(&self, peer: &Pubkey, payment_hash: Hash256) -> bool {
-        self.peer_channel_index
-            .get_channels(peer)
-            .into_iter()
-            .flatten()
-            .any(|channel_id| {
-                self.jit
-                    .allows_channel_for_payment(channel_id, payment_hash)
+                let Some(channel) = self.store.get_channel_actor_state(&channel_id) else {
+                    return false;
+                };
+                channel.state == ChannelState::ChannelReady
+                    && channel.funding_udt_type_script.is_none()
+                    && channel.connectivity_state == ChannelConnectivityState::Online
+                    && !channel.reestablishing
                     && self.is_channel_online(&channel_id)
-                    && self
-                        .store
-                        .get_channel_actor_state(&channel_id)
-                        .and_then(|channel| channel.get_funding_transaction_outpoint())
+                    && channel
+                        .get_funding_transaction_outpoint()
                         .is_some_and(|outpoint| self.outpoint_channel_map.contains_key(&outpoint))
             })
     }
 
     fn jit_retry_should_wait(&self, payment_hash: Hash256) -> bool {
-        if !self.jit.tracks_payment(payment_hash) {
+        let tracked = self.jit.tracks_payment(payment_hash)
+            || self.jit.is_direct_retry(payment_hash)
+            || self.jit.is_waiting_for_existing_channel(payment_hash);
+        if !tracked {
             return false;
         }
         let Some(peer) = self.jit.peer_for_payment(payment_hash) else {
@@ -6483,22 +6840,55 @@ where
     }
 
     async fn finish_jit_payment(&mut self, payment_hash: Hash256) {
+        self.jit_retry_delay_ms.remove(&payment_hash);
         self.jit.forget_direct_retry(payment_hash);
         self.jit.release_reservation(payment_hash);
         let (peer, abandon) = self.jit.detach(payment_hash);
-        self.abandon_idle_jit_opens(abandon).await;
+        self.abandon_idle_jit_opens(peer.map(|peer| (peer, payment_hash)), abandon)
+            .await;
         if let Some(peer) = peer {
             self.jit.schedule_pump(peer);
         }
         self.persist_jit();
     }
 
-    async fn abandon_idle_jit_opens(&mut self, channel_ids: Vec<Hash256>) {
+    async fn abandon_idle_jit_opens(
+        &mut self,
+        restore_to: Option<(Pubkey, Hash256)>,
+        channel_ids: Vec<Hash256>,
+    ) {
+        let mut restore = Vec::new();
         for channel_id in channel_ids {
-            if let Err(err) = self.abandon_channel(channel_id).await {
-                debug!(
-                    "JIT channel {channel_id:?} stayed open after its payment was dropped: {err}"
-                );
+            if channel_id == Hash256::default() {
+                continue;
+            }
+            let still_funding =
+                self.store
+                    .get_channel_actor_state(&channel_id)
+                    .is_some_and(|channel| {
+                        !matches!(
+                            channel.state,
+                            ChannelState::ChannelReady
+                                | ChannelState::ShuttingDown(_)
+                                | ChannelState::Closed(_)
+                        )
+                    });
+            match self.abandon_channel(channel_id).await {
+                Ok(()) => {}
+                Err(err) if !still_funding => {
+                    debug!("JIT channel {channel_id:?} is no longer an inflight open: {err}");
+                }
+                Err(err) => {
+                    debug!(
+                        "JIT channel {channel_id:?} stayed open after its payment was dropped: {err}"
+                    );
+                    restore.push(channel_id);
+                }
+            }
+        }
+        if let Some((peer, payment_hash)) = restore_to {
+            for channel_id in restore {
+                self.jit.record_open(peer, channel_id, payment_hash);
             }
         }
     }
@@ -6523,6 +6913,7 @@ where
     }
 
     async fn fail_jit_payment(&mut self, payment_hash: Hash256, reason: &str) {
+        self.jit_retry_delay_ms.remove(&payment_hash);
         self.jit.forget_direct_retry(payment_hash);
         let (peer, opens_to_abandon) = self.jit.detach(payment_hash);
         if let Some(mut session) = self.store.get_payment_session(payment_hash) {
@@ -6536,7 +6927,8 @@ where
                 self.resolve_trampoline_upstream(payment_hash, None).await;
             }
         }
-        self.abandon_idle_jit_opens(opens_to_abandon).await;
+        self.abandon_idle_jit_opens(peer.map(|peer| (peer, payment_hash)), opens_to_abandon)
+            .await;
         if let Some(peer) = peer {
             self.jit.schedule_pump(peer);
         }
@@ -6661,9 +7053,10 @@ where
                 return None;
             }
         }
-        let channel_can_forward = self.peer_session_map.contains_key(&target)
-            && self.peer_ckb_channel_can_forward(&target, amount, payment_hash);
+        let has_ckb_channel = self.peer_has_ckb_channel(&target, amount, payment_hash);
+        let channel_can_forward = self.peer_ckb_channel_can_forward(&target, amount, payment_hash);
         if channel_can_forward && self.jit.begin_direct_retry(payment_hash) {
+            self.jit.clear_existing_channel_wait(payment_hash);
             self.jit.release_queued(&target, payment_hash);
             self.publish_ready_ckb_channels_to_graph(&target, &network_graph)
                 .await;
@@ -6671,6 +7064,15 @@ where
                 let _ = actor.send_message(PaymentActorMessage::RetrySendPayment(None));
             }
             self.persist_jit();
+            return None;
+        }
+        if has_ckb_channel && !channel_can_forward {
+            // The channel exists but is not reestablished. Wait for it instead
+            // of charging an open fee or starting another channel.
+            self.jit.wait_for_existing_channel(payment_hash, target);
+            let _ = self.network.send_message(NetworkActorMessage::new_event(
+                NetworkActorEvent::RetrySendPayment(payment_hash, None),
+            ));
             return None;
         }
         if channel_can_forward {
@@ -6805,8 +7207,29 @@ where
         network_graph: Arc<RwLock<NetworkGraph<S>>>,
     ) {
         let target = open_channel.pubkey;
+        if !self.planned_jit_open_still_current(payment_hash, &target) {
+            debug!(
+                "Skipping planned JIT open for {payment_hash:?} because the payment is no longer current"
+            );
+            self.drop_planned_slot_if_owned(payment_hash, &target).await;
+            self.persist_jit();
+            return;
+        }
         match Box::pin(self.create_outbound_channel(open_channel, network_graph)).await {
             Ok((_, channel_id)) => {
+                if !self.planned_jit_open_still_current(payment_hash, &target) {
+                    debug!(
+                        "Abandoning JIT channel {channel_id:?} opened after {payment_hash:?} was cancelled"
+                    );
+                    if self.jit.open_payment(&target) == Some(payment_hash) {
+                        self.jit.record_open(target, channel_id, payment_hash);
+                        self.drop_planned_slot_if_owned(payment_hash, &target).await;
+                    } else {
+                        self.abandon_idle_jit_opens(None, vec![channel_id]).await;
+                    }
+                    self.persist_jit();
+                    return;
+                }
                 self.jit.record_open(target, channel_id, payment_hash);
                 debug_event!(self.network, "JitChannelOpening");
             }
@@ -6817,6 +7240,24 @@ where
             }
         }
         self.persist_jit();
+    }
+
+    async fn drop_planned_slot_if_owned(&mut self, payment_hash: Hash256, target: &Pubkey) {
+        if self.jit.open_payment(target) != Some(payment_hash) {
+            return;
+        }
+        let (peer, channel_ids) = self.jit.detach(payment_hash);
+        self.abandon_idle_jit_opens(peer.map(|peer| (peer, payment_hash)), channel_ids)
+            .await;
+    }
+
+    fn planned_jit_open_still_current(&self, payment_hash: Hash256, target: &Pubkey) -> bool {
+        let Some(session) = self.store.get_payment_session(payment_hash) else {
+            return false;
+        };
+        self.jit.open_payment(target) == Some(payment_hash)
+            && !session.status.is_final()
+            && self.jit_upstream_still_held(payment_hash)
     }
 
     fn on_jit_channel_register(
@@ -7010,12 +7451,17 @@ where
             }
         }
         let (channel_id, payments) = self.jit.take_peer(&pubkey);
+        let restore_payment = payments.first().copied();
         for payment_hash in payments {
             self.fail_jit_payment(payment_hash, "peer disconnected during JIT channel open")
                 .await;
         }
         if let Some(channel_id) = channel_id {
-            self.abandon_idle_jit_opens(vec![channel_id]).await;
+            self.abandon_idle_jit_opens(
+                restore_payment.map(|payment| (pubkey, payment)),
+                vec![channel_id],
+            )
+            .await;
         }
         self.persist_jit();
     }
@@ -8227,7 +8673,9 @@ where
                                         && state.funding_tx_confirmed_at.is_some()
                                         && state.latest_commitment_transaction().is_some() =>
                                 {
-                                    debug!("Handling force shutdown after early external funding confirmation");
+                                    debug!(
+                                        "Handling force shutdown after early external funding confirmation"
+                                    );
                                 }
                                 _ => {
                                     let error = Error::ChannelError(
@@ -9175,7 +9623,10 @@ where
                     match tlc.removed_reason.as_ref() {
                         Some(RemoveTlcReason::RemoveTlcFulfill(_)) => continue,
                         Some(RemoveTlcReason::RemoveTlcFail(_)) => {
-                            error!("Upstream trampoline TLC was failed after a downstream preimage was learned: payment_hash={payment_hash}, channel_id={:?}, tlc_id={:?}", prev_tlc.prev_channel_id, prev_tlc.prev_tlc_id);
+                            error!(
+                                "Upstream trampoline TLC was failed after a downstream preimage was learned: payment_hash={payment_hash}, channel_id={:?}, tlc_id={:?}",
+                                prev_tlc.prev_channel_id, prev_tlc.prev_tlc_id
+                            );
                             continue;
                         }
                         None => {}
@@ -9204,7 +9655,9 @@ where
         // A successful attempt must never be converted into an upstream failure
         // merely because its preimage is temporarily missing from the session.
         if has_successful_attempt {
-            error!("Trampoline attempt succeeded but no valid preimage is available for {payment_hash}");
+            error!(
+                "Trampoline attempt succeeded but no valid preimage is available for {payment_hash}"
+            );
             return;
         }
 
@@ -9216,7 +9669,9 @@ where
         // final channel outcome. Any such TLC can still reveal the preimage.
         let outgoing_unresolved = session.has_pending_payment_work(&self.store);
         if outgoing_unresolved {
-            warn!("Deferring upstream trampoline failure while outgoing TLCs are unresolved: {payment_hash}");
+            warn!(
+                "Deferring upstream trampoline failure while outgoing TLCs are unresolved: {payment_hash}"
+            );
             return;
         }
 
@@ -9698,6 +10153,7 @@ where
             requested_disconnect_peers: Default::default(),
             features,
             jit: JitSession::new(config.jit_channel_config()),
+            jit_retry_delay_ms: Default::default(),
             channel_ephemeral_config: ChannelEphemeralConfig {
                 funding_timeout_seconds: config.funding_timeout_seconds,
                 external_funding_timeout_seconds: config.external_funding_timeout_seconds,

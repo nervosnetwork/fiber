@@ -2713,16 +2713,18 @@ where
             // of these channels is sufficiently large.
             let sufficiently_large_capacity = u128::MAX;
 
-            // hop hint only referring to private channels for sender node,
-            // if we get public channel information for this hophint, we just ignore this hophint
+            // Unknown hints may be private hops. A known channel is used only when
+            // the hinted peer is on it, the asset matches, and it is not already a
+            // public edge.
             let filtered_hints = hop_hints.iter().filter(|hint| {
-                match self.get_outbound_channel_info_and_update(&hint.channel_outpoint, hint.pubkey)
-                {
-                    (Some(channel_info), Some(channel_update)) => {
-                        channel_info.udt_type_script == udt_type_script && !channel_update.enabled
-                    }
-                    _ => true,
-                }
+                let Some(channel_info) = self.get_channel(&hint.channel_outpoint) else {
+                    return true;
+                };
+                let (outbound, update) =
+                    self.get_outbound_channel_info_and_update(&hint.channel_outpoint, hint.pubkey);
+                outbound.is_some()
+                    && channel_info.udt_type_script == udt_type_script
+                    && !update.is_some_and(|update| update.enabled)
             });
 
             for hint in filtered_hints {

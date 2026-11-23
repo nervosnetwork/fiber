@@ -40,6 +40,7 @@ pub(crate) struct JitSession {
     pending_pumps: VecDeque<Pubkey>,
     draining: bool,
     direct_route_retried: HashSet<Hash256>,
+    waiting_existing: HashSet<Hash256>,
     reserved: HashMap<Hash256, (Pubkey, Hash256)>,
 }
 
@@ -58,6 +59,7 @@ impl JitSession {
             pending_pumps: VecDeque::new(),
             draining: false,
             direct_route_retried: HashSet::new(),
+            waiting_existing: HashSet::new(),
             reserved: HashMap::new(),
         }
     }
@@ -182,6 +184,10 @@ impl JitSession {
 
     pub(crate) fn open_id(&self, peer: &Pubkey) -> Option<Hash256> {
         self.opens_in_flight.get(peer).copied()
+    }
+
+    pub(crate) fn open_payment(&self, peer: &Pubkey) -> Option<Hash256> {
+        self.open_for.get(peer).copied()
     }
 
     pub(crate) fn has_open(&self, peer: &Pubkey) -> bool {
@@ -417,10 +423,36 @@ impl JitSession {
 
     pub(crate) fn forget_direct_retry(&mut self, payment_hash: Hash256) {
         self.direct_route_retried.remove(&payment_hash);
+        self.waiting_existing.remove(&payment_hash);
     }
 
     pub(crate) fn begin_direct_retry(&mut self, payment_hash: Hash256) -> bool {
         self.direct_route_retried.insert(payment_hash)
+    }
+
+    pub(crate) fn is_direct_retry(&self, payment_hash: Hash256) -> bool {
+        self.direct_route_retried.contains(&payment_hash)
+    }
+
+    pub(crate) fn wait_for_existing_channel(&mut self, payment_hash: Hash256, peer: Pubkey) {
+        self.routing_peer.entry(payment_hash).or_insert(peer);
+        self.waiting_existing.insert(payment_hash);
+    }
+
+    pub(crate) fn clear_existing_channel_wait(&mut self, payment_hash: Hash256) {
+        self.waiting_existing.remove(&payment_hash);
+    }
+
+    pub(crate) fn is_waiting_for_existing_channel(&self, payment_hash: Hash256) -> bool {
+        self.waiting_existing.contains(&payment_hash)
+    }
+
+    pub(crate) fn waiting_existing_for_peer(&self, peer: &Pubkey) -> Vec<Hash256> {
+        self.waiting_existing
+            .iter()
+            .copied()
+            .filter(|payment_hash| self.routing_peer.get(payment_hash) == Some(peer))
+            .collect()
     }
 }
 
@@ -625,5 +657,18 @@ mod tests {
         assert!(restored.has_open(&peer));
         assert!(restored.allows_channel_for_payment(channel_id, first));
         assert!(!restored.allows_channel_for_payment(channel_id, second));
+    }
+
+    #[test]
+    fn existing_channel_wait_is_listed_for_its_peer() {
+        let peer = gen_rand_fiber_public_key();
+        let other = gen_rand_fiber_public_key();
+        let mut session = JitSession::new(JitChannelConfig::default());
+        let payment_hash = Hash256::from([4u8; 32]);
+        session.wait_for_existing_channel(payment_hash, peer);
+        assert_eq!(session.waiting_existing_for_peer(&peer), vec![payment_hash]);
+        assert!(session.waiting_existing_for_peer(&other).is_empty());
+        session.forget_direct_retry(payment_hash);
+        assert!(session.waiting_existing_for_peer(&peer).is_empty());
     }
 }
