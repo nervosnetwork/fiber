@@ -474,6 +474,10 @@ pub struct Channel {
     #[serde_as(as = "U128Hex")]
     #[schemars(schema_with = "schema_as_uint_hex")]
     pub tlc_fee_proportional_millionths: u128,
+    /// The delay time for the commitment transaction, chosen by the initiator of the channel, as an
+    /// [EpochNumberWithFraction](https://github.com/nervosnetwork/rfcs/blob/master/rfcs/0017-tx-valid-since/e-i-l-encoding.png)
+    /// in u64 format. Absent for an opening this node has not stored a channel state for yet.
+    pub commitment_delay_epoch: Option<EpochNumberWithFraction>,
     /// The hash of the shutdown transaction
     pub shutdown_transaction_hash: Option<H256>,
     /// Human-readable reason why the channel opening failed.

@@ -1,4 +1,5 @@
 #![allow(clippy::needless_range_loop)]
+use crate::fiber::config::DEFAULT_COMMITMENT_DELAY_EPOCHS;
 use crate::fiber::CloseFlags;
 use crate::fiber::FeatureVector;
 use crate::gen_rand_sha256_hash;
@@ -10,7 +11,11 @@ use crate::tests::*;
 use crate::{
     fiber::Hash256,
     rpc::{
-        channel::{ListChannelsParams, ListChannelsResult},
+        channel::{
+            AbandonChannelParams, AcceptChannelParams, AcceptChannelResult, Channel,
+            Hash256 as JsonHash256, ListChannelsParams, ListChannelsResult, OpenChannelParams,
+            OpenChannelResult,
+        },
         graph::{GraphNodesParams, GraphNodesResult},
         invoice::{InvoiceParams, InvoiceResult, NewInvoiceParams},
         payment::{GetPaymentCommandParams, GetPaymentCommandResult},
@@ -20,6 +25,7 @@ use crate::{
 };
 use biscuit_auth::macros::biscuit;
 use biscuit_auth::{KeyPair, PrivateKey};
+use ckb_types::core::EpochNumberWithFraction;
 use ckb_types::packed::Script;
 use fiber_json_types::info::NodeInfoResult;
 use std::str::FromStr;
@@ -1506,4 +1512,258 @@ async fn test_rpc_disconnect_peer_not_connected() {
         "expected 'not connected' error, got: {}",
         err
     );
+}
+
+async fn list_channels_via_rpc(node: &NetworkNode, only_pending: Option<bool>) -> Vec<Channel> {
+    let result: ListChannelsResult = node
+        .send_rpc_request(
+            "list_channels",
+            ListChannelsParams {
+                pubkey: None,
+                include_closed: None,
+                only_pending,
+            },
+        )
+        .await
+        .expect("list_channels");
+    result.channels
+}
+
+fn find_listed_channel(channels: &[Channel], channel_id: JsonHash256) -> &Channel {
+    channels
+        .iter()
+        .find(|channel| channel.channel_id == channel_id)
+        .unwrap_or_else(|| panic!("channel {channel_id:?} not listed in {channels:#?}"))
+}
+
+async fn open_channel_via_rpc(
+    node_a: &NetworkNode,
+    node_b: &NetworkNode,
+    commitment_delay_epoch: Option<EpochNumberWithFraction>,
+) -> OpenChannelResult {
+    node_a
+        .send_rpc_request(
+            "open_channel",
+            OpenChannelParams {
+                pubkey: node_b.pubkey.into(),
+                funding_amount: MIN_RESERVED_CKB + 10000000000,
+                public: Some(false),
+                one_way: None,
+                funding_udt_type_script: None,
+                shutdown_script: None,
+                commitment_delay_epoch: commitment_delay_epoch
+                    .map(|epoch| epoch.full_value().into()),
+                commitment_fee_rate: None,
+                funding_fee_rate: None,
+                tlc_expiry_delta: None,
+                tlc_min_value: None,
+                tlc_fee_proportional_millionths: None,
+                max_tlc_value_in_flight: None,
+                max_tlc_number_in_flight: None,
+            },
+        )
+        .await
+        .expect("open_channel")
+}
+
+async fn expect_channel_pending_to_be_accepted(
+    acceptor: &mut NetworkNode,
+    initiator: &NetworkNode,
+) {
+    let initiator_pubkey = initiator.pubkey;
+    acceptor
+        .expect_event(|event| {
+            matches!(
+                event,
+                NetworkServiceEvent::ChannelPendingToBeAccepted(pubkey, _) if pubkey == &initiator_pubkey
+            )
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn test_rpc_list_channels_reports_custom_commitment_delay_epoch() {
+    // 1 1/2 epochs: a fractional value that differs from the default delay.
+    let delay = EpochNumberWithFraction::new(1, 1, 2);
+    let nodes = NetworkNode::new_interconnected_nodes(2, Some(gen_rpc_config())).await;
+    let [node_a, mut node_b]: [NetworkNode; 2] = nodes.try_into().expect("2 nodes");
+
+    let open = open_channel_via_rpc(&node_a, &node_b, Some(delay)).await;
+    expect_channel_pending_to_be_accepted(&mut node_b, &node_a).await;
+    let accept: AcceptChannelResult = node_b
+        .send_rpc_request(
+            "accept_channel",
+            AcceptChannelParams {
+                temporary_channel_id: open.temporary_channel_id,
+                funding_amount: MIN_RESERVED_CKB,
+                shutdown_script: None,
+                max_tlc_value_in_flight: None,
+                max_tlc_number_in_flight: None,
+                tlc_min_value: None,
+                tlc_fee_proportional_millionths: None,
+                tlc_expiry_delta: None,
+            },
+        )
+        .await
+        .expect("accept_channel");
+    let channel_id = accept.channel_id;
+
+    // Wait until both sides list the channel as ready.
+    for node in [&node_a, &node_b] {
+        let mut ready = false;
+        for _ in 0..100 {
+            let channels = list_channels_via_rpc(node, None).await;
+            if channels
+                .iter()
+                .any(|c| c.channel_id == channel_id && c.state == ChannelState::ChannelReady)
+            {
+                ready = true;
+                break;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        }
+        assert!(ready, "channel {channel_id:?} did not become ready");
+    }
+
+    for (node, is_acceptor) in [(&node_a, false), (&node_b, true)] {
+        let channels = list_channels_via_rpc(node, None).await;
+        let channel = find_listed_channel(&channels, channel_id);
+        assert_eq!(channel.is_acceptor, is_acceptor);
+        assert_eq!(
+            channel.commitment_delay_epoch.map(|epoch| epoch.value()),
+            Some(delay.full_value()),
+            "unexpected commitment_delay_epoch on {} side",
+            if is_acceptor { "acceptor" } else { "initiator" }
+        );
+
+        // On the wire the delay is the hex-encoded full u64 value.
+        let raw = node
+            .send_rpc_request_raw(
+                "list_channels",
+                ListChannelsParams {
+                    pubkey: None,
+                    include_closed: None,
+                    only_pending: None,
+                },
+            )
+            .await
+            .expect("list_channels raw");
+        let raw_channel = raw["channels"]
+            .as_array()
+            .expect("channels array")
+            .iter()
+            .find(|c| c["channel_id"] == serde_json::json!(channel_id))
+            .expect("channel in raw response");
+        assert_eq!(
+            raw_channel["commitment_delay_epoch"],
+            serde_json::json!(format!("{:#x}", delay.full_value()))
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_rpc_list_channels_reports_default_commitment_delay_epoch() {
+    let (nodes, channels) = create_n_nodes_network_with_params(
+        &[(
+            (0, 1),
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: MIN_RESERVED_CKB + 10000000000,
+                node_b_funding_amount: MIN_RESERVED_CKB,
+                ..Default::default()
+            },
+        )],
+        2,
+        Some(gen_rpc_config()),
+    )
+    .await;
+    let [node_0, node_1] = nodes.try_into().expect("2 nodes");
+    let channel_id: JsonHash256 = channels[0].into();
+    let default_delay = EpochNumberWithFraction::new(DEFAULT_COMMITMENT_DELAY_EPOCHS, 0, 1);
+
+    for node in [&node_0, &node_1] {
+        let channels = list_channels_via_rpc(node, None).await;
+        let channel = find_listed_channel(&channels, channel_id);
+        assert_eq!(channel.state, ChannelState::ChannelReady);
+        assert_eq!(
+            channel.commitment_delay_epoch.map(|epoch| epoch.value()),
+            Some(default_delay.full_value())
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_rpc_list_pending_channels_reports_initiator_commitment_delay_epoch() {
+    let delay = EpochNumberWithFraction::new(2, 0, 1);
+    let nodes = NetworkNode::new_interconnected_nodes(2, Some(gen_rpc_config())).await;
+    let [node_a, mut node_b]: [NetworkNode; 2] = nodes.try_into().expect("2 nodes");
+
+    let open = open_channel_via_rpc(&node_a, &node_b, Some(delay)).await;
+    expect_channel_pending_to_be_accepted(&mut node_b, &node_a).await;
+    let temp_channel_id = open.temporary_channel_id;
+
+    // The acceptor has not called accept_channel yet, so it holds no channel state: the entry
+    // comes from the inbound request (OpenChannelV2) waiting for acceptance.
+    assert!(node_b
+        .get_channel_actor_state_unchecked(temp_channel_id.into())
+        .is_none());
+    let channels = list_channels_via_rpc(&node_b, Some(true)).await;
+    let channel = find_listed_channel(&channels, temp_channel_id);
+    assert!(channel.is_acceptor);
+    assert_eq!(channel.pubkey, node_a.pubkey.into());
+    assert!(matches!(channel.state, ChannelState::NegotiatingFunding(_)));
+    assert_eq!(
+        channel.commitment_delay_epoch.map(|epoch| epoch.value()),
+        Some(delay.full_value())
+    );
+
+    // The initiator already stored its channel state and reports the same delay.
+    let channels = list_channels_via_rpc(&node_a, Some(true)).await;
+    let channel = find_listed_channel(&channels, temp_channel_id);
+    assert!(!channel.is_acceptor);
+    assert_eq!(
+        channel.commitment_delay_epoch.map(|epoch| epoch.value()),
+        Some(delay.full_value())
+    );
+}
+
+#[tokio::test]
+async fn test_rpc_list_pending_channels_without_channel_state_has_no_commitment_delay_epoch() {
+    let delay = EpochNumberWithFraction::new(2, 0, 1);
+    let nodes = NetworkNode::new_interconnected_nodes(2, Some(gen_rpc_config())).await;
+    let [mut node_a, mut node_b]: [NetworkNode; 2] = nodes.try_into().expect("2 nodes");
+
+    let open = open_channel_via_rpc(&node_a, &node_b, Some(delay)).await;
+    expect_channel_pending_to_be_accepted(&mut node_b, &node_a).await;
+    let temp_channel_id = open.temporary_channel_id;
+
+    // Abandoning the unaccepted outbound channel deletes its channel state and leaves only the
+    // (failed) opening record.
+    let _: () = node_a
+        .send_rpc_request(
+            "abandon_channel",
+            AbandonChannelParams {
+                channel_id: temp_channel_id,
+            },
+        )
+        .await
+        .expect("abandon_channel");
+    let abandoned_id: Hash256 = temp_channel_id.into();
+    node_a
+        .expect_event(
+            |event| matches!(event, NetworkServiceEvent::ChannelAbandon(id) if id == &abandoned_id),
+        )
+        .await;
+    assert!(node_a
+        .get_channel_actor_state_unchecked(abandoned_id)
+        .is_none());
+
+    let channels = list_channels_via_rpc(&node_a, Some(true)).await;
+    let channel = find_listed_channel(&channels, temp_channel_id);
+    assert!(!channel.is_acceptor);
+    assert!(matches!(
+        channel.state,
+        ChannelState::Closed(flags) if flags.0 == CloseFlags::FUNDING_ABORTED.bits()
+    ));
+    assert_eq!(channel.commitment_delay_epoch, None);
 }
