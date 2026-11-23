@@ -2001,10 +2001,602 @@ fn test_payment_status_queries_skip_attempts_for_mismatched_terminal_sessions() 
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
+fn test_channel_cache_serves_snapshots_and_tracks_changes() {
+    use crate::store::open_store_with_migration;
+    use fiber_types::schema::CHANNEL_ACTOR_STATE_PREFIX;
+
+    let dir = TempDir::new("channel-cache-tracking");
+    let store =
+        open_store_with_migration(dir.as_ref(), false, 8, Box::new(|_| true), Box::new(|_| {}))
+            .expect("open store with cache");
+
+    let channel = sample_channel_actor_state(ChannelState::ChannelReady, None);
+    store.insert_channel_actor_state(channel.clone());
+    let key = [&[CHANNEL_ACTOR_STATE_PREFIX], channel.id.as_ref()].concat();
+    let mut rewritten = channel.clone();
+    rewritten.to_local_amount = 12345;
+    let rewritten = bincode::serialize(&rewritten).unwrap();
+
+    // Reads come from the published snapshot, so a record rewritten behind the store's back
+    // cannot leak in.
+    store.put(key.clone(), &rewritten);
+    let served = store.get_channel_actor_state(&channel.id).expect("cached");
+    assert_eq!(served.to_local_amount, channel.to_local_amount);
+
+    // Runtime-only fields never reach the snapshot: a cached read matches a decoded read.
+    let mut with_runtime_state = channel.clone();
+    with_runtime_state.waiting_peer_response = Some(42);
+    with_runtime_state.defer_peer_tlc_updates = true;
+    store.insert_channel_actor_state(with_runtime_state);
+    let served = store.get_channel_actor_state(&channel.id).expect("cached");
+    assert_eq!(served.waiting_peer_response, None);
+    assert!(!served.defer_peer_tlc_updates);
+
+    // A write replaces the published snapshot.
+    let mut updated = channel.clone();
+    updated.to_local_amount = 777;
+    store.insert_channel_actor_state(updated.clone());
+    let served = store.get_channel_actor_state(&channel.id).expect("updated");
+    assert_eq!(served.to_local_amount, 777);
+
+    // A channel only moves to another id while it is opening, and opening channels are not
+    // cached, so the move is a plain record rewrite.
+    let mut opening = sample_channel_actor_state(
+        ChannelState::NegotiatingFunding(fiber_types::NegotiatingFundingFlags::empty()),
+        None,
+    );
+    store.insert_channel_actor_state(opening.clone());
+    let old_id = opening.id;
+    let new_id = gen_rand_sha256_hash();
+    opening.id = new_id;
+    store.move_channel_actor_state(&old_id, opening.clone());
+    assert!(store.get_channel_actor_state(&old_id).is_none());
+    assert_eq!(
+        store.get_channel_actor_state(&new_id).expect("moved").id,
+        new_id
+    );
+    // A move onto the same id is just an insert.
+    store.move_channel_actor_state(&new_id, opening.clone());
+    assert_eq!(
+        store.get_channel_actor_state(&new_id).expect("same id").id,
+        new_id
+    );
+
+    // Deleting a cached channel drops its snapshot too, so it is gone for later reads and its
+    // slot does not stay behind.
+    assert!(store.channel_cache_peek(&channel.id).is_some());
+    store.delete_channel_actor_state(&channel.id);
+    assert!(store.channel_cache_peek(&channel.id).is_none());
+    assert_eq!(store.channel_cache_len(), 0);
+    assert!(store.get_channel_actor_state(&channel.id).is_none());
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_moving_a_cached_channel_drops_its_snapshot() {
+    use crate::store::open_store_with_migration;
+
+    let dir = TempDir::new("channel-cache-move");
+    let store =
+        open_store_with_migration(dir.as_ref(), false, 8, Box::new(|_| true), Box::new(|_| {}))
+            .expect("open store with cache");
+
+    // A published snapshot under the old id must not survive the move, or a reader would be served
+    // a state under an id that no longer names a channel.
+    let channel = sample_channel_actor_state(ChannelState::ChannelReady, None);
+    let old_id = channel.id;
+    store.insert_channel_actor_state(channel.clone());
+    assert!(store.channel_cache_peek(&old_id).is_some());
+
+    let mut moved = channel.clone();
+    let new_id = gen_rand_sha256_hash();
+    moved.id = new_id;
+    store.move_channel_actor_state(&old_id, moved);
+
+    assert!(store.channel_cache_peek(&old_id).is_none());
+    assert_eq!(store.channel_cache_len(), 0);
+    assert!(store.get_channel_actor_state(&old_id).is_none());
+    assert_eq!(
+        store.get_channel_actor_state(&new_id).expect("moved").id,
+        new_id
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_clearing_the_channel_cache_drops_every_snapshot() {
+    use crate::store::open_store_with_migration;
+
+    let dir = TempDir::new("channel-cache-clear");
+    let store =
+        open_store_with_migration(dir.as_ref(), false, 8, Box::new(|_| true), Box::new(|_| {}))
+            .expect("open store with cache");
+
+    let channel = sample_channel_actor_state(ChannelState::ChannelReady, None);
+    store.insert_channel_actor_state(channel.clone());
+    assert!(store.channel_cache_peek(&channel.id).is_some());
+
+    // A restarting node starts from an empty cache and has to decode the records again.
+    store.clear_channel_cache();
+    assert!(store.channel_cache_peek(&channel.id).is_none());
+    assert_eq!(store.channel_cache_len(), 0);
+    assert_eq!(
+        store
+            .get_channel_actor_state(&channel.id)
+            .expect("record")
+            .to_local_amount,
+        channel.to_local_amount
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_channel_cache_is_only_filled_by_writes() {
+    use crate::store::open_store_with_migration;
+    use fiber_types::schema::CHANNEL_ACTOR_STATE_PREFIX;
+
+    let dir = TempDir::new("channel-cache-reads");
+    let store =
+        open_store_with_migration(dir.as_ref(), false, 8, Box::new(|_| true), Box::new(|_| {}))
+            .expect("open store with cache");
+
+    // A ready record that this process never wrote: reads decode it but must not publish it, so a
+    // snapshot can never outlive an invalidation.
+    let channel = sample_channel_actor_state(ChannelState::ChannelReady, None);
+    let key = [&[CHANNEL_ACTOR_STATE_PREFIX], channel.id.as_ref()].concat();
+    store.put(key, bincode::serialize(&channel).unwrap());
+    assert_eq!(
+        store
+            .get_channel_actor_state(&channel.id)
+            .expect("state")
+            .to_local_amount,
+        channel.to_local_amount
+    );
+    assert_eq!(store.channel_cache_len(), 0);
+
+    // A write fills it, and a later transition drops it again.
+    store.insert_channel_actor_state(channel.clone());
+    assert_eq!(store.channel_cache_len(), 1);
+    let mut settling = channel.clone();
+    settling.state = ChannelState::ShuttingDown(fiber_types::ShuttingDownFlags::empty());
+    settling.to_local_amount = 999;
+    store.insert_channel_actor_state(settling.clone());
+    assert_eq!(store.channel_cache_len(), 0);
+    assert_eq!(
+        store
+            .get_channel_actor_state(&channel.id)
+            .expect("state")
+            .to_local_amount,
+        999
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_channel_cache_skips_channels_that_are_not_ready() {
+    use crate::store::open_store_with_migration;
+    use fiber_types::schema::CHANNEL_ACTOR_STATE_PREFIX;
+
+    let dir = TempDir::new("channel-cache-opening");
+    let store =
+        open_store_with_migration(dir.as_ref(), false, 8, Box::new(|_| true), Box::new(|_| {}))
+            .expect("open store with cache");
+
+    // A channel that is still opening can change its id, so it is written but not cached.
+    let mut opening = sample_channel_actor_state(
+        ChannelState::NegotiatingFunding(fiber_types::NegotiatingFundingFlags::empty()),
+        None,
+    );
+    store.insert_channel_actor_state(opening.clone());
+    assert_eq!(store.channel_cache_len(), 0);
+
+    let key = [&[CHANNEL_ACTOR_STATE_PREFIX], opening.id.as_ref()].concat();
+    opening.to_local_amount = 4242;
+    store.put(key, bincode::serialize(&opening).unwrap());
+    // Reading through the store decodes the record, so a rewrite is visible.
+    assert_eq!(
+        store
+            .get_channel_actor_state(&opening.id)
+            .expect("state")
+            .to_local_amount,
+        4242
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_channel_cache_disabled_reads_the_database() {
+    use crate::store::open_store_with_migration;
+    use fiber_types::schema::CHANNEL_ACTOR_STATE_PREFIX;
+
+    let dir = TempDir::new("channel-cache-off");
+    let store =
+        open_store_with_migration(dir.as_ref(), false, 0, Box::new(|_| true), Box::new(|_| {}))
+            .expect("open store without cache");
+
+    let channel = sample_channel_actor_state(ChannelState::ChannelReady, None);
+    store.insert_channel_actor_state(channel.clone());
+    let key = [&[CHANNEL_ACTOR_STATE_PREFIX], channel.id.as_ref()].concat();
+    let mut rewritten = channel.clone();
+    rewritten.to_local_amount = 12345;
+    store.put(key, bincode::serialize(&rewritten).unwrap());
+
+    // Without a cache every read decodes the stored record.
+    assert_eq!(
+        store
+            .get_channel_actor_state(&channel.id)
+            .expect("state")
+            .to_local_amount,
+        12345
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_channel_cache_stops_caching_when_full_and_frees_slots_on_delete() {
+    use crate::store::open_store_with_migration;
+    use fiber_types::schema::CHANNEL_ACTOR_STATE_PREFIX;
+
+    let dir = TempDir::new("channel-cache-capacity");
+    let store =
+        open_store_with_migration(dir.as_ref(), false, 2, Box::new(|_| true), Box::new(|_| {}))
+            .expect("open store with a two-entry cache");
+
+    // The cache holds two channels; the third is written but not cached.
+    let mut channels = Vec::new();
+    for amount in 1..=3u128 {
+        let mut channel = sample_channel_actor_state(ChannelState::ChannelReady, None);
+        channel.to_local_amount = amount;
+        store.insert_channel_actor_state(channel.clone());
+        channels.push(channel);
+    }
+    assert_eq!(store.channel_cache_len(), 2);
+    assert!(store.channel_cache_peek(&channels[0].id).is_some());
+    assert!(store.channel_cache_peek(&channels[1].id).is_some());
+    assert!(store.channel_cache_peek(&channels[2].id).is_none());
+
+    // Every channel is still readable, cached or not.
+    for channel in &channels {
+        let read = store.get_channel_actor_state(&channel.id).expect("state");
+        assert_eq!(read.to_local_amount, channel.to_local_amount);
+    }
+
+    // A cached channel keeps tracking writes.
+    let mut updated = channels[0].clone();
+    updated.to_local_amount = 999;
+    store.insert_channel_actor_state(updated.clone());
+    assert_eq!(
+        store
+            .channel_cache_peek(&updated.id)
+            .expect("cached")
+            .to_local_amount,
+        999
+    );
+
+    // A channel that was not cached is read straight from the record, so a record replaced
+    // behind the store's back is visible.
+    let uncached = channels[2].clone();
+    let mut rewritten = uncached.clone();
+    rewritten.to_local_amount = 11111;
+    let key = [&[CHANNEL_ACTOR_STATE_PREFIX], uncached.id.as_ref()].concat();
+    store.put(key, bincode::serialize(&rewritten).unwrap());
+    assert_eq!(
+        store
+            .get_channel_actor_state(&uncached.id)
+            .expect("state")
+            .to_local_amount,
+        11111
+    );
+
+    // Deleting a channel frees its slot, so a new channel can be cached again.
+    store.delete_channel_actor_state(&channels[1].id);
+    assert_eq!(store.channel_cache_len(), 1);
+    let mut replacement = sample_channel_actor_state(ChannelState::ChannelReady, None);
+    replacement.to_local_amount = 4242;
+    store.insert_channel_actor_state(replacement.clone());
+    assert_eq!(
+        store
+            .channel_cache_peek(&replacement.id)
+            .expect("cached after a delete freed a slot")
+            .to_local_amount,
+        4242
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_channel_cache_never_holds_a_snapshot_the_record_replaced() {
+    use crate::store::open_store_with_migration;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Barrier};
+
+    let dir = TempDir::new("channel-cache-mixed-transitions");
+    let store =
+        open_store_with_migration(dir.as_ref(), false, 8, Box::new(|_| true), Box::new(|_| {}))
+            .expect("open store with cache");
+
+    let channel = sample_channel_actor_state(ChannelState::ChannelReady, None);
+    let id = channel.id;
+    store.insert_channel_actor_state(channel.clone());
+
+    // Threads write the same channel as ready, as shutting down, and delete it: a snapshot that a
+    // later transition invalidated must never come back, and a snapshot that is served must name
+    // the state the record holds.
+    let done = Arc::new(AtomicBool::new(false));
+    let start = Arc::new(Barrier::new(5));
+    let reader = {
+        let store = store.clone();
+        let done = done.clone();
+        let start = start.clone();
+        std::thread::spawn(move || {
+            start.wait();
+            let mut checks = 0u32;
+            while !done.load(Ordering::SeqCst) {
+                // The snapshot and the record are read under the channel's slot, so a write
+                // cannot change the record between the two reads.
+                if let Some((cached, record)) = store.channel_cache_and_record(&id) {
+                    let record = record.expect("a published snapshot must have a record");
+                    assert_eq!(
+                        bincode::serialize(&cached).unwrap(),
+                        bincode::serialize(&record).unwrap(),
+                        "a reader was served a snapshot that differs from the record"
+                    );
+                    checks += 1;
+                }
+            }
+            checks
+        })
+    };
+
+    let writers: Vec<_> = (0..4u128)
+        .map(|worker| {
+            let store = store.clone();
+            let channel = channel.clone();
+            let start = start.clone();
+            std::thread::spawn(move || {
+                start.wait();
+                for round in 1..=100u128 {
+                    let mut state = channel.clone();
+                    state.to_local_amount = worker * 1000 + round;
+                    match (worker + round) % 4 {
+                        0 => store.insert_channel_actor_state(state),
+                        1 => {
+                            state.state =
+                                ChannelState::ShuttingDown(fiber_types::ShuttingDownFlags::empty());
+                            store.insert_channel_actor_state(state)
+                        }
+                        2 => {
+                            state.state =
+                                ChannelState::Closed(fiber_types::CloseFlags::COOPERATIVE);
+                            store.insert_channel_actor_state(state)
+                        }
+                        _ => store.delete_channel_actor_state(&id),
+                    }
+                }
+            })
+        })
+        .collect();
+    for writer in writers {
+        writer.join().expect("writer");
+    }
+    done.store(true, Ordering::SeqCst);
+    let checks = reader.join().expect("reader");
+    // Otherwise the assertions above never ran and prove nothing.
+    assert!(checks > 0, "the reader never saw a published snapshot");
+
+    // Whatever the interleaving, a cached snapshot must be the stored record.
+    assert!(store.channel_cache_len() <= 1);
+    if let Some((cached, record)) = store.channel_cache_and_record(&id) {
+        let record = record.expect("a cached snapshot must have a stored record");
+        assert_eq!(
+            bincode::serialize(&cached).unwrap(),
+            bincode::serialize(&record).unwrap(),
+            "cached snapshot differs from the stored record"
+        );
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_store_restore_clears_the_channel_cache() {
+    use crate::store::open_store_with_migration;
+    use fiber_store::backend::StorageBackend;
+
+    let dir = TempDir::new("channel-cache-restore");
+    let store =
+        open_store_with_migration(dir.as_ref(), false, 8, Box::new(|_| true), Box::new(|_| {}))
+            .expect("open store with cache");
+
+    let channel = sample_channel_actor_state(ChannelState::ChannelReady, None);
+    store.insert_channel_actor_state(channel.clone());
+    assert_eq!(store.channel_cache_len(), 1);
+
+    // A restore describes the database that is being replaced, so the snapshots go even when the
+    // restore itself fails.
+    let missing = dir.as_ref().join("missing-backup");
+    let db_path = dir.as_ref().join("db");
+    assert!(store.restore(&missing, &db_path).is_err());
+    assert_eq!(store.channel_cache_len(), 0);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_channel_cache_capacity_is_not_exceeded_by_concurrent_writes() {
+    use crate::store::open_store_with_migration;
+    use std::sync::{Arc, Barrier};
+
+    let dir = TempDir::new("channel-cache-capacity-race");
+    let store =
+        open_store_with_migration(dir.as_ref(), false, 1, Box::new(|_| true), Box::new(|_| {}))
+            .expect("open store with a one-entry cache");
+
+    // Two channels racing for the single capacity slot: the reservation is atomic, so one wins,
+    // and both stay readable.
+    let mut first = sample_channel_actor_state(ChannelState::ChannelReady, None);
+    first.to_local_amount = 1;
+    let mut second = sample_channel_actor_state(ChannelState::ChannelReady, None);
+    second.to_local_amount = 2;
+    let start = Arc::new(Barrier::new(2));
+    let writers: Vec<_> = [first.clone(), second.clone()]
+        .into_iter()
+        .map(|channel| {
+            let store = store.clone();
+            let start = start.clone();
+            std::thread::spawn(move || {
+                start.wait();
+                store.insert_channel_actor_state(channel);
+            })
+        })
+        .collect();
+    for writer in writers {
+        writer.join().expect("writer");
+    }
+
+    assert!(
+        store.channel_cache_len() <= 1,
+        "cache holds {} entries with a capacity of one",
+        store.channel_cache_len()
+    );
+    for channel in [&first, &second] {
+        assert_eq!(
+            store
+                .get_channel_actor_state(&channel.id)
+                .expect("state")
+                .to_local_amount,
+            channel.to_local_amount
+        );
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_channel_cache_matches_the_database_under_concurrent_writes() {
+    use crate::store::open_store_with_migration;
+    use fiber_types::schema::CHANNEL_ACTOR_STATE_PREFIX;
+
+    let dir = TempDir::new("channel-cache-writers");
+    let store =
+        open_store_with_migration(dir.as_ref(), false, 8, Box::new(|_| true), Box::new(|_| {}))
+            .expect("open store with cache");
+
+    let channel = sample_channel_actor_state(ChannelState::ChannelReady, None);
+    store.insert_channel_actor_state(channel.clone());
+
+    // Several writers race on the same channel. Whatever the interleaving, the published
+    // snapshot must be the record the database holds afterwards.
+    let writers: Vec<_> = (1..=4u128)
+        .map(|writer| {
+            let store = store.clone();
+            let channel = channel.clone();
+            std::thread::spawn(move || {
+                for round in 1..=100u128 {
+                    let mut state = channel.clone();
+                    state.to_local_amount = writer * 1000 + round;
+                    store.insert_channel_actor_state(state);
+                }
+            })
+        })
+        .collect();
+    for writer in writers {
+        writer.join().expect("writer");
+    }
+
+    let cached = store.get_channel_actor_state(&channel.id).expect("cached");
+    let key = [&[CHANNEL_ACTOR_STATE_PREFIX], channel.id.as_ref()].concat();
+    let stored: ChannelActorState = deserialize_from(
+        store.get(key).expect("stored").as_ref(),
+        "ChannelActorState",
+    );
+    assert_eq!(cached.to_local_amount, stored.to_local_amount);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_channel_cache_reads_see_completed_writes() {
+    use crate::store::open_store_with_migration;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::{Arc, Barrier};
+
+    let dir = TempDir::new("channel-cache-concurrent");
+    let store =
+        open_store_with_migration(dir.as_ref(), false, 8, Box::new(|_| true), Box::new(|_| {}))
+            .expect("open store with cache");
+
+    // Start above the sample's own value: a stale snapshot must not look fresh.
+    let channel = sample_channel_actor_state(ChannelState::ChannelReady, None);
+    let first_value = channel.to_local_amount as u64 + 1;
+    store.insert_channel_actor_state(channel.clone());
+
+    let published = Arc::new(AtomicU64::new(0));
+    let done = Arc::new(AtomicBool::new(false));
+    let start = Arc::new(Barrier::new(3));
+
+    let writer = {
+        let store = store.clone();
+        let channel = channel.clone();
+        let published = published.clone();
+        let done = done.clone();
+        let start = start.clone();
+        std::thread::spawn(move || {
+            start.wait();
+            for value in first_value..first_value + 500 {
+                let mut state = channel.clone();
+                state.to_local_amount = value as u128;
+                store.insert_channel_actor_state(state);
+                published.store(value, Ordering::SeqCst);
+            }
+            done.store(true, Ordering::SeqCst);
+        })
+    };
+
+    let readers: Vec<_> = (0..2)
+        .map(|_| {
+            let store = store.clone();
+            let id = channel.id;
+            let published = published.clone();
+            let done = done.clone();
+            let start = start.clone();
+            std::thread::spawn(move || {
+                start.wait();
+                let mut reads = 0u64;
+                while !done.load(Ordering::SeqCst) {
+                    // A write that already returned must be visible to the next read.
+                    let expected = published.load(Ordering::SeqCst);
+                    let observed = store
+                        .get_channel_actor_state(&id)
+                        .expect("state")
+                        .to_local_amount as u64;
+                    assert!(
+                        observed >= expected,
+                        "read {observed} is older than the completed write {expected}"
+                    );
+                    reads += 1;
+                }
+                reads
+            })
+        })
+        .collect();
+
+    writer.join().expect("writer");
+    let reads: u64 = readers
+        .into_iter()
+        .map(|reader| reader.join().expect("reader"))
+        .sum();
+    // The readers must actually have run, otherwise the assertions above prove nothing.
+    assert!(reads > 0, "readers never read a channel state");
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
 fn test_payment_list_skips_unneeded_channel_reads() {
+    use crate::store::open_store_with_migration;
     use fiber_types::schema::{ATTEMPT_CHANNEL_INDEX_PREFIX, CHANNEL_ACTOR_STATE_PREFIX};
     for indexed in [false, true] {
-        let (store, _dir) = generate_store();
+        // No channel cache: the record this test overwrites must be the only source of a channel.
+        let dir = TempDir::new("payment-list-no-channel-cache");
+        let store =
+            open_store_with_migration(dir.as_ref(), false, 0, Box::new(|_| true), Box::new(|_| {}))
+                .expect("open store without a channel cache");
         let channel = sample_channel_actor_state(ChannelState::ChannelReady, None);
         let outpoint = channel.must_get_funding_transaction_outpoint();
         store.insert_channel_actor_state(channel.clone());

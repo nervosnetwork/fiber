@@ -2,9 +2,12 @@ use fiber_types::{ChannelActorData, ChannelSessionV2};
 
 use super::{decode_as_new, OldChannelActorData};
 
+/// The released v0.10.0-rc2 ..= v0.10.1 layout: the session is prefixed with its marker.
+pub(super) const RELEASED_SESSION_MARKER: u32 = 0x56320001;
+
 pub(super) fn released_v2(
     channel: ChannelActorData,
-) -> (OldChannelActorData, Option<ChannelSessionV2>) {
+) -> (OldChannelActorData, Option<(u32, ChannelSessionV2)>) {
     let session = channel.session.clone();
     let latest_commitment_transaction = channel.latest_commitment_transaction();
     let old = OldChannelActorData {
@@ -57,5 +60,5 @@ pub(super) fn released_v2(
         commitment_contract_features:
             fiber_types_0100::CommitmentContractFeatures::ONCHAIN_FULL_PAYMENT_HASH,
     };
-    (old, Some(session))
+    (old, Some((RELEASED_SESSION_MARKER, session)))
 }

@@ -2588,6 +2588,7 @@ dependencies = [
  "clap",
  "clap-serde-derive",
  "criterion",
+ "dashmap 5.5.3",
  "either",
  "fiber-json-types",
  "fiber-sphinx",

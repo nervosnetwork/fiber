@@ -114,6 +114,9 @@ pub const DEFAULT_SYNC_NETWORK_GRAPH: bool = true;
 /// Whether every store write waits for the disk before it returns.
 pub const DEFAULT_STORE_SYNC_WRITES: bool = false;
 
+/// How many channel states are kept in the in-memory read cache. 0 disables the cache.
+pub const DEFAULT_STORE_CHANNEL_CACHE_CAPACITY: usize = 4096;
+
 pub const PAYMENT_MAX_PARTS_LIMIT: u64 = 24;
 
 // See comment in `LdkConfig` for why do we need to specify both name and long,
@@ -432,6 +435,17 @@ pub struct FiberConfig {
         help = "Whether every store write waits for the disk before it returns. Off is faster, but a power loss can lose the last writes; a node that holds others' funds should turn it on. [default: false]"
     )]
     pub(crate) store_sync_writes: Option<bool>,
+
+    /// How many channel states are kept in the in-memory read cache. Reads then answer from
+    /// memory instead of decoding the stored record; 0 disables the cache and always reads the
+    /// database. Only effective while a single process owns the database. [default: 4096]
+    #[arg(
+        name = "FIBER_STORE_CHANNEL_CACHE_CAPACITY",
+        long = "fiber-store-channel-cache-capacity",
+        env,
+        help = "How many channel states are kept in the in-memory read cache; 0 disables it. [default: 4096]"
+    )]
+    pub(crate) store_channel_cache_capacity: Option<usize>,
 
     /// The interval to check watchtower, in seconds. 0 means never check. [default: 60 (1 minute)]
     #[arg(
@@ -781,6 +795,12 @@ impl FiberConfig {
 
     pub fn store_sync_writes(&self) -> bool {
         self.store_sync_writes.unwrap_or(DEFAULT_STORE_SYNC_WRITES)
+    }
+
+    /// How many channel states the store keeps in its in-memory read cache; `0` disables it.
+    pub fn store_channel_cache_capacity(&self) -> usize {
+        self.store_channel_cache_capacity
+            .unwrap_or(DEFAULT_STORE_CHANNEL_CACHE_CAPACITY)
     }
 
     pub fn gen_node_features(&self) -> FeatureVector {

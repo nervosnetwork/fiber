@@ -21,9 +21,7 @@ use crate::fiber::onchain_tlc_reconcile::{
     confirm_onchain_payer_fulfill, has_unresolved_onchain_tlcs, onchain_fulfilled_preimage,
     OnChainConfirmedPayerTlc, OnChainTimeoutTlcRole, OnChainTlcSettlement,
 };
-use crate::fiber::session::{
-    allocate_nonce, bind_context, guarded_sign, new_session, SESSION_MARKER,
-};
+use crate::fiber::session::{allocate_nonce, bind_context, guarded_sign, new_session};
 use crate::fiber::types::{
     BroadcastMessageWithTimestamp, ChannelReadyV2, ClosingSignedV2, CommitmentSignedV2,
     ReestablishChannelV2, RevokeAndAckV2, ShutdownV2, TxCompleteV2, TxSignatures,
@@ -550,8 +548,7 @@ where
         // Full signing-context validation runs on restoration and before every signature.
         if !{
             let session = &state.session;
-            session.marker == SESSION_MARKER
-                && session.own.owner == state.signer.funding_key.pubkey()
+            session.own.owner == state.signer.funding_key.pubkey()
                 && session.own.purpose == fiber_types::NoncePurposeV2::Commitment
         } {
             return Err(ProcessingChannelError::InvalidState(
