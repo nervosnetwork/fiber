@@ -33,7 +33,7 @@ mod tenant;
 #[cfg(not(target_arch = "wasm32"))]
 mod token;
 #[cfg(all(not(target_arch = "wasm32"), feature = "watchtower"))]
-mod watch;
+pub(crate) mod watch;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use crate::lsp_config::{LspConfig, DEFAULT_MAX_ACTIVE_TENANTS};

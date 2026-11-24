@@ -362,6 +362,14 @@ pub(crate) async fn prepare_hosted_signature(
     channel_id: Hash256,
     status: ChannelSigningStatus,
 ) -> SubmitChannelSignatureParams {
+    Box::pin(prepare_hosted_signature_inner(signer, channel_id, status)).await
+}
+
+async fn prepare_hosted_signature_inner(
+    signer: &ChannelSigner<MemoryStore>,
+    channel_id: Hash256,
+    status: ChannelSigningStatus,
+) -> SubmitChannelSignatureParams {
     let ChannelSigningStatus::SignatureRequired {
         request_id,
         content,
@@ -479,6 +487,19 @@ async fn wait_for_external_signer_recovery(
     channel_id: Hash256,
     payments: &[(&NetworkNode, Hash256)],
 ) -> bool {
+    Box::pin(wait_for_external_signer_recovery_inner(
+        node_a, node_b, signer, channel_id, payments,
+    ))
+    .await
+}
+
+async fn wait_for_external_signer_recovery_inner(
+    node_a: &NetworkNode,
+    node_b: &NetworkNode,
+    signer: &ChannelSigner<MemoryStore>,
+    channel_id: Hash256,
+    payments: &[(&NetworkNode, Hash256)],
+) -> bool {
     let sdk = ExternalSignerHttpClient {
         node: node_a,
         signer,
@@ -521,7 +542,15 @@ pub async fn setup_restartable_external_channel(
     is_public: bool,
     signer: &ChannelSigner<MemoryStore>,
 ) -> ([NetworkNode; 2], Hash256) {
-    let ([node_a, node_b], channel_id, _) = setup_pending_external_channel(is_public, signer).await;
+    Box::pin(setup_restartable_external_channel_inner(is_public, signer)).await
+}
+
+async fn setup_restartable_external_channel_inner(
+    is_public: bool,
+    signer: &ChannelSigner<MemoryStore>,
+) -> ([NetworkNode; 2], Hash256) {
+    let ([node_a, node_b], channel_id, _) =
+        Box::pin(setup_pending_external_channel(is_public, signer)).await;
 
     let sdk = ExternalSignerHttpClient {
         node: &node_a,
@@ -578,13 +607,13 @@ pub async fn setup_restartable_external_channel(
             .await
             .expect("seed acceptor outbound liquidity");
         approve_fixture_keysend(signer, &node_a, seed_payment.payment_hash, 1_000_000, false).await;
-        let settled = wait_for_external_signer_recovery(
+        let settled = Box::pin(wait_for_external_signer_recovery(
             &node_a,
             &node_b,
             signer,
             channel_id,
             &[(&node_a, seed_payment.payment_hash)],
-        )
+        ))
         .await;
         assert!(settled, "seed payment settles");
     }
@@ -596,20 +625,30 @@ async fn setup_pending_external_channel(
     is_public: bool,
     signer: &ChannelSigner<MemoryStore>,
 ) -> ([NetworkNode; 2], Hash256, Transaction) {
-    let nodes = NetworkNode::new_n_interconnected_nodes_with_config(2, |index| {
-        let mut builder = NetworkNodeConfigBuilder::new()
-            .node_name(Some(format!("signer-restart-node-{index}")))
-            .base_dir_prefix(&format!("signer-restart-node-{index}-"));
-        if index == 0 {
-            builder = builder.rpc_config(Some(gen_rpc_config()));
-        } else {
-            builder = builder.fiber_config_updater(|config| {
-                config.auto_accept_channel_ckb_funding_amount =
-                    Some(DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT);
-            });
-        }
-        builder.build()
-    })
+    Box::pin(setup_pending_external_channel_inner(is_public, signer)).await
+}
+
+async fn setup_pending_external_channel_inner(
+    is_public: bool,
+    signer: &ChannelSigner<MemoryStore>,
+) -> ([NetworkNode; 2], Hash256, Transaction) {
+    let nodes = Box::pin(NetworkNode::new_n_interconnected_nodes_with_config(
+        2,
+        |index| {
+            let mut builder = NetworkNodeConfigBuilder::new()
+                .node_name(Some(format!("signer-restart-node-{index}")))
+                .base_dir_prefix(&format!("signer-restart-node-{index}-"));
+            if index == 0 {
+                builder = builder.rpc_config(Some(gen_rpc_config()));
+            } else {
+                builder = builder.fiber_config_updater(|config| {
+                    config.auto_accept_channel_ckb_funding_amount =
+                        Some(DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT);
+                });
+            }
+            builder.build()
+        },
+    ))
     .await;
     let [node_a, node_b]: [NetworkNode; 2] = nodes.try_into().unwrap();
     let material = signer.channel_open_material(is_public).await.unwrap();
@@ -641,12 +680,12 @@ async fn setup_pending_external_channel(
 
     let channel_id: Hash256 = open.channel_id.into();
     let unsigned_tx: Transaction = open.unsigned_funding_tx.into();
-    approve_fixture_opening(
+    Box::pin(approve_fixture_opening(
         signer,
         &unsigned_tx,
         &node_a.get_channel_actor_state(channel_id),
         true,
-    )
+    ))
     .await;
     // Funding input signatures are withheld until the SDK has completed both
     // initial owner lanes and the node has persisted our usable local exit.
@@ -2088,24 +2127,34 @@ async fn test_external_signer_buffer_overflow_disconnects_and_recovers() {
 /// Crash after accepting a signature, before running its protocol continuation.
 #[tokio::test]
 async fn test_tenant_restart_after_accepting_revoke_signature() {
-    check_restart_after_accepting_signature(ChannelSigningTransition::SendRevokeAndAck).await;
+    Box::pin(check_restart_after_accepting_signature(
+        ChannelSigningTransition::SendRevokeAndAck,
+    ))
+    .await;
 }
 
 #[tokio::test]
 async fn test_tenant_restart_after_accepting_commitment_signature() {
-    check_restart_after_accepting_signature(ChannelSigningTransition::SendCommitmentSigned).await;
+    Box::pin(check_restart_after_accepting_signature(
+        ChannelSigningTransition::SendCommitmentSigned,
+    ))
+    .await;
 }
 
 #[tokio::test]
 async fn test_tenant_restart_after_accepting_received_commitment_signature() {
-    check_restart_after_accepting_signature(ChannelSigningTransition::CompleteReceivedCommitment)
-        .await;
+    Box::pin(check_restart_after_accepting_signature(
+        ChannelSigningTransition::CompleteReceivedCommitment,
+    ))
+    .await;
 }
 
 #[tokio::test]
 async fn test_tenant_restart_after_accepting_received_revoke_signature() {
-    check_restart_after_accepting_signature(ChannelSigningTransition::CompleteReceivedRevokeAndAck)
-        .await;
+    Box::pin(check_restart_after_accepting_signature(
+        ChannelSigningTransition::CompleteReceivedRevokeAndAck,
+    ))
+    .await;
 }
 
 async fn check_restart_after_accepting_signature(checkpoint: ChannelSigningTransition) {
@@ -2506,51 +2555,61 @@ async fn check_signature_deadline(
 
 #[tokio::test]
 async fn test_signature_submitted_at_safety_deadline_before_maintenance() {
-    check_signature_deadline(
+    Box::pin(check_signature_deadline(
         true,
         false,
         ChannelSigningTransition::CompleteReceivedCommitment,
-    )
+    ))
     .await;
 }
 
 #[tokio::test]
 async fn test_maintenance_before_signature_rejects_stale_request() {
-    check_signature_deadline(
+    Box::pin(check_signature_deadline(
         false,
         false,
         ChannelSigningTransition::CompleteReceivedCommitment,
-    )
+    ))
     .await;
 }
 
 #[tokio::test]
 async fn test_signature_submitted_after_tlc_expiry_before_maintenance() {
-    check_signature_deadline(
+    Box::pin(check_signature_deadline(
         true,
         true,
         ChannelSigningTransition::CompleteReceivedCommitment,
-    )
+    ))
     .await;
 }
 
 #[tokio::test]
 async fn test_signature_deadline_while_awaiting_send_revoke_uses_latest_commitment() {
-    check_signature_deadline(true, false, ChannelSigningTransition::SendRevokeAndAck).await;
+    Box::pin(check_signature_deadline(
+        true,
+        false,
+        ChannelSigningTransition::SendRevokeAndAck,
+    ))
+    .await;
 }
 
 #[tokio::test]
 async fn test_signature_deadline_while_awaiting_send_commitment() {
-    check_signature_deadline(true, false, ChannelSigningTransition::SendCommitmentSigned).await;
+    Box::pin(check_signature_deadline(
+        true,
+        false,
+        ChannelSigningTransition::SendCommitmentSigned,
+    ))
+    .await;
 }
 
 #[tokio::test]
 async fn test_signature_deadline_while_awaiting_received_revoke() {
-    check_signature_deadline(
+    Box::pin(check_signature_deadline(
         true,
         false,
         ChannelSigningTransition::CompleteReceivedRevokeAndAck,
-    )
+    ))
     .await;
 }
 
@@ -2663,4 +2722,402 @@ async fn test_internal_channel_maintenance_force_closes_stalled_local_announced_
     network.stop(None);
     actor_task.await.unwrap();
     network_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn test_slow_external_signer_during_received_revoke_does_not_trigger_peer_timeout() {
+    Box::pin(async {
+        use crate::fiber::channel::{ChannelActor, ChannelEvent, PEER_CHANNEL_RESPONSE_TIMEOUT};
+        use crate::fiber::channel_signer::SignerNotification;
+        use crate::fiber::{FiberActorMessage, FiberActorRef};
+        use fiber_types::{NextChannelSignerMaterial, SignatureRequestId};
+        use ractor::Actor;
+
+        init_tracing();
+        let (_restartable, signer) = RestartableExternalSigner::create().await;
+        let ([mut tenant, mut public_node], channel_id) =
+            setup_restartable_external_channel(false, &signer).await;
+
+        let payment = tenant
+            .send_payment_keysend(&public_node, 10_000, false)
+            .await
+            .expect("start keysend");
+        approve_fixture_keysend(&signer, &tenant, payment.payment_hash, 10_000, false).await;
+
+        wait_until_async_timeout(|| async {
+            matches!(
+                get_signing_status(&tenant, channel_id)
+                    .await
+                    .map(|r| r.status),
+                Ok(ChannelSigningStatus::SignatureRequired {
+                    transition: ChannelSigningTransition::SendCommitmentSigned,
+                    ..
+                })
+            )
+        })
+        .await;
+        let s1 = get_signing_status(&tenant, channel_id)
+            .await
+            .unwrap()
+            .status;
+        sign_and_submit(&tenant, &signer, channel_id, s1).await;
+
+        wait_until_async_timeout(|| async {
+            matches!(
+                get_signing_status(&tenant, channel_id)
+                    .await
+                    .map(|r| r.status),
+                Ok(ChannelSigningStatus::SignatureRequired {
+                    transition: ChannelSigningTransition::CompleteReceivedRevokeAndAck,
+                    ..
+                })
+            )
+        })
+        .await;
+
+        let status = get_signing_status(&tenant, channel_id)
+            .await
+            .unwrap()
+            .status;
+        let submission = prepare_hosted_signature(&signer, channel_id, status).await;
+
+        tenant.stop().await;
+        public_node.stop().await;
+
+        let mut state = tenant.get_channel_actor_state(channel_id);
+        assert!(state.tlc_state.waiting_ack);
+        assert!(state.peer_response_wait_v2().is_some());
+        assert!(state.signing_context.is_awaiting_signature());
+
+        let stale_started = crate::now_timestamp_as_millis_u64()
+            .saturating_sub(PEER_CHANNEL_RESPONSE_TIMEOUT + 5_000);
+        state
+            .session
+            .outgoing
+            .as_mut()
+            .unwrap()
+            .peer_wait_started_at = stale_started;
+        state.waiting_peer_response = Some(stale_started);
+        assert!(
+            !state.peer_does_not_reply_ack_in_time(),
+            "peer timeout must not fire while awaiting local external signature"
+        );
+
+        let (sender, mut messages) = tokio::sync::mpsc::unbounded_channel();
+        let (network, network_task) = Actor::spawn(None, DeadlineNetworkProbe, sender)
+            .await
+            .unwrap();
+        let network_ref = FiberActorRef::from_network(&network);
+        state.network = Some(network_ref.clone());
+        let channel = ChannelActor::new(
+            tenant.pubkey,
+            public_node.pubkey,
+            network_ref,
+            tenant.store.clone(),
+            None,
+        );
+        let (myself, actor_task) = Actor::spawn(None, DeadlineChannelProbe, ()).await.unwrap();
+
+        channel
+            .handle_event(&myself, &mut state, ChannelEvent::CheckActiveChannel)
+            .await
+            .unwrap();
+        channel
+            .handle_event(&myself, &mut state, ChannelEvent::MaintainChannelTlcs)
+            .await
+            .unwrap();
+        assert!(matches!(state.state, ChannelState::ChannelReady));
+        assert!(state.signing_context.is_awaiting_signature());
+        while let Ok(msg) = messages.try_recv() {
+            assert!(
+                !matches!(
+                    msg,
+                    NetworkActorMessage::Fiber(FiberActorMessage::Command(
+                        FiberActorCommand::ControlFiberChannel(ChannelCommandWithId {
+                            command: ChannelCommand::Shutdown(
+                                ShutdownCommand { force: true, .. },
+                                _
+                            ),
+                            ..
+                        })
+                    )) | NetworkActorMessage::Fiber(FiberActorMessage::Event(
+                        crate::fiber::network::FiberActorEvent::ClosingTransactionPending(
+                            _,
+                            _,
+                            _,
+                            true
+                        )
+                    ))
+                ),
+                "unexpected force-close message while awaiting external signature: {msg:?}"
+            );
+        }
+
+        let material = submission.next_material.clone().unwrap();
+        let notification = SignerNotification::ChannelSignatureReady {
+            channel_id,
+            request_id: SignatureRequestId(submission.request_id.into()),
+            signature: Ok(
+                musig2::PartialSignature::from_slice(&submission.partial_signature).unwrap(),
+            ),
+            next_material: Some(NextChannelSignerMaterial {
+                v2_nonces: material
+                    .v2_nonces
+                    .iter()
+                    .map(|n| musig2::PubNonce::from_bytes(n).unwrap())
+                    .collect(),
+                commitment_points: material
+                    .commitment_points
+                    .iter()
+                    .map(|(n, p)| (*n, (*p).try_into().unwrap()))
+                    .collect(),
+                next_commitment_point: material
+                    .next_commitment_point
+                    .map(|p| p.try_into().unwrap()),
+                next_commitment_nonce: material
+                    .next_commitment_nonce
+                    .map(|n| musig2::PubNonce::from_bytes(&n).unwrap()),
+                next_revocation_nonce: material
+                    .next_revocation_nonce
+                    .map(|n| musig2::PubNonce::from_bytes(&n).unwrap()),
+            }),
+            rpc_reply: None,
+        };
+        channel
+            .handle_signer_notification(&myself, &mut state, notification)
+            .await
+            .unwrap();
+        assert!(!state.tlc_state.waiting_ack);
+        assert!(!state.signing_context.is_awaiting_signature());
+        assert!(state.peer_response_wait_v2().is_none());
+
+        myself.stop(None);
+        network.stop(None);
+        actor_task.await.unwrap();
+        network_task.await.unwrap();
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn test_external_signer_resume_refreshes_and_enforces_remaining_peer_wait() {
+    Box::pin(async {
+        use crate::fiber::channel::{ChannelActor, ChannelEvent, PEER_CHANNEL_RESPONSE_TIMEOUT};
+        use crate::fiber::channel_signer::SignerNotification;
+        use crate::fiber::{FiberActorMessage, FiberActorRef};
+        use fiber_types::{NextChannelSignerMaterial, SignatureRequestId};
+        use ractor::Actor;
+
+        init_tracing();
+        let (_restartable, signer) = RestartableExternalSigner::create().await;
+        let ([mut tenant, mut public_node], channel_id) =
+            setup_restartable_external_channel(false, &signer).await;
+
+        let outbound_payment = tenant
+            .send_payment_keysend(&public_node, 10_000, false)
+            .await
+            .expect("start outbound keysend");
+        approve_fixture_keysend(
+            &signer,
+            &tenant,
+            outbound_payment.payment_hash,
+            10_000,
+            false,
+        )
+        .await;
+        wait_until_async_timeout(|| async {
+            matches!(
+                get_signing_status(&tenant, channel_id)
+                    .await
+                    .map(|r| r.status),
+                Ok(ChannelSigningStatus::SignatureRequired {
+                    transition: ChannelSigningTransition::SendCommitmentSigned,
+                    ..
+                })
+            )
+        })
+        .await;
+        let s1 = get_signing_status(&tenant, channel_id)
+            .await
+            .unwrap()
+            .status;
+        let sub1 = prepare_hosted_signature(&signer, channel_id, s1).await;
+
+        let inbound_payment = public_node
+            .send_payment_keysend(&tenant, 10_000, false)
+            .await
+            .expect("start inbound keysend");
+        approve_fixture_keysend(
+            &signer,
+            &public_node,
+            inbound_payment.payment_hash,
+            10_000,
+            true,
+        )
+        .await;
+        wait_until_async_timeout(|| async {
+            let tenant_actor = tenant.get_channel_actor(channel_id).await.unwrap();
+            let pending = call!(
+                tenant_actor,
+                crate::fiber::channel::ChannelActorMessage::TestGetPendingMessages
+            )
+            .unwrap();
+            pending.pending_peer_message_count >= 2
+        })
+        .await;
+
+        assert_eq!(
+            submit_signature(&tenant, sub1).await.unwrap(),
+            SubmitChannelSignatureResult::Applied
+        );
+        wait_until_async_timeout(|| async {
+            matches!(
+                get_signing_status(&tenant, channel_id)
+                    .await
+                    .map(|r| r.status),
+                Ok(ChannelSigningStatus::SignatureRequired {
+                    transition: ChannelSigningTransition::CompleteReceivedCommitment,
+                    ..
+                })
+            )
+        })
+        .await;
+        let s2 = get_signing_status(&tenant, channel_id)
+            .await
+            .unwrap()
+            .status;
+        let sub2 = prepare_hosted_signature(&signer, channel_id, s2).await;
+
+        tenant.stop().await;
+        public_node.stop().await;
+
+        let mut state = tenant.get_channel_actor_state(channel_id);
+        assert!(state.tlc_state.waiting_ack);
+        assert!(state.peer_response_wait_v2().is_some());
+        assert!(state.signing_context.is_awaiting_signature());
+
+        let stale_started =
+            crate::now_timestamp_as_millis_u64().saturating_sub(PEER_CHANNEL_RESPONSE_TIMEOUT + 5_000);
+        state.session.outgoing.as_mut().unwrap().peer_wait_started_at = stale_started;
+        state.waiting_peer_response = Some(stale_started);
+        assert!(!state.peer_does_not_reply_ack_in_time());
+
+        let (sender, mut messages) = tokio::sync::mpsc::unbounded_channel();
+        let (network, network_task) = Actor::spawn(None, DeadlineNetworkProbe, sender)
+            .await
+            .unwrap();
+        let network_ref = FiberActorRef::from_network(&network);
+        state.network = Some(network_ref.clone());
+        let channel = ChannelActor::new(
+            tenant.pubkey,
+            public_node.pubkey,
+            network_ref,
+            tenant.store.clone(),
+            None,
+        );
+        let (myself, actor_task) = Actor::spawn(None, DeadlineChannelProbe, ()).await.unwrap();
+
+        let to_notification = |submission: SubmitChannelSignatureParams| {
+            let material = submission.next_material.clone().unwrap();
+            SignerNotification::ChannelSignatureReady {
+                channel_id,
+                request_id: SignatureRequestId(submission.request_id.into()),
+                signature: Ok(
+                    musig2::PartialSignature::from_slice(&submission.partial_signature).unwrap(),
+                ),
+                next_material: Some(NextChannelSignerMaterial {
+                    v2_nonces: material
+                        .v2_nonces
+                        .iter()
+                        .map(|n| musig2::PubNonce::from_bytes(n).unwrap())
+                        .collect(),
+                    commitment_points: material
+                        .commitment_points
+                        .iter()
+                        .map(|(n, p)| (*n, (*p).try_into().unwrap()))
+                        .collect(),
+                    next_commitment_point: material
+                        .next_commitment_point
+                        .map(|p| p.try_into().unwrap()),
+                    next_commitment_nonce: material
+                        .next_commitment_nonce
+                        .map(|n| musig2::PubNonce::from_bytes(&n).unwrap()),
+                    next_revocation_nonce: material
+                        .next_revocation_nonce
+                        .map(|n| musig2::PubNonce::from_bytes(&n).unwrap()),
+                }),
+                rpc_reply: None,
+            }
+        };
+
+        // CompleteReceivedCommitment transitions into SendRevokeAndAck without releasing wait.
+        channel
+            .handle_signer_notification(&myself, &mut state, to_notification(sub2))
+            .await
+            .unwrap();
+        assert!(state.signing_context.is_awaiting_signature());
+        assert!(!state.peer_does_not_reply_ack_in_time());
+
+        // Prepare SendRevokeAndAck from the live signing request in state.
+        let s3 = crate::rpc::channel::to_rpc_channel_signing_status(&state).unwrap();
+        let sub3 = prepare_hosted_signature(&signer, channel_id, s3).await;
+
+        let before_resume = crate::now_timestamp_as_millis_u64();
+        channel
+            .handle_signer_notification(&myself, &mut state, to_notification(sub3))
+            .await
+            .unwrap();
+        assert!(!state.signing_context.is_awaiting_signature());
+        assert!(state.tlc_state.waiting_ack);
+        let refreshed = state
+            .peer_response_wait_v2()
+            .expect("peer wait remains active while awaiting RAA");
+        assert!(
+            refreshed >= before_resume,
+            "external signer resume must refresh peer wait timestamp ({refreshed} < {before_resume})"
+        );
+        assert!(!state.peer_does_not_reply_ack_in_time());
+        let persisted = tenant.get_channel_actor_state(channel_id);
+        assert!(
+            persisted.peer_response_wait_v2().unwrap() >= before_resume,
+            "refreshed peer wait timestamp must be persisted"
+        );
+
+        // If peer truly stops responding after external signing resumes, 30s timeout still fires.
+        let expired_started =
+            crate::now_timestamp_as_millis_u64().saturating_sub(PEER_CHANNEL_RESPONSE_TIMEOUT + 5_000);
+        state.session.outgoing.as_mut().unwrap().peer_wait_started_at = expired_started;
+        state.waiting_peer_response = Some(expired_started);
+        assert!(state.peer_does_not_reply_ack_in_time());
+
+        channel
+            .handle_event(&myself, &mut state, ChannelEvent::CheckActiveChannel)
+            .await
+            .unwrap();
+        let shutdown_cmd = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(NetworkActorMessage::Fiber(FiberActorMessage::Command(
+                    FiberActorCommand::ControlFiberChannel(ChannelCommandWithId {
+                        channel_id: id,
+                        command: ChannelCommand::Shutdown(ShutdownCommand { force: true, .. }, _),
+                    }),
+                ))) = messages.recv().await
+                {
+                    assert_eq!(id, channel_id);
+                    break;
+                }
+            }
+        })
+        .await;
+        assert!(
+            shutdown_cmd.is_ok(),
+            "unresponsive peer after signer resume must trigger force shutdown"
+        );
+
+        myself.stop(None);
+        network.stop(None);
+        actor_task.await.unwrap();
+        network_task.await.unwrap();
+    })
+    .await;
 }

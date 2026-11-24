@@ -44,10 +44,11 @@ The test-only `POST /authorize` control endpoint records driver intent:
   `remote_fee_rate`. The fixture computes exact plain-CKB close fees from those
   scripts and rates and calls SDK `authorize_close`. An automatically accepting
   peer contributes zero fees; the initiator uses the explicitly selected rate.
-- `Watchtower`: `channel_id`, `destination`, `max_fee` (integer shannons).
-  This persisted fixture policy permits plain-CKB sponsor inputs locked to the
-  approved destination and caps the total fee. It does not approve arbitrary
-  destinations or copy a signing request into an authorization.
+- `Watchtower`: `channel_id`, `destination`, optional `fee_sponsor_lock`,
+  `max_fee` (integer shannons). This persisted fixture policy permits plain-CKB
+  sponsor inputs locked to `fee_sponsor_lock` (or `destination` when omitted)
+  and caps the total fee. It does not approve arbitrary destinations or copy a
+  signing request into an authorization.
 
 The command-line agent obtains live cells, canonical committed ancestors, input
 maturity and median time from the independent `--ckb-rpc` endpoint. Dependencies

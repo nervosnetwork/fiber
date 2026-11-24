@@ -241,10 +241,12 @@ pub enum FixtureAuthorization {
         local_fee_rate: u64,
         remote_fee_rate: u64,
     },
-    /// Permit settlement to the fixture's sponsor wallet, within a local fee cap.
+    /// Permit settlement to an approved destination, optionally with a separate fee sponsor lock.
     Watchtower {
         channel_id: Hash256,
         destination: ckb_jsonrpc_types::Script,
+        #[serde(default)]
+        fee_sponsor_lock: Option<ckb_jsonrpc_types::Script>,
         max_fee: u64,
     },
 }
@@ -270,6 +272,8 @@ pub enum PreimageTarget {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct WatchtowerApproval {
     destination: ckb_jsonrpc_types::Script,
+    #[serde(default)]
+    fee_sponsor_lock: Option<ckb_jsonrpc_types::Script>,
     max_fee: u64,
 }
 
@@ -579,6 +583,7 @@ impl<R: FiberRpc, S: SignerStore> Agent<R, S> {
             FixtureAuthorization::Watchtower {
                 channel_id,
                 destination,
+                fee_sponsor_lock,
                 max_fee,
             } => {
                 anyhow::ensure!(self.binding(channel_id).is_some(), "unknown channel");
@@ -588,6 +593,7 @@ impl<R: FiberRpc, S: SignerStore> Agent<R, S> {
                     format!("{channel_id:#x}"),
                     WatchtowerApproval {
                         destination,
+                        fee_sponsor_lock,
                         max_fee,
                     },
                 );
@@ -790,7 +796,14 @@ impl<R: FiberRpc, S: SignerStore> Agent<R, S> {
             unreachable!()
         };
         let authorization = self
-            .watchtower_authorization(channel_id, content, approval, &chain, deps)
+            .watchtower_authorization(
+                channel_id,
+                content,
+                approval,
+                &chain,
+                deps,
+                chain.udt_deps(),
+            )
             .await?;
         self.sign_watchtower_status(channel_id, status, authorization, &chain)
             .await
@@ -802,7 +815,8 @@ impl<R: FiberRpc, S: SignerStore> Agent<R, S> {
         content: &fiber_json_types::OnchainSigningContent,
         approval: WatchtowerApproval,
         chain: &C,
-        deps: Vec<ckb_types::packed::CellDep>,
+        mut deps: Vec<ckb_types::packed::CellDep>,
+        udt_deps: &HashMap<ckb_types::packed::Byte32, ckb_types::packed::CellDep>,
     ) -> Result<fiber_lsp_sdk::OnchainSpendAuthorization> {
         let tx: ckb_types::packed::Transaction = content.transaction.clone().into();
         let first = tx
@@ -835,13 +849,23 @@ impl<R: FiberRpc, S: SignerStore> Agent<R, S> {
             )
         })?;
         let destination: ckb_types::packed::Script = approval.destination.into();
+        let fee_sponsor_lock: Option<ckb_types::packed::Script> =
+            approval.fee_sponsor_lock.map(Into::into);
+        let expected_sponsor_lock = fee_sponsor_lock.as_ref().unwrap_or(&destination);
         let mut total = 0u64;
         let mut additional_inputs = Vec::new();
         for (index, input) in tx.raw().inputs().into_iter().enumerate() {
             let cell = chain.live_cell(&input.previous_output()).await?;
-            if index > 0 {
+            if index == 0 {
+                if let Some(udt_type) = cell.output.type_().to_opt() {
+                    let udt_dep = crate::DevChain::udt_dep_for_script(udt_deps, &udt_type)?;
+                    if !deps.contains(&udt_dep) {
+                        deps.push(udt_dep);
+                    }
+                }
+            } else {
                 anyhow::ensure!(
-                    cell.output.lock() == destination
+                    cell.output.lock() == *expected_sponsor_lock
                         && cell.output.type_().to_opt().is_none()
                         && cell.data.is_empty(),
                     "unapproved sponsor input"
@@ -862,7 +886,7 @@ impl<R: FiberRpc, S: SignerStore> Agent<R, S> {
         Ok(fiber_lsp_sdk::OnchainSpendAuthorization {
             source,
             destination,
-            fee_sponsor_lock: None,
+            fee_sponsor_lock,
             fee: total,
             additional_inputs,
             cell_deps: deps,
@@ -1933,17 +1957,33 @@ mod tests {
         };
         let mut approval = WatchtowerApproval {
             destination: authorization.destination.clone().into(),
+            fee_sponsor_lock: None,
             max_fee: 4,
         };
+        let empty_udt_deps = HashMap::new();
         assert!(reopened
-            .watchtower_authorization(channel_id(), &content, approval.clone(), &chain, vec![])
+            .watchtower_authorization(
+                channel_id(),
+                &content,
+                approval.clone(),
+                &chain,
+                vec![],
+                &empty_udt_deps,
+            )
             .await
             .unwrap_err()
             .to_string()
             .contains("fee exceeds local cap"));
         approval.max_fee = 5;
         let checked = reopened
-            .watchtower_authorization(channel_id(), &content, approval.clone(), &chain, vec![])
+            .watchtower_authorization(
+                channel_id(),
+                &content,
+                approval.clone(),
+                &chain,
+                vec![],
+                &empty_udt_deps,
+            )
             .await
             .unwrap();
         assert_eq!(checked.fee, authorization.fee);
@@ -1959,6 +1999,7 @@ mod tests {
             .authorize(FixtureAuthorization::Watchtower {
                 channel_id: channel_id(),
                 destination: approval.destination,
+                fee_sponsor_lock: None,
                 max_fee: approval.max_fee,
             })
             .await
@@ -1982,5 +2023,239 @@ mod tests {
             channel_id().into()
         );
         assert_eq!(state.watchtower_submissions[0].signature.len(), 65);
+    }
+
+    #[tokio::test]
+    async fn watchtower_authorization_supports_separate_fee_sponsor_and_udt_deps() {
+        use ckb_types::{
+            core::{ScriptHashType, TransactionBuilder},
+            packed::{Byte32, CellDep, CellInput, CellOutput, OutPoint, Script},
+        };
+
+        struct MultiCellChain {
+            commitment_point: OutPoint,
+            commitment_cell: fiber_lsp_sdk::VerifiedCell,
+            sponsor_point: OutPoint,
+            sponsor_cell: fiber_lsp_sdk::VerifiedCell,
+        }
+
+        #[async_trait::async_trait]
+        impl ChainVerifier for MultiCellChain {
+            async fn live_cell(
+                &self,
+                point: &OutPoint,
+            ) -> Result<fiber_lsp_sdk::VerifiedCell, fiber_lsp_sdk::SignerError> {
+                if point == &self.commitment_point {
+                    Ok(self.commitment_cell.clone())
+                } else if point == &self.sponsor_point {
+                    Ok(self.sponsor_cell.clone())
+                } else {
+                    Err(fiber_lsp_sdk::SignerError::InvalidContent(
+                        "unknown input".into(),
+                    ))
+                }
+            }
+
+            async fn verify_commitment_lineage(
+                &self,
+                source: Hash256,
+                point: &OutPoint,
+            ) -> Result<(), fiber_lsp_sdk::SignerError> {
+                if source == Hash256::from(self.commitment_point.tx_hash())
+                    && point == &self.commitment_point
+                {
+                    Ok(())
+                } else {
+                    Err(fiber_lsp_sdk::SignerError::InvalidContent(
+                        "wrong lineage".into(),
+                    ))
+                }
+            }
+
+            async fn verify_maturity(
+                &self,
+                _inputs: &[CellInput],
+            ) -> Result<(), fiber_lsp_sdk::SignerError> {
+                Ok(())
+            }
+
+            async fn median_time_ms(&self) -> Result<u64, fiber_lsp_sdk::SignerError> {
+                Ok(100)
+            }
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let node = FakeNode::default();
+        node.insert_external_channel(channel_id());
+        let mut agent = Agent::open(
+            node.clone(),
+            AgentConfig {
+                store_dir: dir.path().to_path_buf(),
+                status_file: None,
+                lsp_node_id: lsp_node_id(),
+            },
+        )
+        .await
+        .unwrap();
+        agent.initialize().await.unwrap();
+        let (id, funding) = approve_pending(&mut agent).await;
+        let signer = agent
+            .open_channel(agent.binding(id).unwrap())
+            .await
+            .unwrap();
+        let status = convert_tests::commitment_status(&signer, &funding, false).await;
+        node.state().statuses.insert(id.into(), status);
+        agent.poll_once().await.unwrap();
+        let records = signer.recovery_records().await.unwrap();
+        let commitment_point = OutPoint::new(records[0].transaction.calc_tx_hash(), 0);
+        let commitment_output = records[0].transaction.raw().outputs().get(0).unwrap();
+
+        let destination = Script::new_builder().args([0xaa_u8; 20].pack()).build();
+        let sponsor_lock = Script::new_builder().args([0xbb_u8; 20].pack()).build();
+        let unapproved_lock = Script::new_builder().args([0xcc_u8; 20].pack()).build();
+        let sponsor_point = OutPoint::new([0x55; 32].pack(), 0);
+        let base_dep = CellDep::new_builder()
+            .out_point(OutPoint::new_builder().index(7u32).build())
+            .build();
+        let udt_code_hash = Byte32::from([0x77; 32]);
+        let udt_dep = CellDep::new_builder()
+            .out_point(OutPoint::new_builder().index(8u32).build())
+            .build();
+        let udt_type = Script::new_builder()
+            .code_hash(udt_code_hash.clone())
+            .hash_type(ScriptHashType::Data2)
+            .args([0x01u8; 32].as_slice().pack())
+            .build();
+
+        let tx = TransactionBuilder::default()
+            .input(CellInput::new(commitment_point.clone(), 0))
+            .input(CellInput::new(sponsor_point.clone(), 0))
+            .output(commitment_output.clone())
+            .output_data(ckb_types::packed::Bytes::default())
+            .output(
+                CellOutput::new_builder()
+                    .capacity(19_999_999_995u64)
+                    .lock(sponsor_lock.clone())
+                    .build(),
+            )
+            .output_data(ckb_types::packed::Bytes::default())
+            .build()
+            .data();
+        let content = fiber_json_types::OnchainSigningContent {
+            key_purpose: fiber_json_types::OnchainKeyPurpose::Settlement,
+            transaction: tx.into(),
+        };
+
+        // 1. Separate fee_sponsor_lock approves sponsor_lock input and rejects destination input when mismatched.
+        let mut chain = MultiCellChain {
+            commitment_point,
+            commitment_cell: fiber_lsp_sdk::VerifiedCell {
+                output: commitment_output.clone(),
+                data: vec![],
+            },
+            sponsor_point: sponsor_point.clone(),
+            sponsor_cell: fiber_lsp_sdk::VerifiedCell {
+                output: CellOutput::new_builder()
+                    .capacity(20_000_000_000u64)
+                    .lock(sponsor_lock.clone())
+                    .build(),
+                data: vec![],
+            },
+        };
+        let approval = WatchtowerApproval {
+            destination: destination.clone().into(),
+            fee_sponsor_lock: Some(sponsor_lock.clone().into()),
+            max_fee: 100,
+        };
+        let empty_udt_deps = HashMap::new();
+        let auth = agent
+            .watchtower_authorization(
+                id,
+                &content,
+                approval.clone(),
+                &chain,
+                vec![base_dep.clone()],
+                &empty_udt_deps,
+            )
+            .await
+            .expect("separate fee_sponsor_lock must be accepted");
+        assert_eq!(auth.destination, destination);
+        assert_eq!(auth.fee_sponsor_lock.as_ref(), Some(&sponsor_lock));
+        assert_eq!(auth.fee, 5);
+        assert_eq!(auth.additional_inputs, vec![sponsor_point]);
+        assert_eq!(auth.cell_deps, vec![base_dep.clone()]);
+
+        // Changing sponsor cell lock to destination (or unapproved) must fail when fee_sponsor_lock differs.
+        chain.sponsor_cell.output = CellOutput::new_builder()
+            .capacity(20_000_000_000u64)
+            .lock(destination.clone())
+            .build();
+        assert!(agent
+            .watchtower_authorization(
+                id,
+                &content,
+                approval.clone(),
+                &chain,
+                vec![base_dep.clone()],
+                &empty_udt_deps,
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("unapproved sponsor input"));
+
+        chain.sponsor_cell.output = CellOutput::new_builder()
+            .capacity(20_000_000_000u64)
+            .lock(unapproved_lock)
+            .build();
+        assert!(agent
+            .watchtower_authorization(
+                id,
+                &content,
+                approval.clone(),
+                &chain,
+                vec![base_dep.clone()],
+                &empty_udt_deps,
+            )
+            .await
+            .is_err());
+
+        // 2. UDT commitment cell appends matching UDT dep and rejects unapproved UDT scripts.
+        chain.sponsor_cell.output = CellOutput::new_builder()
+            .capacity(20_000_000_000u64)
+            .lock(sponsor_lock)
+            .build();
+        chain.commitment_cell.output = commitment_output
+            .as_builder()
+            .type_(Some(udt_type).pack())
+            .build();
+        assert!(agent
+            .watchtower_authorization(
+                id,
+                &content,
+                approval.clone(),
+                &chain,
+                vec![base_dep.clone()],
+                &empty_udt_deps,
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("unapproved UDT type script"));
+
+        let mut udt_deps = HashMap::new();
+        udt_deps.insert(udt_code_hash, udt_dep.clone());
+        let auth = agent
+            .watchtower_authorization(
+                id,
+                &content,
+                approval,
+                &chain,
+                vec![base_dep.clone()],
+                &udt_deps,
+            )
+            .await
+            .expect("approved UDT type script must append UDT dep");
+        assert_eq!(auth.cell_deps, vec![base_dep, udt_dep]);
     }
 }

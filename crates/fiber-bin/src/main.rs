@@ -718,6 +718,7 @@ fn forward_event_to_actor(
             keys,
             remote_settlement_data,
             channel_features,
+            _local_shutdown_script,
         ) => {
             watchtower_actor
                 .send_message(WatchtowerMessage::CreateChannel(

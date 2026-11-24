@@ -16,6 +16,7 @@ pub struct DevChain {
     url: String,
     client: reqwest::Client,
     funding_deps: Option<Vec<CellDep>>,
+    udt_deps: std::collections::HashMap<ckb_types::packed::Byte32, CellDep>,
 }
 
 impl DevChain {
@@ -24,6 +25,7 @@ impl DevChain {
         Ok(Self {
             url: url.into(),
             funding_deps: None,
+            udt_deps: std::collections::HashMap::new(),
             client: reqwest::Client::builder()
                 .no_proxy()
                 .timeout(std::time::Duration::from_secs(10))
@@ -121,6 +123,26 @@ impl DevChain {
             dep(cells.hash.clone(), 6, 0),
             dep(cells.hash.clone(), 5, 0),
         ]);
+        self.udt_deps.clear();
+        for (index, name) in [(8, "simple_udt"), (9, "xudt_rce")] {
+            let path = contracts.join(name);
+            if path.exists() {
+                let bytes = std::fs::read(&path)?;
+                ensure!(
+                    cells
+                        .inner
+                        .outputs_data
+                        .get(index)
+                        .context("missing UDT contract")?
+                        .as_bytes()
+                        == bytes.as_slice(),
+                    "genesis UDT contract differs from local {name}"
+                );
+                let code_hash = ckb_types::packed::CellOutput::calc_data_hash(&bytes);
+                self.udt_deps
+                    .insert(code_hash, dep(cells.hash.clone(), index as u32, 0));
+            }
+        }
         Ok(vec![
             dep(cells.hash.clone(), 7, 0),
             dep(cells.hash.clone(), 5, 0),
@@ -137,6 +159,24 @@ impl DevChain {
         ])
     }
 
+    pub fn udt_deps(&self) -> &std::collections::HashMap<ckb_types::packed::Byte32, CellDep> {
+        &self.udt_deps
+    }
+
+    pub fn udt_dep_for_script(
+        udt_deps: &std::collections::HashMap<ckb_types::packed::Byte32, CellDep>,
+        script: &ckb_types::packed::Script,
+    ) -> Result<CellDep> {
+        ensure!(
+            script.hash_type() == ckb_types::core::ScriptHashType::Data2.into(),
+            "unapproved UDT type script hash_type"
+        );
+        udt_deps
+            .get(&script.code_hash())
+            .cloned()
+            .context("unapproved UDT type script")
+    }
+
     async fn lineage(&self, source: Hash256, outpoint: &OutPoint) -> Result<()> {
         ensure!(
             outpoint.index() == 0u32.pack(),
@@ -147,7 +187,21 @@ impl DevChain {
         for _ in 0..128 {
             let (tx, _) = self.committed(&current.tx_hash()).await?;
             let packed: ckb_types::packed::Transaction = tx.inner.clone().into();
-            if matches_commitment(source, &packed, self.funding_deps.as_deref()) {
+            let expected_funding_deps = match packed
+                .raw()
+                .outputs()
+                .get(0)
+                .and_then(|output| output.type_().to_opt())
+            {
+                None => self.funding_deps.clone(),
+                Some(udt_type) => self.funding_deps.as_ref().and_then(|deps| {
+                    let udt_dep = Self::udt_dep_for_script(&self.udt_deps, &udt_type).ok()?;
+                    let mut combined = deps.clone();
+                    combined.push(udt_dep);
+                    Some(combined)
+                }),
+            };
+            if matches_commitment(source, &packed, expected_funding_deps.as_deref()) {
                 return Ok(());
             }
             let output = tx.inner.outputs.first().context("missing descendant")?;
@@ -505,5 +559,157 @@ mod tests {
             );
             server.abort();
         }
+    }
+
+    #[tokio::test]
+    async fn independent_rpc_verifies_udt_commitment_lineage() {
+        use ckb_types::{
+            core::{ScriptHashType, TransactionBuilder},
+            packed::{CellOutput, Script},
+        };
+
+        let udt_code_hash = ckb_types::packed::Byte32::from([0x77; 32]);
+        let wrong_udt_code_hash = ckb_types::packed::Byte32::from([0x88; 32]);
+        let udt_dep = CellDep::new_builder()
+            .out_point(OutPoint::new_builder().index(8u32).build())
+            .build();
+        let udt_type = Script::new_builder()
+            .code_hash(udt_code_hash.clone())
+            .hash_type(ScriptHashType::Data2)
+            .args([0x01u8; 32].as_slice().pack())
+            .build();
+        let wrong_udt_type = udt_type
+            .clone()
+            .as_builder()
+            .code_hash(wrong_udt_code_hash)
+            .build();
+        let wrong_hash_type_udt = udt_type
+            .clone()
+            .as_builder()
+            .hash_type(ScriptHashType::Type)
+            .build();
+        let funding_deps = vec![
+            CellDep::new_builder()
+                .out_point(OutPoint::new_builder().index(6u32).build())
+                .build(),
+            CellDep::new_builder()
+                .out_point(OutPoint::new_builder().index(5u32).build())
+                .build(),
+        ];
+
+        let unsigned_udt = TransactionBuilder::default()
+            .input(CellInput::default())
+            .output(
+                CellOutput::new_builder()
+                    .type_(Some(udt_type).pack())
+                    .build(),
+            )
+            .output_data(100u128.to_le_bytes().to_vec().pack())
+            .build()
+            .data();
+        let source = Hash256::from(fiber_types::compute_tx_message(&unsigned_udt));
+        let valid_deps = [funding_deps.as_slice(), std::slice::from_ref(&udt_dep)].concat();
+        let broadcast_valid = unsigned_udt
+            .clone()
+            .as_builder()
+            .raw(
+                unsigned_udt
+                    .raw()
+                    .as_builder()
+                    .cell_deps(valid_deps)
+                    .build(),
+            )
+            .build();
+        let broadcast_missing_udt_dep = unsigned_udt
+            .clone()
+            .as_builder()
+            .raw(
+                unsigned_udt
+                    .raw()
+                    .as_builder()
+                    .cell_deps(funding_deps.clone())
+                    .build(),
+            )
+            .build();
+
+        let unsigned_wrong_udt = TransactionBuilder::default()
+            .input(CellInput::default())
+            .output(
+                CellOutput::new_builder()
+                    .type_(Some(wrong_udt_type).pack())
+                    .build(),
+            )
+            .output_data(100u128.to_le_bytes().to_vec().pack())
+            .build()
+            .data();
+        let wrong_udt_source = Hash256::from(fiber_types::compute_tx_message(&unsigned_wrong_udt));
+        let broadcast_wrong_udt = unsigned_wrong_udt
+            .clone()
+            .as_builder()
+            .raw(
+                unsigned_wrong_udt
+                    .raw()
+                    .as_builder()
+                    .cell_deps(funding_deps.clone())
+                    .build(),
+            )
+            .build();
+
+        let unsigned_ckb = TransactionBuilder::default()
+            .input(CellInput::default())
+            .output(CellOutput::default())
+            .output_data(ckb_types::packed::Bytes::default())
+            .build()
+            .data();
+        let ckb_source = Hash256::from(fiber_types::compute_tx_message(&unsigned_ckb));
+        let ckb_with_extra_udt_dep = unsigned_ckb
+            .clone()
+            .as_builder()
+            .raw(
+                unsigned_ckb
+                    .raw()
+                    .as_builder()
+                    .cell_deps([funding_deps.as_slice(), std::slice::from_ref(&udt_dep)].concat())
+                    .build(),
+            )
+            .build();
+
+        let (mut chain, server) = mock_chain(vec![
+            broadcast_valid.clone(),
+            broadcast_missing_udt_dep.clone(),
+            broadcast_wrong_udt.clone(),
+            ckb_with_extra_udt_dep.clone(),
+        ])
+        .await;
+        chain.funding_deps = Some(funding_deps);
+        chain.udt_deps.insert(udt_code_hash, udt_dep);
+
+        assert!(chain
+            .verify_commitment_lineage(source, &OutPoint::new(broadcast_valid.calc_tx_hash(), 0))
+            .await
+            .is_ok());
+        assert!(chain
+            .verify_commitment_lineage(
+                source,
+                &OutPoint::new(broadcast_missing_udt_dep.calc_tx_hash(), 0)
+            )
+            .await
+            .is_err());
+        assert!(chain
+            .verify_commitment_lineage(
+                wrong_udt_source,
+                &OutPoint::new(broadcast_wrong_udt.calc_tx_hash(), 0)
+            )
+            .await
+            .is_err());
+        assert!(DevChain::udt_dep_for_script(&chain.udt_deps, &wrong_hash_type_udt).is_err());
+        assert!(chain
+            .verify_commitment_lineage(
+                ckb_source,
+                &OutPoint::new(ckb_with_extra_udt_dep.calc_tx_hash(), 0)
+            )
+            .await
+            .is_err());
+        server.abort();
     }
 }

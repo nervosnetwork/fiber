@@ -5381,6 +5381,14 @@ where
                     .await?;
             }
             self.checkpoint_external_wait(&mut state);
+            if !state.signing_context.is_awaiting_signature()
+                && state.ensure_v2_not_quarantined().is_ok()
+                && state.peer_response_wait_v2().is_some()
+            {
+                state.refresh_peer_response_wait_v2();
+                self.store.insert_channel_actor_state((*state).clone());
+                self.arm_peer_response_v2(&mut state);
+            }
         }
 
         Ok(*state)
@@ -6506,6 +6514,13 @@ impl ChannelActorState {
     }
 
     pub fn peer_does_not_reply_ack_in_time(&self) -> bool {
+        // While awaiting a local external signature, incoming peer replies (e.g. RevokeAndAckV2
+        // paused in CompleteReceivedRevokeAndAck or queued in pending_messages) cannot complete
+        // until the local signer responds. TLC safety deadlines remain active separately via
+        // `signature_tlc_deadline_reached` and `periodic_signature_tlc_deadline_reached`.
+        if self.signing_context.is_awaiting_signature() {
+            return false;
+        }
         if let Some(started) = self.peer_response_wait_v2() {
             // The durable V2 deadline keeps counting while the peer is away, so a peer that
             // never returns is still closed. Judgement is suspended only while a reconnected
@@ -9198,6 +9213,7 @@ impl ChannelActorState {
                             self.watch_channel_keys(),
                             settlement_data,
                             self.channel_features,
+                            self.get_local_shutdown_script(),
                         ),
                     ))
                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);
@@ -10777,13 +10793,17 @@ fn invalid(message: impl Into<String>) -> ProcessingChannelError {
 }
 
 impl ChannelActorState {
+    fn refresh_peer_response_wait_v2(&mut self) {
+        self.clear_waiting_peer_response();
+        self.reset_peer_response_wait_v2();
+    }
+
     /// A peer cannot answer while this channel is offline or its reestablishment is still in
     /// flight, so a reconnect starts a fresh peer-response window instead of charging the
     /// partition against the peer. A reconnect that never completes is bounded separately by
     /// `REESTABLISH_TIMEOUT`.
     fn refresh_peer_response_wait_v2_after_reestablish(&mut self) {
-        self.clear_waiting_peer_response();
-        self.reset_peer_response_wait_v2();
+        self.refresh_peer_response_wait_v2();
     }
 
     fn reset_peer_response_wait_v2(&mut self) {
@@ -10822,7 +10842,7 @@ impl ChannelActorState {
         Some(self.session.outgoing.as_ref()?.peer_wait_started_at)
     }
 
-    fn peer_response_wait_v2(&self) -> Option<u64> {
+    pub(crate) fn peer_response_wait_v2(&self) -> Option<u64> {
         self.close_peer_wait_v2()
             .into_iter()
             .chain(self.ack_peer_wait_v2())
@@ -12500,6 +12520,7 @@ where
                         state.watch_channel_keys(),
                         settlement.clone(),
                         state.channel_features,
+                        state.get_local_shutdown_script(),
                     ),
                 ))
                 .expect(ASSUME_NETWORK_ACTOR_ALIVE);
@@ -14353,6 +14374,14 @@ where
             .await?;
         self.checkpoint_external_wait(state);
         self.drain_pending_messages(myself, state).await?;
+        if !state.signing_context.is_awaiting_signature()
+            && state.ensure_v2_not_quarantined().is_ok()
+            && state.peer_response_wait_v2().is_some()
+        {
+            state.refresh_peer_response_wait_v2();
+            self.store.insert_channel_actor_state(state.clone());
+            self.arm_peer_response_v2(state);
+        }
         Ok(SubmitSignatureOutcome::Applied)
     }
 
