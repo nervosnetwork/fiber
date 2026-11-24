@@ -173,6 +173,22 @@ async fn test_rpc_basic() {
         .await
         .unwrap();
     assert_eq!(res.channels.len(), 2);
+    // Both channels are established, so a pending listing must not report them.
+    let pending: ListChannelsResult = node_0
+        .send_rpc_request(
+            "list_channels",
+            ListChannelsParams {
+                pubkey: None,
+                include_closed: None,
+                only_pending: Some(true),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        pending.channels.is_empty(),
+        "established channels must not be listed as pending: {pending:?}"
+    );
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
     let payment = node_0

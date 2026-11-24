@@ -520,15 +520,16 @@ where
             self.store.get_active_channel_states(filter_pubkey)
         };
         let mut channels = Vec::new();
-        for (_pubkey, channel_id, _state) in channel_states {
+        for (_pubkey, channel_id, channel_state) in channel_states {
+            // The index carries the channel state written in the same batch as the record, so the
+            // pending filter belongs here: it skips the record read of every channel it rejects.
+            if only_pending && !ChannelState::from(channel_state).is_pending() {
+                continue;
+            }
             let Some(state) = self.store.get_channel_actor_state(&channel_id) else {
                 continue;
             };
             let rpc_state: ChannelState = state.state.into();
-            // When only_pending is set, skip channels that are not in a pending state
-            if only_pending && !rpc_state.is_pending() {
-                continue;
-            }
             let offered_tlc_balance = state.get_offered_tlc_balance().rpc_err()?;
             let received_tlc_balance = state.get_received_tlc_balance().rpc_err()?;
             // Enrich with failure_detail from ChannelOpenRecord when available
