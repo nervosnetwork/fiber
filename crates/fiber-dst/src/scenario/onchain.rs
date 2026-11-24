@@ -413,20 +413,7 @@ impl Driver {
     ) -> Result<Hash256> {
         let spend = self.until("watchtowers settle the commitment on both endpoints", |s| {
             if s.runtime.elapsed().as_millis().is_multiple_of(50) {
-                for node in endpoints {
-                    s.watchtower_check(node)?;
-                    let nodes = s.runtime.nodes.borrow();
-                    if let Some(observer) = &nodes[node].settlement_observer {
-                        crate::host::send(observer, WatchtowerMessage::PeriodicCheck)?;
-                    }
-                    let actor = &nodes[node].node.as_ref().context("Fiber node down")?.actor;
-                    crate::host::send(
-                        actor,
-                        NetworkActorMessage::new_command(
-                            NetworkActorCommand::CheckChannelsShutdown,
-                        ),
-                    )?;
-                }
+                s.scan_onchain(endpoints)?;
             }
             let done = endpoints.into_iter().all(|node| {
                 s.runtime.channel(node, &channel).is_some_and(|state| {
@@ -440,6 +427,28 @@ impl Driver {
         })?;
         self.runtime.note(format_args!("watchtowers completed settlement channel={channel} commitment={commitment} spend={spend}"));
         Ok(spend)
+    }
+
+    pub(super) fn scan_onchain(&self, nodes: impl IntoIterator<Item = usize>) -> Result<()> {
+        for node in nodes {
+            let tower = self.tower(node)?;
+            if let Some(actor) = tower.actor.borrow().as_ref() {
+                crate::host::send(actor, WatchtowerMessage::PeriodicCheck)?;
+            }
+            if self.runtime.node_available(node) {
+                let slots = self.runtime.nodes.borrow();
+                let slot = &slots[node];
+                if let Some(observer) = &slot.settlement_observer {
+                    crate::host::send(observer, WatchtowerMessage::PeriodicCheck)?;
+                }
+                let actor = &slot.node.as_ref().expect("available node").actor;
+                crate::host::send(
+                    actor,
+                    NetworkActorMessage::new_command(NetworkActorCommand::CheckChannelsShutdown),
+                )?;
+            }
+        }
+        Ok(())
     }
 
     fn tower(&self, node: usize) -> Result<&Tower> {

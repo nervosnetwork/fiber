@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, RwLock as StdRwLock};
 
 use ckb_types::{core::tx_pool::TxStatus, packed::Script, prelude::Unpack};
@@ -62,6 +62,44 @@ impl SimulatedChain {
     ) -> Option<fiber_types::Hash256> {
         let outpoint = ckb_types::packed::OutPoint::new(commitment.into(), 0);
         self.confirmed_spend(&outpoint)
+    }
+
+    /// Return the confirmed spend of the channel's funding output.
+    pub fn funding_spend(&self, funding_tx: Hash256) -> Option<Hash256> {
+        self.confirmed_spend(&ckb_types::packed::OutPoint::new(funding_tx.into(), 0))
+    }
+
+    /// List confirmed settlements that consumed this commitment or its successor cells.
+    pub fn commitment_settlements(&self, commitment: Hash256) -> BTreeSet<Hash256> {
+        let state = self.0.read().unwrap();
+        let mut settlements = BTreeSet::new();
+        let Some(lock) = confirmed_commitment_lock(&state, commitment) else {
+            return settlements;
+        };
+        let args = lock.args().raw_data();
+        let Some(prefix) = args.get(..36) else {
+            return settlements;
+        };
+        let mut outpoint = ckb_types::packed::OutPoint::new(commitment.into(), 0);
+        while let Some((hash, tx)) = state.txs.iter().find_map(|(hash, record)| {
+            let tx = record.transaction.as_ref()?;
+            (matches!(record.tx_status, TxStatus::Committed(..))
+                && tx.input_pts_iter().any(|input| input == outpoint))
+            .then_some((*hash, tx))
+        }) {
+            settlements.insert(hash);
+            let successor = tx.outputs().into_iter().position(|output| {
+                let next = output.lock();
+                next.code_hash() == lock.code_hash()
+                    && next.hash_type() == lock.hash_type()
+                    && next.args().raw_data().starts_with(prefix)
+            });
+            let Some(index) = successor else {
+                break;
+            };
+            outpoint = ckb_types::packed::OutPoint::new(hash.into(), index as u32);
+        }
+        settlements
     }
 
     /// Check that this tower's durable snapshot matches the confirmed commitment.

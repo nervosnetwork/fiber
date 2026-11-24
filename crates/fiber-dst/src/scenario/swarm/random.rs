@@ -79,6 +79,15 @@ impl Driver {
             "random topology nodes={} links={named_links:?}",
             topology.nodes
         ));
+        // External towers must receive commitment snapshots as channels are opened.
+        for tower in self
+            .runtime
+            .watchtowers
+            .as_ref()
+            .context("watchtower controls")?
+        {
+            tower.enabled.send_replace(true);
+        }
         let continuous = fault_policy != RandomFaultPolicy::Windows;
         if fault_policy == RandomFaultPolicy::Continuous {
             self.chaos = Some(Chaos::new(seed));
@@ -320,7 +329,16 @@ impl Driver {
         self.drive_payment_wave("random recovery", &mut recovery, &mut [], &mut ledger)?;
         ledger.check_payments(self, &recovery, true)?;
         ledger.check_consumed()?;
-        let edge = edges.choose(&mut faults).expect("funded topology");
+        let live_edges: Vec<_> = edges
+            .iter()
+            .filter(|edge| {
+                self.runtime
+                    .channel_online(edge.sender, edge.receiver, &edge.channel)
+            })
+            .collect();
+        let edge = live_edges
+            .choose(&mut faults)
+            .context("no online channel for on-chain probe")?;
         let (closer, peer) = if faults.random() {
             (edge.sender, edge.receiver)
         } else {

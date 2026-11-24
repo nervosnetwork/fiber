@@ -1,10 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{ensure, Context, Result};
-use fnn::fiber::channel::ChannelActorStateStore;
+use fnn::fiber::channel::{ChannelActorState, ChannelActorStateStore};
 use fnn::fiber::{
     AppliedFlags, Attempt, ChannelConnectivityState, ChannelState, Hash256, PaymentStatus, Pubkey,
 };
+use fnn::fiber_types::CloseFlags;
 use fnn::invoice::{CkbInvoiceStatus, InvoiceStore};
 use fnn::simulation::{self, TlcSettlement};
 
@@ -39,6 +40,7 @@ pub(super) struct Ledger<'a> {
     payments: BTreeMap<Hash256, InvoiceIntent>,
     tlcs: BTreeMap<TlcKey, Fulfillment>,
     consumed: BTreeSet<TlcKey>,
+    closed: BTreeSet<Hash256>,
 }
 
 impl<'a> Ledger<'a> {
@@ -49,6 +51,7 @@ impl<'a> Ledger<'a> {
             payments: BTreeMap::new(),
             tlcs: BTreeMap::new(),
             consumed: BTreeSet::new(),
+            closed: BTreeSet::new(),
         }
     }
 
@@ -79,10 +82,29 @@ impl<'a> Ledger<'a> {
                 receipt.payment, key.channel, NAMES[key.from], key.id, NAMES[node], receipt.amount
             ));
         }
-        for (edge, balances) in self.edges.iter().zip(&self.balances) {
+        let edges = self.edges;
+        for (index, edge) in edges.iter().enumerate() {
+            if self.closed.contains(&edge.channel) {
+                continue;
+            }
+            let endpoints = [edge.sender, edge.receiver];
+            let [a, b] = endpoints.map(|node| driver.runtime.channel(node, &edge.channel));
+            let close = a.as_deref().zip(b.as_deref()).and_then(|(a, b)| {
+                Self::closed_commitment(driver, edge, a, b).map(|commitment| (commitment, [a, b]))
+            });
+            if let Some((commitment, states)) = close {
+                self.audit_close(driver, edge, commitment, states)?;
+                self.closed.insert(edge.channel);
+                driver.runtime.note(format_args!(
+                    "swarm audited close channel={} commitment={commitment}",
+                    edge.channel
+                ));
+                continue;
+            }
+            let balances = self.balances[index];
             let capacity: u128 = edge.before.iter().sum();
-            for (side, node) in [edge.sender, edge.receiver].into_iter().enumerate() {
-                if let Some(state) = driver.runtime.channel(node, &edge.channel) {
+            for (side, (node, state)) in endpoints.into_iter().zip([a, b]).enumerate() {
+                if let Some(state) = state {
                     let local = state.get_local_balance();
                     let remote = state.get_remote_balance();
                     ensure!(
@@ -94,6 +116,95 @@ impl<'a> Ledger<'a> {
                         capacity - balances[side]
                     );
                 }
+            }
+        }
+        Ok(())
+    }
+
+    fn audit_close(
+        &mut self,
+        driver: &Driver,
+        edge: &Edge,
+        commitment: Hash256,
+        states: [&ChannelActorState; 2],
+    ) -> Result<()> {
+        let settlements = driver.runtime.chain.commitment_settlements(commitment);
+        ensure!(
+            !settlements.is_empty(),
+            "no settlement spends for {commitment}"
+        );
+        let endpoints = [edge.sender, edge.receiver];
+        let mut evidence = BTreeMap::new();
+        for (side, state) in states.into_iter().enumerate() {
+            let node = endpoints[side];
+            let store = driver.runtime.store(node)?;
+            for tlc in state.tlc_state.all_tlcs() {
+                let Some(receipt) =
+                    store.get_onchain_tlc_settlement(&edge.channel, tlc.tlc_id, &tlc.payment_hash)
+                else {
+                    continue;
+                };
+                ensure!(
+                    settlements.contains(&receipt.tx_hash),
+                    "settlement {} does not spend commitment {commitment}",
+                    receipt.tx_hash
+                );
+                let from = endpoints[if tlc.is_offered() { side } else { 1 - side }];
+                let key = TlcKey {
+                    channel: edge.channel,
+                    from,
+                    id: tlc.id(),
+                };
+                let outcome = (receipt.tx_hash, receipt.preimage);
+                ensure!(
+                    evidence
+                        .insert(key, outcome)
+                        .is_none_or(|peer| peer == outcome),
+                    "channel endpoints disagree on on-chain settlement for TLC {key:?}"
+                );
+                let Some(preimage) = receipt.preimage else {
+                    driver.runtime.note(format_args!(
+                        "swarm audited TLC timeout node={} channel={} payment={} spend={}",
+                        NAMES[node], edge.channel, tlc.payment_hash, receipt.tx_hash
+                    ));
+                    continue;
+                };
+                ensure!(
+                    Hash256::from(tlc.hash_algorithm.hash(preimage)) == tlc.payment_hash,
+                    "on-chain preimage does not match payment {}",
+                    tlc.payment_hash
+                );
+                let recorded = self.tlcs.get(&key).and_then(|fulfillment| {
+                    if tlc.is_offered() {
+                        fulfillment.offered.as_ref()
+                    } else {
+                        fulfillment.received.as_ref()
+                    }
+                });
+                if let Some(recorded) = recorded {
+                    ensure!(
+                        recorded.payment == tlc.payment_hash && recorded.amount == tlc.amount,
+                        "on-chain fulfillment disagrees with recorded TLC {key:?}"
+                    );
+                    continue;
+                }
+                self.record(
+                    &driver.runtime.peers,
+                    &TlcSettlement {
+                        node: driver.runtime.peers[node],
+                        channel: edge.channel,
+                        id: tlc.id(),
+                        offered: tlc.is_offered(),
+                        payment: tlc.payment_hash,
+                        amount: tlc.amount,
+                        attempt: tlc.attempt_id,
+                        previous: tlc.forwarding_tlc,
+                    },
+                )?;
+                driver.runtime.note(format_args!(
+                    "swarm audited TLC fulfill channel={} payment={} spend={}",
+                    edge.channel, tlc.payment_hash, receipt.tx_hash
+                ));
             }
         }
         Ok(())
@@ -174,23 +285,110 @@ impl<'a> Ledger<'a> {
         Ok((key, nodes[side]))
     }
 
+    pub(super) fn onchain_endpoints(&self, driver: &Driver) -> BTreeSet<usize> {
+        self.edges
+            .iter()
+            .filter(|edge| {
+                !self.closed.contains(&edge.channel)
+                    && driver
+                        .runtime
+                        .chain
+                        .funding_spend(edge.funding_tx)
+                        .is_some()
+            })
+            .flat_map(|edge| [edge.sender, edge.receiver])
+            .collect()
+    }
+
+    pub(super) fn next_onchain_expiry(&self, driver: &Driver) -> Option<u64> {
+        let now = driver.clock_ms();
+        self.edges
+            .iter()
+            .flat_map(|edge| [edge.sender, edge.receiver].map(|node| (edge, node)))
+            .filter_map(|(edge, node)| {
+                let state = driver.runtime.channel(node, &edge.channel)?;
+                let funding = state.get_funding_transaction_outpoint()?;
+                let commitment = Hash256::from(state.shutdown_transaction_hash.clone()?);
+                if !state.is_waiting_onchain_settlement()
+                    || driver.runtime.chain.confirmed_spend(&funding) != Some(commitment)
+                    || driver.runtime.chain.commitment_settled(commitment)
+                {
+                    return None;
+                }
+                let store = driver.runtime.store(node).ok()?;
+                let record = store.get_shutdown_settlement_record(&edge.channel)?;
+                if Hash256::from(record.shutdown_tx_hash) != commitment {
+                    return None;
+                }
+                record
+                    .settlement_data
+                    .tlcs
+                    .iter()
+                    .filter_map(|tlc| {
+                        let id = if record.for_remote {
+                            tlc.tlc_id
+                        } else {
+                            tlc.tlc_id.flip()
+                        };
+                        (tlc.expiry > now
+                            && store
+                                .get_onchain_tlc_settlement(&edge.channel, id, &tlc.payment_hash)
+                                .is_none())
+                        .then_some(tlc.expiry)
+                    })
+                    .min()
+            })
+            .min()
+    }
+
+    fn closed_commitment(
+        driver: &Driver,
+        edge: &Edge,
+        a: &ChannelActorState,
+        b: &ChannelActorState,
+    ) -> Option<Hash256> {
+        let (ChannelState::Closed(a_flags), ChannelState::Closed(b_flags)) = (a.state, b.state)
+        else {
+            return None;
+        };
+        if a.is_waiting_onchain_settlement()
+            || b.is_waiting_onchain_settlement()
+            || !((a_flags.contains(CloseFlags::UNCOOPERATIVE_LOCAL)
+                && b_flags.contains(CloseFlags::UNCOOPERATIVE_REMOTE))
+                || (a_flags.contains(CloseFlags::UNCOOPERATIVE_REMOTE)
+                    && b_flags.contains(CloseFlags::UNCOOPERATIVE_LOCAL)))
+            || a.shutdown_transaction_hash != b.shutdown_transaction_hash
+        {
+            return None;
+        }
+        let funding = a.get_funding_transaction_outpoint()?;
+        let commitment = Hash256::from(a.shutdown_transaction_hash.clone()?);
+        (b.get_funding_transaction_outpoint().as_ref() == Some(&funding)
+            && driver.runtime.chain.funding_spend(edge.funding_tx) == Some(commitment)
+            && driver.runtime.chain.commitment_settled(commitment))
+        .then_some(commitment)
+    }
+
     pub(super) fn channels_drained(&self, driver: &Driver) -> bool {
         self.edges.iter().all(|edge| {
+            let a = driver.runtime.channel(edge.sender, &edge.channel);
+            let b = driver.runtime.channel(edge.receiver, &edge.channel);
+            let Some((a, b)) = a.zip(b) else {
+                return false;
+            };
+            if a.is_closed() || b.is_closed() {
+                return self.closed.contains(&edge.channel);
+            }
             driver.runtime.link(edge.sender, edge.receiver)
-                && [edge.sender, edge.receiver].into_iter().all(|node| {
-                    driver
-                        .runtime
-                        .channel(node, &edge.channel)
-                        .is_some_and(|state| {
-                            state.state == ChannelState::ChannelReady
-                            && state.connectivity_state == ChannelConnectivityState::Online
-                            && !state.tlc_state.waiting_ack
-                            // Applied failures are retained until the next commitment.
-                            && state.tlc_state.all_tlcs().all(|tlc| {
-                                tlc.is_fail_remove_confirmed()
-                                    && tlc.removed_confirmed_at.is_some()
-                                    && tlc.applied_flags.contains(AppliedFlags::REMOVE)
-                            })
+                && [a, b].into_iter().all(|state| {
+                    state.state == ChannelState::ChannelReady
+                        && state.connectivity_state == ChannelConnectivityState::Online
+                        && !state.tlc_state.waiting_ack
+                        // Applied failures are retained until the next commitment.
+                        && state.tlc_state.all_tlcs().all(|tlc| {
+                            tlc.is_fail_remove_confirmed()
+                                && tlc.removed_confirmed_at.is_some()
+                                && tlc.applied_flags.contains(AppliedFlags::REMOVE)
                         })
                 })
         })
@@ -222,7 +420,38 @@ impl<'a> Ledger<'a> {
                             tlcs,
                         )
                     });
-                    format!("{} {} {summary:?}", NAMES[node], edge.channel)
+                    let close = state
+                        .as_ref()
+                        .zip(driver.runtime.store(node).ok())
+                        .and_then(|(state, store)| {
+                            let commitment = Hash256::from(state.shutdown_transaction_hash.clone()?);
+                            let snapshot = store.get_shutdown_settlement_record(&edge.channel).map(|record| {
+                                let tlcs = record.settlement_data.tlcs.into_iter()
+                                    .map(|tlc| (tlc.tlc_id, tlc.payment_hash, tlc.expiry))
+                                    .collect::<Vec<_>>();
+                                (record.commitment_number, record.for_remote, tlcs)
+                            });
+                            let receipts: Vec<_> = state
+                                .tlc_state
+                                .all_tlcs()
+                                .map(|tlc| {
+                                    let receipt = store
+                                        .get_onchain_tlc_settlement(
+                                            &edge.channel,
+                                            tlc.tlc_id,
+                                            &tlc.payment_hash,
+                                        )
+                                        .map(|receipt| (receipt.tx_hash, receipt.preimage.is_some()));
+                                    (tlc.tlc_id, tlc.expiry, receipt)
+                                })
+                                .collect();
+                            Some(format!(
+                                " commitment={commitment} chain_settled={} snapshot={snapshot:?} receipts={receipts:?}",
+                                driver.runtime.chain.commitment_settled(commitment)
+                            ))
+                        })
+                        .unwrap_or_default();
+                    format!("{} {} {summary:?}{close}", NAMES[node], edge.channel)
                 })
             })
             .collect()
@@ -259,6 +488,9 @@ impl<'a> Ledger<'a> {
                 .runtime
                 .channel(edge.receiver, &edge.channel)
                 .context("missing channel receiver")?;
+            if self.closed.contains(&edge.channel) {
+                continue;
+            }
             let a_round = a.get_current_commitment_numbers();
             let b_round = b.get_current_commitment_numbers();
             ensure!(

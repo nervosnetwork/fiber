@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
@@ -6,7 +7,7 @@ use fnn::fiber::{Hash256, NetworkActorCommand};
 use fnn::simulation;
 use tokio::sync::oneshot;
 
-use crate::harness::{Harness, HarnessOptions, TICK};
+use crate::harness::{Harness, HarnessOptions, EPOCH, TICK};
 use crate::host::Trace;
 use crate::tower::TowerMode;
 
@@ -18,6 +19,10 @@ mod swarm;
 mod two_node;
 
 const PHASE_TICKS: usize = 6_000;
+
+thread_local! {
+    static CLOCK_OFFSET_MS: Cell<u64> = const { Cell::new(0) };
+}
 const FUNDING_AMOUNT: u128 = 100_000 * 100_000_000;
 
 /// Fault scheduling policy for random exploration.
@@ -80,6 +85,13 @@ pub enum Scenario {
 pub fn run(scenario: Scenario, seed: u64) -> Result<Vec<String>> {
     let trace = Trace::default();
     let result = simulation::run(seed ^ 0x0066_6962_6572, virtual_time, || {
+        struct ResetClock;
+        impl Drop for ResetClock {
+            fn drop(&mut self) {
+                CLOCK_OFFSET_MS.set(0);
+            }
+        }
+        let _clock = ResetClock;
         let directory = tempfile::tempdir()?;
         let topology = if let Scenario::Random {
             payments, phases, ..
@@ -182,7 +194,7 @@ pub fn run(scenario: Scenario, seed: u64) -> Result<Vec<String>> {
 }
 
 fn virtual_time() -> Option<u64> {
-    turmoil::since_epoch().map(|time| time.as_millis() as u64)
+    turmoil::since_epoch().map(|time| time.as_millis() as u64 + CLOCK_OFFSET_MS.get())
 }
 
 struct Driver {
@@ -191,6 +203,20 @@ struct Driver {
 }
 
 impl Driver {
+    fn clock_ms(&self) -> u64 {
+        (EPOCH + self.runtime.elapsed()).as_millis() as u64 + CLOCK_OFFSET_MS.get()
+    }
+
+    fn advance_clock_past(&self, deadline: u64) {
+        let delta = deadline
+            .saturating_add(1_000)
+            .saturating_sub(self.clock_ms());
+        CLOCK_OFFSET_MS.set(CLOCK_OFFSET_MS.get() + delta);
+        self.runtime.note(format_args!(
+            "advance virtual Unix clock by {delta}ms for on-chain TLC expiry={deadline}"
+        ));
+    }
+
     fn step(&mut self) -> Result<()> {
         if let Some(mut chaos) = self.chaos.take() {
             let result = chaos.advance(&mut self.runtime);

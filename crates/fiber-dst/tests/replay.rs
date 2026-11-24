@@ -323,6 +323,31 @@ fn tx_abort_while_syncing_cleans_up_funding_and_allows_retry() {
 }
 
 #[test]
+fn random_workload_reconciles_a_force_close_and_times_out_the_onchain_tlc() {
+    let trace = run_random("5", &["--payments", "32", "--phases", "5", "--chaos"]);
+    let channel = "Hash256(0xc6d81b0a10a3d75a68c7832f3d15fd3599599de69ee1fe88eb359ee9bec4ea2e)";
+    let payment = "0xaa8572262e7e762062ebc8fb92cdf347b724be14d6185e715d804fbce3e3cd68";
+    assert!(trace.contains("advance virtual Unix clock"));
+    for node in ["B", "D"] {
+        let timeout = format!("swarm audited TLC timeout node={node}");
+        assert!(trace.lines().any(|line| {
+            line.contains(&timeout) && line.contains(channel) && line.contains(payment)
+        }));
+    }
+    assert!(trace.contains(&format!("swarm audited close channel={channel}")));
+    let audit = trace
+        .lines()
+        .find(|line| line.contains("swarm audit Direct B->E") && line.contains(payment))
+        .expect("audit the payment whose TLC timed out on chain");
+    assert!(
+        audit.contains("status=Some(Failed) shards=0 delivered=0"),
+        "{audit}"
+    );
+    assert!(trace.contains("random reconciled workload=32"));
+    assert!(trace.contains("recovery_probes=4"));
+}
+
+#[test]
 fn parallel_funding_opens_six_channels_and_probes_each() {
     let trace = run_fixture("parallel-funding", "42");
     assert!(trace.contains("parallel funding overlap=6"));

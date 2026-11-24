@@ -197,11 +197,12 @@ impl Driver {
             .map(|p| p.order.tick)
             .max()
             .unwrap_or_default();
-        let max_ticks = last_order + (budget.as_millis() / TICK.as_millis()) as usize;
+        let mut max_ticks = last_order + (budget.as_millis() / TICK.as_millis()) as usize;
         let mut peak = 0;
         let mut faults_during_payment = false;
         let mut completed = vec![false; payments.len()];
-        for tick in 0..max_ticks {
+        let mut tick = 0;
+        while tick < max_ticks {
             for window in faults.iter_mut() {
                 window.advance(tick, &mut self.runtime)?;
             }
@@ -230,6 +231,11 @@ impl Driver {
                 }
             }
             self.step()?;
+            if self.runtime.watchtowers.is_some()
+                && self.runtime.elapsed().as_millis().is_multiple_of(250)
+            {
+                self.scan_onchain(ledger.onchain_endpoints(self))?;
+            }
             ledger.observe(self)?;
 
             let mut in_flight = 0;
@@ -300,7 +306,11 @@ impl Driver {
             if in_flight > 0 && (chaos_active || faults.iter().any(FaultWindow::is_active)) {
                 faults_during_payment = true;
             }
-            if tick >= last_fault && chaos_drained && pending == 0 && ledger.channels_drained(self)
+            if tick >= last_fault
+                && chaos_drained
+                && pending == 0
+                && in_flight == 0
+                && ledger.channels_drained(self)
             {
                 for node in 0..self.runtime.peers.len() {
                     self.wait_payment_actor(node)?;
@@ -313,6 +323,19 @@ impl Driver {
                     peak,
                     fault_overlapped_payment: faults_during_payment,
                 });
+            }
+            tick += 1;
+            if tick == max_ticks
+                && tick >= last_fault
+                && chaos_drained
+                && self.runtime.watchtowers.is_some()
+            {
+                if let Some(expiry) = ledger.next_onchain_expiry(self) {
+                    // The fault schedule uses Turmoil elapsed time. Only the Unix clock
+                    // shared by Fiber and the synthetic CKB advances between faults.
+                    self.advance_clock_past(expiry);
+                    max_ticks += PHASE_TICKS;
+                }
             }
         }
         let states: Vec<_> = payments
@@ -335,7 +358,7 @@ impl Driver {
             })
             .collect();
         bail!("swarm {phase} failed to drain after {} virtual ms\npayments (hash, status, attempts for non-final sessions): {states:?}\nchannels: {:#?}",
-            budget.as_millis(), ledger.channel_diagnostics(self))
+            TICK.as_millis() * (max_ticks - last_order) as u128, ledger.channel_diagnostics(self))
     }
 
     fn swarm_session(&self, payment: &Payment) -> Option<PaymentSession> {

@@ -23,7 +23,7 @@ use crate::host::{send, Host, LinkControl, Nodes, Peer, Slot, Trace, NAMES};
 
 use crate::tower::{Tower, TowerMode};
 
-const EPOCH: Duration = Duration::from_secs(1_700_000_000);
+pub(crate) const EPOCH: Duration = Duration::from_secs(1_700_000_000);
 pub(crate) const TICK: Duration = Duration::from_millis(5);
 
 pub(crate) struct Harness {
