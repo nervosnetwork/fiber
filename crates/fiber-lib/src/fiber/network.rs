@@ -85,8 +85,8 @@ use crate::ckb::contracts::{
 };
 use crate::ckb::{CkbChainMessage, FundingError, FundingRequest, FundingTx, GetShutdownTxResponse};
 use crate::fiber::channel::{
-    tlc_expiry_delay, AddTlcResponse, ChannelActorState, ChannelEphemeralConfig,
-    ChannelInitializationOperation, OfflineChannelRestoreMode,
+    derive_temp_channel_id_from_tlc_key, tlc_expiry_delay, AddTlcResponse, ChannelActorState,
+    ChannelEphemeralConfig, ChannelInitializationOperation, OfflineChannelRestoreMode,
     OpenChannelWithExternalFundingParameter, TxCollaborationCommand, TxUpdateCommand,
     MAX_TLC_NUMBER_IN_FLIGHT,
 };
@@ -4380,8 +4380,7 @@ where
             .as_ref()
             .ok_or_else(|| "tenant requires external signer".to_string())?;
         let key = signer.base_public_keys.tlc_base_key;
-        let temp_id: Hash256 =
-            ckb_hash::blake2b_256([key.serialize().as_slice(), &[0; 33]].concat()).into();
+        let temp_id = derive_temp_channel_id_from_tlc_key(&key);
         let command_value = serde_json::to_value(&command).map_err(|e| e.to_string())?;
 
         let existing = state
@@ -8594,6 +8593,16 @@ where
             |epochs| epochs.full_value(),
         );
         check_tlc_delta_with_epochs(tlc_expiry_delta, commitment_delay_epochs)?;
+
+        if let Some(signer) = external_channel_signer.as_ref() {
+            let temp_id =
+                derive_temp_channel_id_from_tlc_key(&signer.base_public_keys.tlc_base_key);
+            if self.channels.contains_key(&temp_id) {
+                return Err(ProcessingChannelError::InvalidParameter(format!(
+                    "external signer channel opening {temp_id} is already in progress"
+                )));
+            }
+        }
 
         let channel_signer = if external_channel_signer.is_some() {
             ChannelSigner::external()

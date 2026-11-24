@@ -19,12 +19,15 @@ use crate::fiber::channel::{
     ChannelCommand, ChannelCommandWithId, ShutdownCommand, DEFAULT_COMMITMENT_FEE_RATE,
 };
 use crate::fiber::config::{DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT, MIN_TLC_EXPIRY_DELTA};
-use crate::fiber::network::{FiberActorCommand, NetworkActorMessage};
+use crate::fiber::network::{
+    FiberActorCommand, NetworkActorMessage, OpenChannelWithExternalFundingCommand,
+};
 use crate::fiber::payment::SendPaymentCommand;
 use crate::rpc::channel::to_rpc_channel_open_signer_material;
 use crate::test_utils::{gen_rpc_config, init_tracing, NetworkNode, NetworkNodeConfigBuilder};
 use crate::tests::test_utils::wait_until_async_timeout;
-use ractor::call;
+use crate::NetworkServiceEvent;
+use ractor::{call, RpcReplyPort};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -690,6 +693,93 @@ async fn setup_pending_external_channel_inner(
     // Funding input signatures are withheld until the SDK has completed both
     // initial owner lanes and the node has persisted our usable local exit.
     ([node_a, node_b], channel_id, unsigned_tx)
+}
+
+#[tokio::test]
+async fn duplicate_public_external_signer_open_keeps_original_actor_and_reply() {
+    init_tracing();
+    let [mut opener, peer] = NetworkNode::new_n_interconnected_nodes().await;
+    let (_restart, signer) = RestartableExternalSigner::create().await;
+    let material = signer.channel_open_material(false).await.unwrap();
+    let command = OpenChannelWithExternalFundingCommand {
+        pubkey: peer.pubkey,
+        funding_amount: 100_000_000_000,
+        public: false,
+        shutdown_script: Script::default(),
+        funding_lock_script: Script::default(),
+        funding_lock_script_cell_deps: Vec::new(),
+        funding_udt_type_script: None,
+        commitment_fee_rate: None,
+        commitment_delay_epoch: None,
+        funding_fee_rate: None,
+        tlc_expiry_delta: None,
+        tlc_min_value: None,
+        tlc_fee_proportional_millionths: None,
+        max_tlc_value_in_flight: None,
+        max_tlc_number_in_flight: None,
+        external_channel_signer: Some(material),
+    };
+
+    let (first_send, mut first_recv) = tokio::sync::oneshot::channel();
+    opener
+        .network_actor
+        .send_message(NetworkActorMessage::new_command(
+            FiberActorCommand::OpenChannelWithExternalFunding(
+                command.clone(),
+                RpcReplyPort::from(first_send),
+            ),
+        ))
+        .expect("first open request accepted by public actor");
+    let temp_id = opener
+        .expect_to_process_event(|event| match event {
+            NetworkServiceEvent::ChannelCreated(_, channel_id) => Some(*channel_id),
+            _ => None,
+        })
+        .await;
+    let original_actor = call!(opener.network_actor, |reply| {
+        NetworkActorMessage::new_command(FiberActorCommand::GetChannelActor(temp_id, reply))
+    })
+    .expect("public actor is alive")
+    .expect("original channel actor exists");
+
+    let (retry_send, retry_recv) = tokio::sync::oneshot::channel();
+    opener
+        .network_actor
+        .send_message(NetworkActorMessage::new_command(
+            FiberActorCommand::OpenChannelWithExternalFunding(
+                command,
+                RpcReplyPort::from(retry_send),
+            ),
+        ))
+        .expect("retry reached public actor");
+    let retry = tokio::time::timeout(Duration::from_secs(3), retry_recv)
+        .await
+        .expect("duplicate open must be rejected before peer acceptance")
+        .expect("retry reply is retained");
+    let error = retry.expect_err("duplicate open must not spawn a second actor");
+    assert!(error.contains("already in progress"), "{error}");
+
+    let routed_actor = call!(opener.network_actor, |reply| {
+        NetworkActorMessage::new_command(FiberActorCommand::GetChannelActor(temp_id, reply))
+    })
+    .expect("public actor is alive")
+    .expect("channel route remains present");
+    assert_eq!(routed_actor, original_actor);
+    assert!(matches!(
+        first_recv.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+
+    call!(opener.network_actor, |reply| {
+        NetworkActorMessage::new_command(FiberActorCommand::AbandonChannel(temp_id, reply))
+    })
+    .expect("public actor is alive")
+    .expect("abandon original opening");
+    let first = tokio::time::timeout(Duration::from_secs(3), first_recv)
+        .await
+        .expect("original RPC receives the channel-stop result")
+        .expect("original reply port remains owned by public actor");
+    assert!(first.is_err());
 }
 
 /// Exercise the mandatory SDK validator against real ChannelActor/RPC opening requests.
