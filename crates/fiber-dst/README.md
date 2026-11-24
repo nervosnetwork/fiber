@@ -176,13 +176,27 @@ trace records the selected direction and the frame when the rule hits.
 
 ## Watchtower and on-chain settlement
 
-Once the workload and recovery probes pass, every `random` policy commits a
-held payment on a seeded channel and force-closes it on the shared mock CKB.
 Even seeds run built-in Watchtower actors in the Fiber hosts with the node's
 SQLite store. Odd seeds give each Fiber node an external Watchtower on a
-separate Turmoil host with its own SQLite store. Both modes exercise the real
-Watchtower scanner and transaction builder, with a slow mailbox, CKB
-indexer outage, actor restart, and settlement submission timeout.
+separate Turmoil host with its own SQLite store. Random runs enable the
+towers before opening channels so they can collect commitment snapshots.
+
+When a funding output is spent during a payment wave, the driver triggers
+regular Watchtower and channel shutdown checks. The auditor checks that both
+endpoints agree on the close transaction, the commitment and its successor
+cells are spent, and any TLC settlement receipts match those spends. The
+wave finishes after payments and their attempts have drained.
+
+If a wave reaches its drain budget after faults have healed, the driver can
+advance the virtual Unix clock past the next pending on-chain TLC expiry
+from a matching commitment snapshot. Fiber and simulated CKB share that
+clock. Turmoil's elapsed time and fault schedule continue on the same ticks.
+
+After the workload and recovery probes pass, every `random` policy commits a
+held payment on a seeded online channel and force-closes it on the shared
+mock CKB. Both tower modes exercise the real scanner and transaction builder,
+with a slow mailbox, CKB indexer outage, actor restart, and settlement
+submission timeout.
 
 The external mode sends real Watchtower JSON-RPC methods over framed Turmoil
 TCP. Once both towers persist the commitment snapshot, it drops the RPC link
@@ -203,4 +217,7 @@ whether any fault overlapped an in-flight payment in the combined workload.
 
 The trace includes the build revision, virtual timestamps, frame
 fingerprints, fault receipts, and settled state. Failed runs include the
-assertion and preceding events. Set `RUST_LOG` to enable actor logs on stderr.
+assertion and preceding events. The replay suite compares complete traces
+from independent processes. Routing orders inbound channels by liquidity,
+capacity, and update time, using the funding outpoint to break ties.
+Set `RUST_LOG` to enable actor logs on stderr.
