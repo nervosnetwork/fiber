@@ -1,6 +1,16 @@
 mod config;
 #[cfg(all(not(debug_assertions), feature = "debug-add-tlc"))]
 compile_error!("debug-add-tlc must not be enabled in release builds");
+// A native build needs a concrete store backend. Without one every `fiber_store::Store` import
+// fails, and none of those errors names the missing feature.
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    not(feature = "rocksdb"),
+    not(feature = "sqlite")
+))]
+compile_error!(
+    "a native build needs a store backend: enable the `rocksdb` feature (the default in fiber-bin) or the `sqlite` feature"
+);
 
 #[cfg(feature = "metrics")]
 pub mod metrics;
