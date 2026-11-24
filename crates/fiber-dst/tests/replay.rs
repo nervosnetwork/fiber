@@ -324,7 +324,8 @@ fn tx_abort_while_syncing_cleans_up_funding_and_allows_retry() {
 
 #[test]
 fn random_workload_reconciles_a_force_close_and_times_out_the_onchain_tlc() {
-    let trace = run_random("5", &["--payments", "32", "--phases", "5", "--chaos"]);
+    let options = ["--payments", "32", "--phases", "5", "--chaos"];
+    let trace = run_random("5", &options);
     let channel = "Hash256(0xc6d81b0a10a3d75a68c7832f3d15fd3599599de69ee1fe88eb359ee9bec4ea2e)";
     let payment = "0xaa8572262e7e762062ebc8fb92cdf347b724be14d6185e715d804fbce3e3cd68";
     assert!(trace.contains("advance virtual Unix clock"));
@@ -345,6 +346,7 @@ fn random_workload_reconciles_a_force_close_and_times_out_the_onchain_tlc() {
     );
     assert!(trace.contains("random reconciled workload=32"));
     assert!(trace.contains("recovery_probes=4"));
+    assert_eq!(trace, run_random("5", &options));
 }
 
 #[test]
