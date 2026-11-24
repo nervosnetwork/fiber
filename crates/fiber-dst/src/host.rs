@@ -74,6 +74,7 @@ pub(crate) enum TcpFault {
 pub(crate) enum FrameLoss {
     After(usize),
     FundingUpdate(Hash256),
+    FundingSignatures(Hash256),
 }
 
 #[derive(Clone, Copy)]
@@ -147,6 +148,11 @@ impl LinkControl {
                 message,
                 FiberMessage::ChannelNormalOperation(FiberChannelMessage::TxUpdate(update))
                     if update.channel_id == channel
+            ),
+            Some(FrameLoss::FundingSignatures(channel)) => matches!(
+                message,
+                FiberMessage::ChannelNormalOperation(FiberChannelMessage::TxSignatures(signatures))
+                    if signatures.channel_id == channel
             ),
             None => false,
         };

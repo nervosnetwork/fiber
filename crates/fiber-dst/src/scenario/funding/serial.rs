@@ -1,6 +1,7 @@
 use anyhow::{ensure, Context, Result};
-use fnn::fiber::Hash256;
+use fnn::fiber::{ChannelState, Hash256};
 use fnn::fiber_types::schema::CHANNEL_IMMUTABLE_STATE_PREFIX;
+use fnn::fiber_types::{AwaitingChannelReadyFlags, AwaitingTxSignaturesFlags};
 use fnn::simulation::{BatchTarget, DiskFault};
 
 use crate::host::{FrameLoss, NAMES};
@@ -220,6 +221,70 @@ impl Driver {
         self.probe(&ready)?;
         self.runtime
             .note(format_args!("ID rewrite recovered {ready}"));
+        Ok(())
+    }
+
+    pub(in crate::scenario) fn funding_signature_replay(&mut self) -> Result<()> {
+        self.protect_open(0, 1)?;
+        let temporary = self.begin_open(0, 1, FUNDING_AMOUNT, 0, false)?;
+        // A funds less, so it sends its signatures first and B sends the final response.
+        let reply = self.accept_open(1, temporary, FUNDING_AMOUNT + 100_000_000)?;
+        let response = self.reply("accept channel for signature replay", reply)?;
+        ensure!(response.old_channel_id == temporary);
+        let channel = response.new_channel_id;
+        let loss = Fault::DropPeerFrame {
+            from: 1,
+            to: 0,
+            rule: FrameLoss::FundingSignatures(channel),
+        }
+        .inject(&mut self.runtime)?;
+        let outpoint = self.until(
+            "A is missing funding signatures and B has confirmed funding",
+            |s| {
+                if !loss.hit(&s.runtime) {
+                    return Ok(None);
+                }
+                let Some(a) = s.runtime.channel(0, &channel) else {
+                    return Ok(None);
+                };
+                let Some(b) = s.runtime.channel(1, &channel) else {
+                    return Ok(None);
+                };
+                Ok(match (a.state, b.state) {
+                    (
+                        ChannelState::AwaitingTxSignatures(flags),
+                        ChannelState::AwaitingChannelReady(ready),
+                    ) if flags == AwaitingTxSignaturesFlags::OUR_TX_SIGNATURES_SENT
+                        && ready == AwaitingChannelReadyFlags::OUR_CHANNEL_READY =>
+                    {
+                        b.get_funding_transaction_outpoint()
+                    }
+                    _ => None,
+                })
+            },
+        )?;
+        self.runtime.note(format_args!(
+            "restart A missing B funding signatures channel={channel} outpoint={outpoint:?}"
+        ));
+        let crash = Fault::Crash(0).inject(&mut self.runtime)?;
+        loss.heal(&mut self.runtime);
+        crash.heal(&mut self.runtime);
+
+        self.wait_online(0, 1, &channel)?;
+        for (node, name) in NAMES[..2].iter().enumerate() {
+            let state = self
+                .runtime
+                .channel(node, &channel)
+                .context("missing recovered channel")?;
+            ensure!(
+                state.get_funding_transaction_outpoint().as_ref() == Some(&outpoint),
+                "{name} changed the funding outpoint during recovery"
+            );
+        }
+        self.probe(&channel)?;
+        self.runtime.note(format_args!(
+            "funding signature replay recovered channel={channel} outpoint={outpoint:?}"
+        ));
         Ok(())
     }
 

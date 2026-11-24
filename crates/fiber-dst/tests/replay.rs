@@ -37,6 +37,7 @@ fn emit_fixture_trace() {
         "multihop" => Scenario::Multihop,
         "mpp" => Scenario::Mpp,
         "funding-abort-recovery" => Scenario::FundingAbortRecovery,
+        "funding-signature-replay" => Scenario::FundingSignatureReplay,
         "parallel-funding" => Scenario::ParallelFunding { mixed: false },
         "channel-id-rewrite-sync" => Scenario::ChannelIdRewrite {
             after_commit: false,
@@ -253,6 +254,31 @@ fn mpp_replays_across_two_paths_after_crash() {
     assert!(trace.contains("C paused one MPP path"));
     assert!(trace.contains("MPP settled"));
     assert_eq!(trace, run_fixture("mpp", "42"));
+}
+
+#[test]
+fn funding_reconnect_replays_saved_signatures_before_ready() {
+    let case = "funding-signature-replay";
+    let trace = run_fixture(case, "42");
+    let dropped = trace
+        .lines()
+        .find(|line| line.contains("A dropped peer frame from B TxSignatures "))
+        .expect("the final signatures were lost before A processed them");
+    let (_, after_restart) = trace.split_once("A start 2").expect("A restarted");
+    let (before_ready, _) = after_restart
+        .split_once("A receive from B ChannelReadyV2 ")
+        .expect("B replayed ChannelReady");
+    let replayed = before_ready
+        .lines()
+        .find(|line| line.contains("A receive from B TxSignatures "))
+        .expect("B replayed its signatures before ChannelReady");
+    assert_eq!(
+        dropped.split_whitespace().last(),
+        replayed.split_whitespace().last()
+    );
+    assert!(trace.contains("funding signature replay recovered"));
+    assert!(trace.contains(" Success "));
+    assert_eq!(trace, run_fixture(case, "42"));
 }
 
 #[test]

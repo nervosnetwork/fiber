@@ -59,6 +59,8 @@ pub enum Scenario {
     Mpp,
     /// Drop one funding frame, verify a clean two-sided abort, and retry.
     FundingAbortRecovery,
+    /// Reconnect after one endpoint misses the final funding signatures.
+    FundingSignatureReplay,
     /// Interrupt an opening during or immediately after its durable channel ID rewrite.
     ChannelIdRewrite {
         /// Crash after commit before the notification, or inject an SQLite sync error.
@@ -155,6 +157,7 @@ pub fn run(scenario: Scenario, seed: u64) -> Result<Vec<String>> {
                 fault_policy,
             ),
             Scenario::FundingAbortRecovery => driver.funding_abort_recovery(),
+            Scenario::FundingSignatureReplay => driver.funding_signature_replay(),
             Scenario::ChannelIdRewrite { after_commit } => driver.channel_id_rewrite(after_commit),
             Scenario::ParallelFundingCleanup => {
                 driver.parallel_funding_fixture(funding::BatchFault::AbortCleanup(1))
