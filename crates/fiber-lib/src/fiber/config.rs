@@ -644,12 +644,14 @@ impl FiberConfig {
             .unwrap_or(DEFAULT_ANNOUNCE_NODE_INTERVAL_SECONDS)
     }
 
+    /// Reads or creates the node key and returns its public key.
+    pub fn try_public_key(&self) -> Result<PublicKey> {
+        let secio_kp: SecioKeyPair = self.read_or_generate_secret_key()?.into();
+        Ok(secio_kp.public_key())
+    }
+
     pub fn public_key(&self) -> PublicKey {
-        let secio_kp: SecioKeyPair = self
-            .read_or_generate_secret_key()
-            .expect("read or generate secret key")
-            .into();
-        secio_kp.public_key()
+        self.try_public_key().expect("read or generate secret key")
     }
 
     pub fn gossip_network_maintenance_interval_ms(&self) -> u64 {

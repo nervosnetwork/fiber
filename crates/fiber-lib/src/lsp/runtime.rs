@@ -156,7 +156,9 @@ impl<C: CkbChainClient + Clone + Send + Sync + 'static> TenantRuntimeFactory
 {
     fn provision(&self, tenant_id: &TenantId) -> Result<HostedTenantRecord, String> {
         let config = self.tenant_config(tenant_id);
-        let tenant_pubkey = pubkey_from_tentacle(config.public_key());
+        let tenant_pubkey = pubkey_from_tentacle(config.try_public_key().map_err(|error| {
+            format!("failed to read or generate key for tenant {tenant_id}: {error}")
+        })?);
         Ok(HostedTenantRecord {
             tenant_id: tenant_id.clone(),
             root_signer_pubkey: None,
@@ -168,9 +170,18 @@ impl<C: CkbChainClient + Clone + Send + Sync + 'static> TenantRuntimeFactory
 
     async fn start(&self, record: &HostedTenantRecord) -> Result<HostedTenantRuntime, String> {
         let config = self.tenant_config(&record.tenant_id);
-        let tenant_pubkey = pubkey_from_tentacle(config.public_key());
+        let tenant_pubkey = pubkey_from_tentacle(config.try_public_key().map_err(|error| {
+            format!(
+                "failed to read key for tenant {}: {error}",
+                record.tenant_id
+            )
+        })?);
         let tenant_features = config.gen_node_features();
-        let public_node_id = pubkey_from_tentacle(self.template_config.public_key());
+        let public_node_id = pubkey_from_tentacle(
+            self.template_config
+                .try_public_key()
+                .map_err(|error| format!("failed to read Public T key: {error}"))?,
+        );
         let public_features = self.template_config.gen_node_features();
         if tenant_pubkey != record.tenant_pubkey {
             return Err(format!(

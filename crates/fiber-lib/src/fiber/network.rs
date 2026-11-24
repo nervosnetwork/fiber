@@ -10333,7 +10333,7 @@ where
         } = args;
         let kp = config
             .read_or_generate_secret_key()
-            .expect("read or generate hosted tenant secret key");
+            .map_err(|error| format!("failed to read hosted tenant secret key: {error}"))?;
         let private_key: Privkey = <[u8; 32]>::try_from(kp.as_ref())
             .expect("valid length for hosted tenant key")
             .into();
@@ -11381,7 +11381,12 @@ pub(crate) async fn start_hosted_tenant_actor<
     network_graph: Arc<RwLock<NetworkGraph<S>>>,
     default_shutdown_script: Script,
 ) -> Result<FiberActorRef, String> {
-    let actor_name = format!("HostedTenant {:?}", config.public_key());
+    let actor_name = format!(
+        "HostedTenant {:?}",
+        config
+            .try_public_key()
+            .map_err(|error| format!("failed to read hosted tenant key: {error}"))?
+    );
     Actor::spawn_linked(
         Some(actor_name),
         HostedTenantActor::new(

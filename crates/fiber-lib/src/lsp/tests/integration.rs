@@ -1445,6 +1445,109 @@ async fn hosted_private_channel_registers_host_watch_and_survives_evict() {
 }
 
 #[tokio::test]
+async fn tenant_key_file_error_does_not_stop_shared_lsp_service() {
+    init_tracing();
+
+    let public_t = NetworkNode::new_with_node_name("lsp-tenant-key-error").await;
+    let root = tempdir().expect("temporary LSP directory");
+    let config = lsp_config(root.path().join("lsp"));
+    let broken_signer = test_root_signer_for_name("broken-tenant-key");
+    let broken_id = TenantId::from_root_signer_pubkey(&broken_signer.pubkey());
+    std::fs::create_dir_all(config.tenant_store_root()).expect("create tenant root");
+    std::fs::write(
+        config.tenant_store_root().join(broken_id.as_str()),
+        b"not a directory",
+    )
+    .expect("block tenant key directory");
+
+    let ckb_config = CkbConfig {
+        base_dir: Some(root.path().join("ckb")),
+        rpc_url: "http://127.0.0.1:8114".to_string(),
+        udt_whitelist: None,
+        tx_tracing_polling_interval_ms: 4_000,
+        funding_tx_shell_builder: None,
+    };
+    let root_actor = get_test_root_actor().await;
+    let runtime_factory = Arc::new(FiberTenantRuntimeFactory::new(
+        public_t.signing_events.clone(),
+        config.clone(),
+        public_t.fiber_config.clone(),
+        CkbRpcClient::new(&ckb_config),
+        public_t.chain_actor.clone(),
+        public_t.network_actor.clone(),
+        public_t.store.clone(),
+        root_actor.get_cell(),
+        Script::default(),
+    ));
+    let lsp_actor = Actor::spawn_linked(
+        None,
+        LspService,
+        LspServiceArgs {
+            config: config.clone(),
+            public_node_id: public_t.pubkey,
+            public_network_actor: public_t.network_actor.clone(),
+            store: public_t.store.namespaced(NodeNamespace::lsp_metadata()),
+            runtime_factory,
+            signing_key: public_t.private_key.clone(),
+            token_issuer: super::test_token_issuer(),
+            watchtower_store: public_t.store.clone(),
+            signing_events: public_t.signing_events.clone(),
+        },
+        root_actor.get_cell(),
+    )
+    .await
+    .expect("start shared LSP service")
+    .0;
+
+    let broken_payload = super::registration_payload(
+        &public_t.private_key,
+        &broken_signer,
+        super::fresh_registration_request_id(),
+        crate::now_timestamp_as_millis_u64(),
+    );
+    let broken_result = ractor::call_t!(
+        lsp_actor,
+        |reply| LspServiceMessage::RegisterAuthenticatedTenant {
+            signature: super::sign_tenant_registry_payload(&broken_signer, &broken_payload),
+            payload: broken_payload,
+            reply,
+        },
+        3_000
+    )
+    .expect("key-file error must produce a registration reply");
+    let registration_error = broken_result.expect_err("broken tenant key must reject registration");
+    assert!(
+        registration_error.contains("failed to read or generate key for tenant"),
+        "{registration_error}"
+    );
+
+    let healthy_signer = test_root_signer_for_name("healthy-tenant-key");
+    let (healthy_id, _) =
+        register_authenticated_network_tenant(&lsp_actor, public_t.pubkey, &healthy_signer).await;
+    assert_ne!(healthy_id, broken_id);
+
+    let healthy_key = config
+        .tenant_store_root()
+        .join(healthy_id.as_str())
+        .join("sk");
+    std::fs::remove_file(&healthy_key).expect("remove test tenant key");
+    std::fs::create_dir(&healthy_key).expect("make tenant key unreadable");
+    let activation = ractor::call_t!(
+        lsp_actor,
+        |reply| LspServiceMessage::EnsureTenant(healthy_id, reply),
+        3_000
+    )
+    .expect("key-file error must produce an activation reply");
+    let activation_error = activation.expect_err("broken tenant key must reject activation");
+    assert!(
+        activation_error.contains("failed to read key for tenant"),
+        "{activation_error}"
+    );
+    ractor::call_t!(lsp_actor, LspServiceMessage::GetStatus, 3_000)
+        .expect("shared LSP service remains available");
+}
+
+#[tokio::test]
 async fn production_factory_activates_one_tenant_runtime_via_rpc() {
     init_tracing();
 
