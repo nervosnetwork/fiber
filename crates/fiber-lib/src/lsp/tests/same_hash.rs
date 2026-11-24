@@ -24,7 +24,6 @@ impl HostedTlcLookup for crate::fiber::channel::ChannelActorState {
         })
     }
 }
-use crate::fiber::channel::ChannelActorStateStore;
 use crate::fiber_types::{Hash256, RemoveTlcFulfill, TlcErr, TlcErrPacket, NO_SHARED_SECRET};
 use crate::lsp::LspPaymentDeliveryStatus as DeliveryStatus;
 
@@ -504,7 +503,7 @@ async fn unknown_incoming_execution_is_not_reported_inflight() {
         crate::fiber_types::ChannelState::Closed(crate::fiber_types::CloseFlags::empty());
     closed.tlc_state.offered_tlcs.tlcs.clear();
     let closed_id = closed.id;
-    public.store.insert_channel_actor_state(closed);
+    public.store.insert_channel_actor_state_for_test(closed);
     // A different incoming execution must not find this payment session.
     let response = ractor::call_t!(
         public.network_actor,

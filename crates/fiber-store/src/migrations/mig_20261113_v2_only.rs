@@ -3,14 +3,18 @@ use std::collections::HashSet;
 
 use bincode::Options;
 use ckb_types::{packed::OutPoint, prelude::*};
-use fiber_types::channel_v2_validation::validate_channel_v2;
+use fiber_types::channel_v2_validation::{
+    decode_and_validate_channel_actor_data_parts, validate_channel_v2,
+};
 use fiber_types::schema::{
-    ARCHIVED_V1_PREFIX, ATTEMPT_PREFIX, CHANNEL_ACTOR_STATE_PREFIX, CHANNEL_OPEN_RECORD_PREFIX,
-    CHANNEL_OUTPOINT_CHANNEL_ID_PREFIX, CHANNEL_SHUTDOWN_SETTLEMENT_PREFIX, PAYMENT_SESSION_PREFIX,
-    PUBKEY_CHANNEL_ID_PREFIX, WATCHTOWER_CHANNEL_PREFIX, WATCHTOWER_SUPERSEDED_SETTLEMENT_PREFIX,
+    ARCHIVED_V1_PREFIX, ATTEMPT_PREFIX, CHANNEL_ACTOR_STATE_PREFIX, CHANNEL_IMMUTABLE_STATE_PREFIX,
+    CHANNEL_OPEN_RECORD_PREFIX, CHANNEL_OUTPOINT_CHANNEL_ID_PREFIX,
+    CHANNEL_SHUTDOWN_SETTLEMENT_PREFIX, PAYMENT_SESSION_PREFIX, PUBKEY_CHANNEL_ID_PREFIX,
+    WATCHTOWER_CHANNEL_PREFIX, WATCHTOWER_SUPERSEDED_SETTLEMENT_PREFIX,
 };
 use fiber_types::{
-    ChannelActorData, ChannelData, ChannelFeatures, ChannelOpenRecord, ChannelSessionV2,
+    ChannelActorData, ChannelData, ChannelFeatures, ChannelImmutableData, ChannelOpenRecord,
+    ChannelSessionV2, Hash256,
 };
 use fiber_types_0100::schema::PENDING_COMMIT_DIFF_PREFIX;
 use fiber_types_0100::{
@@ -159,7 +163,6 @@ fn convert_channel_actor_data(
         waiting_forward_tlc_tasks: decode_as_new(old.waiting_forward_tlc_tasks)?,
         remote_shutdown_script: old.remote_shutdown_script,
         local_shutdown_script: old.local_shutdown_script,
-        latest_commitment_transaction: old.latest_commitment_transaction,
         remote_commitment_points: decode_as_new(old.remote_commitment_points)?,
         remote_channel_public_keys: decode_as_new(old.remote_channel_public_keys)?,
         local_shutdown_info: decode_as_new(old.local_shutdown_info)?,
@@ -178,13 +181,57 @@ fn convert_channel_actor_data(
     Ok(channel)
 }
 
+/// Released v0.10.0-rc2 ..= v0.10.1 wrote a session marker in front of the session, which this
+/// layout no longer stores. Reading the pair `(marker, session)` consumes exactly those released
+/// bytes and drops the marker.
+const RELEASED_SESSION_MARKER: u32 = 0x56320001;
+
+struct ReleasedSessionV2(ChannelSessionV2);
+
+impl<'de> serde::Deserialize<'de> for ReleasedSessionV2 {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let (marker, session) = <(u32, ChannelSessionV2)>::deserialize(deserializer)?;
+        if marker != RELEASED_SESSION_MARKER {
+            return Err(serde::de::Error::custom("Invalid V2 session marker"));
+        }
+        Ok(Self(session))
+    }
+}
+
 fn released_channel(
     value: &[u8],
 ) -> Result<(OldChannelActorData, Option<ChannelSessionV2>), String> {
     // develop appended session_v2 to rc1's unchanged binary prefix. Tuples and
     // structs have no framing bytes in bincode; published rc1 has no suffix.
-    decode_exact(value)
-        .or_else(|_| decode_exact::<OldChannelActorData>(value).map(|channel| (channel, None)))
+    if let Ok(channel) = decode_exact::<OldChannelActorData>(value) {
+        return Ok((channel, None));
+    }
+    // Everything with a suffix was written by v0.10.0-rc2 ..= v0.10.1, so its error is the one
+    // that explains the record (an invalid marker, a broken session) rather than "trailing bytes".
+    decode_exact::<(OldChannelActorData, Option<ReleasedSessionV2>)>(value)
+        .map(|(channel, session)| (channel, session.map(|session| session.0)))
+}
+
+/// Read a channel record in whichever layout the database is in: an already split pair, or a whole
+/// record written before the split.
+fn read_channel_record(
+    store: &dyn MigrationStore,
+    key: &[u8],
+    version: &str,
+) -> Result<Option<ChannelRecord>, String> {
+    let Some(value) = store.get(key) else {
+        return Ok(None);
+    };
+    match store.get(&immutable_key(key)?) {
+        Some(immutable) => Ok(Some(ChannelRecord::Current(Box::new(
+            decode_and_validate_channel_actor_data_parts(
+                &stored_channel_id(key)?,
+                &value,
+                &immutable,
+            )?,
+        )))),
+        None => channel_record(&value, version).map(Some),
+    }
 }
 
 fn channel_record(value: &[u8], version: &str) -> Result<ChannelRecord, String> {
@@ -213,6 +260,21 @@ fn legacy_closed(channel: &OldChannelActorData) -> bool {
         && channel.waiting_forward_tlc_tasks.is_empty()
 }
 
+fn immutable_key(key: &[u8]) -> Result<Vec<u8>, String> {
+    let id = key
+        .get(1..)
+        .ok_or_else(|| format!("Invalid channel key {key:?}"))?;
+    Ok([&[CHANNEL_IMMUTABLE_STATE_PREFIX], id].concat())
+}
+
+fn stored_channel_id(key: &[u8]) -> Result<Hash256, String> {
+    let bytes: [u8; 32] = key
+        .get(1..)
+        .and_then(|bytes| bytes.try_into().ok())
+        .ok_or_else(|| format!("Invalid channel key {key:?}"))?;
+    Ok(bytes.into())
+}
+
 fn actor_key(channel_id: &impl AsRef<[u8]>) -> Vec<u8> {
     [&[CHANNEL_ACTOR_STATE_PREFIX], channel_id.as_ref()].concat()
 }
@@ -227,8 +289,8 @@ fn archived_or_closed_channel(
     version: &str,
 ) -> Result<Option<Box<OldChannelActorData>>, String> {
     let key = actor_key(channel_id);
-    let record = if let Some(value) = store.get(&key) {
-        channel_record(&value, version)?
+    let record = if let Some(record) = read_channel_record(store, &key, version)? {
+        record
     } else if let Some(value) = store.get(&archive_key(&key)) {
         let (channel, session) = released_channel(&value)?;
         if session.is_some() {
@@ -297,18 +359,55 @@ fn scan(store: &dyn MigrationStore, apply: bool) -> Result<(), String> {
             blocked.push(format!("{id}: {state}"));
         }
     };
+    let mut mutable_records: HashSet<Hash256> = HashSet::new();
     for (key, value) in store.iter_prefix(&[CHANNEL_ACTOR_STATE_PREFIX]) {
+        let immutable_key = immutable_key(&key)?;
+        // Remembered for the reverse check below, without reading the mutable record again.
+        if let Ok(id) = stored_channel_id(&key) {
+            mutable_records.insert(id);
+        }
+        if !upgrading {
+            let id = stored_channel_id(&key)?;
+            // This database is already split, so prefix 0 is a mutable record and its fixed half
+            // has to be there: a channel is only complete with both records.
+            let Some(immutable) = store.get(&immutable_key) else {
+                return Err(format!(
+                    "Channel {id}: mutable record without its fixed record"
+                ));
+            };
+            decode_and_validate_channel_actor_data_parts(&id, &value, &immutable)
+                .map_err(|error| format!("Invalid split channel record {id}: {error}"))?;
+            continue;
+        }
+        if let Some(immutable) = store.get(&immutable_key) {
+            // Already converted by an interrupted run: both blocks must still validate.
+            let id = stored_channel_id(&key)?;
+            decode_and_validate_channel_actor_data_parts(&id, &value, &immutable)
+                .map_err(|error| format!("Invalid split channel record {id}: {error}"))?;
+            continue;
+        }
         let record = channel_record(&value, version)
             .map_err(|error| format!("Invalid channel record; database preserved: {error}"))?;
         match record {
             ChannelRecord::Current(channel) => {
                 check_id(&key, &channel.id)?;
                 if apply {
-                    let current =
-                        bincode::serialize(&channel).map_err(|error| error.to_string())?;
-                    if current != value {
-                        store.put(&key, &current);
-                    }
+                    // The fixed fields move to their own record, written in the same batch.
+                    let (immutable, mutable) = channel.into_parts();
+                    store.write_batch(
+                        &[
+                            (
+                                immutable_key,
+                                bincode::serialize(&immutable)
+                                    .map_err(|error| error.to_string())?,
+                            ),
+                            (
+                                key,
+                                bincode::serialize(&mutable).map_err(|error| error.to_string())?,
+                            ),
+                        ],
+                        &[],
+                    );
                 }
             }
             ChannelRecord::Legacy(channel) => {
@@ -368,6 +467,18 @@ fn scan(store: &dyn MigrationStore, apply: bool) -> Result<(), String> {
             }
         }
     }
+    // A fixed record nobody can read a channel from, or one that does not decode, never reaches a
+    // getter (they iterate prefix 0), so check the other direction here.
+    for (key, value) in store.iter_prefix(&[CHANNEL_IMMUTABLE_STATE_PREFIX]) {
+        let id = stored_channel_id(&key)?;
+        let _: ChannelImmutableData = decode_exact(&value)
+            .map_err(|error| format!("Invalid fixed record of channel {id}: {error}"))?;
+        if !mutable_records.contains(&id) {
+            return Err(format!(
+                "Channel {id}: fixed record without its mutable record"
+            ));
+        }
+    }
     for (key, value) in store.iter_prefix(&[CHANNEL_OPEN_RECORD_PREFIX]) {
         if !upgrading {
             let record: ChannelOpenRecord = decode_exact(&value)?;
@@ -380,10 +491,9 @@ fn scan(store: &dyn MigrationStore, apply: bool) -> Result<(), String> {
             archive(store, &[key], apply)?;
             continue;
         }
-        let actor = store
-            .get(&actor_key(&record.channel_id))
-            .map(|bytes| channel_record(&bytes, version))
-            .transpose()?;
+        // The prefix-0 loop above may already have split this channel's record, so read it in
+        // whichever layout it is in now.
+        let actor = read_channel_record(store, &actor_key(&record.channel_id), version)?;
         let unfunded_orphan = actor.is_none()
             && record.status == OldChannelOpeningStatus::WaitingForPeer
             && !funded_channels.contains(&record.channel_id)

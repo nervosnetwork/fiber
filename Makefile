@@ -51,7 +51,7 @@ fmt:
 	cargo fmt --all -- --check
 
 coverage-clean:
-	rm -rf "${CARGO_TARGET_DIR}/*.profraw" "${GRCOV_OUTPUT}" "${GRCOV_OUTPUT:.info=}"
+	rm -rf ${CARGO_TARGET_DIR}/*.profraw "${GRCOV_OUTPUT}" "${GRCOV_OUTPUT:.info=}"
 
 coverage-install-tools:
 	rustup component add llvm-tools-preview
@@ -59,9 +59,12 @@ coverage-install-tools:
 
 coverage-run-unittests:
 	mkdir -p "${COVERAGE_PROFRAW_DIR}"
-	rm -f "${COVERAGE_PROFRAW_DIR}/*.profraw"
+	rm -f ${COVERAGE_PROFRAW_DIR}/*.profraw
+	# Instrumented builds are ~2x slower, so keep the same thread budget the CI test job uses,
+	# otherwise the timing-sensitive payment/channel tests flake (force close instead of cooperative).
 	RUSTFLAGS="${RUSTFLAGS} -Cinstrument-coverage" \
 		RUST_LOG=off \
+		RUST_TEST_THREADS=2 \
 		LLVM_PROFILE_FILE="${COVERAGE_PROFRAW_DIR}/unittests-%p-%m.profraw" \
 			cargo test -p fnn -p fiber-bin
 

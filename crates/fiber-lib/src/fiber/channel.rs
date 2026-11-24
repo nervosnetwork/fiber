@@ -25,9 +25,7 @@ use crate::fiber::onchain_tlc_reconcile::{
     confirm_onchain_payer_fulfill, has_unresolved_onchain_tlcs, onchain_fulfilled_preimage,
     OnChainConfirmedPayerTlc, OnChainTimeoutTlcRole, OnChainTlcSettlement,
 };
-use crate::fiber::session::{
-    allocate_nonce, bind_context, guarded_sign, new_session, SESSION_MARKER,
-};
+use crate::fiber::session::{allocate_nonce, bind_context, guarded_sign, new_session};
 use crate::fiber::types::{
     BroadcastMessageWithTimestamp, ChannelReadyV2, ClosingSignedV2, CommitmentSignedV2,
     ReestablishChannelV2, RevokeAndAckV2, ShutdownV2, TxCompleteV2, TxSignatures,
@@ -121,7 +119,7 @@ mod session_tests;
 
 use std::{
     fmt::{self, Debug, Display},
-    sync::Arc,
+    sync::{Arc, OnceLock},
 };
 use strum::AsRefStr;
 use tentacle::secio::PeerId;
@@ -614,8 +612,7 @@ where
         // Full signing-context validation runs on restoration and before every signature.
         if !{
             let session = &state.session;
-            session.marker == SESSION_MARKER
-                && session.own.owner == state.local_channel_public_keys.funding_pubkey
+            session.own.owner == state.local_channel_public_keys.funding_pubkey
                 && session.own.purpose == fiber_types::NoncePurposeV2::Commitment
         } {
             return Err(ProcessingChannelError::InvalidState(
@@ -861,7 +858,7 @@ where
                 if state.session.incoming.is_some()
                     && state.session.outgoing.is_some()
                     && matches!(state.state, ChannelState::AwaitingChannelReady(_))
-                    && state.latest_commitment_transaction.is_some()
+                    && state.latest_commitment_transaction().is_some()
                     && state.ephemeral_config.external_funding.enabled
                     && state.ephemeral_config.external_funding.signed_submitted
                     && state
@@ -2295,7 +2292,7 @@ where
             }
             ChannelState::AwaitingChannelReady(flags)
                 if flags.contains(AwaitingChannelReadyFlags::OUR_CHANNEL_READY)
-                    && state.latest_commitment_transaction.is_some() =>
+                    && state.latest_commitment_transaction().is_some() =>
             {
                 debug!(
                     "Handling force shutdown command in AwaitingChannelReady state, flags: {:?}",
@@ -2305,7 +2302,7 @@ where
             ChannelState::AwaitingTxSignatures(_)
                 if state.ephemeral_config.external_funding.signed_submitted
                     && state.funding_tx_confirmed_at.is_some()
-                    && state.latest_commitment_transaction.is_some() =>
+                    && state.latest_commitment_transaction().is_some() =>
             {
                 debug!("Handling force shutdown after early external funding confirmation");
             }
@@ -4024,7 +4021,7 @@ where
             state.state,
             ChannelState::SigningCommitment(flags)
                 if flags.contains(SigningCommitmentFlags::COMMITMENT_SIGNED_SENT)
-        ) && state.latest_commitment_transaction.is_some();
+        ) && state.latest_commitment_transaction().is_some();
         if !can_submit {
             return Err(ProcessingChannelError::InvalidState(format!(
                 "Cannot submit signed external funding tx until peer CommitmentSigned is verified; state {:?}",
@@ -4056,7 +4053,7 @@ where
         let external_proposal = !state.channel_signer.is_local()
             && state.signing_context.is_awaiting_signature()
             && state.session.pending_incoming.is_some();
-        if state.latest_commitment_transaction.is_none() && !external_proposal {
+        if state.latest_commitment_transaction().is_none() && !external_proposal {
             return Err(ProcessingChannelError::InvalidState(
                 "Cannot return funding proposal without a verified peer commitment".to_owned(),
             ));
@@ -4089,7 +4086,7 @@ where
         state: &ChannelActorState,
     ) -> ProcessingChannelResult {
         // A crash after sending TxUpdate must leave the local commitment available.
-        if state.latest_commitment_transaction.is_none() {
+        if state.latest_commitment_transaction().is_none() {
             return Err(ProcessingChannelError::InvalidState(
                 "Cannot release signed funding tx without a local commitment".to_string(),
             ));
@@ -4201,7 +4198,7 @@ where
                     ChannelState::AwaitingTxSignatures(flags)
                         if !flags.contains(AwaitingTxSignaturesFlags::TX_SIGNATURES_SENT)
                 ) && state.ephemeral_config.external_funding.signed_submitted
-                    && state.latest_commitment_transaction.is_some()
+                    && state.latest_commitment_transaction().is_some()
                 {
                     // Keep exchanging TxSignatures before sending ChannelReady. The
                     // signed funding tx may already be on chain, but the peer may
@@ -5792,10 +5789,16 @@ pub struct ChannelActorState {
     // at the end of the current message processing loop.
     #[doc = "skip_store"]
     pub needs_backup: bool,
-
     /// Runtime round-trip buffer for peer messages deferred while an external signature is in flight.
     #[doc = "skip_store"]
     pub(crate) pending_messages: PendingMessages,
+
+    /// musig2 key aggregation contexts, built once per key order. They only depend on the two
+    /// funding pubkeys, which never change after the channel opens.
+    #[doc = "skip_store"]
+    pub musig2_agg_context_local_first: OnceLock<Arc<KeyAggContext>>,
+    #[doc = "skip_store"]
+    pub musig2_agg_context_remote_first: OnceLock<Arc<KeyAggContext>>,
 }
 
 /// Stores peer messages deferred while an external/remote signature is in flight.
@@ -5887,6 +5890,8 @@ impl From<ChannelActorData> for ChannelActorState {
             pending_payment_notifications: Default::default(),
             replayed_tlc_updates_v2: 0,
             resigning_outgoing_v2: false,
+            musig2_agg_context_local_first: OnceLock::new(),
+            musig2_agg_context_remote_first: OnceLock::new(),
         };
         state.hydrate_external_funding_runtime();
         state
@@ -7238,7 +7243,6 @@ impl ChannelActorState {
                     remote_max_tlc_value_in_flight,
                     remote_max_tlc_number_in_flight,
                 ),
-                latest_commitment_transaction: None,
                 reestablishing: false,
                 connectivity_state: ChannelConnectivityState::Online,
                 pending_replay_updates: vec![],
@@ -7259,6 +7263,8 @@ impl ChannelActorState {
             funding_abort_detail: None,
             private_key: Some(private_key),
             needs_backup: true,
+            musig2_agg_context_local_first: Default::default(),
+            musig2_agg_context_remote_first: Default::default(),
             pending_remove_effects_v2: 0,
             pending_payment_notifications: Default::default(),
             replayed_tlc_updates_v2: 0,
@@ -7368,7 +7374,6 @@ impl ChannelActorState {
                 shutdown_transaction_hash: None,
                 local_reserved_ckb_amount,
                 remote_reserved_ckb_amount: 0,
-                latest_commitment_transaction: None,
                 reestablishing: false,
                 connectivity_state: ChannelConnectivityState::Online,
                 pending_replay_updates: vec![],
@@ -7389,6 +7394,8 @@ impl ChannelActorState {
             funding_abort_detail: None,
             private_key: Some(private_key),
             needs_backup: true,
+            musig2_agg_context_local_first: Default::default(),
+            musig2_agg_context_remote_first: Default::default(),
             pending_remove_effects_v2: 0,
             pending_payment_notifications: Default::default(),
             replayed_tlc_updates_v2: 0,
@@ -8276,11 +8283,30 @@ impl ChannelActorState {
         }
     }
 
-    pub fn get_deterministic_musig2_agg_context(&self) -> KeyAggContext {
-        let local_pubkey = self.get_local_channel_public_keys().funding_pubkey;
-        let remote_pubkey = self.get_remote_channel_public_keys().funding_pubkey;
-        let keys = self.order_things_for_musig2(local_pubkey, remote_pubkey);
-        KeyAggContext::new(keys).expect("Valid pubkeys")
+    pub fn get_deterministic_musig2_agg_context(&self) -> Arc<KeyAggContext> {
+        self.musig2_agg_context(self.should_local_go_first_in_musig2())
+    }
+
+    /// Key aggregation context for one of the two key orders, built once and cached.
+    ///
+    /// The context only depends on the two funding pubkeys and their order, so it stays valid
+    /// for the whole lifetime of the channel.
+    fn musig2_agg_context(&self, local_first: bool) -> Arc<KeyAggContext> {
+        let cached = if local_first {
+            &self.musig2_agg_context_local_first
+        } else {
+            &self.musig2_agg_context_remote_first
+        };
+        Arc::clone(cached.get_or_init(|| {
+            let local_pubkey = self.get_local_channel_public_keys().funding_pubkey;
+            let remote_pubkey = self.get_remote_channel_public_keys().funding_pubkey;
+            let keys = if local_first {
+                [local_pubkey, remote_pubkey]
+            } else {
+                [remote_pubkey, local_pubkey]
+            };
+            Arc::new(KeyAggContext::new(keys).expect("Valid pubkeys"))
+        }))
     }
 
     pub fn get_channel_announcement_musig2_secnonce(&self) -> SecNonce {
@@ -9440,9 +9466,9 @@ impl ChannelActorState {
                     // peer's CommitmentSigned (which is what populates
                     // latest_commitment_transaction). Without this, get_latest_commitment_transaction
                     // would panic on force-close. See GHSA-x6rw-txsignatures-verification.
-                    if self.latest_commitment_transaction.is_none() {
+                    if self.latest_commitment_transaction().is_none() {
                         error!(
-                            "Refusing to advance to ChannelReady for channel {:?}: latest_commitment_transaction is not set; the peer likely skipped sending CommitmentSigned",
+                            "Refusing to advance to ChannelReady for channel {:?}: no usable commitment transaction; the peer likely skipped sending CommitmentSigned",
                             self.get_id()
                         );
                         return;
@@ -9871,15 +9897,8 @@ impl ChannelActorState {
         }
     }
 
-    fn get_musig2_agg_context(&self, for_remote: bool) -> KeyAggContext {
-        let local_pubkey = self.get_local_channel_public_keys().funding_pubkey;
-        let remote_pubkey = self.get_remote_channel_public_keys().funding_pubkey;
-        let pubkeys = if for_remote {
-            [local_pubkey, remote_pubkey]
-        } else {
-            [remote_pubkey, local_pubkey]
-        };
-        KeyAggContext::new(pubkeys).expect("Valid pubkeys")
+    fn get_musig2_agg_context(&self, for_remote: bool) -> Arc<KeyAggContext> {
+        self.musig2_agg_context(for_remote)
     }
 
     // This is used to verify transactions which consume the funding cell.
@@ -10285,15 +10304,9 @@ impl ChannelActorState {
     }
 
     pub(crate) fn get_commitment_lock_script_xonly(&self, for_remote: bool) -> [u8; 32] {
-        let local_pubkey = self.get_local_channel_public_keys().funding_pubkey;
-        let remote_pubkey = self.get_remote_channel_public_keys().funding_pubkey;
-        let pubkeys = if for_remote {
-            [local_pubkey, remote_pubkey]
-        } else {
-            [remote_pubkey, local_pubkey]
-        };
-        let key_agg_ctx = KeyAggContext::new(pubkeys).expect("Valid pubkeys");
-        key_agg_ctx.aggregated_pubkey::<Point>().serialize_xonly()
+        self.musig2_agg_context(for_remote)
+            .aggregated_pubkey::<Point>()
+            .serialize_xonly()
     }
 
     /// Get the latest commitment transaction with updated cell deps
@@ -10302,8 +10315,7 @@ impl ChannelActorState {
     ) -> Result<TransactionView, ProcessingChannelError> {
         self.ensure_v2_not_quarantined()?;
         let tx = self
-            .latest_commitment_transaction
-            .clone()
+            .latest_commitment_transaction()
             .ok_or_else(|| invalid("No usable local commitment transaction for force close"))?;
         let cell_deps = get_cell_deps(vec![Contract::FundingLock], &self.funding_udt_type_script)
             .await
@@ -10588,6 +10600,13 @@ pub trait ChannelActorStateStore {
         payment_hash: Hash256,
     ) -> Option<fiber_types::TrampolineContext>;
     fn get_channel_actor_state(&self, id: &Hash256) -> Option<ChannelActorState>;
+    /// Persist a channel, replacing both records.
+    ///
+    /// The fixed record is written only while the channel is opening, so a caller has to bring a
+    /// channel whose fixed record already exists. Copying an already established state into a store
+    /// that never saw its opening phase leaves a record that cannot be read back (the node's own
+    /// opening path writes it, and test fixtures go through
+    /// `Store::insert_channel_actor_state_for_test`).
     fn insert_channel_actor_state(&self, state: ChannelActorState);
 
     fn move_channel_actor_state(&self, old_id: &Hash256, state: ChannelActorState);
@@ -10612,6 +10631,11 @@ pub trait ChannelActorStateStore {
             .collect()
     }
     fn get_channel_state_by_outpoint(&self, id: &OutPoint) -> Option<ChannelActorState>;
+    /// Every channel the store holds.
+    ///
+    /// A bulk read for offline tooling (restore). It walks the records rather than taking one
+    /// transaction snapshot, so a channel that is moved or deleted while it runs can be missing;
+    /// call it only while the node is not running.
     fn get_all_channel_states(&self) -> Vec<ChannelActorState>;
     fn insert_payment_custom_records(
         &self,
@@ -10939,6 +10963,8 @@ impl ChannelActorState {
             local: 1,
             remote: 1,
         };
+        self.musig2_agg_context_local_first = OnceLock::new();
+        self.musig2_agg_context_remote_first = OnceLock::new();
         let mut peer = self.clone();
         peer.channel_signer = ChannelSigner::local(remote_signer.clone());
         peer.signer = Some(remote_signer);
@@ -11342,8 +11368,8 @@ impl ChannelActorState {
             .as_advanced_builder()
             .set_witnesses(vec![witness.pack()])
             .build();
-        // Install usable commitment before creating any predecessor revocation.
-        self.latest_commitment_transaction = Some(tx.data());
+        // Installing the commitment (below, as `session.incoming`) happens before creating any
+        // predecessor revocation; `latest_commitment_transaction()` derives from it.
         let funding = session.own.clone();
         // Revocation approval can pause after the local exit is already usable.
         // Persist that exact signed pending snapshot, without advancing the
@@ -11844,7 +11870,7 @@ where
             state.local_channel_public_keys.funding_pubkey,
             *state.get_remote_funding_pubkey(),
         );
-        let aggregate = musig2::KeyAggContext::new(keys).map_err(|e| invalid(e.to_string()))?;
+        let aggregate = state.get_deterministic_musig2_agg_context();
         let nonce = AggNonce::sum([close.own.public_nonce.clone(), remote.closing_nonce]);
         let message = compute_tx_message(&tx);
         let channel_id = state.id;
@@ -11964,11 +11990,7 @@ where
                 .ok_or_else(|| invalid("Missing remote closing nonce"))?,
         )
         .map_err(|e| invalid(e.to_string()))?;
-        let keys = state.order_things_for_musig2(
-            state.local_channel_public_keys.funding_pubkey,
-            *state.get_remote_funding_pubkey(),
-        );
-        let aggregate = musig2::KeyAggContext::new(keys).map_err(|e| invalid(e.to_string()))?;
+        let aggregate = state.get_deterministic_musig2_agg_context();
         let nonce = AggNonce::sum([close.own.public_nonce.clone(), remote.closing_nonce.clone()]);
         musig2::verify_partial(
             &aggregate,
@@ -13021,7 +13043,7 @@ mod tests {
             state
                 .retryable_tlc_operations
                 .push_back(RetryableTlcOperation::AddTlc(command.clone()));
-            store.insert_channel_actor_state(state.clone());
+            store.insert_channel_actor_state_for_test(state.clone());
             let actor = ChannelActor::new(
                 state.local_pubkey,
                 state.remote_pubkey,
@@ -13077,6 +13099,8 @@ mod tests {
         tlc.attempt_id = Some(1);
         let hash = tlc.payment_hash;
         state.tlc_state.add_offered_tlc(tlc);
+        // Synthetic established channel: seed the fixed-field record it would have.
+        store.insert_channel_actor_state_for_test(state.clone());
         let actor = ChannelActor::new(
             state.local_pubkey,
             state.remote_pubkey,
@@ -13133,6 +13157,53 @@ mod tests {
         assert!(resumed_expired.expired(reconnect + online * 10));
     }
 
+    #[test]
+    fn test_musig2_agg_context_is_cached_per_key_order() {
+        let state =
+            channel_state_with_limits(ChannelConstraints::default(), ChannelConstraints::default());
+        let local = state.get_local_channel_public_keys().funding_pubkey;
+        let remote = state.get_remote_channel_public_keys().funding_pubkey;
+
+        let local_first = state.get_musig2_agg_context(true);
+        let local_first_again = state.get_musig2_agg_context(true);
+        assert!(Arc::ptr_eq(&local_first, &local_first_again), "cached");
+
+        let remote_first = state.get_musig2_agg_context(false);
+        assert!(
+            !Arc::ptr_eq(&local_first, &remote_first),
+            "one per key order"
+        );
+
+        // The cache must not change the aggregated key for either order.
+        assert_eq!(
+            local_first.aggregated_pubkey::<Pubkey>(),
+            KeyAggContext::new([local, remote])
+                .unwrap()
+                .aggregated_pubkey::<Pubkey>()
+        );
+        assert_eq!(
+            remote_first.aggregated_pubkey::<Pubkey>(),
+            KeyAggContext::new([remote, local])
+                .unwrap()
+                .aggregated_pubkey::<Pubkey>()
+        );
+
+        // The deterministic helper reuses whichever cached order matches its ordering.
+        let deterministic = state.get_deterministic_musig2_agg_context();
+        assert_eq!(
+            deterministic.aggregated_pubkey::<Pubkey>(),
+            KeyAggContext::new(state.order_things_for_musig2(local, remote))
+                .unwrap()
+                .aggregated_pubkey::<Pubkey>()
+        );
+        let expected = if state.should_local_go_first_in_musig2() {
+            local_first
+        } else {
+            remote_first
+        };
+        assert!(Arc::ptr_eq(&deterministic, &expected));
+    }
+
     fn channel_state_with_limits(
         local_constraints: ChannelConstraints,
         remote_constraints: ChannelConstraints,
@@ -13178,7 +13249,6 @@ mod tests {
                 waiting_forward_tlc_tasks: HashMap::new(),
                 remote_shutdown_script: None,
                 local_shutdown_script: Script::default(),
-                latest_commitment_transaction: None,
                 remote_commitment_points: Vec::new(),
                 remote_channel_public_keys: Some(remote_signer.get_base_public_keys()),
                 local_shutdown_info: None,
@@ -13204,6 +13274,8 @@ mod tests {
             funding_abort_detail: None,
             private_key: None,
             needs_backup: false,
+            musig2_agg_context_local_first: Default::default(),
+            musig2_agg_context_remote_first: Default::default(),
             pending_remove_effects_v2: 0,
             pending_payment_notifications: Default::default(),
             replayed_tlc_updates_v2: 0,

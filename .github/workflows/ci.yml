@@ -165,10 +165,13 @@ jobs:
       - name: Install Grcov
         run: make coverage-install-tools
       - name: Generate Code Coverage Report of Unit Tests
-        run: |
-          make coverage-run-unittests
-          make coverage-collect-data
+        run: make coverage-run-unittests
+      # Collect and upload even when a test flaked, so develop's coverage does not go stale.
+      - name: Collect Code Coverage Data
+        if: always()
+        run: make coverage-collect-data
       - name: Upload Code Coverage Report of Unit Tests
+        if: always()
         uses: codecov/codecov-action@v4
         with:
           files: coverage-report.info

@@ -128,7 +128,7 @@ async fn test_buffered_trampoline_inspection_rejects_closed_upstream() {
         .unwrap()
         .expiry = now_timestamp_as_millis_u64() + DEFAULT_FINAL_TLC_EXPIRY_DELTA * 3;
     channel.state = fiber_types::ChannelState::Closed(fiber_types::CloseFlags::empty());
-    node.store.insert_channel_actor_state(channel);
+    node.store.insert_channel_actor_state_for_test(channel);
     let request = buffered_dispatch_test_request(payment_hash, channel_id);
 
     let status = call!(node.network_actor, |reply| {
@@ -156,7 +156,8 @@ async fn test_buffered_trampoline_dispatch_rechecks_removed_upstream() {
         .get_mut(&TLCId::Received(7))
         .unwrap()
         .expiry = now_timestamp_as_millis_u64() + DEFAULT_FINAL_TLC_EXPIRY_DELTA * 3;
-    node.store.insert_channel_actor_state(channel.clone());
+    node.store
+        .insert_channel_actor_state_for_test(channel.clone());
     let request = buffered_dispatch_test_request(payment_hash, channel_id);
     let payment_data = request.clone().into_send_payment_data();
     assert!(payment_data.is_ok(), "{payment_data:?}");
@@ -4879,7 +4880,7 @@ async fn assert_trampoline_success_drains_remaining_tlc(restart: bool) {
     ];
     let (nodes, channels) = create_n_nodes_network_with_visibility(&specifications, 3).await;
     let [node_a, mut node_b, mut node_c] = nodes.try_into().expect("three nodes");
-    assert!(node_b.get_channel_actor_state(channels[0]).session.marker == 0x56320001);
+    assert_v2_session_durable(&node_b.get_channel_actor_state(channels[0]));
     wait_until_node_supports_trampoline_routing(&node_a, &node_b).await;
 
     let amount = 1_500_000_000_u128;

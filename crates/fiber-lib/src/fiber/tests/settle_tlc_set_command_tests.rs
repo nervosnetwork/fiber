@@ -43,6 +43,12 @@ pub(crate) struct MockStore {
 }
 
 impl MockStore {
+    /// Test doubles keep the whole state in memory, so seeding an already
+    /// established channel needs no separate fixed-field record.
+    pub(crate) fn insert_channel_actor_state_for_test(&self, state: ChannelActorState) {
+        self.insert_channel_actor_state(state);
+    }
+
     pub(crate) fn new() -> Self {
         Self {
             invoices: RefCell::new(HashMap::new()),
@@ -439,7 +445,6 @@ pub(crate) fn create_test_channel_state_with_tlc(
             local_shutdown_info: None,
             remote_shutdown_info: None,
             shutdown_transaction_hash: None,
-            latest_commitment_transaction: None,
             reestablishing: false,
             connectivity_state: fiber_types::ChannelConnectivityState::Online,
             pending_replay_updates: vec![],
@@ -466,6 +471,8 @@ pub(crate) fn create_test_channel_state_with_tlc(
         private_key: None,
         needs_backup: false,
         pending_messages: Default::default(),
+        musig2_agg_context_local_first: Default::default(),
+        musig2_agg_context_remote_first: Default::default(),
     }
 }
 

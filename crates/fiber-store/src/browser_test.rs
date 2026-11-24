@@ -86,6 +86,14 @@ impl StorageBackend for Store {
         guard.get(key.as_ref()).cloned()
     }
 
+    fn multi_get<K: AsRef<[u8]>>(&self, keys: &[K]) -> Vec<Option<Vec<u8>>> {
+        // One borrow of the map, so a write cannot land between the keys.
+        let guard = self.data.borrow();
+        keys.iter()
+            .map(|key| guard.get(key.as_ref()).cloned())
+            .collect()
+    }
+
     fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&self, key: K, value: V) {
         let mut guard = self.data.borrow_mut();
         guard.insert(key.as_ref().to_vec(), value.as_ref().to_vec());

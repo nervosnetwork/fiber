@@ -233,6 +233,14 @@ fiber/
 5. **Regenerate RPC docs** if you modify RPC methods (`make gen-rpc-doc`)
 6. **Use `cargo fmt` before committing** - formatting is strictly enforced
 
+## Code review
+
+1. Reachability: Report a defect only with a concrete path in current code (caller, input, or interleaving), using valid stored data and normal APIs. Concerns requiring already-corrupted data or hypothetical future use are non-blocking hardening suggestions; state their preconditions.
+
+2. Migrations: Require compatibility only with released source layouts, excluding databases or schema epochs from intermediate or unreleased develop builds.
+
+3. Tests: For each requested test, name the specific code mutation it must catch. Failures caused by unrelated malformed fixtures do not count.
+
 ## Continuous Integration
 
 CI runs the following checks (all must pass):

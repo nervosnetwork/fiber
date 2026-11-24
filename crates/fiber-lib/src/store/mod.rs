@@ -1,4 +1,5 @@
 pub mod actor;
+mod channel_state;
 pub mod namespace;
 pub mod restore;
 #[cfg(any(test, feature = "sample"))]

@@ -287,7 +287,7 @@ impl<S: RpcServerStore + Clone + Send + Sync + 'static> SubscriptionRpcServerImp
                         authorization.auth.tenant_token_epochs().map(|epochs| {
                             transport::RevocationWatch::new(
                                 tenant_id.clone(),
-                                meta.token_epoch.unwrap_or(0),
+                                meta.token_epoch.map(|e| e.0).unwrap_or(0),
                                 epochs.clone(),
                             )
                         })

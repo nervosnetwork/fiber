@@ -327,7 +327,7 @@ impl BiscuitAuth {
             }
             if let Some(epochs) = &self.tenant_token_epochs {
                 let current_epoch = epochs.get(&tenant_id);
-                let token_epoch = meta.token_epoch.unwrap_or(0);
+                let token_epoch = meta.token_epoch.map(|e| e.0).unwrap_or(0);
                 if token_epoch < current_epoch {
                     return Err(anyhow::anyhow!(
                         "tenant token has been revoked (epoch {token_epoch} < {current_epoch})"
@@ -394,7 +394,7 @@ impl BiscuitAuth {
             }
             if let Some(epochs) = &self.tenant_token_epochs {
                 let current_epoch = epochs.get(&tenant_id);
-                let token_epoch = meta.token_epoch.unwrap_or(0);
+                let token_epoch = meta.token_epoch.map(|e| e.0).unwrap_or(0);
                 if token_epoch < current_epoch {
                     return Err(anyhow::anyhow!(
                         "tenant token has been revoked (epoch {token_epoch} < {current_epoch})"
@@ -420,7 +420,7 @@ impl BiscuitAuth {
 /// Authority-block metadata extracted from a Biscuit token in a single `Authorizer` pass.
 pub(crate) struct TokenMetadata {
     pub(crate) tenant_id: Option<TenantId>,
-    pub(crate) token_epoch: Option<u64>,
+    pub(crate) token_epoch: Option<crate::rpc_scope::TokenEpoch>,
     pub(crate) node_id: Option<NodeId>,
 }
 
@@ -442,10 +442,10 @@ pub(crate) fn extract_token_metadata(token: &Biscuit) -> Result<TokenMetadata> {
     let epochs: Vec<(i64,)> = authorizer.query("data($epoch) <- token_epoch($epoch)")?;
     let token_epoch = match epochs.as_slice() {
         [] => None,
-        [(epoch,)] => Some(
+        [(epoch,)] => Some(crate::rpc_scope::TokenEpoch(
             u64::try_from(*epoch)
                 .map_err(|_| anyhow!("token authority block contains negative token_epoch"))?,
-        ),
+        )),
         _ => {
             return Err(anyhow!(
                 "token authority block must contain at most one token_epoch fact"

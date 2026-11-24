@@ -246,6 +246,22 @@ pub fn mock_ecdsa_signature() -> EcdsaSignature {
     let signature = SECP256K1.sign_ecdsa(&message, &secret_key);
     EcdsaSignature(signature)
 }
+/// A persisted V2 session belongs to this node: it is bound to the funding key and is the
+/// commitment-owner nonce the protocol signs with.
+pub fn assert_v2_session_durable(state: &crate::fiber::channel::ChannelActorState) {
+    assert_eq!(
+        state.session.own.owner, state.local_channel_public_keys.funding_pubkey,
+        "V2 session must be persisted and bound to the funding key"
+    );
+    assert!(
+        matches!(
+            state.session.own.purpose,
+            fiber_types::NoncePurposeV2::Commitment
+        ),
+        "V2 session must hold the commitment-owner nonce"
+    );
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 pub fn generate_store() -> (Store, TempDir) {
     let temp_dir = TempDir::new("test-fnn-node");
@@ -1486,7 +1502,7 @@ impl NetworkNode {
         reload_params: Option<ReloadParams>,
     ) {
         let channel_id = state.id;
-        self.store.insert_channel_actor_state(state);
+        self.store.insert_channel_actor_state_for_test(state);
         self.network_actor
             .send_message(NetworkActorMessage::new_command(
                 FiberActorCommand::ControlFiberChannel(ChannelCommandWithId {
@@ -1911,6 +1927,10 @@ impl NetworkNode {
     }
 
     pub async fn start(&mut self) {
+        // A real restart is a new process with an empty cache: the node has to rebuild every
+        // channel from its record, not from a snapshot the previous process left in memory.
+        #[cfg(test)]
+        self.store.clear_channel_cache();
         let config = self.get_node_config();
         let new = Self::new_with_config(config).await;
         *self = new;

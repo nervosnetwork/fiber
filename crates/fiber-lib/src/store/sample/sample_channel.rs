@@ -46,6 +46,8 @@ impl ChannelActorState {
             private_key: None,
             needs_backup: false,
             pending_messages: Default::default(),
+            musig2_agg_context_local_first: Default::default(),
+            musig2_agg_context_remote_first: Default::default(),
             pending_remove_effects_v2: 0,
             pending_payment_notifications: Default::default(),
             replayed_tlc_updates_v2: 0,

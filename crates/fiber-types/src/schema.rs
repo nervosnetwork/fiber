@@ -2,7 +2,8 @@
 //! +--------------+----------------------+-----------------------------+
 //! | KeyPrefix::  | Key::                | Value::                     |
 //! +--------------+----------------------+-----------------------------+
-//! | 0            | Hash256              | ChannelActorState           |
+//! | 0            | Hash256              | ChannelMutableData          |
+//! | 1            | Hash256              | ChannelImmutableData        |
 //! | 16           | Pubkey               | PersistentNetworkActorState |
 //! | 32           | Hash256              | CkbInvoice                  |
 //! | 33           | Payment_hash         | CkbInvoice Preimage         |
@@ -25,6 +26,8 @@
 //! +--------------+----------------------+-----------------------------+
 
 pub const CHANNEL_ACTOR_STATE_PREFIX: u8 = 0;
+/// Fixed channel fields, written once when the channel opens.
+pub const CHANNEL_IMMUTABLE_STATE_PREFIX: u8 = 1;
 pub const PUBLIC_KEY_NETWORK_ACTOR_STATE_PREFIX: u8 = 16;
 pub const CKB_INVOICE_PREFIX: u8 = 32;
 pub const PREIMAGE_PREFIX: u8 = 33;

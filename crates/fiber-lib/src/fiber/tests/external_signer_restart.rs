@@ -668,7 +668,7 @@ async fn check_real_opening_commitments() {
         Box::pin(setup_pending_external_channel(false, &signer)).await;
     let before = node_a.get_channel_actor_state(channel_id);
     assert!(before.signer.is_none());
-    assert!(before.latest_commitment_transaction.is_none());
+    assert!(before.latest_commitment_transaction().is_none());
     let premature: Result<SubmitSignedFundingTxResult, String> = node_a
         .send_rpc_request(
             "submit_signed_funding_tx",
@@ -969,7 +969,7 @@ async fn maybe_submit_fixture_funding(node: &NetworkNode, channel_id: Hash256) {
     let funding = &state.ephemeral_config.external_funding;
     if funding.enabled
         && !funding.signed_submitted
-        && state.latest_commitment_transaction.is_some()
+        && state.latest_commitment_transaction().is_some()
         && matches!(state.state, ChannelState::SigningCommitment(flags)
             if flags.contains(fiber_types::SigningCommitmentFlags::COMMITMENT_SIGNED_SENT))
     {
@@ -2364,7 +2364,7 @@ async fn check_signature_deadline(
     let deadline = state.pending_tlc_signature_deadline().unwrap();
     assert!(!state.signature_tlc_deadline_reached(deadline - 1));
     assert!(state.signature_tlc_deadline_reached(deadline));
-    let previous_tx = state.latest_commitment_transaction.clone().unwrap();
+    let previous_tx = state.latest_commitment_transaction().unwrap();
     let previous_numbers = state.commitment_numbers;
     let (sender, mut messages) = tokio::sync::mpsc::unbounded_channel();
     let (network, network_task) = Actor::spawn(None, DeadlineNetworkProbe, sender)
@@ -2396,7 +2396,8 @@ async fn check_signature_deadline(
         .is_err());
     assert!(state.signing_context.is_awaiting_signature());
     state.state = ready_state;
-    let signed_tx = state.latest_commitment_transaction.take();
+    let saved_incoming = state.session.incoming.take();
+    let saved_pending_incoming = state.session.pending_incoming.take();
     assert!(channel
         .handle_shutdown_command(
             &mut state,
@@ -2409,7 +2410,8 @@ async fn check_signature_deadline(
         .await
         .is_err());
     assert!(state.signing_context.is_awaiting_signature());
-    state.latest_commitment_transaction = signed_tx;
+    state.session.incoming = saved_incoming;
+    state.session.pending_incoming = saved_pending_incoming;
 
     let (reply, receive) = tokio::sync::oneshot::channel();
     let notification = SignerNotification::ChannelSignatureReady {
@@ -2459,7 +2461,7 @@ async fn check_signature_deadline(
     assert_eq!(state.commitment_numbers, previous_numbers);
     assert_eq!(
         state
-            .latest_commitment_transaction
+            .latest_commitment_transaction()
             .as_ref()
             .unwrap()
             .as_slice(),
@@ -2605,7 +2607,7 @@ async fn test_internal_channel_maintenance_force_closes_stalled_local_announced_
     tenant.stop().await;
     public_node.stop().await;
 
-    let previous_tx = public_state.latest_commitment_transaction.clone().unwrap();
+    let previous_tx = public_state.latest_commitment_transaction().unwrap();
     public_state.ephemeral_config.is_internal_channel = true;
     for tlc in &mut public_state.tlc_state.offered_tlcs.tlcs {
         tlc.expiry = 0;

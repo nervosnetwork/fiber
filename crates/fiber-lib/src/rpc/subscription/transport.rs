@@ -14,7 +14,7 @@ use super::service::EventStream;
 /// Live revocation watcher for a tenant-scoped WebSocket subscription.
 pub(super) struct RevocationWatch {
     tenant_id: TenantId,
-    token_epoch: u64,
+    token_epoch: crate::rpc_scope::TokenEpoch,
     epochs: TenantTokenEpochs,
     rx: tokio::sync::watch::Receiver<u64>,
 }
@@ -24,7 +24,7 @@ impl RevocationWatch {
         let rx = epochs.subscribe_revocations();
         Self {
             tenant_id,
-            token_epoch,
+            token_epoch: crate::rpc_scope::TokenEpoch(token_epoch),
             epochs,
             rx,
         }
@@ -32,7 +32,7 @@ impl RevocationWatch {
 
     async fn wait_revoked(mut self) {
         loop {
-            if self.epochs.get(&self.tenant_id) > self.token_epoch {
+            if self.epochs.get(&self.tenant_id) > self.token_epoch.0 {
                 return;
             }
             if self.rx.changed().await.is_err() {

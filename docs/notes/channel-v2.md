@@ -163,19 +163,25 @@ records and archived V1 records on retry. Back up the complete data directory
 before confirming the migration. Unknown layouts (including unpublished PR
 intermediate epochs), corrupt records and nonempty unversioned stores are refused.
 
-The shared `fiber_types::channel_v2_validation::decode_channel_actor_data` codec
-requires an exact current record, feature byte `1` and a V2 session marker. It
-does not synthesize missing fields or accept an old suffix. Store getters,
-channel iteration and raw `fiber_types::deserialize::<ChannelActorData>` calls
-share that codec, without revalidating all cryptographic snapshots on every read.
+The shared `fiber_types::channel_v2_validation::decode_channel_actor_data_parts`
+codec requires exact current records and feature byte `1`. It does not synthesize
+missing fields or accept an old suffix.
+
+Two layouts exist while upgrading: released `v0.10.0-rc2` ..= `v0.10.1` appended
+`Option<ChannelSessionV2>` to the rc1 record and prefixed that session with the
+four-byte marker `0x56320001`; the current layout stores `ChannelSessionV2`
+without the marker. The admission migration reads the released layout explicitly
+(validating the marker) and converts it, while every reopen uses the current
+layout only. Store getters and channel iteration share that codec, without
+revalidating all cryptographic snapshots on every read.
 Opening a current database validates every channel's retained signing intents,
 including closed history, before writes. Actor restoration also invokes
 `validate_session` before writes or signing.
 
-The public raw-KV helper `fiber_types::deserialize` now requires
-`DeserializeOwned + 'static` rather than `Deserialize<'a>`. This source-level
-API change enables safe actual-type dispatch for owned stored values. Callers
-that need borrowed decoded values can use `bincode::deserialize` directly.
+The public raw-KV helper `fiber_types::deserialize` is a plain bincode read and
+does not validate what it decodes, so a channel read through it is unchecked: use
+`decode_channel_actor_data_parts` for channel records, which checks both records
+and the channel id.
 
 Current preflight uses the backend's existing paged prefix iterator (100 records
 per page), so retained closed histories are not all materialized at once. Every

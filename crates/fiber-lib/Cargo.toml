@@ -22,6 +22,7 @@ ckb-testtool = { version = "1", optional = true }
 ckb-types = "1"
 clap = { version = "4.5.2", features = ["derive", "env", "string"] }
 clap-serde-derive = "0.2.1"
+dashmap = "5"
 either = "1.15.0"
 fiber-sphinx = "3"
 fiber-json-types = { path = "../fiber-json-types", features = ["all"] }

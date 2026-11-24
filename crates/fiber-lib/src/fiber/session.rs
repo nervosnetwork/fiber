@@ -1,14 +1,11 @@
 //! Independent, durable signing sessions for commitment-owner V2 exchanges.
 
+use fiber_types::channel_v2_validation::secret_nonce_v2_parts;
 use fiber_types::{
     ChannelSessionV2, Hash256, NoncePurposeV2, Privkey, Pubkey, SigningNonceV2,
     INITIAL_COMMITMENT_NUMBER,
 };
-use musig2::{
-    AggNonce, BinaryEncoding, KeyAggContext, PartialSignature, PubNonce, SecNonce, SecNonceBuilder,
-};
-
-pub(super) const SESSION_MARKER: u32 = 0x56320001;
+use musig2::{AggNonce, BinaryEncoding, KeyAggContext, PartialSignature, PubNonce, SecNonce};
 
 /// Allocate the initial owner-bound signing session before constructing a channel.
 pub(crate) fn new_session(
@@ -34,7 +31,6 @@ pub(crate) fn new_public_session(
     remote_nonce: Option<PubNonce>,
 ) -> ChannelSessionV2 {
     ChannelSessionV2 {
-        marker: SESSION_MARKER,
         own,
         own_retired: Vec::new(),
         bootstrap_remote_nonce: remote_nonce.clone(),
@@ -71,18 +67,18 @@ pub(super) fn allocate_nonce(
     key: &Privkey,
 ) -> SigningNonceV2 {
     let seed = rand::random::<[u8; 32]>();
-    let mut record = SigningNonceV2 {
+    let public_nonce =
+        secret_nonce_v2_parts(seed, channel_id, owner, number, purpose, key).public_nonce();
+    SigningNonceV2 {
         seed,
         channel_id,
         owner,
         number,
         purpose,
-        public_nonce: SecNonceBuilder::new(seed).build().public_nonce(),
+        public_nonce,
         context: None,
         signature: None,
-    };
-    record.public_nonce = secret_nonce(&record, key).public_nonce();
-    record
+    }
 }
 
 pub(super) fn guarded_sign(
@@ -97,10 +93,11 @@ pub(super) fn guarded_sign(
     if let Some(signature) = record.signature {
         return Ok(signature);
     }
-    if record.public_nonce != secret_nonce(record, key).public_nonce() {
+    let secnonce = secret_nonce(record, key);
+    if record.public_nonce != secnonce.public_nonce() {
         return Err("Invalid persisted V2 nonce seed/key".to_owned());
     }
-    let signature = musig2::sign_partial(aggregate, key, secret_nonce(record, key), nonce, message)
+    let signature = musig2::sign_partial(aggregate, key, secnonce, nonce, message)
         .map_err(|error| error.to_string())?;
     record.signature = Some(signature);
     Ok(signature)

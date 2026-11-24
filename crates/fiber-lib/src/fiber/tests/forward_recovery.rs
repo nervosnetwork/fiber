@@ -427,8 +427,8 @@ async fn test_pending_forward_queue_survives_recovery_and_relinks_after_creation
                 upstream, hash,
             )));
         let (store, _dir) = crate::tests::test_utils::generate_store();
-        store.insert_channel_actor_state(incoming);
-        store.insert_channel_actor_state(outgoing);
+        store.insert_channel_actor_state_for_test(incoming);
+        store.insert_channel_actor_state_for_test(outgoing);
         let (network, task) = Actor::spawn(None, SilentNetworkActor, Default::default())
             .await
             .unwrap();
@@ -474,7 +474,7 @@ async fn test_pending_forward_queue_survives_recovery_and_relinks_after_creation
         let mut created = offered_tlc(3, 1000, hash, None);
         created.forwarding_tlc = Some((upstream, 0));
         outgoing.tlc_state.offered_tlcs.tlcs.push(created);
-        store.insert_channel_actor_state(outgoing);
+        store.insert_channel_actor_state_for_test(outgoing);
         actor.recover_pending_forward_tlcs(&myself, &mut incoming);
         assert!(incoming.waiting_forward_tlc_tasks.is_empty());
         assert!(incoming.retryable_tlc_operations.is_empty());
@@ -561,7 +561,7 @@ async fn test_pending_trampoline_forward_is_resumed_only_for_matching_tlc() {
             .waiting_forward_tlc_tasks
             .insert(TLCId::Received(0), TEST_SHARED_SECRET);
         let (store, _dir) = crate::tests::test_utils::generate_store();
-        store.insert_channel_actor_state(state.clone());
+        store.insert_channel_actor_state_for_test(state.clone());
         let request = SendPaymentDataBuilder::new(
             gen_rand_fiber_public_key(),
             900,
@@ -802,7 +802,7 @@ async fn test_recover_pending_forward_tlc_preserves_scoped_session_key_with_same
         .waiting_forward_tlc_tasks
         .insert(TLCId::Received(0), TEST_SHARED_SECRET);
     let (store, _dir) = crate::tests::test_utils::generate_store();
-    store.insert_channel_actor_state(state.clone());
+    store.insert_channel_actor_state_for_test(state.clone());
 
     // Insert an ordinary (unscoped) payment sharing the same payment_hash.
     let ordinary_request =
@@ -904,7 +904,7 @@ async fn test_recover_pending_forward_tlc_preserves_deferred_hosted_delivery_wit
         .waiting_forward_tlc_tasks
         .insert(TLCId::Received(0), TEST_SHARED_SECRET);
     let (store, _dir) = crate::tests::test_utils::generate_store();
-    store.insert_channel_actor_state(state.clone());
+    store.insert_channel_actor_state_for_test(state.clone());
 
     // Persist a Deferred LspPaymentDelivery (attempt_count == 0, no PaymentSession yet).
     let delivery = LspPaymentDelivery {

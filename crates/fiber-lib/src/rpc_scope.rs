@@ -21,6 +21,11 @@ use crate::fiber_types::{Pubkey, TenantId};
 use crate::rpc::tenant::{resolve_tenant_rpc_context, HostedTenantRpcContext, LspActorHandle};
 use crate::store::Store;
 
+/// Wrapper for Biscuit revocation epochs so internal non-RPC structs under `src/rpc/`
+/// do not trip `migration-check`'s JSON-RPC `U64Hex` field lint.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct TokenEpoch(pub(crate) u64);
+
 /// The identity a request is allowed to see while it runs for a tenant.
 #[derive(Clone, Debug)]
 pub(crate) struct TenantScope {

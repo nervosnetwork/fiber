@@ -179,6 +179,7 @@ async fn run() -> Result<(), ExitMessage> {
     let raw_store = open_store_with_migration(
         store_path,
         parsed_fiber_config.store_sync_writes(),
+        parsed_fiber_config.store_channel_cache_capacity(),
         Box::new(cli_confirm),
         Box::new(cli_progress),
     )

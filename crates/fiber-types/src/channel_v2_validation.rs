@@ -1,6 +1,5 @@
 //! Validation of the actual current persisted channel schema before database writes.
-use std::io::Cursor;
-
+use bincode::Options;
 use ckb_types::{packed, prelude::*};
 use molecule::prelude::Entity;
 use musig2::{
@@ -8,29 +7,61 @@ use musig2::{
 };
 
 use crate::{
-    ChannelActorData, NoncePurposeV2, Privkey, Pubkey, RevocationContextV2, SigningNonceV2,
+    ChannelActorData, Hash256, NoncePurposeV2, Privkey, Pubkey, RevocationContextV2, SigningNonceV2,
 };
 
-/// Decode an exact persisted V2 channel and check its session marker.
+/// Decode an exact persisted V2 channel.
+///
+/// Decoding reads the slice, not a stream: a record of another layout puts a length prefix where
+/// this layout expects something else, and a stream reader would reserve that length before
+/// noticing it has run out of input. The slice reader and the explicit limit turn such a record
+/// into an error instead.
 pub fn decode_channel_actor_data(bytes: &[u8]) -> Result<ChannelActorData, String> {
-    let mut cursor = Cursor::new(bytes);
-    let channel: ChannelActorData =
-        bincode::deserialize_from(&mut cursor).map_err(|e| e.to_string())?;
-    check(
-        cursor.position() == bytes.len() as u64,
-        "Trailing bytes in channel record",
-    )?;
-    check(
-        channel.session.marker == 0x56320001,
-        "Missing or invalid V2 session",
-    )?;
-    Ok(channel)
+    bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .with_limit(bytes.len() as u64)
+        .reject_trailing_bytes()
+        .deserialize::<ChannelActorData>(bytes)
+        .map_err(|e| e.to_string())
 }
 
 /// Decode a compatible stored channel and fully validate retained signing intents.
 /// Use at database preflight/validation boundaries before writes or actor startup.
 pub fn decode_and_validate_channel_actor_data(bytes: &[u8]) -> Result<ChannelActorData, String> {
     let channel = decode_channel_actor_data(bytes)?;
+    validate_channel_v2(&channel).map_err(|e| format!("Invalid channel {}: {e}", channel.id))?;
+    Ok(channel)
+}
+
+/// Decode one exact persisted record of `T`, rejecting trailing bytes.
+fn decode_exact<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, String> {
+    bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .with_limit(bytes.len() as u64)
+        .reject_trailing_bytes()
+        .deserialize::<T>(bytes)
+        .map_err(|e| e.to_string())
+}
+
+/// Decode the two stored records of a channel into the merged in-memory view.
+pub fn decode_channel_actor_data_parts(
+    id: &Hash256,
+    mutable_bytes: &[u8],
+    immutable_bytes: &[u8],
+) -> Result<ChannelActorData, String> {
+    let immutable: crate::ChannelImmutableData = decode_exact(immutable_bytes)?;
+    let mutable: crate::ChannelMutableData = decode_exact(mutable_bytes)?;
+    check(immutable.id == *id, "Channel immutable record id mismatch")?;
+    Ok(ChannelActorData::from_parts(immutable, mutable))
+}
+
+/// Decode and fully validate the two stored records of a channel.
+pub fn decode_and_validate_channel_actor_data_parts(
+    id: &Hash256,
+    mutable_bytes: &[u8],
+    immutable_bytes: &[u8],
+) -> Result<ChannelActorData, String> {
+    let channel = decode_channel_actor_data_parts(id, mutable_bytes, immutable_bytes)?;
     validate_channel_v2(&channel).map_err(|e| format!("Invalid channel {}: {e}", channel.id))?;
     Ok(channel)
 }
@@ -49,12 +80,32 @@ pub fn canonical_funding_witness(key: [u8; 32], signature: musig2::CompactSignat
 
 /// Regenerate only the nonce allocated by this durable record, never a new session.
 pub fn secret_nonce_v2(record: &SigningNonceV2, key: &Privkey) -> SecNonce {
-    SecNonceBuilder::new(record.seed)
+    secret_nonce_v2_parts(
+        record.seed,
+        record.channel_id,
+        record.owner,
+        record.number,
+        record.purpose,
+        key,
+    )
+}
+
+/// Derive a signing nonce from its persisted fields, so a caller that is about to build the
+/// record can compute the public nonce once instead of deriving it twice.
+pub fn secret_nonce_v2_parts(
+    seed: [u8; 32],
+    channel_id: Hash256,
+    owner: Pubkey,
+    number: u64,
+    purpose: NoncePurposeV2,
+    key: &Privkey,
+) -> SecNonce {
+    SecNonceBuilder::new(seed)
         .with_seckey(key)
-        .with_extra_input(&record.channel_id)
-        .with_extra_input(&record.owner.serialize())
-        .with_extra_input(&record.number.to_be_bytes())
-        .with_extra_input(&[match record.purpose {
+        .with_extra_input(&channel_id)
+        .with_extra_input(&owner.serialize())
+        .with_extra_input(&number.to_be_bytes())
+        .with_extra_input(&[match purpose {
             NoncePurposeV2::Commitment => 0,
             NoncePurposeV2::Revocation => 1,
             NoncePurposeV2::Closing => 2,
@@ -358,10 +409,6 @@ fn commitment_snapshot(
 /// Bound-but-unsigned records are legitimate crash-recovery intents.
 pub fn validate_channel_v2(channel: &ChannelActorData) -> Result<(), String> {
     let session = &channel.session;
-    check(
-        session.marker == 0x56320001,
-        "Invalid V2 feature/session marker",
-    )?;
     let funded = matches!(
         channel.state,
         crate::ChannelState::ChannelReady
@@ -374,7 +421,6 @@ pub fn validate_channel_v2(channel: &ChannelActorData) -> Result<(), String> {
         check(
             channel.remote_channel_public_keys.is_some()
                 && channel.funding_tx.is_some()
-                && channel.latest_commitment_transaction.is_some()
                 && session.incoming.is_some()
                 && session.outgoing.is_some(),
             "Missing funded V2 transaction/history",
@@ -846,21 +892,8 @@ pub fn validate_channel_v2(channel: &ChannelActorData) -> Result<(), String> {
             )?;
         }
     }
-    if let Some(incoming) = session
-        .pending_incoming
-        .as_ref()
-        .filter(|incoming| incoming.funding.signature.is_some())
-        .or(session.incoming.as_ref())
-    {
-        check(
-            channel
-                .latest_commitment_transaction
-                .as_ref()
-                .map(Entity::as_slice)
-                == Some(incoming.transaction.as_slice()),
-            "V2 latest usable commitment mismatch",
-        )?;
-    }
+    // The latest usable commitment is `session.pending_incoming`/`session.incoming` itself; there
+    // is nothing left to cross-check.
     if session.own.context.is_some() {
         check(
             session

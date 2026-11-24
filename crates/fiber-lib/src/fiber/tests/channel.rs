@@ -2198,7 +2198,7 @@ async fn test_v2_independent_actor_sessions_duplicates_and_conflicts() {
         assert_eq!(
             incoming.transaction.as_slice(),
             stored_b
-                .latest_commitment_transaction
+                .latest_commitment_transaction()
                 .as_ref()
                 .unwrap()
                 .as_slice()
@@ -4858,7 +4858,7 @@ async fn test_received_tlc_claim_force_closes_after_offline_restart_v2() {
     init_tracing();
     let (mut payer, mut payee, channel_id) =
         create_nodes_with_established_channel(HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT, true).await;
-    assert!(payee.get_channel_actor_state(channel_id).session.marker == 0x56320001);
+    assert_v2_session_durable(&payee.get_channel_actor_state(channel_id));
     let mut claims = Vec::new();
     for algorithm in [HashAlgorithm::Sha256, HashAlgorithm::CkbHash] {
         let preimage = gen_rand_sha256_hash();
@@ -4895,7 +4895,7 @@ async fn test_received_tlc_claim_force_closes_after_offline_restart_v2() {
     }
     let commitment_hash = payee
         .get_channel_actor_state(channel_id)
-        .latest_commitment_transaction
+        .latest_commitment_transaction()
         .clone()
         .unwrap()
         .into_view()
@@ -4957,7 +4957,7 @@ async fn test_received_tlc_claim_force_closes_after_offline_restart_v2() {
     assert_eq!(
         payee
             .get_channel_actor_state(channel_id)
-            .latest_commitment_transaction
+            .latest_commitment_transaction()
             .clone()
             .unwrap()
             .into_view()
@@ -8210,7 +8210,7 @@ async fn test_force_shutdown_awaiting_channel_ready_with_local_commitment() {
 
     let mut node_b_state = node_b.get_channel_actor_state(channel_id);
     assert!(
-        node_b_state.latest_commitment_transaction.is_some(),
+        node_b_state.latest_commitment_transaction().is_some(),
         "test setup must have a local commitment transaction to publish"
     );
     node_b_state.state =
@@ -8278,7 +8278,7 @@ async fn test_force_shutdown_awaiting_channel_ready_without_local_commitment_sho
         .checked_sub(1)
         .expect("established channel has an initial remote commitment");
     node_b_state.connectivity_state = ChannelConnectivityState::Offline;
-    node_b_state.latest_commitment_transaction = None;
+    node_b_state.session.incoming = None;
     node_b
         .update_channel_actor_state(
             node_b_state,
@@ -8331,7 +8331,7 @@ async fn prepare_force_shutdown_awaiting_channel_ready_peer_states(
 
     let mut node_b_state = node_b.get_channel_actor_state(channel_id);
     let remote_commitment_tx = node_b_state
-        .latest_commitment_transaction
+        .latest_commitment_transaction()
         .clone()
         .expect("test setup must have a local commitment transaction to publish")
         .into_view();
@@ -9614,10 +9614,8 @@ async fn test_abandon_failed_channel_without_accept() {
 
     let temp_channel_id = open_channel_result.channel_id;
     let node_a_channel_actor_state = node_a.get_channel_actor_state_unchecked(temp_channel_id);
-    assert!(
-        node_a_channel_actor_state.unwrap().session.marker == 0x56320001,
-        "V2 bootstrap nonce must be durable before advertisement"
-    );
+    // The bootstrap nonce must be durable before advertisement.
+    assert_v2_session_durable(&node_a_channel_actor_state.unwrap());
 
     let res = node_a.send_abandon_channel(temp_channel_id).await;
     assert!(res.is_ok());
@@ -9776,10 +9774,8 @@ async fn test_abandon_channel_with_peer_accept() {
 
     let temp_channel_id = open_channel_result.channel_id;
     let node_a_channel_actor_state = node_a.get_channel_actor_state_unchecked(temp_channel_id);
-    assert!(
-        node_a_channel_actor_state.unwrap().session.marker == 0x56320001,
-        "V2 bootstrap nonce must be durable before advertisement"
-    );
+    // The bootstrap nonce must be durable before advertisement.
+    assert_v2_session_durable(&node_a_channel_actor_state.unwrap());
 
     // stop ckb chain actor to make sure funding tx is not sent
     node_a.send_ckb_chain_message(crate::ckb::CkbChainMessage::Stop);
@@ -9833,7 +9829,7 @@ async fn test_abandon_channel_with_peer_accept() {
     // so node_b will not received `TxCollaborationCommand::TxUpdate` message
     // V2 has durably advertised its bootstrap nonce before collaboration.
     let channel_actor_state = node_b.get_channel_actor_state_unchecked(new_channel_id);
-    assert!(channel_actor_state.unwrap().session.marker == 0x56320001);
+    assert_v2_session_durable(&channel_actor_state.unwrap());
 
     let res = node_b.send_abandon_channel(new_channel_id).await;
     eprintln!("res: {:?}", res);
@@ -11481,7 +11477,7 @@ async fn test_open_channel_with_external_funding() {
         "channel should have exchanged commitments before returning unsigned tx, got {:?}",
         persisted_state.state
     );
-    assert!(persisted_state.latest_commitment_transaction.is_some());
+    assert!(persisted_state.latest_commitment_transaction().is_some());
     let external_funding_state = persisted_state
         .external_funding
         .as_ref()
@@ -12278,8 +12274,8 @@ async fn do_test_external_funding_tx_abort_preserves_recoverable_state() {
 
     // The wallet can sign immediately when open returns; the exit must already be durable.
     let state = node_a.get_channel_actor_state(channel_id);
-    assert!(state.session.marker == 0x56320001);
-    assert!(state.latest_commitment_transaction.is_some());
+    assert_v2_session_durable(&state);
+    assert!(state.latest_commitment_transaction().is_some());
     assert!(!state.ephemeral_config.external_funding.signed_submitted);
     assert!(matches!(state.state, ChannelState::SigningCommitment(flags)
         if flags.contains(SigningCommitmentFlags::COMMITMENT_SIGNED_SENT)));
@@ -12322,7 +12318,7 @@ async fn do_test_external_funding_tx_abort_preserves_recoverable_state() {
     let state = node_a
         .get_channel_actor_state_unchecked(channel_id)
         .expect("TxAbort must not delete signed funding state");
-    assert!(state.latest_commitment_transaction.is_some());
+    assert!(state.latest_commitment_transaction().is_some());
     assert!(state.ephemeral_config.external_funding.signed_submitted);
     assert!(matches!(state.state, ChannelState::AwaitingTxSignatures(_)));
 
@@ -12384,7 +12380,7 @@ async fn do_test_external_funding_can_force_close_after_early_confirmation() {
             let state = node_a.get_channel_actor_state(channel_id);
             if state.funding_tx_confirmed_at.is_some() {
                 assert!(matches!(state.state, ChannelState::AwaitingTxSignatures(_)));
-                assert!(state.latest_commitment_transaction.is_some());
+                assert!(state.latest_commitment_transaction().is_some());
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -12418,8 +12414,8 @@ async fn do_test_external_funding_replays_lost_signed_tx_after_restart() {
     let (channel_id, unsigned_tx) =
         open_external_funding_channel(&node_a, &node_b, 100_000_000_000).await;
     let before = node_a.get_channel_actor_state(channel_id);
-    assert!(before.session.marker == 0x56320001);
-    assert!(before.latest_commitment_transaction.is_some());
+    assert_v2_session_durable(&before);
+    assert!(before.latest_commitment_transaction().is_some());
     let outgoing = before.session.outgoing.clone();
     let signed_tx = mock_sign_external_funding_tx_with_witness(&unsigned_tx, [9u8; 65].pack());
 
@@ -12454,7 +12450,7 @@ async fn do_test_external_funding_replays_lost_signed_tx_after_restart() {
     })
     .await;
     let restored = node_a.get_channel_actor_state(channel_id);
-    assert!(restored.latest_commitment_transaction.is_some());
+    assert!(restored.latest_commitment_transaction().is_some());
     if let Some(outgoing) = outgoing {
         assert_eq!(
             restored
@@ -13373,7 +13369,7 @@ async fn test_tx_signatures_after_channel_ready_rejected() {
         .as_ref()
         .map(|tx| tx.as_slice().to_vec());
     let latest_commitment_bytes_before = state_before
-        .latest_commitment_transaction
+        .latest_commitment_transaction()
         .as_ref()
         .map(|tx| tx.as_slice().to_vec());
 
@@ -13408,12 +13404,12 @@ async fn test_tx_signatures_after_channel_ready_rejected() {
         "funding_tx must not be mutated by a stale peer TxSignatures"
     );
     let latest_commitment_bytes_after = state_after
-        .latest_commitment_transaction
+        .latest_commitment_transaction()
         .as_ref()
         .map(|tx| tx.as_slice().to_vec());
     assert_eq!(
         latest_commitment_bytes_after, latest_commitment_bytes_before,
-        "latest_commitment_transaction must be unchanged by a stale peer TxSignatures"
+        "latest_commitment_transaction() must be unchanged by a stale peer TxSignatures"
     );
 }
 
@@ -13921,7 +13917,6 @@ mod udt_funding_cell_capacity {
                 local_shutdown_info: None,
                 remote_shutdown_info: None,
                 shutdown_transaction_hash: None,
-                latest_commitment_transaction: None,
                 reestablishing: false,
                 connectivity_state: ChannelConnectivityState::Online,
                 pending_replay_updates: vec![],
@@ -13947,6 +13942,8 @@ mod udt_funding_cell_capacity {
             funding_abort_detail: None,
             needs_backup: false,
             pending_messages: Default::default(),
+            musig2_agg_context_local_first: Default::default(),
+            musig2_agg_context_remote_first: Default::default(),
         }
     }
 
