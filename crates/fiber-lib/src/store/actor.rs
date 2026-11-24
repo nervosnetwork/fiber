@@ -1,7 +1,7 @@
 use fiber_store::StorageBackend;
 use fiber_types::now_timestamp_as_millis_u64;
 use ractor::{Actor, ActorProcessingErr, ActorRef};
-#[cfg(not(any(target_arch = "wasm32", test)))]
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -12,6 +12,7 @@ pub struct StoreActorInitializationParameter<S> {
     pub backup_path: PathBuf,
     pub ckb_key_path: PathBuf,
     pub fiber_key_path: PathBuf,
+    pub tenant_store_root: Option<PathBuf>,
     pub backup_interval_hours: u64,
 }
 
@@ -29,6 +30,7 @@ pub struct StoreActorState<S> {
     pub backup_path: PathBuf,
     pub ckb_key_path: PathBuf,
     pub fiber_key_path: PathBuf,
+    pub tenant_store_root: Option<PathBuf>,
     pub backup_interval_hours: u64,
     /// The specific moment the next backup is scheduled to run
     pub next_backup_time: Instant,
@@ -76,6 +78,7 @@ where
             backup_path: args.backup_path,
             ckb_key_path: args.ckb_key_path,
             fiber_key_path: args.fiber_key_path,
+            tenant_store_root: args.tenant_store_root,
             backup_interval_hours: args.backup_interval_hours,
             next_backup_time: first_deadline,
         })
@@ -143,8 +146,13 @@ where
                     "StoreActor: Backup successful. Next routine backup in {} hours.",
                     state.backup_interval_hours
                 );
-                #[cfg(not(any(target_arch = "wasm32", test)))]
-                perform_key_backup(&backup_path, &state.ckb_key_path, &state.fiber_key_path)?;
+                #[cfg(not(target_arch = "wasm32"))]
+                perform_key_backup(
+                    &backup_path,
+                    &state.ckb_key_path,
+                    &state.fiber_key_path,
+                    state.tenant_store_root.as_deref(),
+                )?;
                 Ok(())
             }
             Err(e) => {
@@ -158,31 +166,98 @@ where
     }
 }
 
-#[cfg(not(any(target_arch = "wasm32", test)))]
-/// Backup the node key files to a specified path.
-fn perform_key_backup(
+#[cfg(not(target_arch = "wasm32"))]
+/// Backup the node key files (and hosted tenant identity keys, if present) to a
+/// specified path.
+pub(crate) fn perform_key_backup(
     target_dir: &Path,
     ckb_key_path: &Path,
     fiber_key_path: &Path,
+    tenant_store_root: Option<&Path>,
 ) -> Result<(), String> {
-    if let Err(e) = std::fs::create_dir_all(target_dir) {
-        return Err(format!(
-            "Failed to create backup dir {:?}: {}",
-            target_dir, e
-        ));
-    }
+    create_private_dir_all(target_dir)
+        .map_err(|e| format!("Failed to create backup dir {:?}: {}", target_dir, e))?;
     let keys_to_copy = [(ckb_key_path, "key"), (fiber_key_path, "sk")];
 
     for (src_file, dest_name) in keys_to_copy {
-        if src_file.exists() {
+        if src_file.is_file() {
             let dest_file = target_dir.join(dest_name);
-            if let Err(e) = std::fs::copy(src_file, &dest_file) {
-                return Err(format!("Failed to copy key file {:?}: {}", src_file, e));
-            }
+            copy_private_key_file(src_file, &dest_file)
+                .map_err(|e| format!("Failed to copy key file {:?}: {}", src_file, e))?;
             tracing::info!("Successfully backed up key: {}", dest_name);
         } else {
             tracing::warn!("Key file not found at {:?}, skipping", src_file);
         }
+    }
+
+    if let Some(tenants_root) = tenant_store_root {
+        if tenants_root.is_dir() {
+            let entries = std::fs::read_dir(tenants_root).map_err(|e| {
+                format!("Failed to read tenant store root {:?}: {}", tenants_root, e)
+            })?;
+            let dest_tenants_root = target_dir.join("tenants");
+            let mut backed_up_tenants = 0usize;
+            for entry in entries {
+                let entry = entry.map_err(|e| format!("Failed to read tenant entry: {}", e))?;
+                let file_type = entry.file_type().map_err(|e| {
+                    format!("Failed to inspect tenant entry {:?}: {}", entry.path(), e)
+                })?;
+                if !file_type.is_dir() {
+                    continue;
+                }
+                let src_key = entry.path().join("sk");
+                if !src_key.is_file() {
+                    continue;
+                }
+                if backed_up_tenants == 0 {
+                    create_private_dir_all(&dest_tenants_root).map_err(|e| {
+                        format!(
+                            "Failed to create tenant backup dir {:?}: {}",
+                            dest_tenants_root, e
+                        )
+                    })?;
+                }
+                let dest_tenant_dir = dest_tenants_root.join(entry.file_name());
+                create_private_dir_all(&dest_tenant_dir).map_err(|e| {
+                    format!(
+                        "Failed to create tenant backup dir {:?}: {}",
+                        dest_tenant_dir, e
+                    )
+                })?;
+                let dest_key = dest_tenant_dir.join("sk");
+                copy_private_key_file(&src_key, &dest_key)
+                    .map_err(|e| format!("Failed to copy tenant key {:?}: {}", src_key, e))?;
+                backed_up_tenants += 1;
+            }
+            if backed_up_tenants > 0 {
+                tracing::info!(
+                    "Successfully backed up {} hosted tenant key(s)",
+                    backed_up_tenants
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn create_private_dir_all(path: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn copy_private_key_file(src: &Path, dest: &Path) -> std::io::Result<()> {
+    std::fs::copy(src, dest)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dest, std::fs::Permissions::from_mode(0o600))?;
     }
     Ok(())
 }

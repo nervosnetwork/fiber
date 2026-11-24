@@ -3121,3 +3121,439 @@ async fn test_external_signer_resume_refreshes_and_enforces_remaining_peer_wait(
     })
     .await;
 }
+
+#[tokio::test]
+async fn test_restart_while_awaiting_replacement_commitment_signature_remains_restorable() {
+    Box::pin(async {
+        use crate::fiber::channel::{
+            ChannelActor, ChannelActorStateStore, ChannelEphemeralConfig,
+            ChannelInitializationOperation, ChannelInitializationParameter,
+        };
+        use crate::fiber::channel_signer::SignerNotification;
+        use crate::fiber::types::ReestablishChannelV2;
+        use crate::fiber::FiberActorRef;
+        use fiber_types::{NextChannelSignerMaterial, SignatureRequestId};
+        use ractor::Actor;
+
+        init_tracing();
+        let (_restartable, signer) = RestartableExternalSigner::create().await;
+        let ([mut tenant, mut public_node], channel_id) =
+            setup_restartable_external_channel(false, &signer).await;
+
+        let outbound_payment = tenant
+            .send_payment_keysend(&public_node, 10_000, false)
+            .await
+            .expect("start outbound keysend");
+        approve_fixture_keysend(
+            &signer,
+            &tenant,
+            outbound_payment.payment_hash,
+            10_000,
+            false,
+        )
+        .await;
+        wait_until_async_timeout(|| async {
+            matches!(
+                get_signing_status(&tenant, channel_id)
+                    .await
+                    .map(|r| r.status),
+                Ok(ChannelSigningStatus::SignatureRequired {
+                    transition: ChannelSigningTransition::SendCommitmentSigned,
+                    ..
+                })
+            )
+        })
+        .await;
+        let initial_status = get_signing_status(&tenant, channel_id)
+            .await
+            .unwrap()
+            .status;
+        let initial_submission =
+            prepare_hosted_signature(&signer, channel_id, initial_status).await;
+
+        // Stop the peer before submitting our CS so the peer never accepts it.
+        public_node.stop().await;
+        assert_eq!(
+            submit_signature(&tenant, initial_submission).await.unwrap(),
+            SubmitChannelSignatureResult::Applied
+        );
+        tenant.stop().await;
+
+        let mut tenant_state = tenant.get_channel_actor_state(channel_id);
+        let peer_state = public_node.get_channel_actor_state(channel_id);
+        assert!(tenant_state.tlc_state.waiting_ack);
+        let local_number = tenant_state.get_local_commitment_number();
+        assert_eq!(peer_state.get_remote_commitment_number(), local_number);
+        let original_outgoing = tenant_state
+            .session
+            .outgoing
+            .clone()
+            .expect("original outgoing CS persisted");
+
+        let (sender, _messages) = tokio::sync::mpsc::unbounded_channel();
+        let (network, network_task) = Actor::spawn(None, DeadlineNetworkProbe, sender)
+            .await
+            .unwrap();
+        let network_ref = FiberActorRef::from_network(&network);
+        tenant_state.network = Some(network_ref.clone());
+        let channel = ChannelActor::new(
+            tenant.pubkey,
+            public_node.pubkey,
+            network_ref.clone(),
+            tenant.store.clone(),
+            None,
+        );
+        let (myself, actor_task) = Actor::spawn(None, DeadlineChannelProbe, ()).await.unwrap();
+
+        // Peer reconnects with a rotated commitment nonce at the same commitment number,
+        // forcing resign_outstanding_cs while awaiting external wallet approval.
+        let rotated_peer_nonce = musig2::SecNonce::build([42u8; 32]).build().public_nonce();
+        assert_ne!(
+            Some(&rotated_peer_nonce),
+            tenant_state.session.remote_nonce.as_ref()
+        );
+        tenant_state.mark_reestablishing_offline();
+        let remote_number = tenant_state.get_remote_commitment_number();
+        channel
+            .handle_peer_message(
+                &myself,
+                &mut tenant_state,
+                crate::fiber::types::FiberChannelMessage::ReestablishChannelV2(
+                    ReestablishChannelV2 {
+                        channel_id,
+                        next_commitment_number: local_number,
+                        next_ack_number: remote_number,
+                        next_local_commitment_nonce: rotated_peer_nonce.clone(),
+                    },
+                ),
+            )
+            .await
+            .expect("reestablish triggers replacement signing without error");
+
+        assert!(tenant_state.signing_context.is_awaiting_signature());
+        assert!(
+            tenant_state.session.outgoing.is_some(),
+            "session.outgoing must remain intact until replacement signing finishes"
+        );
+        assert!(tenant_state.tlc_state.waiting_ack);
+
+        // Simulate restart before wallet approval: both store validation and actor restore must succeed.
+        let reloaded = tenant
+            .store
+            .get_channel_actor_state(&channel_id)
+            .expect("funded channel awaiting replacement signature must validate on restart");
+        assert!(reloaded.signing_context.is_awaiting_signature());
+        assert!(reloaded.session.outgoing.is_some());
+        assert!(reloaded.tlc_state.waiting_ack);
+
+        let (restored_actor, restored_handle) = Actor::spawn(
+            None,
+            ChannelActor::new(
+                tenant.pubkey,
+                public_node.pubkey,
+                network_ref.clone(),
+                tenant.store.clone(),
+                None,
+            ),
+            ChannelInitializationParameter {
+                operation: ChannelInitializationOperation::RestoreOfflineChannel(channel_id),
+                ephemeral_config: ChannelEphemeralConfig::default(),
+                private_key: tenant.private_key.clone(),
+            },
+        )
+        .await
+        .expect("channel actor must restore cleanly while awaiting replacement signature");
+        restored_actor.stop(None);
+        restored_handle.await.unwrap();
+
+        // Now approve and submit the replacement signature after restart.
+        let mut resumed = tenant.store.get_channel_actor_state(&channel_id).unwrap();
+        resumed.network = Some(network_ref.clone());
+        let replacement_status = crate::rpc::channel::to_rpc_channel_signing_status(&resumed)
+            .expect("pending replacement signing status");
+        assert!(matches!(
+            replacement_status,
+            ChannelSigningStatus::SignatureRequired {
+                transition: ChannelSigningTransition::SendCommitmentSigned,
+                ..
+            }
+        ));
+        let replacement_submission =
+            prepare_hosted_signature(&signer, channel_id, replacement_status).await;
+        let material = replacement_submission.next_material.clone().unwrap();
+        let notification = SignerNotification::ChannelSignatureReady {
+            channel_id,
+            request_id: SignatureRequestId(replacement_submission.request_id.into()),
+            signature: Ok(musig2::PartialSignature::from_slice(
+                &replacement_submission.partial_signature,
+            )
+            .unwrap()),
+            next_material: Some(NextChannelSignerMaterial {
+                v2_nonces: material
+                    .v2_nonces
+                    .iter()
+                    .map(|n| musig2::PubNonce::from_bytes(n).unwrap())
+                    .collect(),
+                commitment_points: material
+                    .commitment_points
+                    .iter()
+                    .map(|(n, p)| (*n, (*p).try_into().unwrap()))
+                    .collect(),
+                next_commitment_point: material
+                    .next_commitment_point
+                    .map(|p| p.try_into().unwrap()),
+                next_commitment_nonce: material
+                    .next_commitment_nonce
+                    .map(|n| musig2::PubNonce::from_bytes(&n).unwrap()),
+                next_revocation_nonce: material
+                    .next_revocation_nonce
+                    .map(|n| musig2::PubNonce::from_bytes(&n).unwrap()),
+            }),
+            rpc_reply: None,
+        };
+        channel
+            .handle_signer_notification(&myself, &mut resumed, notification)
+            .await
+            .expect("replacement signature applies cleanly after restart");
+
+        assert!(!resumed.signing_context.is_awaiting_signature());
+        assert!(resumed.tlc_state.waiting_ack);
+        let replaced = resumed
+            .session
+            .outgoing
+            .as_ref()
+            .expect("replacement outgoing CS persisted");
+        assert_ne!(
+            replaced.funding.public_nonce,
+            original_outgoing.funding.public_nonce
+        );
+        assert_eq!(replaced.updates, original_outgoing.updates);
+        assert!(
+            tenant.store.get_channel_actor_state(&channel_id).is_some(),
+            "persisted channel remains valid after replacement signature completes"
+        );
+
+        myself.stop(None);
+        network.stop(None);
+        actor_task.await.unwrap();
+        network_task.await.unwrap();
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn test_restart_after_tlc_safety_deadline_does_not_resume_accepted_revoke_and_ack() {
+    Box::pin(async {
+        use crate::fiber::channel::{
+            ChannelActor, ChannelActorStateStore, ChannelEphemeralConfig,
+            ChannelInitializationOperation, ChannelInitializationParameter,
+        };
+        use crate::fiber::channel_signer::SignerNotification;
+        use crate::fiber::network::FiberActorEvent;
+        use crate::fiber::{FiberActorMessage, FiberActorRef};
+        use fiber_types::{NextChannelSignerMaterial, ShuttingDownFlags, SignatureRequestId};
+        use ractor::Actor;
+
+        init_tracing();
+        let (_restartable, signer) = RestartableExternalSigner::create().await;
+        let ([mut tenant, mut public_node], channel_id) =
+            setup_restartable_external_channel(false, &signer).await;
+
+        let deadline_payment = public_node
+            .send_payment(SendPaymentCommand {
+                target_pubkey: Some(tenant.pubkey),
+                amount: Some(10_000),
+                keysend: Some(true),
+                max_fee_rate: Some(1000),
+                final_tlc_expiry_delta: Some(MIN_TLC_EXPIRY_DELTA + 120_000),
+                ..Default::default()
+            })
+            .await
+            .expect("start inbound payment");
+        approve_fixture_keysend(
+            &signer,
+            &public_node,
+            deadline_payment.payment_hash,
+            10_000,
+            true,
+        )
+        .await;
+        wait_until_async_timeout(|| async {
+            let status = get_signing_status(&tenant, channel_id)
+                .await
+                .unwrap()
+                .status;
+            if let ChannelSigningStatus::SignatureRequired { transition, .. } = &status {
+                if *transition == ChannelSigningTransition::SendRevokeAndAck {
+                    return true;
+                }
+                sign_and_submit(&tenant, &signer, channel_id, status).await;
+            }
+            false
+        })
+        .await;
+
+        let status = get_signing_status(&tenant, channel_id)
+            .await
+            .unwrap()
+            .status;
+        let submission = prepare_hosted_signature(&signer, channel_id, status).await;
+        tenant.stop().await;
+        public_node.stop().await;
+
+        let mut state = tenant.get_channel_actor_state(channel_id);
+        let deadline = state.pending_tlc_signature_deadline().unwrap();
+        let previous_remote_number = state.get_remote_commitment_number();
+        let previous_incoming_response = state
+            .session
+            .incoming
+            .as_ref()
+            .and_then(|incoming| incoming.response.as_ref().map(|r| r.as_slice().to_vec()));
+
+        let (sender, mut messages) = tokio::sync::mpsc::unbounded_channel();
+        let (network, network_task) = Actor::spawn(None, DeadlineNetworkProbe, sender)
+            .await
+            .unwrap();
+        let network_ref = FiberActorRef::from_network(&network);
+        state.network = Some(network_ref.clone());
+        let channel = ChannelActor::new(
+            tenant.pubkey,
+            public_node.pubkey,
+            network_ref.clone(),
+            tenant.store.clone(),
+            None,
+        );
+        let (myself, actor_task) = Actor::spawn(None, DeadlineChannelProbe, ()).await.unwrap();
+
+        let material = submission.next_material.clone().unwrap();
+        let notification = SignerNotification::ChannelSignatureReady {
+            channel_id,
+            request_id: SignatureRequestId(submission.request_id.into()),
+            signature: Ok(
+                musig2::PartialSignature::from_slice(&submission.partial_signature).unwrap(),
+            ),
+            next_material: Some(NextChannelSignerMaterial {
+                v2_nonces: material
+                    .v2_nonces
+                    .iter()
+                    .map(|n| musig2::PubNonce::from_bytes(n).unwrap())
+                    .collect(),
+                commitment_points: material
+                    .commitment_points
+                    .iter()
+                    .map(|(n, p)| (*n, (*p).try_into().unwrap()))
+                    .collect(),
+                next_commitment_point: material
+                    .next_commitment_point
+                    .map(|p| p.try_into().unwrap()),
+                next_commitment_nonce: material
+                    .next_commitment_nonce
+                    .map(|n| musig2::PubNonce::from_bytes(&n).unwrap()),
+                next_revocation_nonce: material
+                    .next_revocation_nonce
+                    .map(|n| musig2::PubNonce::from_bytes(&n).unwrap()),
+            }),
+            rpc_reply: None,
+        };
+
+        // Checkpoint the valid SendRevokeAndAck signature before the deadline, simulating a crash
+        // right before `resume_external_v2` runs.
+        assert!(channel
+            .validate_and_checkpoint_signer_notification(
+                &myself,
+                &mut state,
+                notification,
+                deadline.saturating_sub(1),
+            )
+            .await
+            .unwrap()
+            .is_some());
+        assert!(state.signing_context.accepted_signature().is_some());
+
+        // Advance the TLC past the safety deadline before restart.
+        for tlc in &mut state.tlc_state.received_tlcs.tlcs {
+            tlc.expiry = 0;
+        }
+        tenant.store.insert_channel_actor_state(state.clone());
+
+        // Restart the channel actor: pre_start must force-close instead of resuming SendRevokeAndAck.
+        let (restored_actor, restored_handle) = Actor::spawn(
+            None,
+            ChannelActor::new(
+                tenant.pubkey,
+                public_node.pubkey,
+                network_ref.clone(),
+                tenant.store.clone(),
+                None,
+            ),
+            ChannelInitializationParameter {
+                operation: ChannelInitializationOperation::RestoreOfflineChannel(channel_id),
+                ephemeral_config: ChannelEphemeralConfig::default(),
+                private_key: tenant.private_key.clone(),
+            },
+        )
+        .await
+        .expect("channel actor starts and force-closes expired accepted revocation");
+
+        let mut saw_force_close = false;
+        let deadline_wait = tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(msg) = messages.recv().await {
+                match msg {
+                    NetworkActorMessage::Fiber(FiberActorMessage::Event(
+                        FiberActorEvent::ClosingTransactionPending(id, _, _, true),
+                    )) => {
+                        assert_eq!(id, channel_id);
+                        saw_force_close = true;
+                        break;
+                    }
+                    NetworkActorMessage::Fiber(FiberActorMessage::Command(
+                        FiberActorCommand::SendFiberMessage(
+                            crate::fiber::network::FiberMessageWithTarget {
+                                message:
+                                    crate::fiber::types::FiberMessage::ChannelNormalOperation(
+                                        crate::fiber::types::FiberChannelMessage::RevokeAndAckV2(_),
+                                    ),
+                                ..
+                            },
+                        ),
+                    )) => {
+                        panic!(
+                            "pre_start must not transmit RevokeAndAckV2 past TLC safety deadline"
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await;
+        assert!(deadline_wait.is_ok() && saw_force_close);
+
+        let persisted = tenant.get_channel_actor_state(channel_id);
+        assert_eq!(
+            persisted.state,
+            ChannelState::ShuttingDown(ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION)
+        );
+        assert!(!persisted.signing_context.is_awaiting_signature());
+        assert_eq!(
+            persisted.get_remote_commitment_number(),
+            previous_remote_number
+        );
+        assert_eq!(
+            persisted
+                .session
+                .incoming
+                .as_ref()
+                .and_then(|incoming| { incoming.response.as_ref().map(|r| r.as_slice().to_vec()) }),
+            previous_incoming_response,
+            "expired restart must not record a new RevokeAndAckV2 response"
+        );
+
+        restored_actor.stop(None);
+        restored_handle.await.unwrap();
+        myself.stop(None);
+        network.stop(None);
+        actor_task.await.unwrap();
+        network_task.await.unwrap();
+    })
+    .await;
+}

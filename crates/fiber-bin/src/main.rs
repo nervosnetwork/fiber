@@ -160,9 +160,19 @@ async fn run() -> Result<(), ExitMessage> {
         let ckb_key_path = ckb_config.base_dir().join("key");
         let fiber_key_path = parsed_fiber_config.base_dir().join("sk");
         let store_path = parsed_fiber_config.store_path();
+        #[cfg(feature = "lsp")]
+        let tenant_store_root = config.lsp.as_ref().map(|lsp| lsp.tenant_store_root());
+        #[cfg(not(feature = "lsp"))]
+        let tenant_store_root: Option<std::path::PathBuf> = None;
 
-        restore(source_path, &store_path, &fiber_key_path, &ckb_key_path)
-            .map_err(|err| ExitMessage(format!("Failed to restore database: {}", err)))?;
+        restore(
+            source_path,
+            &store_path,
+            &fiber_key_path,
+            &ckb_key_path,
+            tenant_store_root.as_deref(),
+        )
+        .map_err(|err| ExitMessage(format!("Failed to restore database: {}", err)))?;
 
         info!("Successfully restored database to {:?}.", store_path);
         info!("Channels may have been marked as 'Stale' for safety audit.");
@@ -282,6 +292,10 @@ async fn run_node(
             let backup_path = fiber_config.base_dir().join("backups");
             let ckb_key_path = ckb_config.base_dir().join("key");
             let fiber_key_path = fiber_config.base_dir().join("sk");
+            #[cfg(feature = "lsp")]
+            let tenant_store_root = config.lsp.as_ref().map(|lsp| lsp.tenant_store_root());
+            #[cfg(not(feature = "lsp"))]
+            let tenant_store_root = None;
             let store_actor = Actor::spawn_linked(
                 Some("store_actor".to_string()),
                 StoreActor {
@@ -292,6 +306,7 @@ async fn run_node(
                     backup_path,
                     ckb_key_path,
                     fiber_key_path,
+                    tenant_store_root,
                     backup_interval_hours: 24,
                 },
                 root_actor.get_cell(),

@@ -4551,6 +4551,7 @@ async fn assert_v2_actual_backup_rollback_quarantines_matching_malicious_peer() 
         &db,
         &root.path().join("sk"),
         &root.path().join("key"),
+        None,
     )
     .unwrap();
     let store = crate::store::open_store(&db).unwrap();
@@ -4629,6 +4630,116 @@ async fn assert_v2_actual_backup_rollback_quarantines_matching_malicious_peer() 
                 NetworkServiceEvent::ChannelOnline(..) | NetworkServiceEvent::ChannelReady(..)
             )
     )));
+}
+
+#[tokio::test]
+async fn test_restore_marks_hosted_tenant_channels_stale_and_restores_tenant_keys() {
+    use crate::store::NodeNamespace;
+
+    let (a, b, id) = create_nodes_with_established_channel(100000000000, 11800000000, false).await;
+    let public_channel = a.get_channel_actor_state(id);
+    let tenant_channel = b.get_channel_actor_state(id);
+    assert_eq!(public_channel.state, ChannelState::ChannelReady);
+    assert_eq!(tenant_channel.state, ChannelState::ChannelReady);
+
+    let root = tempfile::tempdir().unwrap();
+    let live_db = root.path().join("live");
+    let backup = root.path().join("backup");
+    let src_fiber_key = root.path().join("src_sk");
+    let src_ckb_key = root.path().join("src_key");
+    let src_tenants = root.path().join("src_tenants");
+    std::fs::write(&src_fiber_key, b"public-fiber-sk").unwrap();
+    std::fs::write(&src_ckb_key, b"public-ckb-key").unwrap();
+    std::fs::create_dir_all(src_tenants.join("u1")).unwrap();
+    std::fs::create_dir_all(src_tenants.join("u2")).unwrap();
+    std::fs::write(src_tenants.join("u1").join("sk"), b"tenant-u1-sk").unwrap();
+    std::fs::write(src_tenants.join("u2").join("sk"), b"tenant-u2-sk").unwrap();
+
+    {
+        let store = crate::store::open_store(&live_db).unwrap();
+        store.insert_channel_actor_state_for_test(public_channel.clone());
+        let tenant_u1_store = store.namespaced(NodeNamespace::hosted_tenant("u1"));
+        tenant_u1_store.insert_channel_actor_state_for_test(tenant_channel.clone());
+        let tenant_u2_store = store.namespaced(NodeNamespace::hosted_tenant("u2"));
+        tenant_u2_store.insert_channel_actor_state_for_test(tenant_channel.clone());
+
+        store.backup(&backup).unwrap();
+        crate::store::actor::perform_key_backup(
+            &backup,
+            &src_ckb_key,
+            &src_fiber_key,
+            Some(&src_tenants),
+        )
+        .expect("backup node and tenant keys");
+    }
+
+    assert_eq!(
+        std::fs::read(backup.join("tenants").join("u1").join("sk")).unwrap(),
+        b"tenant-u1-sk"
+    );
+    assert_eq!(
+        std::fs::read(backup.join("tenants").join("u2").join("sk")).unwrap(),
+        b"tenant-u2-sk"
+    );
+
+    // Restoring a backup containing tenant keys without tenant_store_root must fail rather than
+    // silently dropping tenant identity keys.
+    let fresh_host = tempfile::tempdir().unwrap();
+    let restored_db = fresh_host.path().join("store");
+    let restored_fiber_key = fresh_host.path().join("sk");
+    let restored_ckb_key = fresh_host.path().join("key");
+    let restored_tenants = fresh_host.path().join("lsp").join("tenants");
+    assert!(crate::store::restore::restore(
+        &backup,
+        &restored_db,
+        &restored_fiber_key,
+        &restored_ckb_key,
+        None,
+    )
+    .is_err());
+
+    crate::store::restore::restore(
+        &backup,
+        &restored_db,
+        &restored_fiber_key,
+        &restored_ckb_key,
+        Some(&restored_tenants),
+    )
+    .expect("restore DB, public keys, and tenant keys");
+
+    assert_eq!(
+        std::fs::read(&restored_fiber_key).unwrap(),
+        b"public-fiber-sk"
+    );
+    assert_eq!(std::fs::read(&restored_ckb_key).unwrap(), b"public-ckb-key");
+    assert_eq!(
+        std::fs::read(restored_tenants.join("u1").join("sk")).unwrap(),
+        b"tenant-u1-sk"
+    );
+    assert_eq!(
+        std::fs::read(restored_tenants.join("u2").join("sk")).unwrap(),
+        b"tenant-u2-sk"
+    );
+
+    let restored_store = crate::store::open_store(&restored_db).unwrap();
+    assert_eq!(
+        restored_store
+            .get_channel_actor_state(&id)
+            .expect("restored public channel")
+            .state,
+        ChannelState::Stale
+    );
+    for tenant_id in ["u1", "u2"] {
+        let tenant_store = restored_store.namespaced(NodeNamespace::hosted_tenant(tenant_id));
+        assert_eq!(
+            tenant_store
+                .get_channel_actor_state(&id)
+                .expect("restored hosted tenant channel")
+                .state,
+            ChannelState::Stale,
+            "restore must quarantine hosted tenant {tenant_id}'s half of funded channels"
+        );
+    }
 }
 
 #[tokio::test]

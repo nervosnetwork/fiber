@@ -5376,7 +5376,10 @@ where
         state.ephemeral_config.external_funding = external_funding_runtime;
         state.ephemeral_config.is_internal_channel = is_internal_channel;
         if let Some((_, request)) = state.signing_context.awaiting_signature() {
-            if state.signing_context.accepted_signature().is_some() {
+            if state.signature_tlc_deadline_reached(now_timestamp_as_millis_u64()) {
+                self.force_close_expired_signature(&myself, &mut state)
+                    .await?;
+            } else if state.signing_context.accepted_signature().is_some() {
                 Box::pin(self.resume_external_v2(&myself, &mut state, request.transition()))
                     .await?;
             }
@@ -10957,7 +10960,7 @@ impl ChannelActorState {
     fn finish_recovery_v2(&mut self, myself: &ActorRef<ChannelActorMessage>) {
         if self.reestablishing
             && self.recovery_peer_v2.is_some()
-            && !self.tlc_state.waiting_ack
+            && (!self.tlc_state.waiting_ack || self.resigning_outgoing_v2)
             && matches!(self.state, ChannelState::ShuttingDown(_))
         {
             self.reestablishing = false;
@@ -10969,7 +10972,7 @@ impl ChannelActorState {
         }
         if self.reestablishing
             && self.recovery_peer_v2.is_some()
-            && !self.tlc_state.waiting_ack
+            && (!self.tlc_state.waiting_ack || self.resigning_outgoing_v2)
             && self.state == ChannelState::ChannelReady
         {
             self.clear_waiting_peer_response();
@@ -11165,9 +11168,18 @@ impl ChannelActorState {
         })
     }
 
+    #[cfg(test)]
     fn prepare_outgoing_v2(
         &mut self,
         initial: bool,
+    ) -> ProcessingChannelResult<(CommitmentSignedV2, SettlementData)> {
+        self.prepare_outgoing_v2_with_replace(initial, false)
+    }
+
+    fn prepare_outgoing_v2_with_replace(
+        &mut self,
+        initial: bool,
+        replace_existing: bool,
     ) -> ProcessingChannelResult<(CommitmentSignedV2, SettlementData)> {
         self.ensure_v2_not_quarantined()?;
         let mut session = self.session.clone();
@@ -11178,11 +11190,15 @@ impl ChannelActorState {
         if session.remote_number != number {
             return Err(invalid("Remote V2 nonce number mismatch"));
         }
+        let mut replaced_updates = None;
         if let Some(previous) = &session.outgoing {
             let old = CommitmentSignedV2::try_from(previous.request.clone())
                 .map_err(|e| invalid(e.to_string()))?;
             if old.commitment_number == number {
-                return Err(invalid("V2 CS already signed; replay exact cached request"));
+                if !replace_existing {
+                    return Err(invalid("V2 CS already signed; replay exact cached request"));
+                }
+                replaced_updates = Some(previous.updates.clone());
             }
         }
         let remote = session
@@ -11226,12 +11242,14 @@ impl ChannelActorState {
         } else {
             Some(self.revocation_context_v2(true, number)?)
         };
+        let mut updates = replaced_updates.unwrap_or_default();
+        updates.append(&mut self.collect_pending_tlc_updates());
         session.outgoing = Some(OutgoingCommitmentV2 {
             peer_wait_started_at: crate::now_timestamp_as_millis_u64(),
             request: request.clone().into(),
             transaction: transaction.data(),
             settlement: settlement.clone(),
-            updates: self.collect_pending_tlc_updates(),
+            updates,
             funding,
             revocation,
             revocation_context,
@@ -12343,32 +12361,27 @@ where
             }
         }
         if resign_outstanding_cs {
-            if !state.channel_signer.is_local() {
+            if !state.channel_signer.is_local() && !pending_send {
                 let owner = *state.get_remote_funding_pubkey();
                 state.fresh_external_nonce_v2(owner, local, NoncePurposeV2::Commitment)?;
                 state.fresh_external_nonce_v2(owner, local, NoncePurposeV2::Revocation)?;
             }
-            // Carry the original updates into the regenerated round so another crash can replay
-            // them. `pending_replay_updates` and `outgoing.updates` are disjoint by construction
-            // (`prepare_outgoing_v2` drains the former into the latter), and the merged list is
-            // drained again by the next commitment, so repeated crashes cannot accumulate it.
-            let mut updates = outgoing
+            // Keep the previous `session.outgoing` and `waiting_ack` intact until the replacement
+            // signature completes, so a restart while awaiting external approval never leaves a
+            // funded channel without outgoing history. `prepare_outgoing_v2_with_replace` carries
+            // `outgoing.updates` forward atomically when the replacement is signed.
+            state.replayed_tlc_updates_v2 = outgoing
                 .as_ref()
                 .expect("outstanding CS validated")
                 .updates
-                .clone();
-            state.replayed_tlc_updates_v2 = updates.len();
-            updates.append(&mut state.pending_replay_updates);
-            state.pending_replay_updates = updates;
-            {
-                let session = &mut state.session;
-                session.outgoing = None;
-            }
-            state.set_waiting_ack(myself, false);
+                .len();
+            state.resigning_outgoing_v2 = true;
             tracing::debug!(
                 "Channel {} abandoned a stale V2 CommitmentSigned and will sign a fresh one",
                 state.get_id()
             );
+        } else {
+            state.resigning_outgoing_v2 = false;
         }
         self.replay_effects_v2(state);
         state.pending_remove_effects_v2 = state.session.remove_effects.len();
@@ -12447,17 +12460,12 @@ where
             .await?;
         }
         state.finish_recovery_v2(myself);
-        if resign_outstanding_cs {
-            state.resigning_outgoing_v2 = true;
-            if !state.reestablishing {
-                // Recovery no longer owes an ACK, so this is an ordinary CS exchange again.
-                if let Err(err) = self.handle_commitment_signed_command(myself, state).await {
-                    state.resigning_outgoing_v2 = false;
-                    return Err(err);
-                }
+        if state.resigning_outgoing_v2 && !state.reestablishing {
+            // Recovery no longer owes an ACK, so this is an ordinary CS exchange again.
+            if let Err(err) = self.handle_commitment_signed_command(myself, state).await {
+                state.resigning_outgoing_v2 = false;
+                return Err(err);
             }
-        } else {
-            state.resigning_outgoing_v2 = false;
         }
         if let Some(close) = state.session.closing.as_ref() {
             if !close.superseded_by_force_close {
@@ -12640,7 +12648,9 @@ where
         if state.reestablishing && !recovering_bootstrap && !resuming_accepted {
             return Err(invalid("V2 signing waits for reestablishment obligations"));
         }
-        if state.tlc_state.waiting_ack {
+        let replacing_outgoing =
+            state.tlc_state.waiting_ack && (state.resigning_outgoing_v2 || resuming_accepted);
+        if state.tlc_state.waiting_ack && !replacing_outgoing {
             state.resigning_outgoing_v2 = false;
             return Ok(());
         }
@@ -12665,13 +12675,14 @@ where
         {
             return Ok(());
         }
-        let (request, settlement) = match state.prepare_outgoing_v2(flags.is_some()) {
-            Err(ProcessingChannelError::AwaitingExternalSignature) => {
-                self.checkpoint_external_wait(state);
-                return Ok(());
-            }
-            result => result?,
-        };
+        let (request, settlement) =
+            match state.prepare_outgoing_v2_with_replace(flags.is_some(), replacing_outgoing) {
+                Err(ProcessingChannelError::AwaitingExternalSignature) => {
+                    self.checkpoint_external_wait(state);
+                    return Ok(());
+                }
+                result => result?,
+            };
         if let Some(flags) = flags {
             state.update_state(ChannelState::SigningCommitment(
                 flags | SigningCommitmentFlags::OUR_COMMITMENT_SIGNED_SENT,
@@ -12684,7 +12695,9 @@ where
         let replayed = std::mem::take(&mut state.replayed_tlc_updates_v2);
         self.store.insert_channel_actor_state(state.clone());
         // Publish only after IDs, contents and the exact signing intent are durable.
-        for update in &state.session.outgoing.as_ref().expect("signed CS").updates[replayed..] {
+        let updates = &state.session.outgoing.as_ref().expect("signed CS").updates;
+        let skip = replayed.min(updates.len());
+        for update in &updates[skip..] {
             state.send_message_to_peer(match update {
                 fiber_types::TlcReplayUpdate::Add(add) => FiberMessage::add_tlc(add.clone()),
                 fiber_types::TlcReplayUpdate::Remove(remove) => {
@@ -12812,8 +12825,8 @@ where
             && !state.is_acceptor
             && !state.ephemeral_config.external_funding.signed_submitted;
         state.finish_recovery_v2(myself);
-        if (needs_cs || external_reply)
-            && !state.tlc_state.waiting_ack
+        if (((needs_cs || external_reply) && !state.tlc_state.waiting_ack)
+            || state.resigning_outgoing_v2)
             && (!state.reestablishing || (flags.is_some() && state.recovery_peer_v2.is_some()))
         {
             self.handle_commitment_signed_command(myself, state).await?;
@@ -14241,14 +14254,14 @@ where
         else {
             return Ok(None);
         };
-        if state.signing_context.accepted_signature() == Some(&receipt) {
-            return Ok(Some((request, signature)));
-        }
         if state.signature_tlc_deadline_reached(now) {
             self.force_close_expired_signature(myself, state).await?;
             return Err(invalid(
                 "External signature request expired at signing safety deadline",
             ));
+        }
+        if state.signing_context.accepted_signature() == Some(&receipt) {
+            return Ok(Some((request, signature)));
         }
         let content = request.content();
         let binding = content

@@ -198,6 +198,24 @@ impl Store {
         self.namespace.as_ref()
     }
 
+    /// Return all hosted tenant namespaces that have persisted state in this
+    /// physical store.
+    pub fn hosted_tenant_namespaces(&self) -> Vec<NodeNamespace> {
+        let mut seen = HashSet::new();
+        let mut namespaces = Vec::new();
+        for (key, _) in self
+            .inner
+            .prefix_iterator(NodeNamespace::physical_prefix().to_vec())
+        {
+            if let Some(namespace) = NodeNamespace::parse_hosted_tenant_from_physical_key(&key) {
+                if seen.insert(namespace.clone()) {
+                    namespaces.push(namespace);
+                }
+            }
+        }
+        namespaces
+    }
+
     /// Initialize or migrate this logical store to the current Fiber schema.
     ///
     /// A namespaced store owns its own migration version key, so migrations

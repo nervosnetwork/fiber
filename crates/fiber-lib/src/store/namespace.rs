@@ -31,4 +31,20 @@ impl NodeNamespace {
         prefix.extend_from_slice(namespace);
         prefix
     }
+
+    pub(crate) const fn physical_prefix() -> &'static [u8] {
+        NODE_NAMESPACE_KEY_PREFIX
+    }
+
+    /// Extract a hosted tenant namespace from a physical store key, if the key
+    /// belongs to one.
+    pub(crate) fn parse_hosted_tenant_from_physical_key(key: &[u8]) -> Option<Self> {
+        let rest = key.strip_prefix(NODE_NAMESPACE_KEY_PREFIX)?;
+        let len_bytes: [u8; 4] = rest.get(..4)?.try_into().ok()?;
+        let len = u32::from_be_bytes(len_bytes) as usize;
+        let ns_bytes = rest.get(4..4usize.checked_add(len)?)?;
+        let ns = std::str::from_utf8(ns_bytes).ok()?;
+        let tenant_id = ns.strip_prefix("hosted-tenant/")?;
+        Some(Self::hosted_tenant(tenant_id))
+    }
 }

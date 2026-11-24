@@ -5243,6 +5243,7 @@ mod store_actor_tests {
             backup_path: temp_dir.path().to_path_buf(),
             ckb_key_path: temp_dir.path().to_path_buf(),
             fiber_key_path: temp_dir.path().to_path_buf(),
+            tenant_store_root: None,
             backup_interval_hours: 24,
         };
 
@@ -5284,6 +5285,7 @@ mod store_actor_tests {
                 backup_path: temp_dir.path().to_path_buf(),
                 ckb_key_path: temp_dir.path().to_path_buf(),
                 fiber_key_path: temp_dir.path().to_path_buf(),
+                tenant_store_root: None,
                 backup_interval_hours: 24,
             },
             root_actor.get_cell(),

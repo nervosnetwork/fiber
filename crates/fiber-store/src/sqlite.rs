@@ -227,6 +227,14 @@ impl StorageBackend for Store {
     }
 
     fn restore(&self, restore_path: &Path, db_path: &Path) -> Result<(), StoreError> {
+        Self::restore_db(restore_path, db_path)
+    }
+}
+
+impl Store {
+    /// Restore the SQLite database from a backup without opening a live handle on
+    /// `db_path` first.
+    pub fn restore_db(restore_path: &Path, db_path: &Path) -> Result<(), StoreError> {
         // Restore source: restore_path/data.sqlite
         let source_file = restore_path.join("data.sqlite");
         // Target db file: db_path/data.sqlite
