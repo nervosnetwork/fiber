@@ -1,14 +1,99 @@
-use fiber_types::{ChannelActorData, ChannelSessionV2};
+use fiber_types::ChannelActorData;
 
-use super::{decode_as_new, OldChannelActorData};
+use super::super::{
+    convert_named, decode_as_new, ChannelSessionV2Wire, CurrentChannelSessionV2Wire,
+    IncomingCommitmentV2Wire, OldChannelActorData, OutgoingCommitmentV2Wire,
+    ReleasedChannelSessionV2Wire,
+};
 
 /// The released v0.10.0-rc2 ..= v0.10.1 layout: the session is prefixed with its marker.
 pub(super) const RELEASED_SESSION_MARKER: u32 = 0x56320001;
 
+pub(super) fn to_released_settlement(
+    data: fiber_types::SettlementData,
+) -> fiber_types_0100::SettlementData {
+    fiber_types_0100::SettlementData {
+        local_amount: data.local_amount,
+        remote_amount: data.remote_amount,
+        tlcs: data
+            .tlcs
+            .into_iter()
+            .map(|tlc| fiber_types_0100::SettlementTlc {
+                tlc_id: decode_as_new(tlc.tlc_id).unwrap(),
+                hash_algorithm: decode_as_new(tlc.hash_algorithm).unwrap(),
+                payment_amount: tlc.payment_amount,
+                payment_hash: decode_as_new(tlc.payment_hash).unwrap(),
+                expiry: tlc.expiry,
+                local_key: decode_as_new(
+                    tlc.local_key
+                        .expect("released v0.10.1 settlement TLC always stores local_key"),
+                )
+                .unwrap(),
+                remote_key: decode_as_new(tlc.remote_key).unwrap(),
+            })
+            .collect(),
+    }
+}
+
+fn to_released_session(session: fiber_types::ChannelSessionV2) -> ReleasedChannelSessionV2Wire {
+    let wire: CurrentChannelSessionV2Wire = decode_as_new(session).unwrap();
+    ChannelSessionV2Wire {
+        own: wire.own,
+        own_retired: wire.own_retired,
+        remote_nonce: wire.remote_nonce,
+        remote_number: wire.remote_number,
+        bootstrap_remote_nonce: wire.bootstrap_remote_nonce,
+        remote_ready: wire.remote_ready,
+        outgoing: wire.outgoing.map(|out| OutgoingCommitmentV2Wire {
+            peer_wait_started_at: out.peer_wait_started_at,
+            request: out.request,
+            transaction: out.transaction,
+            settlement: to_released_settlement(out.settlement),
+            updates: out.updates,
+            funding: out.funding,
+            revocation: out.revocation,
+            revocation_context: out.revocation_context,
+        }),
+        incoming: wire.incoming.map(|inc| IncomingCommitmentV2Wire {
+            request: inc.request,
+            funding: inc.funding,
+            revocation: inc.revocation,
+            revocation_context: inc.revocation_context,
+            transaction: inc.transaction,
+            settlement: to_released_settlement(inc.settlement),
+            response: inc.response,
+        }),
+        pending_incoming: wire.pending_incoming.map(|inc| IncomingCommitmentV2Wire {
+            request: inc.request,
+            funding: inc.funding,
+            revocation: inc.revocation,
+            revocation_context: inc.revocation_context,
+            transaction: inc.transaction,
+            settlement: to_released_settlement(inc.settlement),
+            response: inc.response,
+        }),
+        pending_ack: wire.pending_ack,
+        last_ack: wire.last_ack,
+        revocation_effect: wire
+            .revocation_effect
+            .map(|(revocation, settlement)| (revocation, to_released_settlement(settlement))),
+        bootstrap_settlement: wire.bootstrap_settlement.map(to_released_settlement),
+        remove_effects: wire
+            .remove_effects
+            .into_iter()
+            .map(|(tlc, execution)| (convert_named(tlc).unwrap(), execution))
+            .collect(),
+        closing: wire.closing,
+    }
+}
+
 pub(super) fn released_v2(
     channel: ChannelActorData,
-) -> (OldChannelActorData, Option<(u32, ChannelSessionV2)>) {
-    let session = channel.session.clone();
+) -> (
+    OldChannelActorData,
+    Option<(u32, ReleasedChannelSessionV2Wire)>,
+) {
+    let session = to_released_session(channel.session.clone());
     let latest_commitment_transaction = channel.latest_commitment_transaction();
     let old = OldChannelActorData {
         state: decode_as_new(channel.state).unwrap(),

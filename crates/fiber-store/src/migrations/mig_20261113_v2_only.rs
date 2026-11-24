@@ -182,20 +182,130 @@ fn convert_channel_actor_data(
 }
 
 /// Released v0.10.0-rc2 ..= v0.10.1 wrote a session marker in front of the session, which this
-/// layout no longer stores. Reading the pair `(marker, session)` consumes exactly those released
-/// bytes and drops the marker.
+/// layout no longer stores. Its nested `SettlementData` and `TlcInfo` also used the released
+/// v0.10.1 binary layout (untagged `SettlementTlc::local_key` and no `TlcInfo::upstream_tlc_key`).
 const RELEASED_SESSION_MARKER: u32 = 0x56320001;
 
-struct ReleasedSessionV2(ChannelSessionV2);
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct OutgoingCommitmentV2Wire<S> {
+    pub peer_wait_started_at: u64,
+    pub request: String,
+    pub transaction: String,
+    pub settlement: S,
+    pub updates: Vec<fiber_types::TlcReplayUpdate>,
+    pub funding: fiber_types::SigningNonceV2,
+    pub revocation: Option<fiber_types::SigningNonceV2>,
+    pub revocation_context: Option<fiber_types::RevocationContextV2>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct IncomingCommitmentV2Wire<S> {
+    pub request: String,
+    pub funding: fiber_types::SigningNonceV2,
+    pub revocation: Option<fiber_types::SigningNonceV2>,
+    pub revocation_context: Option<fiber_types::RevocationContextV2>,
+    pub transaction: String,
+    pub settlement: S,
+    pub response: Option<String>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct ChannelSessionV2Wire<S, T> {
+    pub own: fiber_types::SigningNonceV2,
+    pub own_retired: Vec<fiber_types::SigningNonceV2>,
+    pub remote_nonce: Option<Vec<u8>>,
+    pub remote_number: u64,
+    pub bootstrap_remote_nonce: Option<Vec<u8>>,
+    pub remote_ready: Option<String>,
+    pub outgoing: Option<OutgoingCommitmentV2Wire<S>>,
+    pub incoming: Option<IncomingCommitmentV2Wire<S>>,
+    pub pending_incoming: Option<IncomingCommitmentV2Wire<S>>,
+    pub pending_ack: Option<String>,
+    pub last_ack: Option<String>,
+    pub revocation_effect: Option<(fiber_types::RevocationData, S)>,
+    pub bootstrap_settlement: Option<S>,
+    pub remove_effects: Vec<(T, Option<u32>)>,
+    pub closing: Option<fiber_types::ClosingSessionV2>,
+}
+
+pub(crate) type ReleasedChannelSessionV2Wire =
+    ChannelSessionV2Wire<fiber_types_0100::SettlementData, fiber_types_0100::TlcInfo>;
+pub(crate) type CurrentChannelSessionV2Wire =
+    ChannelSessionV2Wire<fiber_types::SettlementData, fiber_types::TlcInfo>;
+
+struct ReleasedSessionV2(ReleasedChannelSessionV2Wire);
 
 impl<'de> serde::Deserialize<'de> for ReleasedSessionV2 {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let (marker, session) = <(u32, ChannelSessionV2)>::deserialize(deserializer)?;
+        let (marker, session) =
+            <(u32, ReleasedChannelSessionV2Wire)>::deserialize(deserializer)?;
         if marker != RELEASED_SESSION_MARKER {
             return Err(serde::de::Error::custom("Invalid V2 session marker"));
         }
         Ok(Self(session))
     }
+}
+
+fn convert_outgoing_commitment(
+    old: OutgoingCommitmentV2Wire<fiber_types_0100::SettlementData>,
+) -> Result<OutgoingCommitmentV2Wire<fiber_types::SettlementData>, String> {
+    Ok(OutgoingCommitmentV2Wire {
+        peer_wait_started_at: old.peer_wait_started_at,
+        request: old.request,
+        transaction: old.transaction,
+        settlement: convert_settlement(old.settlement)?,
+        updates: old.updates,
+        funding: old.funding,
+        revocation: old.revocation,
+        revocation_context: old.revocation_context,
+    })
+}
+
+fn convert_incoming_commitment(
+    old: IncomingCommitmentV2Wire<fiber_types_0100::SettlementData>,
+) -> Result<IncomingCommitmentV2Wire<fiber_types::SettlementData>, String> {
+    Ok(IncomingCommitmentV2Wire {
+        request: old.request,
+        funding: old.funding,
+        revocation: old.revocation,
+        revocation_context: old.revocation_context,
+        transaction: old.transaction,
+        settlement: convert_settlement(old.settlement)?,
+        response: old.response,
+    })
+}
+
+fn convert_released_session(
+    old: ReleasedChannelSessionV2Wire,
+) -> Result<ChannelSessionV2, String> {
+    let current = CurrentChannelSessionV2Wire {
+        own: old.own,
+        own_retired: old.own_retired,
+        remote_nonce: old.remote_nonce,
+        remote_number: old.remote_number,
+        bootstrap_remote_nonce: old.bootstrap_remote_nonce,
+        remote_ready: old.remote_ready,
+        outgoing: old.outgoing.map(convert_outgoing_commitment).transpose()?,
+        incoming: old.incoming.map(convert_incoming_commitment).transpose()?,
+        pending_incoming: old
+            .pending_incoming
+            .map(convert_incoming_commitment)
+            .transpose()?,
+        pending_ack: old.pending_ack,
+        last_ack: old.last_ack,
+        revocation_effect: old
+            .revocation_effect
+            .map(|(revocation, settlement)| Ok::<_, String>((revocation, convert_settlement(settlement)?)))
+            .transpose()?,
+        bootstrap_settlement: old.bootstrap_settlement.map(convert_settlement).transpose()?,
+        remove_effects: old
+            .remove_effects
+            .into_iter()
+            .map(|(tlc, execution)| Ok::<_, String>((convert_named(tlc)?, execution)))
+            .collect::<Result<Vec<_>, _>>()?,
+        closing: old.closing,
+    };
+    decode_as_new(current)
 }
 
 fn released_channel(
@@ -208,8 +318,12 @@ fn released_channel(
     }
     // Everything with a suffix was written by v0.10.0-rc2 ..= v0.10.1, so its error is the one
     // that explains the record (an invalid marker, a broken session) rather than "trailing bytes".
-    decode_exact::<(OldChannelActorData, Option<ReleasedSessionV2>)>(value)
-        .map(|(channel, session)| (channel, session.map(|session| session.0)))
+    let (channel, session) =
+        decode_exact::<(OldChannelActorData, Option<ReleasedSessionV2>)>(value)?;
+    let session = session
+        .map(|session| convert_released_session(session.0))
+        .transpose()?;
+    Ok((channel, session))
 }
 
 /// Read a channel record in whichever layout the database is in: an already split pair, or a whole
@@ -530,7 +644,22 @@ fn scan(store: &dyn MigrationStore, apply: bool) -> Result<(), String> {
             }
             continue;
         }
-        let record: OldChannelData = decode_exact(&value)?;
+        let record: OldChannelData = match decode_exact(&value) {
+            Ok(old) => old,
+            Err(old_error) => match decode_exact::<ChannelData>(&value) {
+                Ok(current) => {
+                    // Already converted by an interrupted run before db-version advanced.
+                    if key.len() < 33 || key[key.len() - 32..] != current.channel_id.as_ref()[..] {
+                        return Err("Invalid watchtower channel key".to_owned());
+                    }
+                    if current.channel_features != ChannelFeatures::V2 {
+                        return Err("Unsupported watchtower channel features".to_owned());
+                    }
+                    continue;
+                }
+                Err(_) => return Err(old_error),
+            },
+        };
         if key.len() < 33 || key[key.len() - 32..] != record.channel_id.as_ref()[..] {
             return Err("Invalid watchtower channel key".to_owned());
         }
@@ -588,7 +717,25 @@ fn scan(store: &dyn MigrationStore, apply: bool) -> Result<(), String> {
         // Released records have no hosted execution scope. Convert fields by name
         // so adding optional local metadata cannot shift bincode's nested layout.
         for (key, value) in store.iter_prefix(&[PAYMENT_SESSION_PREFIX]) {
-            let old: fiber_types_0100::PaymentSession = decode_exact(&value)?;
+            let old: fiber_types_0100::PaymentSession = match decode_exact(&value) {
+                Ok(old) => old,
+                Err(old_error) => match decode_exact::<fiber_types::PaymentSession>(&value) {
+                    Ok(current) => {
+                        if current.request.upstream_tlc_key.is_some()
+                            || key
+                                != [
+                                    &[PAYMENT_SESSION_PREFIX],
+                                    current.request.payment_hash.as_ref(),
+                                ]
+                                .concat()
+                        {
+                            return Err("Invalid released payment session key".to_owned());
+                        }
+                        continue;
+                    }
+                    Err(_) => return Err(old_error),
+                },
+            };
             let converted: fiber_types::PaymentSession = convert_named(old)?;
             if key
                 != [
@@ -607,7 +754,26 @@ fn scan(store: &dyn MigrationStore, apply: bool) -> Result<(), String> {
             }
         }
         for (key, value) in store.iter_prefix(&[ATTEMPT_PREFIX]) {
-            let old: fiber_types_0100::Attempt = decode_exact(&value)?;
+            let old: fiber_types_0100::Attempt = match decode_exact(&value) {
+                Ok(old) => old,
+                Err(old_error) => match decode_exact::<fiber_types::Attempt>(&value) {
+                    Ok(current) => {
+                        if current.upstream_tlc_key.is_some()
+                            || key
+                                != [
+                                    &[ATTEMPT_PREFIX],
+                                    current.payment_hash.as_ref(),
+                                    &current.id.to_le_bytes(),
+                                ]
+                                .concat()
+                        {
+                            return Err("Invalid released payment attempt key".to_owned());
+                        }
+                        continue;
+                    }
+                    Err(_) => return Err(old_error),
+                },
+            };
             let converted: fiber_types::Attempt = convert_named(old)?;
             if key
                 != [
@@ -627,7 +793,13 @@ fn scan(store: &dyn MigrationStore, apply: bool) -> Result<(), String> {
             }
         }
         for (key, value) in store.iter_prefix(&[WATCHTOWER_SUPERSEDED_SETTLEMENT_PREFIX]) {
-            let snapshots: Vec<fiber_types_0100::SettlementData> = decode_exact(&value)?;
+            let snapshots: Vec<fiber_types_0100::SettlementData> = match decode_exact(&value) {
+                Ok(old) => old,
+                Err(old_error) => match decode_exact::<Vec<fiber_types::SettlementData>>(&value) {
+                    Ok(_) => continue,
+                    Err(_) => return Err(old_error),
+                },
+            };
             let converted = snapshots
                 .into_iter()
                 .map(convert_settlement)

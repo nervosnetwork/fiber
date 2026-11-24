@@ -816,3 +816,105 @@ fn test_funding_evidence_for_another_channel_does_not_block_orphan_retirement() 
     assert_eq!(store.get(archive_key(&key)).unwrap(), encoded);
     assert_split_channel(&store, &other);
 }
+
+#[test]
+fn test_released_v2_channel_with_unresolved_tlc_and_remove_effects_migrates() {
+    let (_dir, store) = database();
+    let mut channel = sample(87);
+
+    // Choose a valid secp256k1 private key whose first byte is 0x02 so decoding it as
+    // head's `Option<Privkey>` fails with an invalid Option tag if released decoding regresses.
+    let raw_key = [0x02u8; 32];
+    let local_key = fiber_types::Privkey::from(&raw_key);
+    let remote_key = fiber_types::Privkey::from(&[0x03u8; 32]).pubkey();
+    let tlc = fiber_types::SettlementTlc {
+        tlc_id: fiber_types::TLCId::Offered(7),
+        hash_algorithm: fiber_types::HashAlgorithm::CkbHash,
+        payment_amount: 50_000,
+        payment_hash: fiber_types::Hash256::from([0x11; 32]),
+        expiry: 1_700_000_000_000,
+        local_key: Some(local_key.clone()),
+        local_key_pubkey: Some(local_key.pubkey()),
+        local_key_commitment_number: None,
+        remote_key,
+    };
+    let settlement = fiber_types::SettlementData {
+        local_amount: 100_000,
+        remote_amount: 200_000,
+        tlcs: vec![tlc],
+    };
+    channel.session.bootstrap_settlement = Some(settlement.clone());
+    let mut old_tlc = OldChannelActorData::samples(89)
+        .remove(1)
+        .tlc_state
+        .offered_tlcs
+        .tlcs
+        .remove(0);
+    old_tlc.amount = 50_000;
+    let current_tlc: fiber_types::TlcInfo = super::convert_named(old_tlc).unwrap();
+    assert_eq!(current_tlc.upstream_tlc_key, None);
+    channel.session.remove_effects = vec![(current_tlc, Some(1))];
+
+    let key = actor_key(&channel.id);
+    let encoded = bincode::serialize(&released_v2(channel.clone())).unwrap();
+    // Prove the released bytes cannot be decoded directly as head's ChannelSessionV2.
+    assert!(
+        decode_exact::<(OldChannelActorData, Option<(u32, ChannelSessionV2)>)>(&encoded).is_err(),
+        "released v0.10.1 session with 0x02-prefixed TLC key must differ from head layout"
+    );
+    store.put(&key, &encoded);
+
+    migrate(&store).unwrap();
+    let restored = assert_split_channel(&store, &channel);
+    let restored_tlc = &restored
+        .session
+        .bootstrap_settlement
+        .as_ref()
+        .unwrap()
+        .tlcs[0];
+    assert_eq!(restored_tlc.local_key.as_ref(), Some(&local_key));
+    assert_eq!(restored_tlc.local_key_pubkey, Some(local_key.pubkey()));
+    assert_eq!(restored_tlc.local_key_commitment_number, None);
+    assert_eq!(restored.session.remove_effects.len(), 1);
+    assert_eq!(restored.session.remove_effects[0].0.upstream_tlc_key, None);
+
+    // Also verify outgoing and incoming commitment snapshots carrying unresolved TLCs round-trip.
+    let mut full_session = channel.session.clone();
+    full_session.outgoing = Some(fiber_types::OutgoingCommitmentV2 {
+        peer_wait_started_at: 123,
+        request: Default::default(),
+        transaction: Default::default(),
+        settlement: settlement.clone(),
+        updates: vec![],
+        funding: channel.session.own.clone(),
+        revocation: None,
+        revocation_context: None,
+    });
+    full_session.incoming = Some(fiber_types::IncomingCommitmentV2 {
+        request: Default::default(),
+        funding: channel.session.own.clone(),
+        revocation: None,
+        revocation_context: None,
+        transaction: Default::default(),
+        settlement: settlement.clone(),
+        response: None,
+    });
+    let mut full_channel = channel.clone();
+    full_channel.session = full_session.clone();
+    let full_released = released_v2(full_channel);
+    let full_encoded = bincode::serialize(&full_released).unwrap();
+    assert!(
+        decode_exact::<(OldChannelActorData, Option<(u32, ChannelSessionV2)>)>(&full_encoded)
+            .is_err()
+    );
+    let (_, decoded_session) = super::released_channel(&full_encoded).unwrap();
+    let decoded_session = decoded_session.expect("decoded V2 session");
+    assert_eq!(
+        decoded_session.outgoing.as_ref().unwrap().settlement,
+        settlement
+    );
+    assert_eq!(
+        decoded_session.incoming.as_ref().unwrap().settlement,
+        settlement
+    );
+}
