@@ -8179,16 +8179,28 @@ where
         temporary_channel_id: &Hash256,
         final_channel_id: Hash256,
     ) {
-        let Some(mut record) = self.store.get_channel_open_record(temporary_channel_id) else {
+        let record = self
+            .store
+            .get_channel_open_record(temporary_channel_id)
+            .map(|mut record| {
+                record.channel_id = final_channel_id;
+                record.update_status(ChannelOpeningStatus::FundingTxBuilding);
+                record
+            });
+        let opening = self
+            .store
+            .get_tenant_channel_opening(temporary_channel_id)
+            .map(|mut opening| {
+                opening.channel_id = final_channel_id;
+                opening
+            });
+        if record.is_none() && opening.is_none() {
             return;
-        };
-
-        if let Some(opening) = self.store.get_tenant_channel_opening(temporary_channel_id) {
-            self.store
-                .delete_tenant_channel_opening(temporary_channel_id);
-            let mut opening = opening;
-            opening.channel_id = final_channel_id;
-            self.store.put_tenant_channel_opening(opening);
+        }
+        let has_opening = opening.is_some();
+        self.store
+            .move_channel_open_records(temporary_channel_id, record, opening);
+        if has_opening {
             if let Some(replies) = self
                 .pending_tenant_opening_replies
                 .remove(temporary_channel_id)
@@ -8199,10 +8211,6 @@ where
                     .extend(replies);
             }
         }
-        self.store.delete_channel_open_record(temporary_channel_id);
-        record.channel_id = final_channel_id;
-        record.update_status(ChannelOpeningStatus::FundingTxBuilding);
-        self.store.insert_channel_open_record(record);
     }
 
     /// Check peer's node announcement and log warnings if funding amount is insufficient for auto-accept

@@ -10748,6 +10748,14 @@ pub trait ChannelOpenRecordStore {
     fn insert_channel_open_record(&self, record: ChannelOpenRecord);
     /// Delete the record for the given channel ID.
     fn delete_channel_open_record(&self, channel_id: &Hash256);
+    /// Atomically move persisted opening records from `temporary_channel_id` to their
+    /// updated channel IDs in a single write batch.
+    fn move_channel_open_records(
+        &self,
+        temporary_channel_id: &Hash256,
+        record: Option<ChannelOpenRecord>,
+        opening: Option<TenantChannelOpening>,
+    );
 }
 
 /// A wrapper on CommitmentTransaction that has a partial signature along with

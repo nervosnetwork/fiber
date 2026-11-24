@@ -17,6 +17,7 @@ pub fn ensure_hosted_watch_channel(
     store: &Store,
     tenant: &HostedTenantRecord,
     channel_id: Hash256,
+    quotas: &crate::lsp_config::WatchtowerQuotas,
 ) -> Result<(), String> {
     let node_id = tenant_watchtower_node_id(&tenant.tenant_pubkey);
     if store.get_watch_channel(&node_id, &channel_id).is_some() {
@@ -28,7 +29,7 @@ pub fn ensure_hosted_watch_channel(
         let snapshot = state.hosted_watch_channel_snapshot()?;
         let signing_scope = events.watchtower(&node_id);
         let signing_update = signing_scope.prepare_created(channel_id);
-        store.insert_watch_channel(
+        store.insert_watch_channel_checked(
             node_id,
             channel_id,
             snapshot.funding_udt_type_script,
@@ -36,7 +37,8 @@ pub fn ensure_hosted_watch_channel(
             snapshot.settlement_data,
             snapshot.channel_features,
             snapshot.payout_lock_script,
-        );
+            quotas,
+        )?;
         signing_update.publish();
         return Ok(());
     }
@@ -60,7 +62,7 @@ pub fn ensure_hosted_watch_channel(
     }
     let signing_scope = events.watchtower(&node_id);
     let signing_update = signing_scope.prepare_created(channel_id);
-    store.insert_watch_channel(
+    store.insert_watch_channel_checked(
         node_id.clone(),
         channel_id,
         snapshot.funding_udt_type_script,
@@ -70,7 +72,8 @@ pub fn ensure_hosted_watch_channel(
         invert_empty_settlement(snapshot.settlement_data),
         snapshot.channel_features,
         snapshot.remote_payout_lock_script,
-    );
+        quotas,
+    )?;
     signing_update.publish();
     Ok(())
 }

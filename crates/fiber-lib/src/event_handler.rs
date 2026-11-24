@@ -418,6 +418,7 @@ mod tests {
                 &store,
                 &record,
                 hosted_channel_id,
+                &Default::default(),
             )
             .unwrap();
             let refreshed = store

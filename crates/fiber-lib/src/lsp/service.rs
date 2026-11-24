@@ -718,6 +718,7 @@ impl Actor for LspService {
                         &state.watchtower_store,
                         &tenant,
                         channel_id,
+                        &state.config.watchtower_quotas(),
                     ) {
                         tracing::warn!(
                             tenant_id = %tenant.tenant_id,

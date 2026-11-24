@@ -333,14 +333,94 @@ fn ensure_hosted_watch_skips_an_existing_row() {
         None,
     );
 
-    super::watch::ensure_hosted_watch_channel(&Default::default(), &store, &record, channel_id)
-        .unwrap();
+    super::watch::ensure_hosted_watch_channel(
+        &Default::default(),
+        &store,
+        &record,
+        channel_id,
+        &Default::default(),
+    )
+    .unwrap();
 
     let watched = store
         .get_watch_channel(&node_id, &channel_id)
         .expect("watch row remains");
     assert_eq!(watched.local_settlement_data.local_amount, 11);
     assert_eq!(watched.local_settlement_data.remote_amount, 22);
+}
+
+#[cfg(feature = "watchtower")]
+#[test]
+fn ensure_hosted_watch_channel_enforces_watchtower_quotas() {
+    use crate::fiber::channel::{ChannelActorState, ChannelActorStateStore};
+    use crate::lsp_config::WatchtowerQuotas;
+    use crate::store::NodeNamespace;
+    use crate::watchtower::WatchtowerStore;
+    use fiber_types::sample::StoreSample;
+
+    let root = tempdir().expect("temporary directory");
+    std::fs::create_dir_all(root.path().join("fiber")).expect("create store dir");
+    let store = open_store(root.path().join("fiber/store")).expect("open store");
+    let record = HostedTenantRecord {
+        tenant_id: TenantId::new("quota-tenant").unwrap(),
+        root_signer_pubkey: None,
+        tenant_pubkey: Privkey::from(&[11; 32]).pubkey(),
+        created_at: 42,
+        token_epoch: 0,
+    };
+    let node_id = crate::lsp::tenant_watchtower_node_id(&record.tenant_pubkey);
+    let tenant_store = store.namespaced(NodeNamespace::hosted_tenant(record.tenant_id.as_str()));
+
+    let make_channel = |seed: u64, id_byte: u8| -> (Hash256, ChannelActorState) {
+        let mut data = fiber_types::ChannelActorData::samples(seed).remove(0);
+        let remote_keys = fiber_types::ChannelActorData::samples(seed + 1000)
+            .remove(0)
+            .local_channel_public_keys;
+        let id = Hash256::from([id_byte; 32]);
+        data.id = id;
+        data.remote_channel_public_keys = Some(remote_keys);
+        data.tlc_state.offered_tlcs.tlcs.clear();
+        data.tlc_state.received_tlcs.tlcs.clear();
+        data.channel_features = fiber_types::ChannelFeatures::V2;
+        (id, ChannelActorState::from(data))
+    };
+
+    let (ch1, state1) = make_channel(101, 0x31);
+    let (ch2, state2) = make_channel(102, 0x32);
+    let (ch3, state3) = make_channel(103, 0x33);
+    tenant_store.insert_channel_actor_state(state1);
+    tenant_store.insert_channel_actor_state(state2);
+    // Put ch3 only in the host store to exercise the fallback inversion branch too.
+    store.insert_channel_actor_state(state3);
+
+    let quotas = WatchtowerQuotas {
+        max_channels_per_node: 1,
+        max_channels_total: 1,
+        max_preimages_per_node: 4,
+        max_preimages_total: 4,
+    };
+    let events = Default::default();
+
+    // First channel is admitted within quota.
+    super::watch::ensure_hosted_watch_channel(&events, &store, &record, ch1, &quotas)
+        .expect("first channel within quota");
+    assert!(store.get_watch_channel(&node_id, &ch1).is_some());
+
+    // Re-ensuring an already-monitored channel remains idempotent even at quota.
+    super::watch::ensure_hosted_watch_channel(&events, &store, &record, ch1, &quotas)
+        .expect("existing channel remains idempotent at quota");
+
+    // Second channel via tenant-store branch is rejected by per-node quota without persisting.
+    let err = super::watch::ensure_hosted_watch_channel(&events, &store, &record, ch2, &quotas)
+        .expect_err("second channel must be rejected by watchtower quota");
+    assert!(err.contains("quota exceeded"), "unexpected error: {err}");
+    assert!(store.get_watch_channel(&node_id, &ch2).is_none());
+
+    // Third channel via host-store fallback branch is also rejected by quota without persisting.
+    let err = super::watch::ensure_hosted_watch_channel(&events, &store, &record, ch3, &quotas)
+        .expect_err("fallback host-store branch must also enforce watchtower quota");
+    assert!(err.contains("quota exceeded"), "unexpected error: {err}");
+    assert!(store.get_watch_channel(&node_id, &ch3).is_none());
 }
 
 #[test]

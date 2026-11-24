@@ -5404,3 +5404,79 @@ async fn test_tenant_channel_opening_persists_before_and_after_final_id() {
     assert!(store.get_tenant_channel_opening(&second_id).is_none());
     assert_eq!(store.list_tenant_channel_openings().len(), 1);
 }
+
+#[test]
+fn test_move_channel_open_records_atomically_rekeys_both_records() {
+    use crate::fiber::channel::{ChannelOpenRecordStore, TenantChannelOpening};
+    use crate::fiber::network::OpenChannelWithExternalFundingCommand;
+    use crate::fiber::types::Privkey;
+    use ckb_types::packed::Script;
+    use fiber_types::{ChannelOpenRecord, ChannelOpeningStatus};
+
+    let (store, _dir) = generate_store();
+    let tenant = store.namespaced(NodeNamespace::hosted_tenant("atomic-move-owner"));
+    let temporary_id = Hash256::from([0x11; 32]);
+    let final_id = Hash256::from([0x22; 32]);
+    let peer_pubkey = Privkey::from(&[2u8; 32]).pubkey();
+    let command = OpenChannelWithExternalFundingCommand {
+        pubkey: peer_pubkey,
+        funding_amount: 100_000_000_000,
+        public: false,
+        shutdown_script: Script::default(),
+        funding_lock_script: Script::default(),
+        funding_lock_script_cell_deps: Vec::new(),
+        funding_udt_type_script: None,
+        commitment_fee_rate: None,
+        commitment_delay_epoch: None,
+        funding_fee_rate: None,
+        tlc_expiry_delta: None,
+        tlc_min_value: None,
+        tlc_fee_proportional_millionths: None,
+        max_tlc_value_in_flight: None,
+        max_tlc_number_in_flight: None,
+        external_channel_signer: None,
+    };
+
+    let mut record = ChannelOpenRecord::new(temporary_id, peer_pubkey, command.funding_amount);
+    let mut opening = TenantChannelOpening {
+        command,
+        channel_id: temporary_id,
+        result: None,
+        terminated: false,
+    };
+    tenant.insert_channel_open_record(record.clone());
+    tenant.put_tenant_channel_opening(opening.clone());
+
+    record.channel_id = final_id;
+    record.update_status(ChannelOpeningStatus::FundingTxBuilding);
+    opening.channel_id = final_id;
+    tenant.move_channel_open_records(&temporary_id, Some(record.clone()), Some(opening.clone()));
+
+    assert!(tenant.get_channel_open_record(&temporary_id).is_none());
+    assert!(tenant.get_tenant_channel_opening(&temporary_id).is_none());
+    let moved_record = tenant
+        .get_channel_open_record(&final_id)
+        .expect("re-keyed open record");
+    assert_eq!(moved_record.channel_id, final_id);
+    assert_eq!(moved_record.status, ChannelOpeningStatus::FundingTxBuilding);
+    let moved_opening = tenant
+        .get_tenant_channel_opening(&final_id)
+        .expect("re-keyed tenant opening");
+    assert_eq!(moved_opening.channel_id, final_id);
+    assert_eq!(tenant.list_tenant_channel_openings().len(), 1);
+
+    // Same-ID update must keep both rows in place rather than deleting them.
+    record.update_status(ChannelOpeningStatus::ChannelReady);
+    opening.terminated = true;
+    tenant.move_channel_open_records(&final_id, Some(record), Some(opening));
+    assert_eq!(
+        tenant.get_channel_open_record(&final_id).unwrap().status,
+        ChannelOpeningStatus::ChannelReady
+    );
+    assert!(
+        tenant
+            .get_tenant_channel_opening(&final_id)
+            .unwrap()
+            .terminated
+    );
+}

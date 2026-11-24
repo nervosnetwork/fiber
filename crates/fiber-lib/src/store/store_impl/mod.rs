@@ -1961,6 +1961,34 @@ impl ChannelOpenRecordStore for Store {
         let key = [&[CHANNEL_OPEN_RECORD_PREFIX], channel_id.as_ref()].concat();
         self.delete(key);
     }
+
+    fn move_channel_open_records(
+        &self,
+        temporary_channel_id: &Hash256,
+        record: Option<ChannelOpenRecord>,
+        opening: Option<crate::fiber::channel::TenantChannelOpening>,
+    ) {
+        let mut batch = self.batch();
+        if let Some(opening) = opening {
+            if opening.channel_id != *temporary_channel_id {
+                batch.delete(tenant_channel_opening_key(temporary_channel_id));
+            }
+            batch.put(
+                tenant_channel_opening_key(&opening.channel_id),
+                serde_json::to_vec(&opening).expect("serializable tenant opening"),
+            );
+        }
+        if let Some(record) = record {
+            if record.channel_id != *temporary_channel_id {
+                let old_key =
+                    [&[CHANNEL_OPEN_RECORD_PREFIX], temporary_channel_id.as_ref()].concat();
+                batch.delete(old_key);
+            }
+            let kv = KeyValue::ChannelOpenRecord(record.channel_id, record);
+            batch.put(kv.key(), kv.value());
+        }
+        batch.commit();
+    }
 }
 
 impl InvoiceStore for Store {
