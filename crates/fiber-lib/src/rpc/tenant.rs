@@ -700,10 +700,33 @@ mod tests {
             .build(&root)
             .unwrap();
         let auth = BiscuitAuth::from_pubkey(root.public().to_string()).unwrap();
+        let auth_with_lsp_flag = BiscuitAuth::from_pubkey(root.public().to_string())
+            .unwrap()
+            .with_lsp_enabled(true);
         let tenant_token = tenant.to_base64().unwrap();
+        let operator_token = operator.to_base64().unwrap();
 
         for method in ["send_payment", "get_invoice"] {
-            assert!(auth.check_permission(method, &tenant_token).is_ok());
+            let err = auth
+                .check_permission(method, &tenant_token)
+                .err()
+                .expect("tenant token must be rejected by BiscuitAuth");
+            assert!(
+                err.to_string()
+                    .contains("hosted LSP service is not enabled"),
+                "{err}"
+            );
+            let err_with_flag = auth_with_lsp_flag
+                .check_permission(method, &tenant_token)
+                .err()
+                .expect("tenant token must be rejected without lsp feature");
+            assert!(
+                err_with_flag
+                    .to_string()
+                    .contains("hosted LSP service is not enabled"),
+                "{err_with_flag}"
+            );
+            assert!(auth.check_permission(method, &operator_token).is_ok());
             assert!(
                 enforce_tenant_method_allowlist(method, &tenant).is_err(),
                 "tenant token must not reach the public {method} handler"
