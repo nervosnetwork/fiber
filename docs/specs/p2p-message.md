@@ -75,6 +75,40 @@ finished. It does not share that earlier funding. Once the open is ready, that b
 stays reserved for its payment until the payment finishes, and the next payment opens
 its own channel.
 
+### Timeouts and recovery
+
+An open starts only when the remaining TLC expiry covers funding setup (3
+minutes), four confirmations at an assumed 30 seconds each, two minutes after
+the channel is ready, and the payment's final TLC expiry delta. Otherwise the
+payment fails and no channel is opened. That budget is checked once, before the
+open.
+
+Before our funding signature is sent, the funding timeout (default 24 hours
+from channel creation) aborts a stalled open. A receiver disconnect, an upstream
+TLC removal, or a failed open does the same: the channel is abandoned, the
+payment fails, and the in-flight slot is freed.
+
+After our funding signature is sent, including while the channel waits to
+become ready, the open stays. A broadcast funding transaction is traced until
+four confirmations, a failed transaction, or a spent funding input. An
+unbroadcast transaction has no JIT timer. A receiver disconnect leaves that open
+and its payment in place and fails only payments queued behind it.
+
+Removing the upstream TLC after the open can no longer be abandoned fails the
+payment immediately. The channel stays tracked, occupies one
+`jit_max_inflight_opens` slot, and blocks the next open to that receiver until
+the channel is ready or the funding actor stops. When the channel becomes ready
+after that TLC is gone, the reservation is dropped. A later payment uses the
+ready channel when it can forward, and opens another channel when it cannot.
+
+Restart restores an in-flight open, its queue, and its reservation while the
+upstream TLC is still held. When that TLC is already gone, JIT tracking drops
+the open. The funding channel can still confirm, and a new payment to that
+receiver is refused while the channel is still opening.
+
+A watchtower settles TLCs on-chain, including the upstream TLC on the channel
+into the liquidity node. The funding transaction stays with the tracer.
+
 ## Channel establishment
 
 The establishment flow is adapted from [BOLT 02]:
