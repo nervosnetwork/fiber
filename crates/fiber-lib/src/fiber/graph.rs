@@ -448,6 +448,8 @@ pub struct NetworkGraph<S> {
     // The pubkey of the node that is running this instance of the network graph.
     source: Pubkey,
     scope: NetworkGraphScope,
+    // The public LSP that owns this hosted tenant runtime, independent of channel liveness.
+    hosted_lsp: Option<Pubkey>,
     // All the channels in the network.
     pub(crate) channels: HashMap<OutPoint, ChannelInfo>,
     // Index: node_id -> set of channel outpoints involving this node
@@ -553,8 +555,10 @@ where
     /// the tenant only needs its private first-hop channel to the public LSP
     /// node when constructing a trampoline payment.
     #[cfg(all(not(target_arch = "wasm32"), feature = "lsp"))]
-    pub(crate) fn new_owned_channels(store: S, source: Pubkey) -> Self {
-        Self::empty(store, source, false, NetworkGraphScope::OwnedChannelsOnly)
+    pub(crate) fn new_owned_channels(store: S, source: Pubkey, hosted_lsp: Pubkey) -> Self {
+        let mut graph = Self::empty(store, source, false, NetworkGraphScope::OwnedChannelsOnly);
+        graph.hosted_lsp = Some(hosted_lsp);
+        graph
     }
 
     fn empty(
@@ -568,6 +572,7 @@ where
             always_process_gossip_message: false,
             source,
             scope,
+            hosted_lsp: None,
             channels: HashMap::new(),
             node_channels: HashMap::new(),
             channel_stats: Default::default(),
@@ -1156,6 +1161,11 @@ where
 
     pub fn get_source_pubkey(&self) -> Pubkey {
         self.source
+    }
+
+    /// The hosted tenant's configured LSP, not inferred from currently active channels.
+    pub(crate) fn hosted_lsp(&self) -> Option<Pubkey> {
+        self.hosted_lsp
     }
 
     pub(crate) fn mark_channel_failed(&mut self, channel_outpoint: &OutPoint) {

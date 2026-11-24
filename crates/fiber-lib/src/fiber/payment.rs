@@ -381,8 +381,13 @@ pub trait SendPaymentDataExt {
     fn hash_algorithm(&self) -> HashAlgorithm;
 }
 
-impl SendPaymentDataExt for SendPaymentData {
-    fn new(command: SendPaymentCommand, currency: Currency) -> Result<SendPaymentData, String> {
+impl SendPaymentCommand {
+    fn build_data_impl(
+        command: SendPaymentCommand,
+        currency: Currency,
+        source: Option<Pubkey>,
+        hosted_lsp: Option<Pubkey>,
+    ) -> Result<SendPaymentData, String> {
         // `from_str` requires the invoice to carry a valid signature, so parsing
         // here also guarantees the invoice is signed.
         let invoice = command
@@ -408,12 +413,18 @@ impl SendPaymentDataExt for SendPaymentData {
         }
 
         let trampoline_hops = command.trampoline_hops.or_else(|| {
-            invoice.as_ref().and_then(|invoice| {
-                invoice
-                    .trampoline_route_hint()
-                    .copied()
-                    .map(|node_id| vec![node_id.into()])
-            })
+            let hinted_lsp: Pubkey = invoice.as_ref()?.trampoline_route_hint().copied()?.into();
+            if source == Some(hinted_lsp) {
+                None
+            } else if let Some(local_lsp) = hosted_lsp {
+                if local_lsp == hinted_lsp {
+                    Some(vec![local_lsp])
+                } else {
+                    Some(vec![local_lsp, hinted_lsp])
+                }
+            } else {
+                Some(vec![hinted_lsp])
+            }
         });
 
         fn validate_field<T: PartialEq + Clone>(
@@ -575,6 +586,12 @@ impl SendPaymentDataExt for SendPaymentData {
             .dry_run(command.dry_run)
             .trampoline_hops(trampoline_hops)
             .build()
+    }
+}
+
+impl SendPaymentDataExt for SendPaymentData {
+    fn new(command: SendPaymentCommand, currency: Currency) -> Result<SendPaymentData, String> {
+        SendPaymentCommand::build_data_impl(command, currency, None, None)
     }
 
     fn trampoline_hops(&self) -> Option<&[Pubkey]> {
@@ -800,6 +817,19 @@ impl SendPaymentCommand {
     /// Builds payment data after validating it against the payer node's currency.
     pub fn build_send_payment_data(self, currency: Currency) -> Result<SendPaymentData, Error> {
         SendPaymentData::new(self, currency).map_err(|e| {
+            error!("Failed to validate payment request: {:?}", e);
+            Error::InvalidParameter(format!("Failed to validate payment request: {:?}", e))
+        })
+    }
+
+    /// Build and validate a payment using the payer's actual first-hop context.
+    pub(crate) fn build_send_payment_data_for_payer(
+        self,
+        currency: Currency,
+        source: Pubkey,
+        hosted_lsp: Option<Pubkey>,
+    ) -> Result<SendPaymentData, Error> {
+        Self::build_data_impl(self, currency, Some(source), hosted_lsp).map_err(|e| {
             error!("Failed to validate payment request: {:?}", e);
             Error::InvalidParameter(format!("Failed to validate payment request: {:?}", e))
         })

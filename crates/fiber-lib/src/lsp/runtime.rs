@@ -186,6 +186,7 @@ impl<C: CkbChainClient + Clone + Send + Sync + 'static> TenantRuntimeFactory
         let graph = Arc::new(RwLock::new(NetworkGraph::new_owned_channels(
             store.clone(),
             tenant_pubkey,
+            public_node_id,
         )));
         let (event_sender, mut event_receiver) = mpsc::channel(1024);
         let actor = start_hosted_tenant_actor(

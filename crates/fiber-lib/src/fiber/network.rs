@@ -4131,11 +4131,18 @@ where
                 }
             }
             FiberActorCommand::SendPayment(payment_request, reply) => {
-                let payment_request = match payment_request.build_send_payment_data(state.currency)
-                {
+                let (source, hosted_lsp) = {
+                    let graph = self.network_graph.read().await;
+                    (graph.get_source_pubkey(), graph.hosted_lsp())
+                };
+                let payment_request = match payment_request.build_send_payment_data_for_payer(
+                    state.currency,
+                    source,
+                    hosted_lsp,
+                ) {
                     Ok(payment) => payment,
                     Err(err) => {
-                        error!("Failed to build payment from command: {:?}", err);
+                        error!("Failed to build payment from command: {err}");
                         let _ = reply.send(Err(err.to_string()));
                         return Ok(());
                     }

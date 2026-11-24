@@ -34,6 +34,7 @@ use crate::watchtower::WatchtowerStore;
 use crate::{
     ckb::{client::CkbRpcClient, config::CkbConfig},
     fiber::{
+        graph::NetworkGraph,
         network::{
             AcceptChannelCommand, FiberActorCommand, FiberActorMessage, FiberActorRef,
             NetworkActorMessage, PublicNetworkCommand,
@@ -1186,6 +1187,13 @@ pub(super) async fn create_lsp_test_network_inner(
                 ),
         )
         .await;
+        // Match the production hosted runtime: tenants route using only their
+        // own channels, not the public graph of the NetworkNode test helper.
+        *tenant.network_graph.write().await = NetworkGraph::new_owned_channels(
+            tenant.store.clone(),
+            tenant.pubkey,
+            nodes[*lsp_node_index].pubkey,
+        );
         connect_in_process(&nodes[*lsp_node_index], &tenant).await;
         let record = HostedTenantRecord {
             tenant_id: tenant_id.clone(),
@@ -2664,6 +2672,65 @@ async fn hosted_tenant_pays_ordinary_node_through_lsp_with_mpp() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn public_lsp_pays_own_online_tenant_with_invoice_hint() {
+    init_tracing();
+
+    let network = create_lsp_test_network(
+        &[((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT), true)],
+        2,
+        &[((0, "u1"), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT))],
+    )
+    .await;
+    let public_t = &network.nodes[0];
+    let tenant = network.tenant(0, "u1");
+    let preimage = gen_rand_sha256_hash();
+    let invoice: fiber_json_types::InvoiceResult = tenant
+        .client
+        .request(
+            "new_invoice",
+            rpc_params![fiber_json_types::NewInvoiceParams {
+                amount: 1_000_000,
+                description: Some("public LSP pays hosted tenant".to_string()),
+                currency: fiber_json_types::Currency::Fibd,
+                payment_preimage: Some(preimage.into()),
+                payment_hash: None,
+                expiry: Some(60 * 60),
+                fallback_address: None,
+                final_expiry_delta: None,
+                udt_type_script: None,
+                hash_algorithm: None,
+                allow_mpp: None,
+                allow_trampoline_routing: Some(true),
+            }],
+        )
+        .await
+        .expect("create hosted invoice");
+    let decoded = crate::invoice::CkbInvoice::from_str(&invoice.invoice_address)
+        .expect("decode hosted invoice");
+    assert_eq!(
+        decoded.trampoline_route_hint(),
+        Some(&secp256k1::PublicKey::from(public_t.pubkey))
+    );
+    let payment_hash = *decoded.payment_hash();
+
+    public_t
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice.invoice_address),
+            max_fee_amount: Some(100_000),
+            ..Default::default()
+        })
+        .await
+        .expect("pay own tenant without an explicit trampoline hop");
+    public_t.wait_until_success(payment_hash).await;
+    wait_until_async_timeout(|| async {
+        tenant.node.get_invoice_status(&payment_hash) == Some(CkbInvoiceStatus::Paid)
+    })
+    .await;
+
+    network.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn hosted_tenant_pays_hosted_tenant_across_two_lsps() {
     init_tracing();
 
@@ -2739,7 +2806,6 @@ async fn hosted_tenant_pays_hosted_tenant_across_two_lsps() {
                 invoice: Some(invoice.invoice_address),
                 max_fee_amount: Some(100_000),
                 max_fee_rate: Some(1_000),
-                trampoline_hops: Some(vec![network.nodes[0].pubkey, network.nodes[3].pubkey]),
                 ..Default::default()
             },
         )

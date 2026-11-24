@@ -12418,6 +12418,49 @@ fn test_send_payment_uses_invoice_trampoline_route_hint() {
     assert_eq!(payment.trampoline_hops, Some(vec![explicit_trampoline]));
 }
 
+#[test]
+fn test_invoice_hint_is_resolved_before_payment_validation() {
+    let (payee_private_key, payee) = gen_rand_secp256k1_keypair_tuple();
+    let payee_lsp = gen_rand_fiber_public_key();
+    let payer_lsp = gen_rand_fiber_public_key();
+    let tenant = gen_rand_fiber_public_key();
+    let invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(1_000))
+        .payment_preimage(gen_rand_sha256_hash())
+        .payee_pub_key(payee)
+        .trampoline_route_hint(payee_lsp.into())
+        .build_with_sign(|message| SECP256K1.sign_ecdsa_recoverable(message, &payee_private_key))
+        .expect("build invoice with trampoline route hint")
+        .to_string();
+    let command = || SendPaymentCommand {
+        invoice: Some(invoice.clone()),
+        ..Default::default()
+    };
+
+    let same_node = command()
+        .build_send_payment_data_for_payer(Currency::Fibd, payee_lsp, None)
+        .expect("public LSP can pay its tenant directly");
+    assert_eq!(same_node.trampoline_hops, None);
+
+    let cross_lsp = command()
+        .build_send_payment_data_for_payer(Currency::Fibd, tenant, Some(payer_lsp))
+        .expect("tenant first reaches its own LSP");
+    assert_eq!(cross_lsp.trampoline_hops, Some(vec![payer_lsp, payee_lsp]));
+
+    let same_lsp = command()
+        .build_send_payment_data_for_payer(Currency::Fibd, tenant, Some(payee_lsp))
+        .expect("tenant reaches payee through their shared LSP");
+    assert_eq!(same_lsp.trampoline_hops, Some(vec![payee_lsp]));
+
+    let explicit = SendPaymentCommand {
+        trampoline_hops: Some(vec![payer_lsp]),
+        ..command()
+    }
+    .build_send_payment_data_for_payer(Currency::Fibd, tenant, Some(payee_lsp))
+    .expect("explicit hops override invoice hint");
+    assert_eq!(explicit.trampoline_hops, Some(vec![payer_lsp]));
+}
+
 fn malicious_invoice_that_used_to_panic_parser() -> String {
     let mut data = vec![u5::try_from_u8(0).expect("valid unsigned invoice marker")];
     data.extend(std::iter::repeat_n(
