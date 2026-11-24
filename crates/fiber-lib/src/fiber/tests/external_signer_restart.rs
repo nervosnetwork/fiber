@@ -3647,3 +3647,290 @@ async fn test_restart_after_tlc_safety_deadline_does_not_resume_accepted_revoke_
     })
     .await;
 }
+
+#[tokio::test]
+async fn test_pending_commitment_signature_survives_three_peer_reconnects() {
+    Box::pin(async {
+        use crate::fiber::channel::ChannelActor;
+        use crate::fiber::channel_signer::SignerNotification;
+        use crate::fiber::types::{FiberChannelMessage, ReestablishChannelV2};
+        use crate::fiber::FiberActorRef;
+        use fiber_types::{NextChannelSignerMaterial, SignatureRequestId};
+        use musig2::BinaryEncoding;
+        use ractor::Actor;
+
+        init_tracing();
+        let (_restartable, signer) = RestartableExternalSigner::create().await;
+        let ([mut tenant, mut public_node], channel_id) =
+            setup_restartable_external_channel(false, &signer).await;
+
+        let outbound_payment = tenant
+            .send_payment_keysend(&public_node, 10_000, false)
+            .await
+            .expect("start outbound keysend");
+        approve_fixture_keysend(
+            &signer,
+            &tenant,
+            outbound_payment.payment_hash,
+            10_000,
+            false,
+        )
+        .await;
+        wait_until_async_timeout(|| async {
+            matches!(
+                get_signing_status(&tenant, channel_id)
+                    .await
+                    .map(|r| r.status),
+                Ok(ChannelSigningStatus::SignatureRequired {
+                    transition: ChannelSigningTransition::SendCommitmentSigned,
+                    ..
+                })
+            )
+        })
+        .await;
+
+        tenant.stop().await;
+        public_node.stop().await;
+
+        let mut tenant_state = tenant.get_channel_actor_state(channel_id);
+        let mut peer_state = public_node.get_channel_actor_state(channel_id);
+        assert!(peer_state.signing_context.peer_external_funding);
+
+        let (sender, _messages) = tokio::sync::mpsc::unbounded_channel();
+        let (network, network_task) = Actor::spawn(None, DeadlineNetworkProbe, sender)
+            .await
+            .unwrap();
+        let network_ref = FiberActorRef::from_network(&network);
+        tenant_state.network = Some(network_ref.clone());
+        peer_state.network = Some(network_ref.clone());
+        let (myself, actor_task) = Actor::spawn(None, DeadlineChannelProbe, ()).await.unwrap();
+
+        // Part A: An updated locally-signing peer with `peer_external_funding` does not rotate
+        // its unused `session.own` across 4 reconnects, keeping the pending request valid.
+        let original_peer_nonce = peer_state.session.own.public_nonce.clone();
+        for _ in 0..4 {
+            peer_state.mark_reestablishing_offline();
+            peer_state.on_peer_reconnected();
+        }
+        assert_eq!(
+            peer_state.session.own.public_nonce, original_peer_nonce,
+            "unused verification nonce must stay pinned for external-funding peer across reconnects"
+        );
+
+        // Part B: Even if a peer DOES rotate its verification nonce 3 times (evicting the
+        // original nonce from `own_retired`), the external-signing node rebinds its unsigned
+        // `SendCommitmentSigned` request to the peer's latest live nonce.
+        let channel = ChannelActor::new(
+            tenant.pubkey,
+            public_node.pubkey,
+            network_ref.clone(),
+            tenant.store.clone(),
+            None,
+        );
+        let local_number = tenant_state.get_local_commitment_number();
+        let remote_number = tenant_state.get_remote_commitment_number();
+        let original_request_id = tenant_state
+            .signing_context
+            .awaiting_signature()
+            .expect("awaiting SendCommitmentSigned")
+            .0;
+
+        let mut latest_peer_nonce = original_peer_nonce;
+        for seed_byte in [51u8, 52u8, 53u8] {
+            latest_peer_nonce = musig2::SecNonce::build([seed_byte; 32])
+                .build()
+                .public_nonce();
+            tenant_state.mark_reestablishing_offline();
+            channel
+                .handle_peer_message(
+                    &myself,
+                    &mut tenant_state,
+                    FiberChannelMessage::ReestablishChannelV2(ReestablishChannelV2 {
+                        channel_id,
+                        next_commitment_number: local_number,
+                        next_ack_number: remote_number,
+                        next_local_commitment_nonce: latest_peer_nonce.clone(),
+                    }),
+                )
+                .await
+                .expect("reestablish rebinds pending SendCommitmentSigned to rotated peer nonce");
+        }
+        assert_eq!(
+            tenant_state.session.remote_nonce.as_ref(),
+            Some(&latest_peer_nonce)
+        );
+        let rebound_request_id = tenant_state
+            .signing_context
+            .awaiting_signature()
+            .expect("rebound SendCommitmentSigned request")
+            .0;
+        assert_ne!(rebound_request_id, original_request_id);
+
+        // Sign the rebound request with the external signer and verify the resulting CS
+        // verifies against the peer's latest rotated nonce (`latest_peer_nonce`).
+        let rebound_status = crate::rpc::channel::to_rpc_channel_signing_status(&tenant_state)
+            .expect("rebound signing status");
+        let submission = prepare_hosted_signature(&signer, channel_id, rebound_status).await;
+        let material = submission.next_material.clone().unwrap();
+        let notification = SignerNotification::ChannelSignatureReady {
+            channel_id,
+            request_id: SignatureRequestId(submission.request_id.into()),
+            signature: Ok(
+                musig2::PartialSignature::from_slice(&submission.partial_signature).unwrap(),
+            ),
+            next_material: Some(NextChannelSignerMaterial {
+                v2_nonces: material
+                    .v2_nonces
+                    .iter()
+                    .map(|n| musig2::PubNonce::from_bytes(n).unwrap())
+                    .collect(),
+                commitment_points: material
+                    .commitment_points
+                    .iter()
+                    .map(|(n, p)| (*n, (*p).try_into().unwrap()))
+                    .collect(),
+                next_commitment_point: material
+                    .next_commitment_point
+                    .map(|p| p.try_into().unwrap()),
+                next_commitment_nonce: material
+                    .next_commitment_nonce
+                    .map(|n| musig2::PubNonce::from_bytes(&n).unwrap()),
+                next_revocation_nonce: material
+                    .next_revocation_nonce
+                    .map(|n| musig2::PubNonce::from_bytes(&n).unwrap()),
+            }),
+            rpc_reply: None,
+        };
+        channel
+            .handle_signer_notification(&myself, &mut tenant_state, notification)
+            .await
+            .expect("rebound commitment signature applies cleanly");
+        assert!(!tenant_state.signing_context.is_awaiting_signature());
+        let outgoing = tenant_state
+            .session
+            .outgoing
+            .as_ref()
+            .expect("signed outgoing commitment");
+        let expected_agg = musig2::AggNonce::sum([
+            outgoing.funding.public_nonce.clone(),
+            latest_peer_nonce.clone(),
+        ]);
+        assert_eq!(
+            outgoing
+                .funding
+                .context
+                .as_ref()
+                .and_then(|ctx| ctx.get(66..132)),
+            Some(expected_agg.to_bytes().as_slice()),
+            "signed commitment must bind to the peer's latest rotated nonce"
+        );
+
+        myself.stop(None);
+        network.stop(None);
+        actor_task.await.unwrap();
+        network_task.await.unwrap();
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn test_external_signer_diverged_local_counter_does_not_hit_lookahead_limit() {
+    Box::pin(async {
+        use crate::fiber::channel::ChannelActor;
+        use crate::fiber::channel_signer::SignerNotification;
+        use crate::fiber::FiberActorRef;
+        use fiber_types::{NextChannelSignerMaterial, SignatureRequestId};
+        use ractor::Actor;
+
+        init_tracing();
+        let (_restartable, signer) = RestartableExternalSigner::create().await;
+        let ([mut tenant, mut public_node], channel_id) =
+            setup_restartable_external_channel(false, &signer).await;
+
+        let outbound_payment = tenant
+            .send_payment_keysend(&public_node, 10_000, false)
+            .await
+            .expect("start outbound keysend");
+        approve_fixture_keysend(
+            &signer,
+            &tenant,
+            outbound_payment.payment_hash,
+            10_000,
+            false,
+        )
+        .await;
+        wait_until_async_timeout(|| async {
+            matches!(
+                get_signing_status(&tenant, channel_id)
+                    .await
+                    .map(|r| r.status),
+                Ok(ChannelSigningStatus::SignatureRequired {
+                    transition: ChannelSigningTransition::SendCommitmentSigned,
+                    ..
+                })
+            )
+        })
+        .await;
+
+        let status = get_signing_status(&tenant, channel_id)
+            .await
+            .unwrap()
+            .status;
+        let submission = prepare_hosted_signature(&signer, channel_id, status).await;
+        tenant.stop().await;
+        public_node.stop().await;
+
+        let mut state = tenant.get_channel_actor_state(channel_id);
+        let (sender, _messages) = tokio::sync::mpsc::unbounded_channel();
+        let (network, network_task) = Actor::spawn(None, DeadlineNetworkProbe, sender)
+            .await
+            .unwrap();
+        let network_ref = FiberActorRef::from_network(&network);
+        state.network = Some(network_ref.clone());
+        let channel = ChannelActor::new(
+            tenant.pubkey,
+            public_node.pubkey,
+            network_ref,
+            tenant.store.clone(),
+            None,
+        );
+        let (myself, actor_task) = Actor::spawn(None, DeadlineChannelProbe, ()).await.unwrap();
+
+        // Simulate a SendCommitmentSigned response when `local` has diverged far ahead of
+        // `remote`: the SDK omits local commitment points on remote-lane transitions and supplies
+        // only a fresh V2 nonce, which must be accepted by the node.
+        let material = submission.next_material.clone().unwrap();
+        let notification = SignerNotification::ChannelSignatureReady {
+            channel_id,
+            request_id: SignatureRequestId(submission.request_id.into()),
+            signature: Ok(
+                musig2::PartialSignature::from_slice(&submission.partial_signature).unwrap(),
+            ),
+            next_material: Some(NextChannelSignerMaterial {
+                v2_nonces: material
+                    .v2_nonces
+                    .iter()
+                    .map(|n| musig2::PubNonce::from_bytes(n).unwrap())
+                    .collect(),
+                commitment_points: Vec::new(),
+                next_commitment_point: None,
+                next_commitment_nonce: None,
+                next_revocation_nonce: None,
+            }),
+            rpc_reply: None,
+        };
+        channel
+            .handle_signer_notification(&myself, &mut state, notification)
+            .await
+            .expect(
+                "SendCommitmentSigned must accept nonce-only refill without local commitment points",
+            );
+        assert!(!state.signing_context.is_awaiting_signature());
+
+        myself.stop(None);
+        network.stop(None);
+        actor_task.await.unwrap();
+        network_task.await.unwrap();
+    })
+    .await;
+}

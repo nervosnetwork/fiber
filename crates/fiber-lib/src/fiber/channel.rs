@@ -6970,7 +6970,7 @@ impl ChannelActorState {
         }
     }
 
-    fn on_peer_reconnected(&mut self) {
+    pub(crate) fn on_peer_reconnected(&mut self) {
         if self.reestablishing && self.connectivity_state == ChannelConnectivityState::Offline {
             self.connectivity_state = ChannelConnectivityState::Syncing;
             let now = now_timestamp_as_millis_u64();
@@ -6993,10 +6993,12 @@ impl ChannelActorState {
                 // An outstanding external intent pins its exact nonce and peer inputs across
                 // reconnects. Never erase the staged evidence needed to resume its signature.
                 if !self.signing_context.is_awaiting_signature() {
-                    // External signers have a finite V2 nonce pool: avoid burning fresh nonces
-                    // on repeated peer reconnects when `session.own` is still unused for the
-                    // current commitment number.
-                    let needs_rotation = self.channel_signer.local_material().is_some()
+                    // External signers have a finite V2 nonce pool and may hold an unsigned
+                    // SendCommitmentSigned request across multiple reconnects while waiting for
+                    // wallet approval: avoid rotating an unused `session.own` for the current
+                    // commitment number when either side uses external signing.
+                    let needs_rotation = (self.channel_signer.local_material().is_some()
+                        && !self.signing_context.peer_external_funding)
                         || self.session.own.context.is_some()
                         || self.session.own.number != number;
                     if !initial_unaccepted && !ready_advertised && needs_rotation {
@@ -12352,8 +12354,23 @@ where
         let peer_nonce = peer.next_local_commitment_nonce.clone();
         let peer_number = peer.next_commitment_number;
         state.recovery_peer_v2 = Some(peer);
+        let rebind_pending_send = peer_number == local
+            && pending_send
+            && state.signing_context.accepted_signature().is_none()
+            && state.session.remote_nonce.as_ref() != Some(&peer_nonce);
+        if rebind_pending_send {
+            // The peer rotated its commitment verification nonce while an unsigned
+            // SendCommitmentSigned request was awaiting wallet approval. Allocate fresh
+            // local nonces before cancelling the stale request so the wallet signs against
+            // the peer's live nonce rather than one that may age out of `own_retired`.
+            let owner = *state.get_remote_funding_pubkey();
+            state.fresh_external_nonce_v2(owner, local, NoncePurposeV2::Commitment)?;
+            state.fresh_external_nonce_v2(owner, local, NoncePurposeV2::Revocation)?;
+            state.signing_context.cancel_request();
+            state.resigning_outgoing_v2 = true;
+        }
         // An ahead-of-us advertisement remains per-connection until RAA advances both counters.
-        if peer_number == local && !pending_send {
+        if peer_number == local && (!pending_send || rebind_pending_send) {
             {
                 let session = &mut state.session;
                 session.remote_nonce = Some(peer_nonce);
@@ -12380,7 +12397,7 @@ where
                 "Channel {} abandoned a stale V2 CommitmentSigned and will sign a fresh one",
                 state.get_id()
             );
-        } else {
+        } else if !rebind_pending_send {
             state.resigning_outgoing_v2 = false;
         }
         self.replay_effects_v2(state);
@@ -14302,20 +14319,30 @@ where
             let material = next_material
                 .as_ref()
                 .ok_or_else(|| invalid("External V2 advancement requires fresh next material"))?;
+            // Local per-commitment points are indexed by `remote_commitment_number` (the local
+            // commitment lane). Only transitions on that lane advance local commitment points;
+            // requiring them for `local_commitment_number` would collide with the lookahead
+            // window whenever the two counters diverge.
+            let requires_commitment_points = matches!(
+                request.transition(),
+                ChannelSigningTransition::CompleteReceivedCommitment
+                    | ChannelSigningTransition::SendRevokeAndAck
+            );
             if material.v2_nonces.is_empty()
-                || !(content.slot.commitment_number.saturating_add(1)
-                    ..=content.slot.commitment_number.saturating_add(2))
-                    .all(|n| {
-                        material
-                            .commitment_points
-                            .iter()
-                            .any(|(number, _)| *number == n)
-                            || state
-                                .signing_context
-                                .v2_commitment_points
+                || (requires_commitment_points
+                    && !(content.slot.commitment_number.saturating_add(1)
+                        ..=content.slot.commitment_number.saturating_add(2))
+                        .all(|n| {
+                            material
+                                .commitment_points
                                 .iter()
                                 .any(|(number, _)| *number == n)
-                    })
+                                || state
+                                    .signing_context
+                                    .v2_commitment_points
+                                    .iter()
+                                    .any(|(number, _)| *number == n)
+                        }))
             {
                 return Err(invalid(
                     "External V2 material lacks fresh nonce or exact next commitment points",

@@ -419,6 +419,7 @@ impl<S: SignerStore> ChannelSigner<S> {
         &self,
         slot: NonceSlot,
         content_hash: [u8; 32],
+        include_commitment_points: bool,
     ) -> Result<NextChannelSignerMaterial, SignerError> {
         let mut key = channel_store_key(self.channel_key_id);
         key.extend_from_slice(b"/response/");
@@ -426,7 +427,9 @@ impl<S: SignerStore> ChannelSigner<S> {
         if let Some(encoded) = self.store.get(&key).await.map_err(store_error)? {
             return decode(&encoded);
         }
-        let material = self.next_material(slot).await?;
+        let material = self
+            .next_material_inner(slot, include_commitment_points)
+            .await?;
         // A lost RPC response must retry the exact public refill, not mint another one.
         if self
             .store
@@ -450,6 +453,14 @@ impl<S: SignerStore> ChannelSigner<S> {
         &self,
         slot: NonceSlot,
     ) -> Result<NextChannelSignerMaterial, SignerError> {
+        self.next_material_inner(slot, true).await
+    }
+
+    async fn next_material_inner(
+        &self,
+        slot: NonceSlot,
+        include_commitment_points: bool,
+    ) -> Result<NextChannelSignerMaterial, SignerError> {
         let commitment_number = slot.commitment_number.saturating_add(1);
 
         let mut v2_nonces = Vec::new();
@@ -463,13 +474,20 @@ impl<S: SignerStore> ChannelSigner<S> {
                 .public_nonce,
             );
         }
-        let commitment_points = (commitment_number..commitment_number.saturating_add(4))
-            .map(|n| (n, self.get_commitment_point(n)))
-            .collect();
+        // Only refill the two exact next local per-commitment points (never +4, and never
+        // for remote-lane transitions whose counter can diverge ahead of `remote_commitment_number`).
+        let (commitment_points, next_commitment_point) = if include_commitment_points {
+            let points = (commitment_number..commitment_number.saturating_add(2))
+                .map(|n| (n, self.get_commitment_point(n)))
+                .collect();
+            (points, Some(self.get_commitment_point(commitment_number)))
+        } else {
+            (Vec::new(), None)
+        };
         Ok(NextChannelSignerMaterial {
             v2_nonces,
             commitment_points,
-            next_commitment_point: Some(self.get_commitment_point(commitment_number)),
+            next_commitment_point,
             next_commitment_nonce: None,
             next_revocation_nonce: None,
         })

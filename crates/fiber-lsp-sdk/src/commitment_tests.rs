@@ -3055,3 +3055,157 @@ async fn prepare_and_sign_onchain_accepts_separate_fee_sponsor_and_rejects_overs
             .is_err());
     }
 }
+
+#[tokio::test]
+async fn allows_unexpired_outbound_single_part_retry_after_cancellation_and_still_blocks_replay() {
+    let f = Fixture::new(false).await;
+    f.sign(true, 0, f.opening()).await;
+    f.sign(false, 0, f.opening()).await;
+
+    let terms = f.terms(false);
+    let payment_hash = terms.payment_hash;
+    f.signer.authorize_payment(terms.clone()).await.unwrap();
+
+    let outbound_settlement = |for_remote: bool, tlc_num: u64| {
+        let mut tlc = f.tlc(false, for_remote);
+        tlc.tlc_id = if for_remote {
+            TLCId::Offered(tlc_num)
+        } else {
+            TLCId::Received(tlc_num)
+        };
+        SettlementData {
+            local_amount: 350,
+            remote_amount: 600,
+            tlcs: vec![tlc],
+        }
+    };
+
+    // Attempt #1 (tlc_id = 4) committed on both lanes.
+    f.sign(true, 1, outbound_settlement(true, 4)).await;
+    f.sign(false, 1, outbound_settlement(false, 4)).await;
+
+    // Attempt #1 fails downstream and is cancelled/refunded.
+    f.signer.authorize_cancellation(payment_hash).await.unwrap();
+    f.sign(true, 2, f.opening()).await;
+
+    // While Attempt #1 (tlc_id = 4) is still active on the local lane, adding a fresh attempt
+    // (tlc_id = 5) on the remote lane must be rejected to preserve single-part fund safety.
+    let (content, context) = f.request(true, 3, outbound_settlement(true, 5)).await;
+    f.assert_rejected(content, context, "differs between commitment lanes")
+        .await;
+
+    // Remove Attempt #1 on the local lane as well.
+    f.sign(false, 2, f.opening()).await;
+
+    // Reusing the retired TLC ID (4) is still forbidden.
+    let (content, context) = f.request(true, 3, outbound_settlement(true, 4)).await;
+    f.assert_rejected(content, context, "retired TLC or invoice replay")
+        .await;
+
+    // Retrying after payment expiry is still forbidden.
+    let (content, context) = f.request(true, 3, outbound_settlement(true, 5)).await;
+    assert!(f
+        .signer
+        .prepare_commitment(content, context, terms.expires_at_ms)
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("expired"));
+
+    // Valid unexpired retry with fresh TLC ID (5) succeeds on both lanes.
+    f.sign(true, 3, outbound_settlement(true, 5)).await;
+    f.sign(false, 3, outbound_settlement(false, 5)).await;
+
+    // Accepting the retry reset payment resolution back to Pending, so removing TLC 5 without
+    // a fresh resolution must be rejected.
+    let (content, context) = f.request(true, 4, f.opening()).await;
+    f.assert_rejected(content, context, "locally authorized resolution")
+        .await;
+
+    // Retry #2 succeeds: fulfillment is now accepted and settles into remote balance.
+    f.signer
+        .authorize_fulfillment(payment_hash, [9; 32].into())
+        .await
+        .unwrap();
+    let paid = SettlementData {
+        local_amount: 350,
+        remote_amount: 650,
+        tlcs: vec![],
+    };
+    f.sign(true, 4, paid.clone()).await;
+    f.sign(false, 4, paid).await;
+
+    // Once fulfilled, any further TLC with the same payment hash is permanently blocked.
+    let (content, context) = f.request(true, 5, outbound_settlement(true, 6)).await;
+    f.assert_rejected(content, context, "retired TLC or invoice replay")
+        .await;
+
+    // Inbound invoices remain strictly single-attempt and reject retries even after Cancel.
+    let inbound_fixture = Fixture::new(false).await;
+    inbound_fixture
+        .sign(true, 0, inbound_fixture.opening())
+        .await;
+    inbound_fixture
+        .sign(false, 0, inbound_fixture.opening())
+        .await;
+    let inv_terms = inbound_fixture.terms(true);
+    inbound_fixture
+        .signer
+        .authorize_invoice(inv_terms.clone(), [9; 32].into())
+        .await
+        .unwrap();
+    inbound_fixture
+        .sign(true, 1, inbound_fixture.incoming(true))
+        .await;
+    inbound_fixture
+        .sign(false, 1, inbound_fixture.incoming(false))
+        .await;
+    inbound_fixture
+        .signer
+        .authorize_cancellation(inv_terms.payment_hash)
+        .await
+        .unwrap();
+    inbound_fixture
+        .sign(true, 2, inbound_fixture.opening())
+        .await;
+    inbound_fixture
+        .sign(false, 2, inbound_fixture.opening())
+        .await;
+    let mut retry_inv = inbound_fixture.incoming(true);
+    retry_inv.tlcs[0].tlc_id = TLCId::Received(5);
+    let (content, context) = inbound_fixture.request(true, 3, retry_inv).await;
+    inbound_fixture
+        .assert_rejected(content, context, "retired TLC or invoice replay")
+        .await;
+}
+
+#[tokio::test]
+async fn next_material_limits_commitment_points_to_local_lane_lookahead() {
+    let f = Fixture::new(false).await;
+    let slot = fiber_types::NonceSlot {
+        purpose: fiber_types::NoncePurpose::Commitment,
+        commitment_number: 15,
+    };
+
+    // Direct `next_material` refills only the exact two next points (16, 17), never +4.
+    let local_lane = f.signer.next_material(slot).await.unwrap();
+    assert_eq!(local_lane.v2_nonces.len(), 1);
+    let numbers: Vec<u64> = local_lane
+        .commitment_points
+        .iter()
+        .map(|(n, _)| *n)
+        .collect();
+    assert_eq!(numbers, vec![16, 17]);
+    assert!(local_lane.next_commitment_point.is_some());
+
+    // Remote-lane requests (SendCommitmentSigned / CompleteReceivedRevokeAndAck) omit
+    // local commitment points completely so diverged local counters cannot overflow lookahead.
+    let remote_lane = f
+        .signer
+        .next_material_for_request(slot, [0x77; 32], false)
+        .await
+        .unwrap();
+    assert_eq!(remote_lane.v2_nonces.len(), 1);
+    assert!(remote_lane.commitment_points.is_empty());
+    assert!(remote_lane.next_commitment_point.is_none());
+}

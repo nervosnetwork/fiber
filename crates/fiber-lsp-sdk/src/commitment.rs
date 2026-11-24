@@ -455,6 +455,7 @@ impl CommitmentState {
         let mut local = previous_local;
         let mut remote = previous.map_or(self.parameters.remote_amount, |p| p.remote_amount);
         let mut outbound = tlcs.iter().any(|t| !t.inbound);
+        let mut retry_resets = Vec::new();
         for tlc in &tlcs {
             let existing = old_tlcs
                 .iter()
@@ -465,19 +466,23 @@ impl CommitmentState {
                 }
                 continue;
             }
-            if retired
-                .iter()
-                .any(|t| t.hash == tlc.hash || (t.id == tlc.id && t.inbound == tlc.inbound))
+            // Reject adding a new attempt while another active TLC for the same payment hash
+            // still exists on the peer/other commitment lane (single-part invariant).
+            if let Some(active_other) = self.lanes[1 - index]
+                .as_ref()
+                .and_then(|lane| lane.tlcs.iter().find(|t| t.hash == tlc.hash))
             {
-                return Err(invalid("retired TLC or invoice replay"));
+                if active_other != tlc {
+                    return Err(invalid("TLC differs between commitment lanes"));
+                }
             }
-            // The other lane can already contain this TLC; do not reapply wall-clock invoice
-            // acceptance limits while completing the second half of the protocol exchange.
+            // The other lane can already contain this exact TLC attempt; do not reapply wall-clock
+            // invoice acceptance limits while completing the second half of the protocol exchange.
             let other = self.lanes[1 - index].as_ref().and_then(|lane| {
                 lane.tlcs
                     .iter()
                     .chain(&lane.retired)
-                    .find(|t| t.hash == tlc.hash)
+                    .find(|t| t.id == tlc.id && t.inbound == tlc.inbound)
             });
             if let Some(other) = other {
                 if other != tlc {
@@ -498,8 +503,25 @@ impl CommitmentState {
                     "TLC does not match authorized direction, amount or hash algorithm",
                 ));
             }
+            // Always reject reusing a retired `(id, inbound)`. For payment hashes, inbound
+            // invoices and already-fulfilled payments can never replay, whereas an unexpired
+            // single-part outbound payment whose previous attempt was refunded (`Cancel`) may
+            // retry with a fresh TLC ID once the prior attempt is no longer active on either lane.
+            let replayed_id = retired
+                .iter()
+                .any(|t| t.id == tlc.id && t.inbound == tlc.inbound);
+            let replayed_hash = retired.iter().any(|t| t.hash == tlc.hash)
+                && (tlc.inbound || (payment.resolution == Resolution::Fulfill && other.is_none()));
+            if replayed_id || replayed_hash {
+                return Err(invalid("retired TLC or invoice replay"));
+            }
+            let resolution_allows_new = if tlc.inbound {
+                payment.resolution == Resolution::Pending
+            } else {
+                matches!(payment.resolution, Resolution::Pending | Resolution::Cancel)
+            };
             if other.is_none()
-                && (payment.resolution != Resolution::Pending
+                && (!resolution_allows_new
                     || now_ms >= terms.expires_at_ms
                     || (tlc.expiry / 1000) * 1000
                         < now_ms
@@ -510,6 +532,9 @@ impl CommitmentState {
                 return Err(invalid(
                     "new TLC is resolved, expired or outside authorized expiry bounds",
                 ));
+            }
+            if !tlc.inbound && payment.resolution == Resolution::Cancel && other.is_none() {
+                retry_resets.push(tlc.hash);
             }
             if tlc.inbound {
                 remote = sub(remote, tlc.amount)?;
@@ -548,6 +573,15 @@ impl CommitmentState {
         }
         if local != snapshot.data.local_amount || remote != snapshot.data.remote_amount {
             return Err(invalid("balances do not match authorized TLC transitions"));
+        }
+        for hash in retry_resets {
+            if let Some(payment) = self
+                .payments
+                .iter_mut()
+                .find(|p| p.terms.payment_hash == hash)
+            {
+                payment.resolution = Resolution::Pending;
+            }
         }
         self.lanes[index] = Some(Lane {
             version,

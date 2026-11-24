@@ -763,6 +763,16 @@ impl<S: SignerStore> HostedSession<S> {
         let signer = self.root.open_channel(key_id).await?;
         let slot = pending.prepared.content().nonce_slot();
         let content_hash = pending.prepared.review().content_hash;
+        let include_commitment_points = matches!(
+            &pending.prepared.validation,
+            crate::protocol::PreparedValidation::Commitment { context, .. }
+                if context.transition
+                    == fiber_types::ChannelSigningTransition::CompleteReceivedCommitment
+        ) || matches!(
+            &pending.prepared.validation,
+            crate::protocol::PreparedValidation::Revocation { context, .. }
+                if context.transition == fiber_types::ChannelSigningTransition::SendRevokeAndAck
+        );
         let signature = match &pending.prepared.validation {
             crate::protocol::PreparedValidation::Commitment { .. } => {
                 signer.sign_commitment(pending.prepared, now_ms).await?
@@ -784,7 +794,13 @@ impl<S: SignerStore> HostedSession<S> {
             (RequestKind::Channel, ChannelSignature::Musig2(signature)) => {
                 let next_material = match slot {
                     Some(slot) => Some(next_material_to_rpc(
-                        &signer.next_material_for_request(slot, content_hash).await?,
+                        &signer
+                            .next_material_for_request(
+                                slot,
+                                content_hash,
+                                include_commitment_points,
+                            )
+                            .await?,
                     )),
                     None => None,
                 };
