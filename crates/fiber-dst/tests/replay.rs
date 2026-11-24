@@ -311,6 +311,23 @@ fn interrupted_abort_cleanup_preserves_online_siblings() {
 }
 
 #[test]
+fn mpp_first_hop_rejection_leaves_no_undispatched_attempt() {
+    let options = ["--payments", "12", "--phases", "3", "--chaos-payments"];
+    let trace = run_random("3", &options);
+    let payment = "0x2ff7b23acb22470a20fba6888cfc3e8c605030a7d2857d1c9ab410e32d854fbe";
+    let audit = trace
+        .lines()
+        .find(|line| line.contains("swarm audit Mpp C->E") && line.contains(payment))
+        .expect("audit the MPP whose first hop rejected its first shard");
+    assert!(
+        audit.contains("status=Some(Failed) shards=0 delivered=0 fee=0 attempts=1"),
+        "{audit}"
+    );
+    assert!(trace.contains("random reconciled workload=12"));
+    assert_eq!(trace, run_random("3", &options));
+}
+
+#[test]
 fn random_payment_chaos_replays_a_targeted_sqlite_write_error() {
     let options = ["--payments", "12", "--phases", "3", "--chaos-payments"];
     let trace = run_random("9", &options);

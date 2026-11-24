@@ -327,6 +327,9 @@ impl<'a> Ledger<'a> {
         let mut paths = BTreeSet::new();
         let mut amount = 0;
         let mut fee = 0;
+        let attempts = session
+            .as_ref()
+            .map_or(0, |session| session.attempts_count());
         if let Some(session) = session {
             for attempt in session.attempts().filter(|attempt| attempt.is_success()) {
                 ensure!(success, "failed payment has a successful attempt");
@@ -376,7 +379,7 @@ impl<'a> Ledger<'a> {
             }
         }
         driver.runtime.note(format_args!(
-            "swarm audit {:?} {}->{} hash={} status={status:?} shards={} delivered={amount} fee={fee}",
+            "swarm audit {:?} {}->{} hash={} status={status:?} shards={} delivered={amount} fee={fee} attempts={attempts}",
             payment.order.kind, NAMES[payment.order.from], NAMES[payment.order.to], payment.hash, ids.len()
         ));
         Ok(success)
