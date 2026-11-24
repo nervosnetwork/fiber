@@ -354,6 +354,37 @@ fn mpp_first_hop_rejection_leaves_no_undispatched_attempt() {
 }
 
 #[test]
+fn receiver_restart_expires_an_incomplete_mpp_hold() {
+    let trace = run_random(
+        "13661109889927125842",
+        &["--payments", "128", "--phases", "8"],
+    );
+    let payment = "0x47a8fc7c101e867aed09efdddce18fd880d492e1291a260fbae8d5765632c002";
+    let shard_received = trace
+        .lines()
+        .find(|line| line.contains("D receive from F AddTlc") && line.contains(payment))
+        .expect("receiver gets the MPP shard before crashing");
+    let (_, after_receive) = trace
+        .split_once(shard_received)
+        .expect("trace after receipt");
+    let (_, after_crash) = after_receive
+        .split_once(" crash D\n")
+        .expect("receiver crashes");
+    let (_, after_restart) = after_crash
+        .split_once(" restart D\n")
+        .expect("receiver restarts");
+    let audit = after_restart
+        .lines()
+        .find(|line| line.contains("swarm audit Mpp G->D") && line.contains(payment))
+        .expect("audit the interrupted MPP after both hops drain");
+    assert!(
+        audit.contains("status=Some(Failed) shards=0 delivered=0"),
+        "{audit}"
+    );
+    assert!(trace.contains("random reconciled workload=128"));
+}
+
+#[test]
 fn random_payment_chaos_replays_a_targeted_sqlite_write_error() {
     let options = ["--payments", "12", "--phases", "3", "--chaos-payments"];
     let trace = run_random("9", &options);
