@@ -1,13 +1,10 @@
 use fiber_store::backend::StorageBackend;
 use fiber_store::db_migrate::DbMigrate;
-use fiber_store::migrations::decode_as_new;
-use fiber_types_0100::ChannelActorData as OldChannelActorData;
-
-#[path = "../../../../fiber-store/src/migrations/v2_only/test_utils.rs"]
-mod migration_fixtures;
 use fiber_store::migration::{
     MigrateError, Migration, Migrations, INIT_DB_VERSION, LATEST_DB_VERSION, MIGRATION_VERSION_KEY,
 };
+use fiber_store::migrations::decode_as_new;
+use fiber_types_0100::ChannelActorData as OldChannelActorData;
 use std::cmp::Ordering;
 use std::sync::{Arc, RwLock};
 
@@ -22,6 +19,95 @@ fn gen_path() -> std::path::PathBuf {
 fn gen_store() -> fiber_store::Store {
     let path = gen_path();
     fiber_store::Store::open_db(&path).unwrap()
+}
+
+// This real-channel fixture has no unsettled TLCs in its signed snapshots. The
+// store migration's own tests cover the released wire layout with pending TLCs.
+fn released_v2_without_pending_tlcs(
+    channel: fiber_types::ChannelActorData,
+) -> (
+    OldChannelActorData,
+    Option<(u32, fiber_types::ChannelSessionV2)>,
+) {
+    const RELEASED_SESSION_MARKER: u32 = 0x56320001;
+    let session = channel.session.clone();
+    assert!(session
+        .outgoing
+        .as_ref()
+        .is_none_or(|outgoing| outgoing.settlement.tlcs.is_empty()));
+    assert!(session
+        .incoming
+        .as_ref()
+        .is_none_or(|incoming| incoming.settlement.tlcs.is_empty()));
+    assert!(session
+        .pending_incoming
+        .as_ref()
+        .is_none_or(|incoming| incoming.settlement.tlcs.is_empty()));
+    assert!(session
+        .revocation_effect
+        .as_ref()
+        .is_none_or(|(_, settlement)| settlement.tlcs.is_empty()));
+    assert!(session
+        .bootstrap_settlement
+        .as_ref()
+        .is_none_or(|settlement| settlement.tlcs.is_empty()));
+    let latest_commitment_transaction = channel.latest_commitment_transaction();
+    let old = OldChannelActorData {
+        state: decode_as_new(channel.state).unwrap(),
+        public_channel_info: decode_as_new(channel.public_channel_info).unwrap(),
+        local_tlc_info: decode_as_new(channel.local_tlc_info).unwrap(),
+        remote_tlc_info: decode_as_new(channel.remote_tlc_info).unwrap(),
+        local_pubkey: decode_as_new(channel.local_pubkey).unwrap(),
+        remote_pubkey: decode_as_new(channel.remote_pubkey).unwrap(),
+        id: decode_as_new(channel.id).unwrap(),
+        funding_tx: channel.funding_tx,
+        funding_tx_confirmed_at: channel.funding_tx_confirmed_at,
+        funding_udt_type_script: channel.funding_udt_type_script,
+        latest_commitment_transaction,
+        is_acceptor: channel.is_acceptor,
+        is_one_way: channel.is_one_way,
+        to_local_amount: channel.to_local_amount,
+        to_remote_amount: channel.to_remote_amount,
+        local_reserved_ckb_amount: channel.local_reserved_ckb_amount,
+        remote_reserved_ckb_amount: channel.remote_reserved_ckb_amount,
+        commitment_fee_rate: channel.commitment_fee_rate,
+        commitment_delay_epoch: channel.commitment_delay_epoch,
+        funding_fee_rate: channel.funding_fee_rate,
+        signer: decode_as_new(channel.signer.expect("released channel has a local signer"))
+            .unwrap(),
+        local_channel_public_keys: decode_as_new(channel.local_channel_public_keys).unwrap(),
+        commitment_numbers: decode_as_new(channel.commitment_numbers).unwrap(),
+        local_constraints: decode_as_new(channel.local_constraints).unwrap(),
+        remote_constraints: decode_as_new(channel.remote_constraints).unwrap(),
+        tlc_state: serde_json::from_value(serde_json::to_value(channel.tlc_state).unwrap())
+            .unwrap(),
+        retryable_tlc_operations: serde_json::from_value(
+            serde_json::to_value(channel.retryable_tlc_operations).unwrap(),
+        )
+        .unwrap(),
+        waiting_forward_tlc_tasks: decode_as_new(channel.waiting_forward_tlc_tasks).unwrap(),
+        remote_shutdown_script: channel.remote_shutdown_script,
+        local_shutdown_script: channel.local_shutdown_script,
+        remote_commitment_points: decode_as_new(channel.remote_commitment_points).unwrap(),
+        remote_channel_public_keys: decode_as_new(channel.remote_channel_public_keys).unwrap(),
+        local_shutdown_info: decode_as_new(channel.local_shutdown_info).unwrap(),
+        remote_shutdown_info: decode_as_new(channel.remote_shutdown_info).unwrap(),
+        shutdown_transaction_hash: channel.shutdown_transaction_hash,
+        reestablishing: channel.reestablishing,
+        created_at: channel.created_at,
+        pending_replay_updates: decode_as_new(channel.pending_replay_updates).unwrap(),
+        last_was_revoke: channel.last_was_revoke,
+        connectivity_state: decode_as_new(channel.connectivity_state).unwrap(),
+        external_funding: decode_as_new(channel.external_funding).unwrap(),
+        last_committed_remote_nonce: None,
+        remote_revocation_nonce_for_verify: None,
+        remote_revocation_nonce_for_send: None,
+        remote_revocation_nonce_for_next: None,
+        last_revoke_ack_msg: None,
+        commitment_contract_features:
+            fiber_types_0100::CommitmentContractFeatures::ONCHAIN_FULL_PAYMENT_HASH,
+    };
+    (old, Some((RELEASED_SESSION_MARKER, session)))
 }
 
 #[test]
@@ -487,7 +573,7 @@ async fn test_upgrade_retains_real_v2_signed_history_and_remains_valid() {
     assert!(channel.session.outgoing.is_some());
     assert!(channel.session.incoming.is_some());
     let original = bincode::serialize(&channel.core).unwrap();
-    let old = migration_fixtures::released_v2(channel.core.clone());
+    let old = released_v2_without_pending_tlcs(channel.core.clone());
     let key = [&[0], id.as_ref()].concat();
     let path = gen_path();
     {
