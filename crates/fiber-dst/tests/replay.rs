@@ -300,6 +300,29 @@ fn fully_aborted_funding_is_verified_and_retried() {
 }
 
 #[test]
+fn tx_abort_while_syncing_cleans_up_funding_and_allows_retry() {
+    let trace = run_random("9", &["--payments", "12", "--phases", "3", "--chaos"]);
+    let channel = "Hash256(0x361dcb3d5c0a965b8239b64850b16d8db5bbcb14348290d9fe2d705bf6a2061a)";
+    let (before_abort, after_abort) = trace
+        .split_once("C receive from D TxAbort ")
+        .expect("C receives D's abort while reestablishing");
+    assert!(before_abort.contains(&format!("D funding aborted {channel}")));
+    assert!(after_abort.contains(&format!("C funding aborted {channel}")));
+    assert!(after_abort.contains(&format!(
+        "funding fully aborted C-D channel={channel} with no chain residue"
+    )));
+    let (_, retry) = after_abort
+        .split_once(&format!(
+            "retry fully aborted funding C-D channel={channel}"
+        ))
+        .expect("retry opening after both endpoints clean up");
+    assert!(retry
+        .lines()
+        .any(|line| { line.contains("opened V2 channel C-D ") && !line.contains(channel) }));
+    assert!(retry.contains("random reconciled workload=12"));
+}
+
+#[test]
 fn parallel_funding_opens_six_channels_and_probes_each() {
     let trace = run_fixture("parallel-funding", "42");
     assert!(trace.contains("parallel funding overlap=6"));
