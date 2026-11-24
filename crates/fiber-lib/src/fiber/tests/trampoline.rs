@@ -6,11 +6,14 @@ use crate::fiber::channel::{
 use crate::fiber::config::{
     DEFAULT_FINAL_TLC_EXPIRY_DELTA, DEFAULT_TLC_EXPIRY_DELTA, MIN_TLC_EXPIRY_DELTA,
 };
-use crate::fiber::delivery::TrampolineForwardingRequest;
+use crate::fiber::delivery::{
+    DeliveryDecision, HostedDeliveryPort, PaymentOutcomeDecision, PaymentOutcomeRequest,
+    SettledPaymentOutcome, TrampolineForwardingRequest,
+};
 use crate::fiber::graph::*;
 use crate::fiber::network::{
     BufferedTrampolineUpstreamStatus, DebugEvent, FiberActorCommand, NetworkActorMessage,
-    SendOnionPacketCommand,
+    PublicNetworkCommand, SendOnionPacketCommand,
 };
 use crate::fiber::payment::SendPaymentCommand;
 use crate::fiber::tests::create_test_channel_state_with_tlc;
@@ -32,11 +35,12 @@ use fiber_types::{
     RemoveTlcReason, RetryableTlcOperation, TLCId, TlcErr, TlcErrPacket, TlcErrorCode, TlcInfo,
     TlcStatus,
 };
-use ractor::{call, RpcReplyPort};
+use ractor::{call, ActorRef, RpcReplyPort};
 use rand::Rng;
 use secp256k1::SECP256K1;
+use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, Notify};
 use tracing::{debug, error};
 
 async fn set_test_trampoline_settlement_paused(node: &NetworkNode, paused: bool) {
@@ -2744,6 +2748,92 @@ async fn send_manual_trampoline_forward(
         .expect("send command");
 
     receiver.await.expect("recv result")
+}
+
+#[derive(Debug)]
+struct ReentrantHostedDeliveryPort {
+    network: ActorRef<NetworkActorMessage>,
+    callback_completed: Arc<Notify>,
+}
+
+#[async_trait::async_trait]
+impl HostedDeliveryPort for ReentrantHostedDeliveryPort {
+    async fn accept_trampoline_delivery(
+        &self,
+        _request: TrampolineForwardingRequest,
+    ) -> Result<DeliveryDecision, String> {
+        // Cold tenant activation calls back into this actor to register its peer.
+        // A normal mailbox round-trip reproduces the same wait-for relationship.
+        ractor::call_t!(
+            self.network,
+            |reply| NetworkActorMessage::new_command(FiberActorCommand::GetInflightPaymentCount(
+                reply
+            )),
+            1_000
+        )
+        .map_err(|error| format!("public actor could not handle activation callback: {error}"))??;
+        self.callback_completed.notify_one();
+        Ok(DeliveryDecision::Buffered)
+    }
+
+    async fn decide_payment_outcome(
+        &self,
+        _request: PaymentOutcomeRequest,
+    ) -> Result<PaymentOutcomeDecision, String> {
+        Err("not used by this test".to_string())
+    }
+
+    fn report_settled_payment(&self, _outcome: SettledPaymentOutcome) {}
+
+    fn report_tenant_channel(&self, _tenant_pubkey: Pubkey, _channel_id: Hash256, _online: bool) {}
+}
+
+#[tokio::test]
+async fn test_hosted_delivery_acceptance_does_not_block_public_network_actor() {
+    init_tracing();
+    let (nodes, channels) = create_n_nodes_network_with_visibility(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), true),
+            ((1, 2), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), true),
+        ],
+        3,
+    )
+    .await;
+    let [_payer, trampoline, recipient] = nodes.try_into().expect("3 nodes");
+    let callback_completed = Arc::new(Notify::new());
+    trampoline
+        .network_actor
+        .send_message(NetworkActorMessage::new_command(
+            PublicNetworkCommand::SetDeliveryPort(Arc::new(ReentrantHostedDeliveryPort {
+                network: trampoline.network_actor.clone(),
+                callback_completed: callback_completed.clone(),
+            })),
+        ))
+        .expect("attach hosted delivery port");
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(3),
+        send_manual_trampoline_forward(
+            &trampoline,
+            &recipient,
+            channels[0],
+            HashAlgorithm::CkbHash,
+            HashAlgorithm::CkbHash,
+            now_timestamp_as_millis_u64()
+                + DEFAULT_FINAL_TLC_EXPIRY_DELTA
+                + 2 * DEFAULT_TLC_EXPIRY_DELTA,
+            false,
+        ),
+    )
+    .await
+    .expect("trampoline admission should not stall");
+    assert!(
+        result.is_ok(),
+        "activation callback must complete: {result:?}"
+    );
+    tokio::time::timeout(Duration::from_secs(1), callback_completed.notified())
+        .await
+        .expect("hosted delivery accepted after the public actor callback");
 }
 
 #[tokio::test]

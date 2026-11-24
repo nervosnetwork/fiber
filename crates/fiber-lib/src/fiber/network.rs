@@ -1342,6 +1342,11 @@ pub enum FiberActorCommand {
         reply: RpcReplyPort<Result<(), DeliveryDispatchError>>,
     },
     #[cfg(not(target_arch = "wasm32"))]
+    CompleteTrampolineAdmission {
+        request: TrampolineForwardingRequest,
+        decision: Result<DeliveryDecision, String>,
+    },
+    #[cfg(not(target_arch = "wasm32"))]
     ReconcileBufferedTrampolineSettlement {
         session_key: PaymentSessionKey,
         reply: RpcReplyPort<Result<(), String>>,
@@ -3617,6 +3622,7 @@ where
             }
             #[cfg(not(target_arch = "wasm32"))]
             command @ (FiberActorCommand::DispatchBufferedTrampoline { .. }
+            | FiberActorCommand::CompleteTrampolineAdmission { .. }
             | FiberActorCommand::ReconcileBufferedTrampolineSettlement { .. }
             | FiberActorCommand::FailBufferedTrampoline { .. }
             | FiberActorCommand::SettleLspPaymentOutcome { .. }) => {
@@ -4489,6 +4495,29 @@ where
         command: FiberActorCommand,
     ) -> crate::Result<()> {
         match command {
+            FiberActorCommand::CompleteTrampolineAdmission { request, decision } => {
+                let payment_hash = request.payment_hash;
+                let previous_tlc = request.previous_tlc;
+                if let Err(error) =
+                    Box::pin(self.complete_trampoline_admission(state, request, decision)).await
+                {
+                    Box::pin(self.on_add_tlc_result_event(
+                        myself,
+                        state,
+                        PaymentSessionKey {
+                            payment_hash,
+                            upstream_tlc_key: None,
+                        },
+                        None,
+                        Err((
+                            ProcessingChannelError::TlcForwardingError(error.clone()),
+                            error,
+                        )),
+                        Some(previous_tlc),
+                    ))
+                    .await;
+                }
+            }
             FiberActorCommand::DispatchBufferedTrampoline { request, reply } => {
                 let key = request.hosted_session_key();
                 if let Some(session) = self.store.get_payment_session(key) {
@@ -6057,9 +6086,18 @@ where
     ) -> Result<(), TlcErr> {
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(port) = state.delivery_port.clone() {
-            return self
-                .accept_or_dispatch_hosted_trampoline(state, port, request)
-                .await;
+            let network = state.network.clone();
+            // The LSP may be activating a tenant and calling back into this actor.
+            // Never wait for its answer while holding the public actor's mailbox.
+            crate::tasks::spawn(async move {
+                let decision = port.accept_trampoline_delivery(request.clone()).await;
+                if let Err(error) = network.send_message(FiberActorMessage::new_command(
+                    FiberActorCommand::CompleteTrampolineAdmission { request, decision },
+                )) {
+                    warn!("Failed to deliver hosted trampoline decision: {error}");
+                }
+            });
+            return Ok(());
         }
 
         self.dispatch_trampoline_payment(state, request).await
@@ -6138,13 +6176,13 @@ where
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    async fn accept_or_dispatch_hosted_trampoline(
+    async fn complete_trampoline_admission(
         &self,
         state: &mut FiberActorState<S, C>,
-        port: Arc<dyn HostedDeliveryPort>,
         request: TrampolineForwardingRequest,
+        decision: Result<DeliveryDecision, String>,
     ) -> Result<(), TlcErr> {
-        match port.accept_trampoline_delivery(request.clone()).await {
+        match decision {
             Ok(DeliveryDecision::NotHosted) => {
                 self.dispatch_trampoline_payment(state, request).await
             }
