@@ -1632,7 +1632,10 @@ mod tests {
                 !next.v2_nonces.is_empty(),
                 "signing must replenish fresh V2 nonces"
             );
-            assert!(!next.commitment_points.is_empty());
+            assert!(
+                next.commitment_points.is_empty() && next.next_commitment_point.is_none(),
+                "remote-lane SendCommitmentSigned must not emit local commitment_points"
+            );
             serde_json::to_value(&state.submissions[0]).unwrap()
         };
         agent
@@ -1643,6 +1646,18 @@ mod tests {
             first,
             serde_json::to_value(&node.state().submissions[1]).unwrap()
         );
+
+        let local_status = convert_tests::commitment_status(&signer, &tx, false).await;
+        node.state()
+            .statuses
+            .insert(channel_id().into(), local_status);
+        agent.poll_once().await.expect("poll and sign local lane");
+        let state = node.state();
+        assert_eq!(state.submissions.len(), 3);
+        let local_next = state.submissions[2].next_material.as_ref().unwrap();
+        assert!(!local_next.v2_nonces.is_empty());
+        assert_eq!(local_next.commitment_points.len(), 2);
+        assert!(local_next.next_commitment_point.is_some());
     }
 
     #[tokio::test]

@@ -4632,6 +4632,7 @@ async fn assert_v2_actual_backup_rollback_quarantines_matching_malicious_peer() 
     )));
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[tokio::test]
 async fn test_restore_marks_hosted_tenant_channels_stale_and_restores_tenant_keys() {
     use crate::store::NodeNamespace;
