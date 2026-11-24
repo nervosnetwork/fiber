@@ -4,7 +4,10 @@ use std::rc::Rc;
 use anyhow::{ensure, Context, Result};
 use fnn::fiber::channel::{ChannelActorState, ChannelActorStateStore};
 use fnn::fiber::network::{AcceptChannelCommand, AcceptChannelResponse, OpenChannelCommand};
-use fnn::fiber::{Hash256, NetworkActorCommand};
+use fnn::fiber::{ChannelState, Hash256, NetworkActorCommand};
+use fnn::fiber_types::schema::CHANNEL_ACTOR_STATE_PREFIX;
+use fnn::simulation;
+use fnn::store::Store;
 use tokio::sync::oneshot;
 
 use crate::harness::Harness;
@@ -49,6 +52,7 @@ pub(super) struct FundingOrder {
 pub(super) enum BatchFault {
     None,
     DropUpdate(usize),
+    AbortCleanup(usize),
     Chaos(usize),
     SlowChain { index: usize, ticks: u32 },
 }
@@ -64,6 +68,43 @@ pub(super) enum OpeningFault {
 enum Outcome {
     Online,
     Aborted,
+}
+
+pub(super) fn mutable_key(channel: Hash256) -> Vec<u8> {
+    [&[CHANNEL_ACTOR_STATE_PREFIX], channel.as_ref()].concat()
+}
+
+fn audited_channel_state(
+    store: &Store,
+    id: Hash256,
+    peer: &fnn::fiber::Pubkey,
+) -> Result<Option<ChannelState>> {
+    let state = simulation::channel_records(store, &id).map(|records| records.decode());
+    let mut peer_rows = store
+        .get_channel_states(None)
+        .into_iter()
+        .filter(|(_, channel, _)| *channel == id);
+    let expected = state.as_ref().map(|state| (*peer, id, state.state));
+    let indexed = peer_rows.next();
+    ensure!(
+        indexed == expected && peer_rows.next().is_none(),
+        "channel {id} peer index={indexed:?}, expected={expected:?}"
+    );
+    let indexed = simulation::indexed_funding_outpoints(store, &id);
+    let expected = state
+        .as_ref()
+        .and_then(|state| state.get_funding_transaction_outpoint());
+    ensure!(
+        indexed.iter().eq(expected.iter()),
+        "channel {id} funding outpoint index={indexed:?}, expected={expected:?}"
+    );
+    if state.is_none() {
+        ensure!(
+            simulation::cached_channel_matches_disk(store, &id).is_none(),
+            "deleted channel {id} remains in cache"
+        );
+    }
+    Ok(state.map(|state| state.state))
 }
 
 struct Attempt {
@@ -112,11 +153,14 @@ impl Attempt {
         let lock = self.initial.get_funding_lock_script();
         let transactions = runtime.chain.funding_transactions(&lock);
         if matches!(outcome, Outcome::Aborted) {
-            ensure!(
-                runtime.funding_record_absent(opener, channel)?
-                    && runtime.funding_record_absent(acceptor, channel)?,
-                "both endpoints reported abort but channel {channel} remains persisted"
-            );
+            for (owner, peer) in [(opener, acceptor), (acceptor, opener)] {
+                let store = runtime.store(owner)?;
+                ensure!(
+                    audited_channel_state(&store, channel, &runtime.peers[peer])?.is_none(),
+                    "aborted channel {channel} remains on {}",
+                    NAMES[owner]
+                );
+            }
             ensure!(
                 transactions.is_empty(),
                 "aborted channel {channel} left funding transactions: {transactions:?}"

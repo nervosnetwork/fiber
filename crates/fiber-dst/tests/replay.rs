@@ -38,6 +38,11 @@ fn emit_fixture_trace() {
         "mpp" => Scenario::Mpp,
         "funding-abort-recovery" => Scenario::FundingAbortRecovery,
         "parallel-funding" => Scenario::ParallelFunding { mixed: false },
+        "channel-id-rewrite-sync" => Scenario::ChannelIdRewrite {
+            after_commit: false,
+        },
+        "channel-id-rewrite-crash" => Scenario::ChannelIdRewrite { after_commit: true },
+        "parallel-funding-cleanup" => Scenario::ParallelFundingCleanup,
         "parallel-funding-abort" => Scenario::ParallelFunding { mixed: true },
         _ => panic!("unknown replay fixture {case}"),
     };
@@ -161,6 +166,7 @@ fn crash_before_commitment_ack_replays_across_processes() {
     let trace = run_fixture("crash-before-ack", "42");
     assert!(trace.contains("before ACK"));
     assert!(trace.contains("B start 2"));
+    assert!(trace.contains("cache and disk agree after ACK recovery"));
     assert_eq!(trace.matches(" Success ").count(), 2);
     assert_eq!(trace, run_fixture("crash-before-ack", "42"));
 }
@@ -284,6 +290,43 @@ fn parallel_funding_abort_is_isolated_from_healthy_siblings() {
     assert!(trace.contains("parallel funding one-sided abort"));
     assert!(trace.contains("parallel funding reconciled attempts=4 online=3 aborted=1 probes=3"));
     assert_eq!(trace, run_fixture("parallel-funding-abort", "42"));
+}
+
+#[test]
+fn interrupted_channel_id_rewrite_is_atomic_and_recovers() {
+    for case in ["channel-id-rewrite-sync", "channel-id-rewrite-crash"] {
+        let trace = run_fixture(case, "42");
+        assert!(trace.contains("ID rewrite after_commit="));
+        assert!(trace.contains("ID rewrite recovered"));
+        assert_eq!(trace, run_fixture(case, "42"));
+    }
+}
+
+#[test]
+fn interrupted_abort_cleanup_preserves_online_siblings() {
+    let trace = run_fixture("parallel-funding-cleanup", "42");
+    assert!(trace.contains("funding cleanup SQLite error"));
+    assert!(trace.contains("parallel funding reconciled attempts=4 online=3 aborted=1 probes=3"));
+    assert_eq!(trace, run_fixture("parallel-funding-cleanup", "42"));
+}
+
+#[test]
+fn random_payment_chaos_replays_a_targeted_sqlite_write_error() {
+    let options = ["--payments", "12", "--phases", "3", "--chaos-payments"];
+    let trace = run_random("9", &options);
+    let mut remaining = trace.as_str();
+    for marker in [
+        "chaos arm sqlite-batch F WriteIo",
+        "F SQLite fault WriteIo stopped Fiber",
+        "chaos end sqlite-batch hit=true",
+        "F start 2",
+        "random reconciled workload=12",
+    ] {
+        (_, remaining) = remaining
+            .split_once(marker)
+            .unwrap_or_else(|| panic!("missing or out-of-order SQLite milestone {marker}"));
+    }
+    assert_eq!(trace, run_random("9", &options));
 }
 
 #[test]

@@ -1,5 +1,6 @@
 //! VFS fault injection for real SQLite connections opened by Fiber DST.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::ffi::CStr;
 use std::mem::{align_of, size_of};
@@ -33,10 +34,54 @@ pub enum DiskFault {
     SyncIo,
 }
 
+/// Select a batch by the key prefixes it puts and deletes. Supplied conditions must all match.
+#[derive(Clone, Debug)]
+pub struct BatchTarget {
+    /// Require a put with this prefix, when supplied.
+    pub put_prefix: Option<Vec<u8>>,
+    /// Require a delete with this prefix, when supplied.
+    pub delete_prefix: Option<Vec<u8>>,
+}
+
 #[derive(Default)]
 struct DiskState {
     armed: Option<DiskFault>,
+    batch: Option<BatchTarget>,
     hit: Option<DiskFault>,
+}
+
+thread_local! {
+    // SQLite calls the VFS synchronously. Other threads or connections must not
+    // inherit the scope of the selected transaction.
+    static ACTIVE_BATCH: Cell<*const Mutex<DiskState>> = const { Cell::new(ptr::null()) };
+}
+
+#[derive(Clone)]
+pub(crate) struct BatchFaults(Arc<Mutex<DiskState>>);
+
+impl std::fmt::Debug for BatchFaults {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BatchFaults").finish_non_exhaustive()
+    }
+}
+
+pub(crate) struct BatchScope(*const Mutex<DiskState>);
+
+impl Drop for BatchScope {
+    fn drop(&mut self) {
+        ACTIVE_BATCH.set(self.0);
+    }
+}
+
+impl BatchFaults {
+    pub(crate) fn enter(&self, matches: impl FnOnce(&BatchTarget) -> bool) -> Option<BatchScope> {
+        let state = lock(&self.0);
+        if state.armed.is_some() && state.batch.as_ref().is_some_and(matches) {
+            Some(BatchScope(ACTIVE_BATCH.replace(Arc::as_ptr(&self.0))))
+        } else {
+            None
+        }
+    }
 }
 
 /// Fault control associated with one simulated node's database directory.
@@ -69,6 +114,15 @@ impl SimulatedDisk {
     pub fn arm(&self, fault: DiskFault) {
         *lock(&self.0.state) = DiskState {
             armed: Some(fault),
+            ..DiskState::default()
+        };
+    }
+
+    /// Arm an error for a matching batch. It is consumed when the VFS delivers the error.
+    pub fn arm_batch(&self, fault: DiskFault, target: BatchTarget) {
+        *lock(&self.0.state) = DiskState {
+            armed: Some(fault),
+            batch: Some(target),
             hit: None,
         };
     }
@@ -94,18 +148,18 @@ fn lock<T>(value: &Mutex<T>) -> MutexGuard<'_, T> {
     value.lock().unwrap_or_else(|error| error.into_inner())
 }
 
-pub(crate) fn vfs_for(path: &Path) -> Result<Option<&'static str>, String> {
+pub(crate) fn vfs_for(path: &Path) -> Result<Option<(&'static str, BatchFaults)>, String> {
     let disks = lock(&DISKS);
     if disks.is_empty() {
         return Ok(None);
     }
     let path = path.canonicalize().map_err(|e| e.to_string())?;
-    if disks.get(&path).is_none_or(|disk| disk.strong_count() == 0) {
+    let Some(disk) = disks.get(&path).and_then(Weak::upgrade) else {
         return Ok(None);
-    }
+    };
     drop(disks);
     VFS.get_or_init(register).as_ref().map_err(Clone::clone)?;
-    Ok(Some(VFS_NAME))
+    Ok(Some((VFS_NAME, BatchFaults(disk))))
 }
 
 // The parent owns the first szOsFile bytes and receives its original file pointer
@@ -192,6 +246,9 @@ unsafe extern "C" fn open(
 fn fault(disk: &Mutex<DiskState>, sync: bool) -> Option<c_int> {
     let mut state = lock(disk);
     let plan = state.armed?;
+    if state.batch.is_some() && !ACTIVE_BATCH.with(|active| ptr::eq(active.get(), disk)) {
+        return None;
+    }
     let result = match (plan, sync) {
         (DiskFault::WriteIo, false) => ffi::SQLITE_IOERR_WRITE,
         (DiskFault::DiskFull, false) => ffi::SQLITE_FULL,
@@ -259,7 +316,58 @@ unsafe extern "C" fn sync(file: *mut sqlite3_file, flags: c_int) -> c_int {
 mod tests {
     use rusqlite::{Connection, OpenFlags};
 
-    use super::{ffi, DiskFault, SimulatedDisk, VFS_NAME};
+    use crate::backend::{BatchWriter, StorageBackend};
+    use crate::sqlite::Store;
+
+    use super::{ffi, BatchTarget, DiskFault, SimulatedDisk, VFS_NAME};
+
+    #[test]
+    fn simulated_sqlite_fault_matches_both_operations_in_one_batch() {
+        let temp = tempfile::tempdir().unwrap();
+        let disk = SimulatedDisk::new(temp.path()).unwrap();
+        let mut store = Store::open_db(temp.path()).unwrap();
+        store.set_sync_writes(true);
+        store.put(b"old/key", b"original");
+        store.put(b"old/sibling", b"sibling");
+        disk.arm_batch(
+            DiskFault::WriteIo,
+            BatchTarget {
+                put_prefix: Some(b"new/".to_vec()),
+                delete_prefix: Some(b"old/".to_vec()),
+            },
+        );
+        store.put(b"new/direct", b"direct");
+        let mut delete_only = store.batch();
+        delete_only.delete(b"old/sibling");
+        delete_only.commit();
+        let mut put_only = store.batch();
+        put_only.put(b"new/sibling", b"sibling");
+        put_only.commit();
+        assert_eq!(disk.hit(), None);
+        let mut moving = store.batch();
+        moving.delete(b"old/key");
+        moving.put(b"new/key", b"moved");
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| moving.commit())).is_err()
+        );
+        assert_eq!(disk.hit(), Some(DiskFault::WriteIo));
+        drop(store);
+        let store = Store::open_db(temp.path()).unwrap();
+        assert_eq!(
+            store.get(b"old/key").as_deref(),
+            Some(b"original".as_slice())
+        );
+        assert_eq!(store.get(b"new/key"), None);
+        assert_eq!(store.get(b"old/sibling"), None);
+        assert_eq!(
+            store.get(b"new/direct").as_deref(),
+            Some(b"direct".as_slice())
+        );
+        assert_eq!(
+            store.get(b"new/sibling").as_deref(),
+            Some(b"sibling".as_slice())
+        );
+    }
 
     #[test]
     fn simulated_sqlite_faults_are_node_local_and_batches_are_atomic() {
@@ -273,7 +381,7 @@ mod tests {
             let b_dir = temp.path().join("b");
             let a_disk = SimulatedDisk::new(&a_dir).unwrap();
             let b_disk = SimulatedDisk::new(&b_dir).unwrap();
-            assert_eq!(super::vfs_for(&a_dir).unwrap(), Some(VFS_NAME));
+            assert_eq!(super::vfs_for(&a_dir).unwrap().unwrap().0, VFS_NAME);
             let open = |path: &std::path::Path| {
                 Connection::open_with_flags_and_vfs(
                     path.join("data.sqlite"),

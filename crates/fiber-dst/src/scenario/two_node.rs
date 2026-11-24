@@ -160,7 +160,25 @@ impl Driver {
         Ok(())
     }
 
+    fn ready_channel_records(
+        &self,
+        node: usize,
+        channel: &Hash256,
+    ) -> Result<fnn::simulation::ChannelRecords> {
+        let store = self.runtime.store(node)?;
+        ensure!(
+            fnn::simulation::cached_channel_matches_disk(&store, channel) == Some(true),
+            "{} hot cache disagrees with SQLite or has no ready channel {channel}",
+            NAMES[node]
+        );
+        fnn::simulation::channel_records(&store, channel).context("missing durable ready channel")
+    }
+
     pub(super) fn crash_before_ack(&mut self, channel: &Hash256) -> Result<()> {
+        let initial = [
+            self.ready_channel_records(0, channel)?,
+            self.ready_channel_records(1, channel)?,
+        ];
         let before = self.balances(channel)?;
         let b_round = self
             .runtime
@@ -188,10 +206,22 @@ impl Driver {
             persisted != b_round,
             "pause did not follow a durable B commitment"
         );
+        let committed = self.ready_channel_records(1, channel)?;
+        ensure!(
+            committed != initial[1] && committed.immutable() == initial[1].immutable(),
+            "commitment should update only the mutable record"
+        );
         self.runtime
             .note(format_args!("B committed {persisted:?} before ACK"));
         let crash = faults::Fault::Crash(1).inject(&mut self.runtime)?;
         cut.heal(&mut self.runtime);
+        {
+            let store = self.runtime.reopen_offline_store(1)?;
+            ensure!(
+                fnn::simulation::channel_records(&store, channel).as_ref() == Some(&committed),
+                "B recovered a different record than it committed before ACK"
+            );
+        }
         self.until("A notices B disconnect", |s| {
             Ok((!s.runtime.nodes.borrow()[0].connected.contains(&1)).then_some(()))
         })?;
@@ -204,6 +234,14 @@ impl Driver {
             self.finish_payment(channel, 0, payment, 100, before)? == PaymentStatus::Success,
             "crash-window payment did not succeed"
         );
+        for (node, original) in initial.iter().enumerate() {
+            ensure!(
+                self.ready_channel_records(node, channel)?.immutable() == original.immutable(),
+                "{} changed the channel's immutable record",
+                NAMES[node]
+            );
+        }
+        self.runtime.note("cache and disk agree after ACK recovery");
         self.probe(channel)
     }
 

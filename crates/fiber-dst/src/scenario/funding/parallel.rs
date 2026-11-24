@@ -4,17 +4,27 @@ use anyhow::{ensure, Context, Result};
 use fnn::fiber::config::DEFAULT_FINAL_TLC_EXPIRY_DELTA;
 use fnn::fiber::payment::SendPaymentWithRouterCommand;
 use fnn::fiber::{ChannelState, Hash256, NetworkActorCommand, PaymentStatus};
-use fnn::fiber_types::RouterHop;
-use fnn::simulation::{ChainEndpoint, ChainFault};
+use fnn::fiber_types::{CloseFlags, RouterHop};
+use fnn::simulation::{BatchTarget, ChainEndpoint, ChainFault, DiskFault};
 
 use crate::host::{FrameLoss, NAMES};
 use crate::scenario::{faults::Fault, TICK};
 
-use super::{Attempt, BatchFault, Driver, Edge, FundingOrder, Outcome, FUNDING_AMOUNT};
+use super::{
+    audited_channel_state, mutable_key, Attempt, BatchFault, Driver, Edge, FundingOrder, Outcome,
+    FUNDING_AMOUNT,
+};
 
 impl Driver {
-    pub(in crate::scenario) fn parallel_funding_fixture(&mut self, mixed: bool) -> Result<()> {
-        let count = if mixed { 4 } else { 6 };
+    pub(in crate::scenario) fn parallel_funding_fixture(
+        &mut self,
+        fault: BatchFault,
+    ) -> Result<()> {
+        let expected_aborts = usize::from(matches!(
+            fault,
+            BatchFault::DropUpdate(_) | BatchFault::AbortCleanup(_)
+        ));
+        let count = if expected_aborts == 0 { 6 } else { 4 };
         let orders = (0..count)
             .map(|index| FundingOrder {
                 opener: index % 2,
@@ -23,13 +33,8 @@ impl Driver {
                 gap_ticks: index % 2,
             })
             .collect();
-        let fault = if mixed {
-            BatchFault::DropUpdate(1)
-        } else {
-            BatchFault::None
-        };
         let edges = self.parallel_funding(orders, fault, 0, &mut BTreeSet::new())?;
-        ensure!(edges.len() == count - usize::from(mixed));
+        ensure!(edges.len() == count - expected_aborts);
         Ok(())
     }
 
@@ -45,6 +50,7 @@ impl Driver {
         let policy = match fault {
             BatchFault::None => "none",
             BatchFault::DropUpdate(_) => "drop-update",
+            BatchFault::AbortCleanup(_) => "abort-cleanup",
             BatchFault::Chaos(_) => "continuous",
             BatchFault::SlowChain { .. } => "slow-ckb",
         };
@@ -56,7 +62,7 @@ impl Driver {
         ));
         self.protect_open(a, b)?;
         let drop_victim = match fault {
-            BatchFault::DropUpdate(index) => {
+            BatchFault::DropUpdate(index) | BatchFault::AbortCleanup(index) => {
                 // Start the faulty attempt before submitting its healthy siblings.
                 let victim = orders.remove(index);
                 orders.insert(0, victim);
@@ -170,8 +176,63 @@ impl Driver {
             self.runtime.note(format_args!(
                 "parallel funding victim={victim} pending with online siblings"
             ));
+            let cleanup = if matches!(fault, BatchFault::AbortCleanup(_)) {
+                let order = &attempts[drop_victim.expect("armed victim")].order;
+                let node = order.acceptor;
+                ensure!(
+                    audited_channel_state(
+                        &self.runtime.store(node)?,
+                        victim,
+                        &self.runtime.peers[order.opener]
+                    )?
+                    .is_some(),
+                    "abort victim {victim} was already absent"
+                );
+                let injection = Fault::Sqlite {
+                    node,
+                    fault: DiskFault::WriteIo,
+                    batch: Some(BatchTarget {
+                        put_prefix: None,
+                        delete_prefix: Some(mutable_key(victim)),
+                    }),
+                }
+                .inject(&mut self.runtime)?;
+                Some((node, injection))
+            } else {
+                None
+            };
             // The dropped application frame stays lost. Reconnect makes Fiber reconcile it.
             drop.heal(&mut self.runtime);
+            if let Some((node, injection)) = cleanup {
+                self.until("victim funding cleanup hits SQLite error", |s| {
+                    Ok(injection.hit(&s.runtime).then_some(()))
+                })?;
+                injection.stop_after_sqlite_fault(&mut self.runtime);
+                {
+                    let store = self.runtime.reopen_offline_store(node)?;
+                    let peer = if node == a { b } else { a };
+                    ensure!(
+                        audited_channel_state(&store, victim, &self.runtime.peers[peer])?
+                            == Some(ChannelState::Closed(CloseFlags::FUNDING_ABORTED)),
+                        "failed delete did not preserve the terminal state of channel {victim}"
+                    );
+                    for attempt in attempts.iter().filter(|attempt| attempt.channel != victim) {
+                        ensure!(
+                            audited_channel_state(
+                                &store,
+                                attempt.channel,
+                                &self.runtime.peers[peer]
+                            )? == Some(ChannelState::ChannelReady),
+                            "abort of {victim} affected sibling {}",
+                            attempt.channel
+                        );
+                    }
+                    self.runtime.note(format_args!(
+                        "funding cleanup SQLite error rolled back channel={victim}"
+                    ));
+                }
+                self.runtime.restart(node);
+            }
         } else if let BatchFault::Chaos(index) = fault {
             self.allow_open_faults(a, b, attempts[index].channel)?;
         } else if let BatchFault::SlowChain { index, ticks } = fault {

@@ -374,8 +374,8 @@ impl<'a> ChannelStates<'a> {
         Some((cached, record))
     }
 
-    /// The cached snapshot only, without falling back to the record (tests only).
-    #[cfg(test)]
+    /// The cached snapshot only, without falling back to the record.
+    #[cfg(any(test, all(feature = "simulation", not(target_arch = "wasm32"))))]
     pub(super) fn cache_peek(&self, id: &Hash256) -> Option<ChannelActorState> {
         let key = self.cache_key(id);
         self.cache

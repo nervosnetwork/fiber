@@ -3,8 +3,8 @@ use std::{cell::RefCell, time::Duration};
 use anyhow::{Context, Result};
 use fnn::fiber::Hash256;
 use fnn::simulation::{
-    pause_before_commitment_ack, pause_before_forwarding_fulfill, slow_mailbox, ChainEndpoint,
-    ChainFault, CommitmentPause, DiskFault, MailboxDelay,
+    pause_before_commitment_ack, pause_before_forwarding_fulfill, slow_mailbox, BatchTarget,
+    ChainEndpoint, ChainFault, CommitmentPause, DiskFault, MailboxDelay,
 };
 use ractor::ActorCell;
 
@@ -27,6 +27,7 @@ pub(in crate::scenario) enum Fault {
     Sqlite {
         node: usize,
         fault: DiskFault,
+        batch: Option<BatchTarget>,
     },
     Tcp {
         from: usize,
@@ -66,6 +67,7 @@ pub(in crate::scenario) enum ProtocolPoint {
     CommitmentAck,
     ForwardFulfill,
     FundingPersisted,
+    ChannelIdRewritten,
 }
 
 pub(in crate::scenario) enum MailboxTarget {
@@ -142,8 +144,15 @@ impl Fault {
                     fault,
                 }
             }
-            Self::Sqlite { node, fault } => {
-                harness.disks[node].arm(fault);
+            Self::Sqlite {
+                node,
+                fault,
+                ref batch,
+            } => {
+                match batch {
+                    Some(target) => harness.disks[node].arm_batch(fault, target.clone()),
+                    None => harness.disks[node].arm(fault),
+                }
                 Injection::Sqlite { node, fault }
             }
             Self::Tcp {
@@ -222,6 +231,13 @@ impl Fault {
                     ProtocolPoint::FundingPersisted => {
                         fnn::simulation::pause_after_funding_state(peer, channel, preceding_hits)
                     }
+                    ProtocolPoint::ChannelIdRewritten => {
+                        fnn::simulation::pause_after_channel_id_rewrite(
+                            peer,
+                            channel,
+                            preceding_hits,
+                        )
+                    }
                 };
                 Injection::ProtocolPause(RefCell::new(pause))
             }
@@ -282,6 +298,15 @@ impl Injection {
         }
     }
 
+    pub(in crate::scenario) fn stop_after_sqlite_fault(self, harness: &mut Harness) {
+        let Self::Sqlite { node, .. } = self else {
+            unreachable!("expected SQLite injection");
+        };
+        assert!(self.hit(harness), "SQLite fault must hit before crashing");
+        harness.crash(node);
+        harness.disks[node].clear();
+    }
+
     pub(in crate::scenario) fn heal(self, harness: &mut Harness) {
         match self {
             Self::Crash(node) => harness.restart(node),
@@ -291,13 +316,11 @@ impl Injection {
             }
             Self::Chain { node, .. } => harness.chain_access[node].set(ChainFault::Healthy),
             Self::Sqlite { node, .. } => {
-                let tripped = harness.disks[node].hit().is_some();
-                if tripped {
-                    harness.crash(node);
-                }
-                harness.disks[node].clear();
-                if tripped {
+                if harness.disks[node].hit().is_some() {
+                    self.stop_after_sqlite_fault(harness);
                     harness.restart(node);
+                } else {
+                    harness.disks[node].clear();
                 }
             }
             Self::Tcp { control, .. } => control.disarm(),

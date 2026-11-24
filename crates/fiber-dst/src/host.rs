@@ -205,6 +205,7 @@ pub(crate) struct Host {
     pub nodes: Nodes,
     pub trace: Trace,
     pub watchtower: Option<Tower>,
+    pub funding_timeout_seconds: Option<u64>,
 }
 
 impl Host {
@@ -219,6 +220,9 @@ impl Host {
         .map_err(|error| anyhow!(error))?;
         let mut config = FiberConfig::default();
         config.auto_accept_channel_ckb_funding_amount = Some(0);
+        if let Some(timeout) = self.funding_timeout_seconds {
+            config.funding_timeout_seconds = timeout;
+        }
         let features = config.gen_node_features();
         let generation = {
             let mut nodes = self.nodes.borrow_mut();

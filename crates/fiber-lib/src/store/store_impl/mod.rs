@@ -527,8 +527,6 @@ pub(super) fn channel_immutable_key(id: &Hash256) -> Vec<u8> {
 }
 
 /// Queue the two channel records plus their indexes into one atomic batch.
-// `store` is only read by the debug assertion.
-#[cfg_attr(not(debug_assertions), allow(unused_variables))]
 pub(super) fn stage_channel_actor_state(
     store: &Store,
     batch: &mut impl BatchWriter,
@@ -539,6 +537,22 @@ pub(super) fn stage_channel_actor_state(
     let channel_state = state.state;
     let remote_pubkey = state.get_remote_pubkey();
     let funding_outpoint = state.get_funding_transaction_outpoint();
+    if write_immutable {
+        // Funding collaboration can replace the transaction. Retire the previous
+        // outpoint in the same transaction that publishes its replacement.
+        let previous_outpoint = store
+            .get(channel_immutable_key(&id))
+            .and_then(|record| {
+                deserialize_from::<ChannelImmutableData>(&record, "ChannelImmutableState")
+                    .funding_tx
+            })
+            .map(|tx| OutPoint::new(tx.calc_tx_hash(), 0));
+        if let Some(previous) =
+            previous_outpoint.filter(|old| Some(old) != funding_outpoint.as_ref())
+        {
+            batch.delete(KeyValue::OutPointChannelId(previous, id).key());
+        }
+    }
 
     let kv = KeyValue::PubkeyChannelId((remote_pubkey, id), channel_state);
     batch.put(kv.key(), kv.value());
@@ -708,12 +722,77 @@ pub(crate) fn validate_stored_channel_record(
     }
 }
 
+/// Both durable records read from a single database snapshot.
+#[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+#[derive(PartialEq, Eq)]
+pub struct ChannelRecords {
+    id: Hash256,
+    mutable: Vec<u8>,
+    immutable: Vec<u8>,
+}
+
+#[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+impl ChannelRecords {
+    /// Decode the captured records without consulting Fiber's cache.
+    pub fn decode(&self) -> ChannelActorState {
+        deserialize_channel_state_parts(&self.id, &self.mutable, &self.immutable)
+    }
+
+    /// Bytes of the record that must stay fixed once the channel is established.
+    pub fn immutable(&self) -> &[u8] {
+        &self.immutable
+    }
+
+    fn from_rows(id: Hash256, [mutable, immutable]: [Option<Vec<u8>>; 2]) -> Option<Self> {
+        match (mutable, immutable) {
+            (Some(mutable), Some(immutable)) => Some(Self {
+                id,
+                mutable,
+                immutable,
+            }),
+            (None, None) => None,
+            (Some(_), None) => panic!("DST channel {id}: missing immutable record"),
+            (None, Some(_)) => panic!("DST channel {id}: missing mutable record"),
+        }
+    }
+}
+
 #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
 impl Store {
-    pub(crate) fn simulation_channel_bytes(&self, id: &Hash256) -> Option<Vec<u8>> {
-        let mut bytes = self.get(channel_mutable_key(id))?;
-        bytes.extend(self.get(channel_immutable_key(id))?);
-        Some(bytes)
+    pub(crate) fn simulation_channel_records(&self, id: &Hash256) -> Option<ChannelRecords> {
+        let rows = self.multi_get(&[channel_mutable_key(id), channel_immutable_key(id)]);
+        ChannelRecords::from_rows(*id, rows.try_into().expect("two keys requested"))
+    }
+
+    pub(crate) fn simulation_cached_channel_matches_disk(&self, id: &Hash256) -> Option<bool> {
+        let cached = self.channel_states().cache_peek(id)?;
+        let (immutable, mutable) = cached.core.into_parts();
+        Some(self.simulation_channel_records(id).is_some_and(|records| {
+            serialize_to_vec(&immutable, "ChannelImmutableState") == records.immutable
+                && serialize_to_vec(&mutable, "ChannelMutableState") == records.mutable
+        }))
+    }
+
+    pub(crate) fn simulation_indexed_funding_outpoints(&self, id: &Hash256) -> Vec<OutPoint> {
+        self.collect_by_prefix(&[CHANNEL_OUTPOINT_CHANNEL_ID_PREFIX])
+            .into_iter()
+            .filter(|kv| deserialize_from::<Hash256>(&kv.value, "ChannelId") == *id)
+            .map(|kv| OutPoint::from_slice(&kv.key[1..]).expect("decode indexed funding outpoint"))
+            .collect()
+    }
+}
+
+#[cfg(all(test, feature = "simulation", not(target_arch = "wasm32")))]
+mod simulation_records_tests {
+    use super::{ChannelRecords, Hash256};
+
+    #[test]
+    fn simulation_rejects_either_half_of_a_channel() {
+        let id = Hash256::default();
+        assert!(ChannelRecords::from_rows(id, [None, None]).is_none());
+        for rows in [[Some(vec![]), None], [None, Some(vec![])]] {
+            assert!(std::panic::catch_unwind(|| ChannelRecords::from_rows(id, rows)).is_err());
+        }
     }
 }
 

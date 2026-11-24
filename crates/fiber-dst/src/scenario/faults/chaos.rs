@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use fnn::fiber::Hash256;
+use fnn::simulation::{BatchTarget, DiskFault};
 use rand::rngs::StdRng;
 use rand::seq::IteratorRandom;
 use rand::{Rng, SeedableRng};
@@ -166,6 +167,28 @@ impl Chaos {
         Ok(())
     }
 
+    pub(in crate::scenario) fn arm_sqlite_batch(
+        &mut self,
+        harness: &mut Harness,
+        node: usize,
+        fault: DiskFault,
+        batch: BatchTarget,
+        expires: Duration,
+    ) -> Result<()> {
+        self.active.push(Active {
+            target: Target::Node(node),
+            ends: expires,
+            fault: Fault::Sqlite {
+                node,
+                fault,
+                batch: Some(batch),
+            }
+            .inject(harness)?,
+            label: "sqlite-batch",
+        });
+        Ok(())
+    }
+
     pub(in crate::scenario) fn stop_at(&mut self, time: Duration) {
         self.stop = Some(time);
     }
@@ -233,6 +256,10 @@ impl Chaos {
             let candidates = (0..harness.peers.len())
                 .filter(|&node| {
                     harness.node_available(node)
+                        && !self
+                            .active
+                            .iter()
+                            .any(|active| active.target == Target::Node(node))
                         && !self
                             .protected_open
                             .is_some_and(|(a, b)| node == a || node == b)

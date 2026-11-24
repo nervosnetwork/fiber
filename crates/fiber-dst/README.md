@@ -30,7 +30,7 @@ Each `random` invocation runs one simulation. Omit the seed to generate a new
 one. The command prints the seed and workload arguments to stderr before
 starting. Replay with the same build, seed, and arguments. Fixed scenarios
 run through nextest, alongside cross-process replay checks for pinned random
-seeds. CI runs the DST suite and the SQLite fault-isolation test.
+seeds. CI runs the DST suite and the SQLite fault-isolation tests.
 
 ## Architecture
 
@@ -81,7 +81,7 @@ payment-wave driver and settlement auditor.
 
 | Fixed test scenario | What it checks |
 | --- | --- |
-| `crash-before-ack` | The receiver crashes after committing and before sending its ACK. The payment settles once after recovery and a new payment succeeds. |
+| `crash-before-ack` | The receiver crashes after committing and before sending its ACK. The hot cache agrees with SQLite, the immutable record is unchanged, and reopening SQLite recovers the exact committed records. The payment settles once after recovery and a new payment succeeds. |
 | `faults` | A CKB outage, slow funding query, and a request timeout, SQLite I/O errors and disk full, refused TCP dial and read/write resets, a full outbound queue, a slow actor mailbox, and a single TLC frame delayed by seven virtual seconds. Each fault must hit and the channel must recover. |
 | Two-node faults | Fixed seed 1729 selects a mix of direct payments, node crashes, partitions, and CKB, SQLite, TCP, outbound queue, and actor mailbox faults. The checker tracks balance bounds before settlement, mirrored channel state, and cleanup. |
 | Diamond payments | Seed 42 exercises concurrent bidirectional multihop and MPP on a four-node diamond, with direct payments mixed in. Seeded crashes, partitions and network actor delays overlap the workload. Once the faults end, the auditor checks every invoice and its per-hop TLCs before issuing recovery probes. |
@@ -89,10 +89,20 @@ payment-wave driver and settlement auditor.
 | `mpp` | A diamond topology forces a signed invoice onto two paths. One relay crashes while a shard is in flight. The invoice and both unique shards must settle, with exact channel balances and no TLCs left. |
 | Watchtower settlement | Force-closes a channel with a committed hold-invoice TLC. A Watchtower mailbox delay, indexer outage, actor restart, and settlement submission timeout precede on-chain fulfillment. The test checks the settlement witness, invoice and payment states, and both wallet payouts. The external fixture also partitions the RPC link and completes settlement while the recipient is down. |
 | Funding abort recovery | Drops a funding frame, verifies that both endpoints abort and clear funding state, and retries the open. |
+| Channel ID rewrite | Injects an SQLite sync error in the rewrite and, in a separate run, crashes after commit before notifying the network actor. SQLite reopens with exactly one complete channel ID and matching indexes. The original attempt either becomes usable or aborts cleanly before a new channel settles a payment. |
+| Interrupted funding cleanup | Fails a SQLite write while removing an aborted channel with three online siblings. A cold read checks rollback. After restart the target's records and indexes are gone, and a payment settles on each sibling's outpoint. |
 | Parallel funding | Six channels fund concurrently on one peer link. A second fixture drops one channel's `TxUpdate` before opening its siblings, observes the two abort receipts across reconnection, and probes every surviving channel by outpoint. |
 
 The SQLite adapter injects real SQLite result codes at VFS write and sync
-callbacks. The queue budget models resource pressure at the simulation send
+callbacks. A one-shot error can target a node's next VFS operation or restrict
+delivery to a write batch containing matching put and delete key prefixes.
+When both prefixes are supplied, both operations must appear in the same batch.
+The driver counts a hit when SQLite receives the error. Continuous payment
+chaos can sample a targeted write fault during an early direct payment and
+records whether the batch was hit. The channel checker reads both durable records
+in one snapshot and treats a missing half as an invariant violation.
+
+The queue budget models resource pressure at the simulation send
 boundary. Chain outages hold requests until access is restored. Route setup
 relays signed channel advertisements between the simulated nodes' graphs.
 

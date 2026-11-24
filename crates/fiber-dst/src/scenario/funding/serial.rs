@@ -1,10 +1,15 @@
 use anyhow::{ensure, Context, Result};
 use fnn::fiber::Hash256;
+use fnn::fiber_types::schema::CHANNEL_IMMUTABLE_STATE_PREFIX;
+use fnn::simulation::{BatchTarget, DiskFault};
 
 use crate::host::{FrameLoss, NAMES};
 
-use super::{Attempt, Driver, Edge, FundingOrder, OpeningFault, FUNDING_AMOUNT};
-use crate::scenario::faults::Fault;
+use super::{
+    audited_channel_state, mutable_key, Attempt, Driver, Edge, FundingOrder, OpeningFault, Outcome,
+    FUNDING_AMOUNT,
+};
+use crate::scenario::faults::{Fault, ProtocolPoint};
 
 impl Driver {
     pub(in crate::scenario) fn open_channel(&mut self) -> Result<Hash256> {
@@ -127,6 +132,95 @@ impl Driver {
             ));
         }
         Ok((channel, edge))
+    }
+
+    pub(in crate::scenario) fn channel_id_rewrite(&mut self, after_commit: bool) -> Result<()> {
+        let order = FundingOrder {
+            opener: 0,
+            acceptor: 1,
+            amount: FUNDING_AMOUNT,
+            gap_ticks: 0,
+        };
+        self.protect_open(0, 1)?;
+        let temporary = self.begin_open(0, 1, order.amount, 0, false)?;
+        ensure!(
+            audited_channel_state(&self.runtime.store(0)?, temporary, &self.runtime.peers[1])?
+                .is_some(),
+            "opener has no temporary channel {temporary}"
+        );
+        let injection = if after_commit {
+            Fault::ProtocolPause {
+                node: 0,
+                channel: temporary,
+                point: ProtocolPoint::ChannelIdRewritten,
+                preceding_hits: 0,
+            }
+        } else {
+            Fault::Sqlite {
+                node: 0,
+                fault: DiskFault::SyncIo,
+                batch: Some(BatchTarget {
+                    put_prefix: Some(vec![CHANNEL_IMMUTABLE_STATE_PREFIX]),
+                    delete_prefix: Some(mutable_key(temporary)),
+                }),
+            }
+        }
+        .inject(&mut self.runtime)?;
+        let reply = self.accept_open(1, temporary, order.amount)?;
+        let response = self.reply("accept channel for ID rewrite", reply)?;
+        let channel = response.new_channel_id;
+        ensure!(response.old_channel_id == temporary && temporary != channel);
+        let attempt = Attempt::new(&self.runtime, order, channel)?;
+        self.until("channel ID rewrite interruption", |s| {
+            Ok(injection.hit(&s.runtime).then_some(()))
+        })?;
+        if after_commit {
+            self.runtime.crash(0);
+            injection.heal(&mut self.runtime);
+        } else {
+            injection.stop_after_sqlite_fault(&mut self.runtime);
+        }
+        {
+            let store = self.runtime.reopen_offline_store(0)?;
+            let old = audited_channel_state(&store, temporary, &self.runtime.peers[1])?.is_some();
+            let new = audited_channel_state(&store, channel, &self.runtime.peers[1])?.is_some();
+            ensure!(old != new, "ID rewrite kept old={old} and new={new}");
+            ensure!(
+                !after_commit || new,
+                "successful ID rewrite lost its final record"
+            );
+            self.runtime.note(format_args!(
+                "ID rewrite after_commit={after_commit} old={old} final={new}"
+            ));
+        }
+        self.runtime.restart(0);
+        let outcome = self
+            .until("interrupted channel ID rewrite reconciles", |s| {
+                if s.runtime.channel_online(0, 1, &channel) {
+                    return Ok(Some(Outcome::Online));
+                }
+                // The opener may still have used the temporary id when its write failed.
+                // Check durable absence under both IDs, even when its abort receipt used the old ID.
+                let both_absent = s.runtime.link(0, 1)
+                    && s.runtime.funding_record_absent(0, temporary)?
+                    && s.runtime.funding_record_absent(0, channel)?
+                    && s.runtime.funding_record_absent(1, channel)?;
+                Ok(both_absent.then_some(Outcome::Aborted))
+            })
+            .with_context(|| format!("opening {temporary} -> {channel}"))?;
+        ensure!(
+            audited_channel_state(&self.runtime.store(0)?, temporary, &self.runtime.peers[1])?
+                .is_none(),
+            "temporary channel survived recovery"
+        );
+        let ready = match attempt.verify(&self.runtime, outcome, 0)? {
+            Some(edge) => edge.channel,
+            None => self.open_channel()?,
+        };
+        self.probe(&ready)?;
+        self.runtime
+            .note(format_args!("ID rewrite recovered {ready}"));
+        Ok(())
     }
 
     pub(in crate::scenario) fn funding_abort_recovery(&mut self) -> Result<()> {

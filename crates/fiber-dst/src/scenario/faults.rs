@@ -184,6 +184,7 @@ impl Driver {
         let injection = Fault::Sqlite {
             node: target,
             fault,
+            batch: None,
         }
         .inject(&mut self.runtime)?;
         self.runtime

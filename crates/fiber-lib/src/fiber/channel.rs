@@ -711,17 +711,18 @@ where
                 state.handle_accept_channel_message(accept_channel)?;
                 let old_id = state.get_id();
                 state.fill_in_channel_id();
+                // External funding may pause while the initiator leaves the app to sign
+                // the funding tx. Persist the channel and its opening records under the
+                // final channel id atomically before publishing either event so
+                // reconnect/restart can still route later messages without stranding records.
+                let signing_update = self.signing_events.prepare(state);
+                self.store.move_channel_actor_state(&old_id, state.clone());
+                signing_update.publish_removed(old_id);
+                signing_update.publish();
+                #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+                crate::simulation::after_channel_id_rewrite(state.get_local_pubkey(), old_id).await;
 
                 if state.ephemeral_config.external_funding.enabled {
-                    // External funding may pause while the initiator leaves the app to sign
-                    // the funding tx. Persist the channel and its opening records under the
-                    // final channel id atomically so reconnect/restart can still route the
-                    // later TxUpdate/CommitmentSigned without stranding opening records.
-                    let signing_update = self.signing_events.prepare(state);
-                    self.store.move_channel_actor_state(&old_id, state.clone());
-                    signing_update.publish_removed(old_id);
-                    signing_update.publish();
-
                     // For external funding, send a different event and transition to
                     // NegotiatingFunding(AWAITING_EXTERNAL_FUNDING).
                     self.network
@@ -756,7 +757,6 @@ where
                         ))
                         .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                 } else {
-                    self.store.move_channel_actor_state(&old_id, state.clone());
                     // Normal flow: send ChannelAccepted to start funding collaboration
                     self.network
                         .send_message(FiberActorMessage::new_event(

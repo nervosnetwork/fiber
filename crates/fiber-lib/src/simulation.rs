@@ -18,8 +18,9 @@ use crate::fiber::types::FiberMessage;
 use crate::store::Store;
 
 pub use crate::fiber::network::{start_node, SimulatedChain, SimulatedNode};
+pub use crate::store::store_impl::ChannelRecords;
 #[cfg(feature = "sqlite")]
-pub use fiber_store::simulation::{DiskFault, SimulatedDisk};
+pub use fiber_store::simulation::{BatchTarget, DiskFault, SimulatedDisk};
 
 thread_local! {
     static ENVIRONMENT: RefCell<Option<Environment>> = const { RefCell::new(None) };
@@ -85,9 +86,23 @@ pub(crate) fn keyed_random(domain: &[u8], context: &[u8]) -> [u8; 32] {
     })
 }
 
-/// Read the persisted channel record so a checker can skip unchanged snapshots.
-pub fn channel_bytes(store: &Store, channel: &Hash256) -> Option<Vec<u8>> {
-    store.simulation_channel_bytes(channel)
+/// Read the persisted channel records atomically and reject a partial pair.
+pub fn channel_records(store: &Store, channel: &Hash256) -> Option<ChannelRecords> {
+    store.simulation_channel_records(channel)
+}
+
+/// Compare a published cache entry against persisted bytes while the harness holds time still.
+/// Returns `None` if there is no published cache entry.
+pub fn cached_channel_matches_disk(store: &Store, channel: &Hash256) -> Option<bool> {
+    store.simulation_cached_channel_matches_disk(channel)
+}
+
+/// Read the raw outpoint index, including entries for a missing channel.
+pub fn indexed_funding_outpoints(
+    store: &Store,
+    channel: &Hash256,
+) -> Vec<ckb_types::packed::OutPoint> {
+    store.simulation_indexed_funding_outpoints(channel)
 }
 
 /// One endpoint's durable balance change from fulfilling a TLC.
@@ -467,11 +482,21 @@ pub fn pause_after_funding_state(
     arm(PausePoint::FundingPersisted, node, channel, preceding_hits)
 }
 
+/// Pause after a durable channel ID rewrite before notifying the network actor.
+pub fn pause_after_channel_id_rewrite(
+    node: Pubkey,
+    old_id: Hash256,
+    preceding_hits: usize,
+) -> CommitmentPause {
+    arm(PausePoint::ChannelIdRewritten, node, old_id, preceding_hits)
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum PausePoint {
     CommitmentAck,
     ForwardFulfill,
     FundingPersisted,
+    ChannelIdRewritten,
 }
 
 fn arm(
@@ -517,6 +542,10 @@ pub(crate) async fn before_forwarding_fulfill(node: Pubkey, channel: Hash256) {
 
 pub(crate) async fn after_funding_state(node: Pubkey, channel: Hash256) {
     pause_at(PausePoint::FundingPersisted, node, channel).await;
+}
+
+pub(crate) async fn after_channel_id_rewrite(node: Pubkey, old_id: Hash256) {
+    pause_at(PausePoint::ChannelIdRewritten, node, old_id).await;
 }
 
 async fn pause_at(point: PausePoint, node: Pubkey, channel: Hash256) {

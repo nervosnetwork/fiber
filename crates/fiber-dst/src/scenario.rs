@@ -6,7 +6,7 @@ use fnn::fiber::{Hash256, NetworkActorCommand};
 use fnn::simulation;
 use tokio::sync::oneshot;
 
-use crate::harness::{Harness, TICK};
+use crate::harness::{Harness, HarnessOptions, TICK};
 use crate::host::Trace;
 use crate::tower::TowerMode;
 
@@ -59,6 +59,13 @@ pub enum Scenario {
     Mpp,
     /// Drop one funding frame, verify a clean two-sided abort, and retry.
     FundingAbortRecovery,
+    /// Interrupt an opening during or immediately after its durable channel ID rewrite.
+    ChannelIdRewrite {
+        /// Crash after commit before the notification, or inject an SQLite sync error.
+        after_commit: bool,
+    },
+    /// Interrupt deletion of one aborted funding attempt while sibling channels are active.
+    ParallelFundingCleanup,
     /// Open multiple channels on one peer link and verify each funding outcome.
     ParallelFunding {
         /// Drop a funding update for one attempt and check abort isolation.
@@ -109,10 +116,18 @@ pub fn run(scenario: Scenario, seed: u64) -> Result<Vec<String>> {
             directory.path(),
             trace.clone(),
             edges,
-            duration,
-            // Continuous reconnects need headroom in Turmoil's shared SYN and data queue.
-            continuous.then_some(512),
-            tower_mode,
+            HarnessOptions {
+                duration,
+                // Continuous reconnects need headroom in Turmoil's shared SYN and data queue.
+                tcp_capacity: continuous.then_some(512),
+                tower_mode,
+                // A peer that misses the terminal abort frame follows its funding timer.
+                funding_timeout_seconds: matches!(
+                    scenario,
+                    Scenario::ChannelIdRewrite { .. } | Scenario::ParallelFundingCleanup
+                )
+                .then_some(1),
+            },
         )?;
         let mut driver = Driver {
             runtime,
@@ -140,7 +155,15 @@ pub fn run(scenario: Scenario, seed: u64) -> Result<Vec<String>> {
                 fault_policy,
             ),
             Scenario::FundingAbortRecovery => driver.funding_abort_recovery(),
-            Scenario::ParallelFunding { mixed } => driver.parallel_funding_fixture(mixed),
+            Scenario::ChannelIdRewrite { after_commit } => driver.channel_id_rewrite(after_commit),
+            Scenario::ParallelFundingCleanup => {
+                driver.parallel_funding_fixture(funding::BatchFault::AbortCleanup(1))
+            }
+            Scenario::ParallelFunding { mixed } => driver.parallel_funding_fixture(if mixed {
+                funding::BatchFault::DropUpdate(1)
+            } else {
+                funding::BatchFault::None
+            }),
             Scenario::CrashBeforeAck | Scenario::TwoNodeFaults => {
                 let channel = driver.open_channel()?;
                 match scenario {

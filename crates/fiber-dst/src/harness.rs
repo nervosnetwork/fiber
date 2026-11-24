@@ -1,10 +1,11 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, UNIX_EPOCH};
 
 use anyhow::{anyhow, ensure, Context, Result};
-use fnn::fiber::channel::{ChannelActorState, ChannelActorStateStore};
+use fnn::fiber::channel::ChannelActorState;
 use fnn::fiber::gossip::GossipMessageUpdates;
 use fnn::fiber::graph::NetworkGraphStateStore;
 use fnn::fiber::payment::PaymentSessionExt;
@@ -13,6 +14,7 @@ use fnn::fiber::{
     NetworkActorMessage, PaymentStatus, Privkey, Pubkey,
 };
 use fnn::simulation::{self, ChainFaultHit, SimulatedChain, SimulatedChainAccess, SimulatedDisk};
+use fnn::store::{open_store_with_migration, Store};
 use ractor::RpcReplyPort;
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use tokio::sync::oneshot;
@@ -29,6 +31,7 @@ pub(crate) struct Harness {
     pub(crate) nodes: Nodes,
     pub(crate) peers: Vec<Pubkey>,
     trace: Trace,
+    storage_root: PathBuf,
     snapshots: RefCell<BTreeMap<(usize, Hash256), ChannelSnapshot>>,
     pub(crate) links: BTreeMap<(usize, usize), LinkControl>,
     pub(crate) chain: SimulatedChain,
@@ -40,8 +43,15 @@ pub(crate) struct Harness {
 }
 
 struct ChannelSnapshot {
-    bytes: Vec<u8>,
+    records: simulation::ChannelRecords,
     state: Rc<ChannelActorState>,
+}
+
+pub(crate) struct HarnessOptions {
+    pub(crate) duration: Duration,
+    pub(crate) tcp_capacity: Option<usize>,
+    pub(crate) tower_mode: Option<TowerMode>,
+    pub(crate) funding_timeout_seconds: Option<u64>,
 }
 
 impl Harness {
@@ -50,10 +60,14 @@ impl Harness {
         path: &std::path::Path,
         trace: Trace,
         edges: &[(usize, usize)],
-        duration: Duration,
-        tcp_capacity: Option<usize>,
-        tower_mode: Option<TowerMode>,
+        options: HarnessOptions,
     ) -> Result<Self> {
+        let HarnessOptions {
+            duration,
+            tcp_capacity,
+            tower_mode,
+            funding_timeout_seconds,
+        } = options;
         let mut builder = turmoil::Builder::new();
         builder
             .rng_seed(seed)
@@ -117,6 +131,7 @@ impl Harness {
                 nodes: nodes.clone(),
                 trace: trace.clone(),
                 watchtower: watchtowers.as_ref().map(|controls| controls[index].clone()),
+                funding_timeout_seconds,
             };
             world.host(NAMES[index], move || {
                 let host = host.clone();
@@ -146,6 +161,7 @@ impl Harness {
             nodes,
             peers,
             trace,
+            storage_root: path.to_path_buf(),
             snapshots: RefCell::default(),
             links,
             chain,
@@ -249,19 +265,39 @@ impl Harness {
             .contains(&channel)
     }
 
-    pub(crate) fn funding_record_absent(&self, node: usize, channel: Hash256) -> Result<bool> {
+    pub(crate) fn store(&self, node: usize) -> Result<Store> {
         ensure!(
             self.node_available(node),
-            "{} funding store unavailable",
+            "{} store unavailable",
             NAMES[node]
         );
-        let nodes = self.nodes.borrow();
-        let store = &nodes[node]
+        Ok(self.nodes.borrow()[node]
             .node
             .as_ref()
-            .context("funding store offline")?
-            .store;
-        Ok(simulation::channel_bytes(store, &channel).is_none())
+            .expect("available node")
+            .store
+            .clone())
+    }
+
+    pub(crate) fn reopen_offline_store(&self, node: usize) -> Result<Store> {
+        ensure!(
+            self.nodes.borrow()[node].node.is_none(),
+            "{} is still online",
+            NAMES[node]
+        );
+        open_store_with_migration(
+            self.storage_root.join(NAMES[node]),
+            true,
+            0,
+            Box::new(|_| false),
+            Box::new(|_| {}),
+        )
+        .map_err(|error| anyhow!(error))
+    }
+
+    pub(crate) fn funding_record_absent(&self, node: usize, channel: Hash256) -> Result<bool> {
+        let store = self.store(node)?;
+        Ok(simulation::channel_records(&store, &channel).is_none())
     }
 
     pub(crate) fn channel(&self, node: usize, channel: &Hash256) -> Option<Rc<ChannelActorState>> {
@@ -270,22 +306,22 @@ impl Harness {
             return None;
         }
         let store = &nodes[node].node.as_ref()?.store;
-        let bytes = simulation::channel_bytes(store, channel)?;
+        let records = simulation::channel_records(store, channel)?;
         let mut snapshots = self.snapshots.borrow_mut();
         let key = (node, *channel);
         if let Some(previous) = snapshots
             .get(&key)
-            .filter(|previous| previous.bytes == bytes)
+            .filter(|previous| previous.records == records)
         {
             return Some(previous.state.clone());
         }
         // V2 deserialization verifies persisted signing state. Only repeat that work
         // when SQLite shows a new record.
-        let state = Rc::new(store.get_channel_actor_state(channel)?);
+        let state = Rc::new(records.decode());
         snapshots.insert(
             key,
             ChannelSnapshot {
-                bytes,
+                records,
                 state: state.clone(),
             },
         );
@@ -397,7 +433,7 @@ impl Harness {
 
 #[cfg(test)]
 mod tests {
-    use super::{simulation, Duration, Harness, Trace};
+    use super::{simulation, Duration, Harness, HarnessOptions, Trace};
 
     #[test]
     fn listener_reaccepts_after_dialer_crashes_before_connect_returns() {
@@ -411,9 +447,12 @@ mod tests {
                     directory.path(),
                     Trace::default(),
                     &[(0, 1)],
-                    Duration::from_secs(1),
-                    None,
-                    None,
+                    HarnessOptions {
+                        duration: Duration::from_secs(1),
+                        tcp_capacity: None,
+                        tower_mode: None,
+                        funding_timeout_seconds: None,
+                    },
                 )
                 .unwrap();
                 for _ in 0..10 {

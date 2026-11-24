@@ -10005,6 +10005,19 @@ where
             let Some(channel_actor_state) = self.store.get_channel_actor_state(&channel_id) else {
                 continue;
             };
+            if channel_actor_state.state == ChannelState::Closed(CloseFlags::FUNDING_ABORTED) {
+                // The channel can persist its terminal state before the network actor
+                // deletes it. Replay the normal cleanup if a crash interrupted that step.
+                self.network
+                    .send_message(FiberActorMessage::new_event(
+                        FiberActorEvent::ChannelActorStopped(
+                            channel_id,
+                            StopReason::AbortFunding,
+                        ),
+                    ))
+                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                continue;
+            }
             // Recover final outcomes from live upstream TLCs, not completed payment history.
             if !channel_actor_state.is_closed() {
                 for tlc in channel_actor_state

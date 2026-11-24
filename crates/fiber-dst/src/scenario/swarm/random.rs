@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use anyhow::{ensure, Context, Result};
 use fnn::fiber::Hash256;
-use fnn::simulation;
+use fnn::simulation::{self, BatchTarget, DiskFault};
 use rand::seq::{IndexedRandom, IteratorRandom, SliceRandom};
 use rand::{rngs::StdRng, Rng, SeedableRng};
 
@@ -12,7 +12,7 @@ use crate::host::{TcpFault, NAMES};
 use crate::scenario::faults::{
     long_delay_rng, sample_long_delay, schedule_fault_windows, Chaos, Fault, FaultWindow,
 };
-use crate::scenario::funding::{BatchFault, FundingOrder, OpeningFault};
+use crate::scenario::funding::{mutable_key, BatchFault, FundingOrder, OpeningFault};
 use crate::scenario::{RandomFaultPolicy, TICK};
 
 use super::{Driver, Edge, Kind, Ledger, Order, FUNDING_AMOUNT, MPP_AMOUNT, RELAY_FEE_PPM};
@@ -208,6 +208,16 @@ impl Driver {
                 }
                 start = orders.last().expect("nonempty wave").tick + workload.random_range(4..=12);
             }
+            let mut storage_rng = StdRng::seed_from_u64(seed ^ 0x0073_746f_7261_6765);
+            let storage_order = if storage_rng.random_ratio(1, 8) {
+                orders
+                    .iter()
+                    .filter(|order| order.tick <= 10 && matches!(order.kind, Kind::Direct))
+                    .choose(&mut storage_rng)
+                    .map(|order| (order.from, order.to))
+            } else {
+                None
+            };
             let mut batch = self.prepare_payments(orders, &mut invoices, &mut ledger)?;
             let stop = self.runtime.elapsed() + TICK * u32::try_from(start + 20)?;
             let edge = edges.choose(&mut faults).expect("funded topology");
@@ -217,6 +227,30 @@ impl Driver {
                 edge.receiver
             };
             chaos.arm_payment_cut(&mut self.runtime, edge.channel, node, true)?;
+            if let Some((from, target)) = storage_order.filter(|(_, target)| *target != node) {
+                let channel = edges
+                    .iter()
+                    .find(|edge| link(edge.sender, edge.receiver) == link(from, target))
+                    .context("direct payment has no funded edge")?
+                    .channel;
+                let fault = [DiskFault::WriteIo, DiskFault::DiskFull, DiskFault::SyncIo]
+                    [storage_rng.random_range(0..3)];
+                let expires = self.runtime.elapsed() + Duration::from_millis(250);
+                self.runtime.note(format_args!(
+                    "chaos arm sqlite-batch {} {fault:?} channel={channel}",
+                    NAMES[target]
+                ));
+                chaos.arm_sqlite_batch(
+                    &mut self.runtime,
+                    target,
+                    fault,
+                    BatchTarget {
+                        put_prefix: Some(mutable_key(channel)),
+                        delete_prefix: None,
+                    },
+                    expires,
+                )?;
+            }
             chaos.stop_at(stop);
             self.chaos = Some(chaos);
             let outcome =
