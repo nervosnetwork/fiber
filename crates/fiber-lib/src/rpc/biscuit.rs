@@ -270,9 +270,7 @@ pub fn extract_node_id(token: &Biscuit) -> Result<NodeId> {
     const QUERY: &str = "data($id) <- node($id)";
     let mut authorizer = build_authorizer(token)?;
     let (id,): (String,) = authorizer.query_exactly_one(QUERY)?;
-    let node_id = NodeId::from_str(id.as_str())?;
-    tracing::warn!("fetch {id:?} {node_id:?}");
-    Ok(node_id)
+    NodeId::from_str(id.as_str())
 }
 
 #[cfg(test)]
