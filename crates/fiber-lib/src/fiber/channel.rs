@@ -4820,6 +4820,520 @@ where
     }
 }
 
+impl<S> ChannelActor<S>
+where
+    S: ChannelActorStateStore + InvoiceStore + PreimageStore + Send + Sync + 'static,
+{
+    fn pre_start_accept_channel(
+        &self,
+        param: AcceptChannelParameter,
+        private_key: Privkey,
+    ) -> Result<Box<ChannelActorState>, ActorProcessingErr> {
+        let AcceptChannelParameter {
+            funding_amount: local_funding_amount,
+            reserved_ckb_amount: local_reserved_ckb_amount,
+            shutdown_script: local_shutdown_script,
+            tlc_info,
+            public_channel_info,
+            channel_signer,
+            open_channel,
+            channel_id_sender,
+            max_tlc_number_in_flight,
+            max_tlc_value_in_flight,
+        } = param;
+        let pubkey = self.get_remote_pubkey();
+        debug!(
+            "Accepting channel {:?} to peer {:?}",
+            &open_channel, &pubkey
+        );
+
+        let counterpart_pubkeys: ChannelBasePublicKeys = (&open_channel).into();
+        let public = open_channel.is_public();
+        let is_one_way = open_channel.is_one_way();
+        let OpenChannelV2 {
+            channel_id,
+            chain_hash,
+            commitment_fee_rate,
+            commitment_delay_epoch,
+            funding_fee_rate,
+            funding_udt_type_script,
+            funding_amount,
+            shutdown_script,
+            reserved_ckb_amount,
+            first_per_commitment_point,
+            second_per_commitment_point,
+            initial_commitment_nonce,
+            max_tlc_value_in_flight: remote_max_tlc_value_in_flight,
+            max_tlc_number_in_flight: remote_max_tlc_number_in_flight,
+            channel_announcement_nonce,
+            ..
+        } = &open_channel;
+
+        if *chain_hash != get_chain_hash() {
+            return Err(Box::new(ProcessingChannelError::InvalidParameter(format!(
+                "Invalid chain hash {:?}",
+                chain_hash
+            ))));
+        }
+
+        if public && is_one_way {
+            return Err(Box::new(ProcessingChannelError::InvalidParameter(
+                "An one-way channel cannot be public".to_string(),
+            )));
+        }
+
+        if public && (channel_announcement_nonce.is_none() || public_channel_info.is_none()) {
+            return Err(Box::new(ProcessingChannelError::InvalidParameter(
+                "Public channel should have channel announcement nonce and public channel info"
+                    .to_string(),
+            )));
+        }
+
+        if !public && (channel_announcement_nonce.is_some() || public_channel_info.is_some()) {
+            return Err(Box::new(ProcessingChannelError::InvalidParameter(
+                "Non-public channel should not have channel announcement nonce and public channel info"
+                    .to_string(),
+            )));
+        }
+
+        ChannelActorState::check_accept_channel_parameters_for_values(
+            local_funding_amount,
+            *funding_amount,
+            local_reserved_ckb_amount,
+            *reserved_ckb_amount,
+            *commitment_fee_rate,
+            funding_udt_type_script,
+            shutdown_script,
+            max_tlc_number_in_flight,
+            *remote_max_tlc_number_in_flight,
+        )?;
+
+        if !is_tlc_key_derivation_safe(
+            &counterpart_pubkeys.tlc_base_key,
+            first_per_commitment_point,
+        ) || !is_tlc_key_derivation_safe(
+            &counterpart_pubkeys.tlc_base_key,
+            second_per_commitment_point,
+        ) {
+            return Err(Box::new(ProcessingChannelError::InvalidParameter(
+                "peer tlc_basepoint and per_commitment_point derive to invalid key".to_string(),
+            )));
+        }
+
+        let mut state = Box::new(ChannelActorState::new_inbound_channel(
+            *channel_id,
+            public_channel_info,
+            is_one_way,
+            local_funding_amount,
+            local_reserved_ckb_amount,
+            *commitment_fee_rate,
+            *commitment_delay_epoch,
+            *funding_fee_rate,
+            funding_udt_type_script.clone(),
+            channel_signer,
+            self.get_local_pubkey(),
+            self.get_remote_pubkey(),
+            local_shutdown_script.clone(),
+            shutdown_script.clone(),
+            *funding_amount,
+            *reserved_ckb_amount,
+            counterpart_pubkeys,
+            initial_commitment_nonce.clone(),
+            channel_announcement_nonce.clone(),
+            *first_per_commitment_point,
+            *second_per_commitment_point,
+            *remote_max_tlc_value_in_flight,
+            *remote_max_tlc_number_in_flight,
+            max_tlc_number_in_flight,
+            max_tlc_value_in_flight,
+            tlc_info,
+            self.network.clone(),
+            private_key,
+        ));
+        state.check_accept_channel_parameters()?;
+
+        if open_channel.is_external_funding() {
+            state.signing_context.peer_external_funding = true;
+            state.ephemeral_config.external_funding.enabled = true;
+            let remote_pubkey = self.get_remote_pubkey();
+            debug!(
+                "Channel {:?} accepted with external funding from peer {:?}",
+                channel_id, &remote_pubkey
+            );
+        }
+
+        let channel_announcement_nonce = if public {
+            Some(state.get_channel_announcement_musig2_pubnonce())
+        } else {
+            None
+        };
+
+        let commitment_number = 1;
+        let accept_channel = AcceptChannelV2 {
+            channel_id: *channel_id,
+            funding_amount: local_funding_amount,
+            shutdown_script: local_shutdown_script,
+            reserved_ckb_amount: local_reserved_ckb_amount,
+            max_tlc_value_in_flight,
+            max_tlc_number_in_flight,
+            funding_pubkey: state.local_channel_public_keys.funding_pubkey,
+            tlc_basepoint: state.local_channel_public_keys.tlc_base_key,
+            first_per_commitment_point: state.get_local_commitment_point(commitment_number),
+            second_per_commitment_point: state.get_local_commitment_point(commitment_number + 1),
+            channel_announcement_nonce,
+            initial_commitment_nonce: state.session.own.public_nonce.clone(),
+            channel_features: 1,
+        };
+
+        let accept_message = FiberMessage::accept_channel_v2(accept_channel);
+        self.store.insert_channel_actor_state((*state).clone());
+        self.network
+            .send_message(FiberActorMessage::new_command(
+                FiberActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                    state.get_remote_pubkey(),
+                    accept_message,
+                )),
+            ))
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+
+        state.update_state(ChannelState::NegotiatingFunding(
+            NegotiatingFundingFlags::INIT_SENT,
+        ));
+        if let Some(sender) = channel_id_sender {
+            sender.send(state.get_id()).expect("Receive not dropped");
+        }
+        Ok(state)
+    }
+
+    fn pre_start_open_channel(
+        &self,
+        param: OpenChannelParameter,
+        private_key: Privkey,
+    ) -> Result<Box<ChannelActorState>, ActorProcessingErr> {
+        let OpenChannelParameter {
+            funding_amount,
+            channel_signer,
+            tlc_info,
+            public_channel_info,
+            is_one_way,
+            funding_udt_type_script,
+            shutdown_script,
+            channel_id_sender,
+            commitment_fee_rate,
+            commitment_delay_epoch,
+            funding_fee_rate,
+            max_tlc_number_in_flight,
+            max_tlc_value_in_flight,
+        } = param;
+        let public = public_channel_info.is_some();
+        let pubkey = self.get_remote_pubkey();
+        info!("Trying to open a channel to {:?}", &pubkey);
+
+        let commitment_fee_rate = commitment_fee_rate.unwrap_or(DEFAULT_COMMITMENT_FEE_RATE);
+        let funding_fee_rate = funding_fee_rate.unwrap_or(DEFAULT_FEE_RATE);
+
+        let (to_local_amount, reserved_ckb_amount) = get_funding_and_reserved_amount(
+            funding_amount,
+            &shutdown_script,
+            &funding_udt_type_script,
+        )?;
+
+        let mut channel = ChannelActorState::new_outbound_channel(
+            public_channel_info,
+            is_one_way,
+            channel_signer,
+            None,
+            self.get_local_pubkey(),
+            self.get_remote_pubkey(),
+            to_local_amount,
+            reserved_ckb_amount,
+            commitment_fee_rate,
+            commitment_delay_epoch
+                .unwrap_or(EpochNumberWithFraction::new(
+                    DEFAULT_COMMITMENT_DELAY_EPOCHS,
+                    0,
+                    1,
+                ))
+                .full_value(),
+            funding_fee_rate,
+            funding_udt_type_script.clone(),
+            shutdown_script.clone(),
+            max_tlc_value_in_flight,
+            max_tlc_number_in_flight,
+            tlc_info,
+            self.network.clone(),
+            private_key,
+        )?;
+
+        check_open_channel_parameters(
+            &channel.funding_udt_type_script,
+            &channel.local_shutdown_script,
+            channel.local_reserved_ckb_amount,
+            channel.funding_fee_rate,
+            channel.commitment_fee_rate,
+            channel.commitment_delay_epoch,
+            channel.local_constraints.max_tlc_number_in_flight,
+        )?;
+
+        let mut channel_flags = if public {
+            ChannelFlags::PUBLIC
+        } else {
+            ChannelFlags::empty()
+        };
+        if is_one_way {
+            channel_flags.insert(ChannelFlags::ONE_WAY);
+        }
+        let channel_announcement_nonce = if public {
+            Some(channel.get_channel_announcement_musig2_pubnonce())
+        } else {
+            None
+        };
+        let commitment_number = 1;
+        let message = FiberMessage::ChannelInitializationV2(OpenChannelV2 {
+            chain_hash: get_chain_hash(),
+            channel_id: channel.get_id(),
+            funding_udt_type_script,
+            funding_amount: channel.to_local_amount,
+            shutdown_script,
+            reserved_ckb_amount: channel.local_reserved_ckb_amount,
+            funding_fee_rate,
+            commitment_fee_rate,
+            commitment_delay_epoch: channel.commitment_delay_epoch,
+            max_tlc_value_in_flight: channel.local_constraints.max_tlc_value_in_flight,
+            max_tlc_number_in_flight: channel.local_constraints.max_tlc_number_in_flight,
+            channel_flags,
+            first_per_commitment_point: channel.get_local_commitment_point(commitment_number),
+            second_per_commitment_point: channel.get_local_commitment_point(commitment_number + 1),
+            funding_pubkey: channel.get_local_channel_public_keys().funding_pubkey,
+            tlc_basepoint: channel.get_local_channel_public_keys().tlc_base_key,
+            initial_commitment_nonce: channel.session.own.public_nonce.clone(),
+            channel_features: 1,
+            channel_announcement_nonce,
+        });
+
+        debug!(
+            "Created OpenChannelV2 message to {:?}: {:?}",
+            &pubkey, &message
+        );
+        self.store.insert_channel_actor_state((*channel).clone());
+        self.network
+            .send_message(FiberActorMessage::new_command(
+                FiberActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                    self.get_remote_pubkey(),
+                    message,
+                )),
+            ))
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        channel.update_state(ChannelState::NegotiatingFunding(
+            NegotiatingFundingFlags::OUR_INIT_SENT,
+        ));
+        debug!(
+            "Channel to peer {:?} with id {:?} created",
+            &pubkey,
+            &channel.get_id()
+        );
+
+        channel_id_sender
+            .send(channel.get_id())
+            .expect("Receive not dropped");
+        Ok(channel)
+    }
+
+    fn pre_start_restore_offline_channel(
+        &self,
+        channel_id: Hash256,
+        ephemeral_config: &ChannelEphemeralConfig,
+        private_key: Privkey,
+    ) -> Result<Box<ChannelActorState>, ActorProcessingErr> {
+        let mut channel = self
+            .store
+            .get_channel_actor_state(&channel_id)
+            .expect("channel should exist");
+        channel.validate_session()?;
+        let Some(restore_mode) = channel.offline_restore_mode() else {
+            return Err(Box::new(ProcessingChannelError::InvalidState(format!(
+                "Channel {:x} cannot be restored offline from state {:?}",
+                channel.get_id(),
+                channel.state
+            ))));
+        };
+        match restore_mode {
+            OfflineChannelRestoreMode::ReestablishPeer => {
+                channel.mark_reestablishing_offline();
+                channel.reset_peer_response_wait_v2();
+            }
+            OfflineChannelRestoreMode::WatchChain => channel.mark_watching_chain_offline(),
+        }
+        channel.network = Some(self.network.clone());
+        channel.ephemeral_config = ephemeral_config.clone();
+        channel.hydrate_external_funding_runtime();
+        channel.drop_stale_waiting_forward_tlc_tasks();
+        channel.private_key = Some(private_key);
+        self.store.insert_channel_actor_state(channel.clone());
+        {
+            if !matches!(channel.state, ChannelState::Closed(_))
+                || channel.is_waiting_onchain_settlement()
+            {
+                self.replay_effects_v2(&channel);
+            }
+            self.replay_remove_effects_v2(&channel);
+        }
+
+        Ok(Box::new(channel))
+    }
+
+    fn pre_start_open_channel_with_external_funding(
+        &self,
+        param: OpenChannelWithExternalFundingParameter,
+        private_key: Privkey,
+    ) -> Result<Box<ChannelActorState>, ActorProcessingErr> {
+        let OpenChannelWithExternalFundingParameter {
+            funding_amount,
+            channel_signer,
+            external_channel_signer,
+            tlc_info,
+            public_channel_info,
+            funding_udt_type_script,
+            shutdown_script,
+            funding_lock_script,
+            funding_lock_script_cell_deps,
+            channel_id_sender,
+            commitment_fee_rate,
+            commitment_delay_epoch,
+            funding_fee_rate,
+            max_tlc_number_in_flight,
+            max_tlc_value_in_flight,
+        } = param;
+        let public = public_channel_info.is_some();
+        let peer_id = PeerId::from_public_key(&crate::fiber::types::pubkey_to_tentacle(
+            self.get_remote_pubkey(),
+        ));
+        info!(
+            "Trying to open a channel with external funding to {:?}",
+            &peer_id
+        );
+
+        let commitment_fee_rate = commitment_fee_rate.unwrap_or(DEFAULT_COMMITMENT_FEE_RATE);
+        let funding_fee_rate = funding_fee_rate.unwrap_or(DEFAULT_FEE_RATE);
+
+        let (to_local_amount, reserved_ckb_amount) = get_funding_and_reserved_amount(
+            funding_amount,
+            &shutdown_script,
+            &funding_udt_type_script,
+        )?;
+
+        let mut channel = ChannelActorState::new_outbound_channel(
+            public_channel_info,
+            false,
+            channel_signer,
+            external_channel_signer,
+            self.get_local_pubkey(),
+            self.get_remote_pubkey(),
+            to_local_amount,
+            reserved_ckb_amount,
+            commitment_fee_rate,
+            commitment_delay_epoch
+                .unwrap_or(EpochNumberWithFraction::new(
+                    DEFAULT_COMMITMENT_DELAY_EPOCHS,
+                    0,
+                    1,
+                ))
+                .full_value(),
+            funding_fee_rate,
+            funding_udt_type_script.clone(),
+            shutdown_script.clone(),
+            max_tlc_value_in_flight,
+            max_tlc_number_in_flight,
+            tlc_info,
+            self.network.clone(),
+            private_key,
+        )?;
+
+        channel.ephemeral_config.external_funding.enabled = true;
+        channel
+            .ephemeral_config
+            .external_funding
+            .funding_lock_script = Some(funding_lock_script);
+        channel
+            .ephemeral_config
+            .external_funding
+            .funding_lock_script_cell_deps = funding_lock_script_cell_deps;
+
+        check_open_channel_parameters(
+            &channel.funding_udt_type_script,
+            &channel.local_shutdown_script,
+            channel.local_reserved_ckb_amount,
+            channel.funding_fee_rate,
+            channel.commitment_fee_rate,
+            channel.commitment_delay_epoch,
+            channel.local_constraints.max_tlc_number_in_flight,
+        )?;
+
+        let mut channel_flags = if public {
+            ChannelFlags::PUBLIC
+        } else {
+            ChannelFlags::empty()
+        };
+        channel_flags.insert(ChannelFlags::EXTERNAL_FUNDING);
+
+        let channel_announcement_nonce = if public {
+            Some(channel.get_channel_announcement_musig2_pubnonce())
+        } else {
+            None
+        };
+        let commitment_number = 1;
+        let message = FiberMessage::ChannelInitializationV2(OpenChannelV2 {
+            chain_hash: get_chain_hash(),
+            channel_id: channel.get_id(),
+            funding_udt_type_script,
+            funding_amount: channel.to_local_amount,
+            shutdown_script,
+            reserved_ckb_amount: channel.local_reserved_ckb_amount,
+            funding_fee_rate,
+            commitment_fee_rate,
+            commitment_delay_epoch: channel.commitment_delay_epoch,
+            max_tlc_value_in_flight: channel.local_constraints.max_tlc_value_in_flight,
+            max_tlc_number_in_flight: channel.local_constraints.max_tlc_number_in_flight,
+            channel_flags,
+            first_per_commitment_point: channel.get_local_commitment_point(commitment_number),
+            second_per_commitment_point: channel.get_local_commitment_point(commitment_number + 1),
+            funding_pubkey: channel.get_local_channel_public_keys().funding_pubkey,
+            tlc_basepoint: channel.get_local_channel_public_keys().tlc_base_key,
+            initial_commitment_nonce: channel.session.own.public_nonce.clone(),
+            channel_features: 1,
+            channel_announcement_nonce,
+        });
+
+        debug!(
+            "Created OpenChannelV2 message (external funding) to {:?}: {:?}",
+            &peer_id, &message
+        );
+        self.store.insert_channel_actor_state((*channel).clone());
+        self.network
+            .send_message(FiberActorMessage::new_command(
+                FiberActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                    self.get_remote_pubkey(),
+                    message,
+                )),
+            ))
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+
+        channel.update_state(ChannelState::NegotiatingFunding(
+            NegotiatingFundingFlags::OUR_INIT_SENT,
+        ));
+        debug!(
+            "Channel with external funding to peer {:?} with id {:?} created",
+            &peer_id,
+            &channel.get_id()
+        );
+
+        channel_id_sender
+            .send(channel.get_id())
+            .expect("Receive not dropped");
+        Ok(channel)
+    }
+}
+
 #[async_trait::async_trait]
 impl<S> Actor for ChannelActor<S>
 where
@@ -4840,518 +5354,20 @@ where
             .map_err(ProcessingChannelError::InvalidState)?;
         // startup the event processing
         let mut state = match args.operation {
-            ChannelInitializationOperation::AcceptChannel(AcceptChannelParameter {
-                funding_amount: local_funding_amount,
-                reserved_ckb_amount: local_reserved_ckb_amount,
-                shutdown_script: local_shutdown_script,
-                tlc_info,
-                public_channel_info,
-                channel_signer,
-                open_channel,
-                channel_id_sender,
-                max_tlc_number_in_flight,
-                max_tlc_value_in_flight,
-            }) => {
-                let pubkey = self.get_remote_pubkey();
-                debug!(
-                    "Accepting channel {:?} to peer {:?}",
-                    &open_channel, &pubkey
-                );
-
-                let counterpart_pubkeys: ChannelBasePublicKeys = (&open_channel).into();
-                let public = open_channel.is_public();
-                let is_one_way = open_channel.is_one_way();
-                let OpenChannelV2 {
+            ChannelInitializationOperation::AcceptChannel(param) => {
+                self.pre_start_accept_channel(param, args.private_key)?
+            }
+            ChannelInitializationOperation::OpenChannel(param) => {
+                self.pre_start_open_channel(param, args.private_key)?
+            }
+            ChannelInitializationOperation::RestoreOfflineChannel(channel_id) => self
+                .pre_start_restore_offline_channel(
                     channel_id,
-                    chain_hash,
-                    commitment_fee_rate,
-                    commitment_delay_epoch,
-                    funding_fee_rate,
-                    funding_udt_type_script,
-                    funding_amount,
-                    shutdown_script,
-                    reserved_ckb_amount,
-                    first_per_commitment_point,
-                    second_per_commitment_point,
-                    initial_commitment_nonce,
-                    max_tlc_value_in_flight: remote_max_tlc_value_in_flight,
-                    max_tlc_number_in_flight: remote_max_tlc_number_in_flight,
-                    channel_announcement_nonce,
-                    ..
-                } = &open_channel;
-
-                if *chain_hash != get_chain_hash() {
-                    return Err(Box::new(ProcessingChannelError::InvalidParameter(format!(
-                        "Invalid chain hash {:?}",
-                        chain_hash
-                    ))));
-                }
-
-                if public && is_one_way {
-                    return Err(Box::new(ProcessingChannelError::InvalidParameter(
-                        "An one-way channel cannot be public".to_string(),
-                    )));
-                }
-
-                // TODO: we may reject the channel opening request here
-                // if the peer want to open a public channel, but we don't want to.
-                if public && (channel_announcement_nonce.is_none() || public_channel_info.is_none())
-                {
-                    return Err(Box::new(ProcessingChannelError::InvalidParameter(
-                        "Public channel should have channel announcement nonce and public channel info".to_string(),
-                    )));
-                }
-
-                if !public
-                    && (channel_announcement_nonce.is_some() || public_channel_info.is_some())
-                {
-                    return Err(Box::new(ProcessingChannelError::InvalidParameter(
-                        "Non-public channel should not have channel announcement nonce and public channel info".to_string(),
-                    )));
-                }
-
-                ChannelActorState::check_accept_channel_parameters_for_values(
-                    local_funding_amount,
-                    *funding_amount,
-                    local_reserved_ckb_amount,
-                    *reserved_ckb_amount,
-                    *commitment_fee_rate,
-                    funding_udt_type_script,
-                    shutdown_script,
-                    max_tlc_number_in_flight,
-                    *remote_max_tlc_number_in_flight,
-                )?;
-
-                if !is_tlc_key_derivation_safe(
-                    &counterpart_pubkeys.tlc_base_key,
-                    first_per_commitment_point,
-                ) || !is_tlc_key_derivation_safe(
-                    &counterpart_pubkeys.tlc_base_key,
-                    second_per_commitment_point,
-                ) {
-                    return Err(Box::new(ProcessingChannelError::InvalidParameter(
-                        "peer tlc_basepoint and per_commitment_point derive to invalid key"
-                            .to_string(),
-                    )));
-                }
-
-                let mut state = ChannelActorState::new_inbound_channel(
-                    *channel_id,
-                    public_channel_info,
-                    is_one_way,
-                    local_funding_amount,
-                    local_reserved_ckb_amount,
-                    *commitment_fee_rate,
-                    *commitment_delay_epoch,
-                    *funding_fee_rate,
-                    funding_udt_type_script.clone(),
-                    channel_signer,
-                    self.get_local_pubkey(),
-                    self.get_remote_pubkey(),
-                    local_shutdown_script.clone(),
-                    shutdown_script.clone(),
-                    *funding_amount,
-                    *reserved_ckb_amount,
-                    counterpart_pubkeys,
-                    initial_commitment_nonce.clone(),
-                    channel_announcement_nonce.clone(),
-                    *first_per_commitment_point,
-                    *second_per_commitment_point,
-                    *remote_max_tlc_value_in_flight,
-                    *remote_max_tlc_number_in_flight,
-                    max_tlc_number_in_flight,
-                    max_tlc_value_in_flight,
-                    tlc_info,
-                    self.network.clone(),
-                    args.private_key.clone(),
-                );
-                state.check_accept_channel_parameters()?;
-
-                // If the peer is using external funding, mark this channel accordingly
-                // so we wait for them to sign and submit the funding transaction.
-                if open_channel.is_external_funding() {
-                    state.signing_context.peer_external_funding = true;
-                    state.ephemeral_config.external_funding.enabled = true;
-                    let remote_pubkey = self.get_remote_pubkey();
-                    debug!(
-                        "Channel {:?} accepted with external funding from peer {:?}",
-                        channel_id, &remote_pubkey
-                    );
-                }
-
-                let channel_announcement_nonce = if public {
-                    Some(state.get_channel_announcement_musig2_pubnonce())
-                } else {
-                    None
-                };
-
-                let commitment_number = 1; // The first commitment number is 1, as 0 is reserved for the initial state.
-                let accept_channel = AcceptChannelV2 {
-                    channel_id: *channel_id,
-                    funding_amount: local_funding_amount,
-                    shutdown_script: local_shutdown_script,
-                    reserved_ckb_amount: local_reserved_ckb_amount,
-                    max_tlc_value_in_flight,
-                    max_tlc_number_in_flight,
-                    funding_pubkey: state.local_channel_public_keys.funding_pubkey,
-                    tlc_basepoint: state.local_channel_public_keys.tlc_base_key,
-                    first_per_commitment_point: state.get_local_commitment_point(commitment_number),
-                    second_per_commitment_point: state
-                        .get_local_commitment_point(commitment_number + 1),
-                    channel_announcement_nonce,
-                    initial_commitment_nonce: state.session.own.public_nonce.clone(),
-                    channel_features: 1,
-                };
-
-                let accept_message = FiberMessage::accept_channel_v2(accept_channel);
-                self.store.insert_channel_actor_state(state.clone());
-                self.network
-                    .send_message(FiberActorMessage::new_command(
-                        FiberActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
-                            state.get_remote_pubkey(),
-                            accept_message,
-                        )),
-                    ))
-                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-
-                state.update_state(ChannelState::NegotiatingFunding(
-                    NegotiatingFundingFlags::INIT_SENT,
-                ));
-                if let Some(sender) = channel_id_sender {
-                    sender.send(state.get_id()).expect("Receive not dropped");
-                }
-                state
-            }
-            ChannelInitializationOperation::OpenChannel(OpenChannelParameter {
-                funding_amount,
-                channel_signer,
-                tlc_info,
-                public_channel_info,
-                is_one_way,
-                funding_udt_type_script,
-                shutdown_script,
-                channel_id_sender,
-                commitment_fee_rate,
-                commitment_delay_epoch,
-                funding_fee_rate,
-                max_tlc_number_in_flight,
-                max_tlc_value_in_flight,
-            }) => {
-                let public = public_channel_info.is_some();
-                let pubkey = self.get_remote_pubkey();
-                info!("Trying to open a channel to {:?}", &pubkey);
-
-                let commitment_fee_rate =
-                    commitment_fee_rate.unwrap_or(DEFAULT_COMMITMENT_FEE_RATE);
-                let funding_fee_rate = funding_fee_rate.unwrap_or(DEFAULT_FEE_RATE);
-
-                let (to_local_amount, reserved_ckb_amount) = get_funding_and_reserved_amount(
-                    funding_amount,
-                    &shutdown_script,
-                    &funding_udt_type_script,
-                )?;
-
-                let mut channel = *ChannelActorState::new_outbound_channel(
-                    public_channel_info,
-                    is_one_way,
-                    channel_signer,
-                    None,
-                    self.get_local_pubkey(),
-                    self.get_remote_pubkey(),
-                    to_local_amount,
-                    reserved_ckb_amount,
-                    commitment_fee_rate,
-                    commitment_delay_epoch
-                        .unwrap_or(EpochNumberWithFraction::new(
-                            DEFAULT_COMMITMENT_DELAY_EPOCHS,
-                            0,
-                            1,
-                        ))
-                        .full_value(),
-                    funding_fee_rate,
-                    funding_udt_type_script.clone(),
-                    shutdown_script.clone(),
-                    max_tlc_value_in_flight,
-                    max_tlc_number_in_flight,
-                    tlc_info,
-                    self.network.clone(),
-                    args.private_key.clone(),
-                )?;
-
-                check_open_channel_parameters(
-                    &channel.funding_udt_type_script,
-                    &channel.local_shutdown_script,
-                    channel.local_reserved_ckb_amount,
-                    channel.funding_fee_rate,
-                    channel.commitment_fee_rate,
-                    channel.commitment_delay_epoch,
-                    channel.local_constraints.max_tlc_number_in_flight,
-                )?;
-
-                let mut channel_flags = if public {
-                    ChannelFlags::PUBLIC
-                } else {
-                    ChannelFlags::empty()
-                };
-                if is_one_way {
-                    channel_flags.insert(ChannelFlags::ONE_WAY);
-                }
-                let channel_announcement_nonce = if public {
-                    Some(channel.get_channel_announcement_musig2_pubnonce())
-                } else {
-                    None
-                };
-                let commitment_number = 1; // The first commitment number is 1, as 0 is reserved for the initial state.
-                let message = FiberMessage::ChannelInitializationV2(OpenChannelV2 {
-                    chain_hash: get_chain_hash(),
-                    channel_id: channel.get_id(),
-                    funding_udt_type_script,
-                    funding_amount: channel.to_local_amount,
-                    shutdown_script,
-                    reserved_ckb_amount: channel.local_reserved_ckb_amount,
-                    funding_fee_rate,
-                    commitment_fee_rate,
-                    commitment_delay_epoch: channel.commitment_delay_epoch,
-                    max_tlc_value_in_flight: channel.local_constraints.max_tlc_value_in_flight,
-                    max_tlc_number_in_flight: channel.local_constraints.max_tlc_number_in_flight,
-                    channel_flags,
-                    first_per_commitment_point: channel
-                        .get_local_commitment_point(commitment_number),
-                    second_per_commitment_point: channel
-                        .get_local_commitment_point(commitment_number + 1),
-                    funding_pubkey: channel.get_local_channel_public_keys().funding_pubkey,
-                    tlc_basepoint: channel.get_local_channel_public_keys().tlc_base_key,
-                    initial_commitment_nonce: channel.session.own.public_nonce.clone(),
-                    channel_features: 1,
-                    channel_announcement_nonce,
-                });
-
-                debug!(
-                    "Created OpenChannelV2 message to {:?}: {:?}",
-                    &pubkey, &message
-                );
-                self.store.insert_channel_actor_state(channel.clone());
-                self.network
-                    .send_message(FiberActorMessage::new_command(
-                        FiberActorCommand::SendFiberMessage(FiberMessageWithTarget {
-                            target: self.get_remote_pubkey(),
-                            message,
-                        }),
-                    ))
-                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-                // TODO: note that we can't actually guarantee that this OpenChannelV2 message is sent here.
-                // It is even possible that the remote pubkey is bogus, and we can't send a message to it.
-                // We need some book-keeping service to remove all the OUR_INIT_SENT channels.
-                channel.update_state(ChannelState::NegotiatingFunding(
-                    NegotiatingFundingFlags::OUR_INIT_SENT,
-                ));
-                debug!(
-                    "Channel to peer {:?} with id {:?} created",
-                    &pubkey,
-                    &channel.get_id()
-                );
-
-                channel_id_sender
-                    .send(channel.get_id())
-                    .expect("Receive not dropped");
-                channel
-            }
-            ChannelInitializationOperation::RestoreOfflineChannel(channel_id) => {
-                let mut channel = self
-                    .store
-                    .get_channel_actor_state(&channel_id)
-                    .expect("channel should exist");
-                channel.validate_session()?;
-                let Some(restore_mode) = channel.offline_restore_mode() else {
-                    return Err(Box::new(ProcessingChannelError::InvalidState(format!(
-                        "Channel {:x} cannot be restored offline from state {:?}",
-                        channel.get_id(),
-                        channel.state
-                    ))));
-                };
-                match restore_mode {
-                    OfflineChannelRestoreMode::ReestablishPeer => {
-                        channel.mark_reestablishing_offline();
-                        // Local downtime must not consume the peer's response
-                        // window. Only actor restoration resets it; reconnects
-                        // on a live actor retain the existing deadline.
-                        channel.reset_peer_response_wait_v2();
-                    }
-                    OfflineChannelRestoreMode::WatchChain => channel.mark_watching_chain_offline(),
-                }
-                channel.network = Some(self.network.clone());
-                channel.ephemeral_config = args.ephemeral_config.clone();
-                channel.hydrate_external_funding_runtime();
-                channel.drop_stale_waiting_forward_tlc_tasks();
-                channel.private_key = Some(args.private_key.clone());
-                self.store.insert_channel_actor_state(channel.clone());
-                {
-                    // Watchtower/payment protection cannot depend on the peer
-                    // being online after a process crash. These are durable local
-                    // effects, not protocol traffic gated by the handshake.
-                    if !matches!(channel.state, ChannelState::Closed(_))
-                        || channel.is_waiting_onchain_settlement()
-                    {
-                        self.replay_effects_v2(&channel);
-                    }
-                    self.replay_remove_effects_v2(&channel);
-                }
-
-                channel
-            }
-            ChannelInitializationOperation::OpenChannelWithExternalFunding(
-                OpenChannelWithExternalFundingParameter {
-                    funding_amount,
-                    channel_signer,
-                    external_channel_signer,
-                    tlc_info,
-                    public_channel_info,
-                    funding_udt_type_script,
-                    shutdown_script,
-                    funding_lock_script,
-                    funding_lock_script_cell_deps,
-                    channel_id_sender,
-                    commitment_fee_rate,
-                    commitment_delay_epoch,
-                    funding_fee_rate,
-                    max_tlc_number_in_flight,
-                    max_tlc_value_in_flight,
-                },
-            ) => {
-                let public = public_channel_info.is_some();
-                let peer_id = PeerId::from_public_key(&crate::fiber::types::pubkey_to_tentacle(
-                    self.get_remote_pubkey(),
-                ));
-                info!(
-                    "Trying to open a channel with external funding to {:?}",
-                    &peer_id
-                );
-
-                let commitment_fee_rate =
-                    commitment_fee_rate.unwrap_or(DEFAULT_COMMITMENT_FEE_RATE);
-                let funding_fee_rate = funding_fee_rate.unwrap_or(DEFAULT_FEE_RATE);
-
-                let (to_local_amount, reserved_ckb_amount) = get_funding_and_reserved_amount(
-                    funding_amount,
-                    &shutdown_script,
-                    &funding_udt_type_script,
-                )?;
-
-                let mut channel = *ChannelActorState::new_outbound_channel(
-                    public_channel_info,
-                    false,
-                    channel_signer,
-                    external_channel_signer,
-                    self.get_local_pubkey(),
-                    self.get_remote_pubkey(),
-                    to_local_amount,
-                    reserved_ckb_amount,
-                    commitment_fee_rate,
-                    commitment_delay_epoch
-                        .unwrap_or(EpochNumberWithFraction::new(
-                            DEFAULT_COMMITMENT_DELAY_EPOCHS,
-                            0,
-                            1,
-                        ))
-                        .full_value(),
-                    funding_fee_rate,
-                    funding_udt_type_script.clone(),
-                    shutdown_script.clone(),
-                    max_tlc_value_in_flight,
-                    max_tlc_number_in_flight,
-                    tlc_info,
-                    self.network.clone(),
-                    args.private_key.clone(),
-                )?;
-
-                // Mark this channel as using external funding.
-                channel.ephemeral_config.external_funding.enabled = true;
-                channel
-                    .ephemeral_config
-                    .external_funding
-                    .funding_lock_script = Some(funding_lock_script);
-                channel
-                    .ephemeral_config
-                    .external_funding
-                    .funding_lock_script_cell_deps = funding_lock_script_cell_deps;
-
-                check_open_channel_parameters(
-                    &channel.funding_udt_type_script,
-                    &channel.local_shutdown_script,
-                    channel.local_reserved_ckb_amount,
-                    channel.funding_fee_rate,
-                    channel.commitment_fee_rate,
-                    channel.commitment_delay_epoch,
-                    channel.local_constraints.max_tlc_number_in_flight,
-                )?;
-
-                let mut channel_flags = if public {
-                    ChannelFlags::PUBLIC
-                } else {
-                    ChannelFlags::empty()
-                };
-                // Mark this as an external funding channel so the peer knows
-                // to wait for the user to sign the funding transaction.
-                channel_flags.insert(ChannelFlags::EXTERNAL_FUNDING);
-
-                let channel_announcement_nonce = if public {
-                    Some(channel.get_channel_announcement_musig2_pubnonce())
-                } else {
-                    None
-                };
-                let commitment_number = 1; // The first commitment number is 1, as 0 is reserved for the initial state.
-                let message = FiberMessage::ChannelInitializationV2(OpenChannelV2 {
-                    chain_hash: get_chain_hash(),
-                    channel_id: channel.get_id(),
-                    funding_udt_type_script,
-                    funding_amount: channel.to_local_amount,
-                    shutdown_script,
-                    reserved_ckb_amount: channel.local_reserved_ckb_amount,
-                    funding_fee_rate,
-                    commitment_fee_rate,
-                    commitment_delay_epoch: channel.commitment_delay_epoch,
-                    max_tlc_value_in_flight: channel.local_constraints.max_tlc_value_in_flight,
-                    max_tlc_number_in_flight: channel.local_constraints.max_tlc_number_in_flight,
-                    channel_flags,
-                    first_per_commitment_point: channel
-                        .get_local_commitment_point(commitment_number),
-                    second_per_commitment_point: channel
-                        .get_local_commitment_point(commitment_number + 1),
-                    funding_pubkey: channel.get_local_channel_public_keys().funding_pubkey,
-                    tlc_basepoint: channel.get_local_channel_public_keys().tlc_base_key,
-                    initial_commitment_nonce: channel.session.own.public_nonce.clone(),
-                    channel_features: 1,
-                    channel_announcement_nonce,
-                });
-
-                debug!(
-                    "Created OpenChannelV2 message (external funding) to {:?}: {:?}",
-                    &peer_id, &message
-                );
-                self.store.insert_channel_actor_state(channel.clone());
-                self.network
-                    .send_message(FiberActorMessage::new_command(
-                        FiberActorCommand::SendFiberMessage(FiberMessageWithTarget {
-                            target: self.get_remote_pubkey(),
-                            message,
-                        }),
-                    ))
-                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-
-                // Same initial state as regular OpenChannelV2 - we're still negotiating
-                channel.update_state(ChannelState::NegotiatingFunding(
-                    NegotiatingFundingFlags::OUR_INIT_SENT,
-                ));
-                debug!(
-                    "Channel with external funding to peer {:?} with id {:?} created",
-                    &peer_id,
-                    &channel.get_id()
-                );
-
-                channel_id_sender
-                    .send(channel.get_id())
-                    .expect("Receive not dropped");
-                channel
+                    &args.ephemeral_config,
+                    args.private_key,
+                )?,
+            ChannelInitializationOperation::OpenChannelWithExternalFunding(param) => {
+                self.pre_start_open_channel_with_external_funding(param, args.private_key)?
             }
         };
 
@@ -5361,13 +5377,13 @@ where
         state.ephemeral_config.is_internal_channel = is_internal_channel;
         if let Some((_, request)) = state.signing_context.awaiting_signature() {
             if state.signing_context.accepted_signature().is_some() {
-                self.resume_external_v2(&myself, &mut state, request.transition())
+                Box::pin(self.resume_external_v2(&myself, &mut state, request.transition()))
                     .await?;
             }
             self.checkpoint_external_wait(&mut state);
         }
 
-        Ok(state)
+        Ok(*state)
     }
 
     async fn handle(
@@ -5407,9 +5423,8 @@ where
                 });
             }
             ChannelActorMessage::PeerMessage(message) => {
-                if let Err(error) = self
-                    .handle_peer_message(&myself, state, message.clone())
-                    .await
+                if let Err(error) =
+                    Box::pin(self.handle_peer_message(&myself, state, message.clone())).await
                 {
                     error!(
                         "{:?} Error while processing channel message: {:?} with message: {:?}",
@@ -5421,20 +5436,19 @@ where
                 }
             }
             ChannelActorMessage::Event(e) => {
-                if let Err(err) = self.handle_event(&myself, state, e).await {
+                if let Err(err) = Box::pin(self.handle_event(&myself, state, e)).await {
                     error!("Error while processing channel event: {:?}", err);
                 }
             }
             ChannelActorMessage::SignerNotification(notification) => {
-                if let Err(err) = self
-                    .handle_signer_notification(&myself, state, notification)
-                    .await
+                if let Err(err) =
+                    Box::pin(self.handle_signer_notification(&myself, state, notification)).await
                 {
                     error!("Error while processing signer notification: {:?}", err);
                 }
             }
             ChannelActorMessage::Command(command) => {
-                if let Err(err) = self.handle_command(&myself, state, command).await {
+                if let Err(err) = Box::pin(self.handle_command(&myself, state, command)).await {
                     if !matches!(err, ProcessingChannelError::WaitingTlcAck) {
                         error!(
                             "{:?} Error while processing channel command: {:?}",
@@ -5455,7 +5469,7 @@ where
         }
 
         {
-            if let Err(error) = self.progress_close_v2(state).await {
+            if let Err(error) = Box::pin(self.progress_close_v2(state)).await {
                 error!(?error, "Unable to progress V2 cooperative close");
             }
         }

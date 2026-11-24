@@ -439,12 +439,13 @@ pub mod server {
         };
         let auth = match config.biscuit_public_key.as_ref() {
             Some(key) => {
-                let mut auth =
-                    BiscuitAuth::from_pubkey(key.to_string())?.with_lsp_enabled(lsp_enabled);
+                let auth = BiscuitAuth::from_pubkey(key.to_string())?.with_lsp_enabled(lsp_enabled);
                 #[cfg(feature = "lsp")]
-                if let Some(epochs) = tenant_token_epochs {
-                    auth = auth.with_tenant_token_epochs(epochs);
-                }
+                let auth = if let Some(epochs) = tenant_token_epochs {
+                    auth.with_tenant_token_epochs(epochs)
+                } else {
+                    auth
+                };
                 tracing::info!("Enable RPC auth");
                 Some(auth)
             }
@@ -513,7 +514,7 @@ pub mod server {
 
             #[cfg(feature = "watchtower")]
             if config.is_module_enabled("watchtower") {
-                #[cfg(not(target_arch = "wasm32"))]
+                #[cfg(feature = "lsp")]
                 let watchtower_quotas = match lsp_actor.as_ref() {
                     Some(actor) => {
                         ractor::call!(actor, crate::lsp::LspServiceMessage::GetWatchtowerQuotas)
@@ -523,7 +524,7 @@ pub mod server {
                     }
                     None => Default::default(),
                 };
-                #[cfg(target_arch = "wasm32")]
+                #[cfg(not(feature = "lsp"))]
                 let watchtower_quotas = crate::lsp_config::WatchtowerQuotas::default();
                 modules
                     .merge(
@@ -836,27 +837,40 @@ pub mod server {
                     if response.status() == hyper::StatusCode::BAD_REQUEST)
                 );
             }
-            // Well-formed browser credentials still use the ordinary RPC policies.
-            let invalid_token = URL_SAFE_NO_PAD.encode(b"not a Biscuit");
-            for (token, code) in [(token.as_str(), -32001), (invalid_token.as_str(), -32999)] {
-                let mut request = url.clone().into_client_request().unwrap();
-                request.headers_mut().insert(
-                    SEC_WEBSOCKET_PROTOCOL,
-                    format!(
-                        "fiber-rpc, base64url.bearer.authorization.fiber.{}",
-                        token.trim_end_matches('=')
-                    )
-                    .parse()
-                    .unwrap(),
-                );
-                let (mut socket, _) = connect_async(request).await.unwrap();
-                socket.send(Message::text(
+            // Well-formed browser credentials still use the ordinary RPC policies,
+            // while invalid Biscuit tokens are rejected during the HTTP upgrade handshake.
+            let mut request = url.clone().into_client_request().unwrap();
+            request.headers_mut().insert(
+                SEC_WEBSOCKET_PROTOCOL,
+                format!("fiber-rpc, {credential}").parse().unwrap(),
+            );
+            let (mut socket, _) = connect_async(request).await.unwrap();
+            socket
+                .send(Message::text(
                     r#"{"jsonrpc":"2.0","id":1,"method":"subscribe","params":["channel_signing"]}"#,
-                )).await.unwrap();
-                let reply = browser_message(&mut socket).await;
-                assert_eq!(reply["error"]["code"], code);
-                socket.close(None).await.unwrap();
-            }
+                ))
+                .await
+                .unwrap();
+            let reply = browser_message(&mut socket).await;
+            assert_eq!(reply["error"]["code"], -32001);
+            socket.close(None).await.unwrap();
+
+            let invalid_token = URL_SAFE_NO_PAD.encode(b"not a Biscuit");
+            let mut request = url.clone().into_client_request().unwrap();
+            request.headers_mut().insert(
+                SEC_WEBSOCKET_PROTOCOL,
+                format!(
+                    "fiber-rpc, base64url.bearer.authorization.fiber.{}",
+                    invalid_token.trim_end_matches('=')
+                )
+                .parse()
+                .unwrap(),
+            );
+            let error = connect_async(request).await.unwrap_err();
+            assert!(
+                matches!(error, tokio_tungstenite::tungstenite::Error::Http(response)
+                if response.status() == hyper::StatusCode::UNAUTHORIZED)
+            );
             let mut headers = hyper::HeaderMap::new();
             headers.insert(
                 SEC_WEBSOCKET_PROTOCOL,

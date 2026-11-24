@@ -14196,10 +14196,9 @@ mod udt_funding_cell_capacity {
             shared.removed_confirmed_at = Some(1);
             shared.applied_flags = AppliedFlags::REMOVE;
             local_state.clean_up_failed_tlcs();
-            // Unlike the remote TLC cache, external indexed public material is
-            // immutable history: retaining old indices prevents refill rebinding.
-            // Refill rejection is exercised by the external V2 signing test.
-            assert!(local_state
+            // Point 3 is no longer referenced by any remaining TLC and is below
+            // `remote_commitment_number`, so cleanup prunes it to bound storage.
+            assert!(!local_state
                 .signing_context
                 .v2_commitment_points
                 .iter()

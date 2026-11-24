@@ -4421,8 +4421,27 @@ async fn test_buffered_trampoline_failure_uses_request_not_same_hash_session() {
     let unrelated =
         bincode::serialize(&node_t.store.get_payment_session(payment_hash).unwrap()).unwrap();
 
-    for _ in 0..2 {
-        assert!(call!(node_t.network_actor, |reply| {
+    let first_result = call!(node_t.network_actor, |reply| {
+        NetworkActorMessage::new_command(FiberActorCommand::FailBufferedTrampoline {
+            request: request.clone(),
+            reason: "buffer deadline expired".to_string(),
+            error_code: TlcErrorCode::PermanentNodeFailure,
+            reply,
+        })
+    })
+    .unwrap();
+    match first_result {
+        Ok(settled) => assert!(settled),
+        Err(err) => assert!(
+            err.contains("awaiting channel persistence"),
+            "unexpected FailBufferedTrampoline error: {err}"
+        ),
+    }
+    node_a.wait_until_failed(payment_hash).await;
+
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+    loop {
+        let result = call!(node_t.network_actor, |reply| {
             NetworkActorMessage::new_command(FiberActorCommand::FailBufferedTrampoline {
                 request: request.clone(),
                 reason: "buffer deadline expired".to_string(),
@@ -4430,10 +4449,31 @@ async fn test_buffered_trampoline_failure_uses_request_not_same_hash_session() {
                 reply,
             })
         })
-        .unwrap()
-        .unwrap());
-        node_a.wait_until_failed(payment_hash).await;
+        .unwrap();
+        match result {
+            Ok(settled) => {
+                assert!(settled);
+                break;
+            }
+            Err(err)
+                if err.contains("awaiting channel persistence")
+                    && tokio::time::Instant::now() < deadline =>
+            {
+                tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+            }
+            Err(err) => panic!("FailBufferedTrampoline failed before reconciling: {err}"),
+        }
     }
+    assert!(call!(node_t.network_actor, |reply| {
+        NetworkActorMessage::new_command(FiberActorCommand::FailBufferedTrampoline {
+            request: request.clone(),
+            reason: "buffer deadline expired".to_string(),
+            error_code: TlcErrorCode::PermanentNodeFailure,
+            reply,
+        })
+    })
+    .unwrap()
+    .unwrap());
     assert_eq!(
         bincode::serialize(&node_t.store.get_payment_session(payment_hash).unwrap()).unwrap(),
         unrelated

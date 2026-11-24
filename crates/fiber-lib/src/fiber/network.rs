@@ -1982,6 +1982,8 @@ struct FiberActorStateArgs {
     features: FeatureVector,
 }
 
+type BoxedFiberFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
+
 impl<S, C> FiberActorCore<S, C>
 where
     S: NetworkActorStateStore
@@ -2425,17 +2427,59 @@ where
         Ok(FiberMessageDisposition::Processed)
     }
 
-    async fn handle_event(
+    fn handle_event<'a>(
+        &'a self,
+        myself: FiberActorRef,
+        state: &'a mut FiberActorState<S, C>,
+        event: FiberActorEvent,
+    ) -> BoxedFiberFuture<'a, crate::Result<()>> {
+        match event {
+            FiberActorEvent::PeerMessage(pubkey, message) => Box::pin(async move {
+                self.handle_peer_message(myself, state, pubkey, message)
+                    .await?;
+                Ok(())
+            }),
+            event @ (FiberActorEvent::ChannelReady(..)
+            | FiberActorEvent::ChannelActorStopped(..)
+            | FiberActorEvent::ChannelSettlementCompleted(..)
+            | FiberActorEvent::ChannelSettlementRecovered(..)) => {
+                Box::pin(self.handle_channel_lifecycle_event(myself, state, event))
+            }
+            event @ (FiberActorEvent::FundingTransactionPending(..)
+            | FiberActorEvent::ExternalFundingTransactionSubmitted(..)
+            | FiberActorEvent::FundingTransactionConfirmed(..)
+            | FiberActorEvent::FundingTransactionFailed { .. }
+            | FiberActorEvent::ClosingTransactionPending(..)
+            | FiberActorEvent::ClosingTransactionConfirmed(..)) => {
+                Box::pin(Self::handle_funding_and_closing_event(state, event))
+            }
+            event @ FiberActorEvent::TlcRemoveReceived(..) => {
+                Box::pin(self.handle_tlc_remove_received_event(myself, state, event))
+            }
+            event @ (FiberActorEvent::ResumePaymentAfterClosedChannel(..)
+            | FiberActorEvent::RetrySendPayment(..)
+            | FiberActorEvent::AddTlcResult(..)
+            | FiberActorEvent::OwnedChannelUpdateEvent(..)
+            | FiberActorEvent::PaymentSucceeded(..)
+            | FiberActorEvent::PaymentActorStopped(..)) => {
+                Box::pin(self.handle_payment_and_graph_event(myself, state, event))
+            }
+            event @ FiberActorEvent::ChannelAcceptedForExternalFunding { .. } => {
+                Box::pin(Self::handle_external_funding_accepted_event(state, event))
+            }
+            event => Box::pin(std::future::ready(
+                self.handle_sync_event(myself, state, event),
+            )),
+        }
+    }
+
+    fn handle_sync_event(
         &self,
         myself: FiberActorRef,
         state: &mut FiberActorState<S, C>,
         event: FiberActorEvent,
     ) -> crate::Result<()> {
         match event {
-            FiberActorEvent::PeerMessage(pubkey, message) => {
-                self.handle_peer_message(myself, state, pubkey, message)
-                    .await?;
-            }
             FiberActorEvent::ChannelAccepted(
                 pubkey,
                 new,
@@ -2478,6 +2522,143 @@ where
                         .expect(ASSUME_NETWORK_MYSELF_ALIVE);
                 }
             }
+            FiberActorEvent::ClosingTransactionFailed(pubkey, channel_id, tx_hash) => {
+                state.inflight_tracers.remove(&tx_hash.clone().into());
+                error!(
+                    "Closing transaction failed for channel {:?}, tx hash: {:?}, peer pubkey: {:?}",
+                    &channel_id, &tx_hash, &pubkey
+                );
+            }
+            FiberActorEvent::RetryPendingPaymentsForChannel(channel_outpoint) => {
+                if state
+                    .pending_channel_ready_retry_scans
+                    .remove(&channel_outpoint)
+                    && state.outpoint_channel_map.contains_key(&channel_outpoint)
+                {
+                    state
+                        .last_channel_ready_scan
+                        .insert(channel_outpoint.clone(), now_timestamp_as_millis_u64());
+                    state.retry_pending_payments_for_channel(&myself, &channel_outpoint);
+                }
+            }
+            FiberActorEvent::ExternalFundingTxReady(channel_id, funding_tx) => {
+                if let Some(mut opening) = state.store.get_tenant_channel_opening(&channel_id) {
+                    if opening.result.is_none() {
+                        if let Some(channel) = state.store.get_channel_actor_state(&channel_id) {
+                            match channel.tenant_opening_result(funding_tx.clone()) {
+                                Ok(result) => {
+                                    opening.result = Some(result.clone());
+                                    state.store.put_tenant_channel_opening(opening);
+                                    state.reply_tenant_opening(channel_id, Ok(result));
+                                }
+                                Err(err) => {
+                                    state.reply_tenant_opening(channel_id, Err(err));
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if let Some(reply) = state.pending_external_funding_replies.remove(&channel_id) {
+                    debug!(
+                        "Returning negotiated unsigned external funding tx for channel {:?}: {:?}",
+                        channel_id,
+                        funding_tx.calc_tx_hash()
+                    );
+                    let _ = reply.send(Ok(OpenChannelWithExternalFundingResponse {
+                        channel_id,
+                        unsigned_funding_tx: funding_tx,
+                    }));
+                } else {
+                    warn!(
+                        "No pending external funding reply found when tx became ready for channel {:?}",
+                        channel_id
+                    );
+                }
+            }
+            _ => unreachable!("unexpected sync fiber actor event"),
+        }
+        Ok(())
+    }
+
+    async fn handle_payment_and_graph_event(
+        &self,
+        myself: FiberActorRef,
+        state: &mut FiberActorState<S, C>,
+        event: FiberActorEvent,
+    ) -> crate::Result<()> {
+        match event {
+            FiberActorEvent::ResumePaymentAfterClosedChannel(session_key, attempt_id) => {
+                Box::pin(self.resume_payment_actor_and_send_command(
+                    myself,
+                    state,
+                    session_key,
+                    PaymentActorMessage::ResumeAfterClosedChannel(attempt_id),
+                ))
+                .await;
+            }
+            FiberActorEvent::RetrySendPayment(session_key, attempt_id) => {
+                Box::pin(self.resume_payment_actor_and_send_command(
+                    myself,
+                    state,
+                    session_key,
+                    PaymentActorMessage::RetrySendPayment(attempt_id),
+                ))
+                .await;
+            }
+            FiberActorEvent::AddTlcResult(
+                session_key,
+                attempt_id,
+                add_tlc_result,
+                previous_tlc,
+            ) => {
+                Box::pin(self.on_add_tlc_result_event(
+                    myself,
+                    state,
+                    session_key,
+                    attempt_id,
+                    add_tlc_result,
+                    previous_tlc,
+                ))
+                .await;
+            }
+            FiberActorEvent::OwnedChannelUpdateEvent(owned_channel_update_event) => {
+                let mut graph = self.network_graph.write().await;
+                debug!(
+                    "Received owned channel update event: {:?}",
+                    owned_channel_update_event
+                );
+                let is_down =
+                    matches!(owned_channel_update_event, OwnedChannelUpdateEvent::Down(_));
+                graph.process_owned_channel_update_event(owned_channel_update_event);
+                if is_down {
+                    debug!("Owned channel is down");
+                }
+            }
+            FiberActorEvent::PaymentSucceeded(session_key) => {
+                Box::pin(state.resolve_trampoline_upstream(myself, session_key, None)).await;
+            }
+            FiberActorEvent::PaymentActorStopped(session_key, actor_id, last_error_packet) => {
+                Box::pin(state.on_payment_actor_stopped(
+                    myself,
+                    session_key,
+                    actor_id,
+                    last_error_packet,
+                ))
+                .await;
+            }
+            _ => unreachable!("unexpected payment or graph event"),
+        }
+        Ok(())
+    }
+
+    async fn handle_channel_lifecycle_event(
+        &self,
+        myself: FiberActorRef,
+        state: &mut FiberActorState<S, C>,
+        event: FiberActorEvent,
+    ) -> crate::Result<()> {
+        match event {
             FiberActorEvent::ChannelReady(channel_id, pubkey, channel_outpoint) => {
                 info!(
                     "Channel ({:?}) to peer {:?} is now ready",
@@ -2485,18 +2666,15 @@ where
                 );
                 state.peer_channel_index.mark_channel_ready(&channel_id);
 
-                // Mark the opening record as ChannelReady (terminal success state).
                 if let Some(mut record) = state.store.get_channel_open_record(&channel_id) {
                     record.update_status(ChannelOpeningStatus::ChannelReady);
                     state.store.insert_channel_open_record(record);
                 }
 
-                // FIXME(yukang): need to make sure ChannelReady is sent after the channel is reestablished
                 state
                     .outpoint_channel_map
                     .insert(channel_outpoint.clone(), channel_id);
 
-                // Notify outside observers.
                 myself
                     .send_message(FiberActorMessage::new_notification(
                         NetworkServiceEvent::ChannelReady(
@@ -2507,11 +2685,6 @@ where
                     ))
                     .expect(ASSUME_NETWORK_MYSELF_ALIVE);
 
-                // Retry payment attempts whose first hop uses this channel.
-                // Debounce to prevent resource exhaustion from repeated
-                // reestablish events. Uses trailing-edge: when suppressed,
-                // schedules a deferred scan so the trailing ChannelReady
-                // (e.g. from a real reconnect) is never lost.
                 match decide_channel_ready_retry_scan(
                     &mut state.last_channel_ready_scan,
                     &mut state.pending_channel_ready_retry_scans,
@@ -2542,9 +2715,10 @@ where
                     }
                 }
 
-                state
-                    .recover_trampoline_settlements_for_channel(myself.clone(), channel_id)
-                    .await;
+                Box::pin(
+                    state.recover_trampoline_settlements_for_channel(myself.clone(), channel_id),
+                )
+                .await;
 
                 debug_event!(
                     myself,
@@ -2553,268 +2727,6 @@ where
                         channel_id, pubkey
                     )
                 );
-            }
-            FiberActorEvent::FundingTransactionPending(transaction, outpoint, channel_id) => {
-                // Advance the opening record to FundingTxBroadcasted.
-                if let Some(mut record) = state.store.get_channel_open_record(&channel_id) {
-                    record.update_status(ChannelOpeningStatus::FundingTxBroadcasted);
-                    state.store.insert_channel_open_record(record);
-                }
-                state
-                    .on_funding_transaction_pending(channel_id, transaction, outpoint)
-                    .await;
-            }
-            FiberActorEvent::ExternalFundingTransactionSubmitted(
-                outpoint,
-                channel_id,
-                watched_inputs,
-            ) => {
-                state.pending_channels.insert(outpoint.clone(), channel_id);
-                if let Err(err) = state
-                    .trace_tx(
-                        outpoint.tx_hash().into(),
-                        InFlightCkbTxKind::Funding(channel_id),
-                        watched_inputs,
-                        true,
-                    )
-                    .await
-                {
-                    error!("Failed to watch external funding transaction: {}", err);
-                }
-            }
-            FiberActorEvent::FundingTransactionConfirmed(
-                outpoint,
-                block_hash,
-                tx_index,
-                timestamp,
-            ) => {
-                state.inflight_tracers.remove(&outpoint.tx_hash().into());
-                state
-                    .on_funding_transaction_confirmed(outpoint, block_hash, tx_index, timestamp)
-                    .await;
-            }
-            FiberActorEvent::FundingTransactionFailed {
-                outpoint,
-                input_spent,
-            } => {
-                state.inflight_tracers.remove(&outpoint.tx_hash().into());
-                error!(
-                    "Funding transaction failed: {:?} (input_spent={})",
-                    outpoint, input_spent
-                );
-                state
-                    .on_funding_transaction_failed(outpoint, input_spent)
-                    .await;
-            }
-            FiberActorEvent::ClosingTransactionPending(channel_id, pubkey, tx, force) => {
-                if state
-                    .store
-                    .get_channel_actor_state(&channel_id)
-                    .is_some_and(|channel| channel.ensure_v2_not_quarantined().is_err())
-                {
-                    return Ok(());
-                }
-                state
-                    .on_closing_transaction_pending(channel_id, pubkey, tx.clone(), force)
-                    .await;
-            }
-            FiberActorEvent::ClosingTransactionConfirmed(
-                pubkey,
-                channel_id,
-                tx_hash,
-                force,
-                close_by_us,
-            ) => {
-                state.inflight_tracers.remove(&tx_hash.clone().into());
-                state
-                    .on_closing_transaction_confirmed(
-                        &pubkey,
-                        &channel_id,
-                        tx_hash,
-                        force,
-                        close_by_us,
-                    )
-                    .await;
-            }
-            FiberActorEvent::ClosingTransactionFailed(pubkey, channel_id, tx_hash) => {
-                state.inflight_tracers.remove(&tx_hash.clone().into());
-                error!(
-                    "Closing transaction failed for channel {:?}, tx hash: {:?}, peer pubkey: {:?}",
-                    &channel_id, &tx_hash, &pubkey
-                );
-            }
-            FiberActorEvent::TlcRemoveReceived(
-                session_key,
-                attempt_id,
-                mut remove_tlc_reason,
-                source,
-            ) => {
-                let mut local_error = None;
-                let mut completion = None;
-                if let Some((channel_id, tlc_id)) = source {
-                    // Revalidate queued events against the persisted shutdown evidence.
-                    let Some(channel) = self.store.get_channel_actor_state(&channel_id) else {
-                        return Ok(());
-                    };
-                    let Some((tlc, error_code)) =
-                        collect_onchain_payer_failures(&channel, &self.store)
-                            .into_iter()
-                            .find(|(tlc, _)| {
-                                tlc.tlc_id == tlc_id && tlc.session_key() == session_key
-                            })
-                    else {
-                        return Ok(());
-                    };
-                    let OnChainTimeoutTlcRole::OriginPayer {
-                        attempt_id: source_attempt_id,
-                    } = tlc.role
-                    else {
-                        return Ok(());
-                    };
-                    if source_attempt_id != attempt_id {
-                        return Ok(());
-                    }
-                    // The source determines the local failure; do not trust a stale event reason.
-                    remove_tlc_reason = RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
-                        TlcErr::new(error_code),
-                        &tlc.shared_secret,
-                    ));
-                    // A missing payer record cannot accept this chain outcome. Acknowledge it
-                    // so CheckChannels stops selecting the same TLC.
-                    let acknowledge = |reason: RemoveTlcReason| {
-                        myself.send_message(FiberActorMessage::new_command(
-                            FiberActorCommand::OnChainTlcRemoveCompleted {
-                                downstream_channel_id: channel_id,
-                                downstream_tlc_id: tlc_id,
-                                payment_hash: session_key.payment_hash,
-                                reason,
-                                completion: OnChainTlcRemoveCompletion::Payer,
-                            },
-                        ))
-                    };
-                    // Manually added TLCs have no payer state to persist.
-                    let Some(id) = attempt_id else {
-                        acknowledge(remove_tlc_reason)?;
-                        return Ok(());
-                    };
-                    let Some(channel_outpoint) = channel.get_funding_transaction_outpoint() else {
-                        warn!(
-                            "Will retry excluded payer TLC {:?}: funding outpoint missing",
-                            tlc_id
-                        );
-                        return Ok(());
-                    };
-                    let Some(attempt) = self.store.get_attempt(session_key, id) else {
-                        warn!(
-                            "Acknowledging on-chain payer TLC {:?}: payment attempt is gone",
-                            tlc_id
-                        );
-                        acknowledge(remove_tlc_reason)?;
-                        return Ok(());
-                    };
-                    if self.store.get_payment_session(session_key).is_none() {
-                        warn!(
-                            "Acknowledging on-chain payer TLC {:?}: payment session is gone",
-                            tlc_id
-                        );
-                        acknowledge(remove_tlc_reason)?;
-                        return Ok(());
-                    }
-                    local_error = Some(TlcErr::new_channel_fail(
-                        error_code,
-                        channel.get_local_pubkey(),
-                        channel_outpoint.clone(),
-                        None,
-                    ));
-                    completion = Some(PaymentTlcRemoveContext {
-                        channel_id,
-                        tlc_id,
-                        channel_outpoint,
-                        tried_times: attempt.tried_times,
-                    });
-                }
-                // When a node is restarted, RemoveTLC will also be resent if necessary
-                self.on_remove_tlc_event(
-                    myself.clone(),
-                    state,
-                    session_key,
-                    attempt_id,
-                    remove_tlc_reason,
-                    local_error,
-                    completion,
-                )
-                .await;
-                #[cfg(debug_assertions)]
-                {
-                    if let Some(payment_session) = self.store.get_payment_session(session_key) {
-                        debug_event!(
-                            myself,
-                            format!(
-                                "after on_remove_tlc_event session_status: {:?}",
-                                payment_session.status
-                            )
-                        );
-                    }
-                }
-            }
-            FiberActorEvent::ResumePaymentAfterClosedChannel(session_key, attempt_id) => {
-                self.resume_payment_actor_and_send_command(
-                    myself,
-                    state,
-                    session_key,
-                    PaymentActorMessage::ResumeAfterClosedChannel(attempt_id),
-                )
-                .await;
-            }
-            FiberActorEvent::RetrySendPayment(session_key, attempt_id) => {
-                self.resume_payment_actor_and_send_command(
-                    myself,
-                    state,
-                    session_key,
-                    PaymentActorMessage::RetrySendPayment(attempt_id),
-                )
-                .await;
-            }
-            FiberActorEvent::RetryPendingPaymentsForChannel(channel_outpoint) => {
-                if state
-                    .pending_channel_ready_retry_scans
-                    .remove(&channel_outpoint)
-                    && state.outpoint_channel_map.contains_key(&channel_outpoint)
-                {
-                    state
-                        .last_channel_ready_scan
-                        .insert(channel_outpoint.clone(), now_timestamp_as_millis_u64());
-                    state.retry_pending_payments_for_channel(&myself, &channel_outpoint);
-                }
-            }
-            FiberActorEvent::AddTlcResult(
-                session_key,
-                attempt_id,
-                add_tlc_result,
-                previous_tlc,
-            ) => {
-                self.on_add_tlc_result_event(
-                    myself,
-                    state,
-                    session_key,
-                    attempt_id,
-                    add_tlc_result,
-                    previous_tlc,
-                )
-                .await;
-            }
-            FiberActorEvent::OwnedChannelUpdateEvent(owned_channel_update_event) => {
-                let mut graph = self.network_graph.write().await;
-                debug!(
-                    "Received owned channel update event: {:?}",
-                    owned_channel_update_event
-                );
-                let is_down =
-                    matches!(owned_channel_update_event, OwnedChannelUpdateEvent::Down(_));
-                graph.process_owned_channel_update_event(owned_channel_update_event);
-                if is_down {
-                    debug!("Owned channel is down");
-                }
             }
             FiberActorEvent::ChannelActorStopped(channel_id, reason) => {
                 if matches!(
@@ -2829,7 +2741,6 @@ where
                     }
                 }
 
-                // If the channel failed before reaching ChannelReady, mark the opening record as Failed.
                 if let Some(mut record) = state.store.get_channel_open_record(&channel_id) {
                     if record.status != ChannelOpeningStatus::ChannelReady {
                         let failure_detail = match &reason {
@@ -2869,17 +2780,7 @@ where
                         state.store.insert_channel_open_record(record);
                     }
                 }
-                state.on_channel_actor_stopped(channel_id, reason).await;
-            }
-            FiberActorEvent::PaymentSucceeded(session_key) => {
-                state
-                    .resolve_trampoline_upstream(myself, session_key, None)
-                    .await;
-            }
-            FiberActorEvent::PaymentActorStopped(session_key, actor_id, last_error_packet) => {
-                state
-                    .on_payment_actor_stopped(myself, session_key, actor_id, last_error_packet)
-                    .await;
+                Box::pin(state.on_channel_actor_stopped(channel_id, reason)).await;
             }
             FiberActorEvent::ChannelSettlementCompleted(channel_id) => {
                 if let Some(channel_actor) = state.channels.get(&channel_id) {
@@ -2894,12 +2795,12 @@ where
                 } else if let Some(mut actor_state) =
                     self.store.get_channel_actor_state(&channel_id)
                 {
-                    self.reconcile_onchain_tlcs_without_live_actor(
+                    Box::pin(self.reconcile_onchain_tlcs_without_live_actor(
                         state,
                         &mut actor_state,
                         now_timestamp_as_millis_u64(),
                         true,
-                    )
+                    ))
                     .await;
                 }
             }
@@ -2920,269 +2821,423 @@ where
                 } else if let Some(mut actor_state) =
                     self.store.get_channel_actor_state(&channel_id)
                 {
-                    self.reconcile_onchain_tlcs_without_live_actor(
+                    Box::pin(self.reconcile_onchain_tlcs_without_live_actor(
                         state,
                         &mut actor_state,
                         now_timestamp_as_millis_u64(),
                         false,
-                    )
+                    ))
                     .await;
                 }
             }
-            FiberActorEvent::ChannelAcceptedForExternalFunding {
-                peer_id,
-                new_channel_id,
-                old_channel_id,
-                funding_amount,
-                remote_funding_amount,
-                funding_source_lock_script,
-                funding_source_lock_script_cell_deps,
-                funding_cell_lock_script,
-                funding_udt_type_script,
-                local_reserved_ckb_amount,
-                remote_reserved_ckb_amount,
-                funding_fee_rate,
-            } => {
-                assert_ne!(
-                    new_channel_id, old_channel_id,
-                    "new and old channel id must be different"
-                );
+            _ => unreachable!("unexpected channel lifecycle event"),
+        }
+        Ok(())
+    }
 
-                // Update channel mapping
-                if let Some(peer_pubkey) = state.peer_channel_index.get_pubkey(&peer_id) {
-                    if let Some(channel) = state.channels.remove(&old_channel_id) {
-                        debug!(
-                            "Channel accepted for external funding: {:?} -> {:?}",
-                            old_channel_id, new_channel_id
-                        );
-                        state.channels.insert(new_channel_id, channel);
-                        state.peer_channel_index.replace_channel(
-                            peer_pubkey,
-                            old_channel_id,
-                            new_channel_id,
-                        );
-                    }
+    async fn handle_funding_and_closing_event(
+        state: &mut FiberActorState<S, C>,
+        event: FiberActorEvent,
+    ) -> crate::Result<()> {
+        match event {
+            FiberActorEvent::FundingTransactionPending(transaction, outpoint, channel_id) => {
+                if let Some(mut record) = state.store.get_channel_open_record(&channel_id) {
+                    record.update_status(ChannelOpeningStatus::FundingTxBroadcasted);
+                    state.store.insert_channel_open_record(record);
                 }
-
-                state.move_channel_open_record_to_final_id(&old_channel_id, new_channel_id);
-
-                // Move the pending reply to the final channel id. The actual RPC response is
-                // sent only after tx collaboration finishes and the unsigned tx is frozen.
-                let reply = state
-                    .pending_external_funding_replies
-                    .remove(&old_channel_id)
-                    .or_else(|| {
-                        state
-                            .pending_external_funding_replies
-                            .remove(&new_channel_id)
-                    });
-
-                if let Some(reply) = reply {
-                    // Build the local unsigned tx. External funding passes a custom funding
-                    // source lock and optional extra cell deps; the shared builder handles both
-                    // internal and external funding paths.
-                    let request = FundingRequest {
-                        script: funding_source_lock_script.clone(),
-                        udt_type_script: funding_udt_type_script,
-                        local_amount: funding_amount,
-                        remote_amount: remote_funding_amount,
-                        funding_fee_rate,
-                        local_reserved_ckb_amount,
-                        remote_reserved_ckb_amount,
-                    };
-
-                    let funding_tx = FundingTx::new();
-                    let (send, recv) = oneshot::channel::<Result<FundingTx, FundingError>>();
-                    let rpc_reply = RpcReplyPort::from(send);
-
-                    let _ =
-                        state
-                            .chain_actor
-                            .send_message(CkbChainMessage::BuildUnsignedFundingTx {
-                                funding_tx,
-                                request,
-                                funding_source_lock_script,
-                                funding_source_lock_script_cell_deps,
-                                funding_cell_lock_script,
-                                reply: rpc_reply,
-                            });
-
-                    match ractor::concurrency::timeout(
-                        Duration::from_millis(DEFAULT_CHAIN_ACTOR_TIMEOUT),
-                        recv,
-                    )
-                    .await
-                    {
-                        Ok(Ok(Ok(built_tx))) => {
-                            if let Some(tx) = built_tx.into_inner() {
-                                debug!(
-                                    "Starting external funding tx collaboration for channel {:?} with locally built tx {:?}",
-                                    new_channel_id,
-                                    tx.hash()
-                                );
-                                state
-                                    .pending_external_funding_replies
-                                    .insert(new_channel_id, reply);
-                                if let Err(e) = state
-                                    .send_command_to_channel(
-                                        new_channel_id,
-                                        ChannelCommand::TxCollaborationCommand(
-                                            TxCollaborationCommand::TxUpdate(TxUpdateCommand {
-                                                transaction: tx.data(),
-                                            }),
-                                        ),
-                                    )
-                                    .await
-                                {
-                                    error!(
-                                        "Failed to start external funding tx collaboration: {:?}",
-                                        e
-                                    );
-                                    state.reply_tenant_opening(new_channel_id, Err(format!("Failed to start external funding tx collaboration: {e}")));
-                                    if let Some(reply) = state
-                                        .pending_external_funding_replies
-                                        .remove(&new_channel_id)
-                                    {
-                                        let _ = reply.send(Err(format!(
-                                            "Failed to start external funding tx collaboration: {}",
-                                            e
-                                        )));
-                                    }
-                                }
-                            } else {
-                                error!(
-                                    "Built funding tx is empty for channel {:?}",
-                                    new_channel_id
-                                );
-                                state.reply_tenant_opening(
-                                    new_channel_id,
-                                    Err("Failed to build unsigned funding tx: empty result".into()),
-                                );
-                                let _ = reply
-                                    .send(Err("Failed to build unsigned funding tx: empty result"
-                                        .to_string()));
-                            }
-                        }
-                        Ok(Ok(Err(e))) => {
-                            error!(
-                                "Failed to build unsigned funding tx for channel {:?}: {:?}",
-                                new_channel_id, e
-                            );
-                            state.reply_tenant_opening(
-                                new_channel_id,
-                                Err(format!("Failed to build unsigned funding tx: {e}")),
-                            );
-                            let _ = reply
-                                .send(Err(format!("Failed to build unsigned funding tx: {}", e)));
-                        }
-                        Ok(Err(e)) => {
-                            error!(
-                                "Channel recv error for channel {:?}: {:?}",
-                                new_channel_id, e
-                            );
-                            state.reply_tenant_opening(
-                                new_channel_id,
-                                Err(format!("Channel recv error: {e}")),
-                            );
-                            let _ = reply.send(Err(format!("Channel recv error: {}", e)));
-                        }
-                        Err(_) => {
-                            error!(
-                                "Timeout waiting for unsigned funding tx for channel {:?}",
-                                new_channel_id
-                            );
-                            state.reply_tenant_opening(
-                                new_channel_id,
-                                Err("Timeout waiting for unsigned funding tx".into()),
-                            );
-                            let _ = reply
-                                .send(Err("Timeout waiting for unsigned funding tx".to_string()));
-                        }
-                    }
-                } else {
-                    warn!(
-                        "No pending reply found for external funding channel {:?} (old: {:?})",
-                        new_channel_id, old_channel_id
-                    );
+                Box::pin(state.on_funding_transaction_pending(channel_id, transaction, outpoint))
+                    .await;
+            }
+            FiberActorEvent::ExternalFundingTransactionSubmitted(
+                outpoint,
+                channel_id,
+                watched_inputs,
+            ) => {
+                state.pending_channels.insert(outpoint.clone(), channel_id);
+                if let Err(err) = Box::pin(state.trace_tx(
+                    outpoint.tx_hash().into(),
+                    InFlightCkbTxKind::Funding(channel_id),
+                    watched_inputs,
+                    true,
+                ))
+                .await
+                {
+                    error!("Failed to watch external funding transaction: {}", err);
                 }
             }
-            FiberActorEvent::ExternalFundingTxReady(channel_id, funding_tx) => {
-                if let Some(mut opening) = state.store.get_tenant_channel_opening(&channel_id) {
-                    if opening.result.is_none() {
-                        if let Some(channel) = state.store.get_channel_actor_state(&channel_id) {
-                            match channel.tenant_opening_result(funding_tx.clone()) {
-                                Ok(result) => {
-                                    opening.result = Some(result.clone());
-                                    state.store.put_tenant_channel_opening(opening);
-                                    state.reply_tenant_opening(channel_id, Ok(result));
-                                }
-                                Err(err) => {
-                                    state.reply_tenant_opening(channel_id, Err(err));
-                                }
-                            }
-                        }
-                    }
+            FiberActorEvent::FundingTransactionConfirmed(
+                outpoint,
+                block_hash,
+                tx_index,
+                timestamp,
+            ) => {
+                state.inflight_tracers.remove(&outpoint.tx_hash().into());
+                Box::pin(
+                    state.on_funding_transaction_confirmed(
+                        outpoint, block_hash, tx_index, timestamp,
+                    ),
+                )
+                .await;
+            }
+            FiberActorEvent::FundingTransactionFailed {
+                outpoint,
+                input_spent,
+            } => {
+                state.inflight_tracers.remove(&outpoint.tx_hash().into());
+                error!(
+                    "Funding transaction failed: {:?} (input_spent={})",
+                    outpoint, input_spent
+                );
+                Box::pin(state.on_funding_transaction_failed(outpoint, input_spent)).await;
+            }
+            FiberActorEvent::ClosingTransactionPending(channel_id, pubkey, tx, force) => {
+                if state
+                    .store
+                    .get_channel_actor_state(&channel_id)
+                    .is_some_and(|channel| channel.ensure_v2_not_quarantined().is_err())
+                {
+                    return Ok(());
                 }
+                Box::pin(state.on_closing_transaction_pending(
+                    channel_id,
+                    pubkey,
+                    tx.clone(),
+                    force,
+                ))
+                .await;
+            }
+            FiberActorEvent::ClosingTransactionConfirmed(
+                pubkey,
+                channel_id,
+                tx_hash,
+                force,
+                close_by_us,
+            ) => {
+                state.inflight_tracers.remove(&tx_hash.clone().into());
+                Box::pin(state.on_closing_transaction_confirmed(
+                    &pubkey,
+                    &channel_id,
+                    tx_hash,
+                    force,
+                    close_by_us,
+                ))
+                .await;
+            }
+            _ => unreachable!("unexpected funding or closing event"),
+        }
+        Ok(())
+    }
 
-                if let Some(reply) = state.pending_external_funding_replies.remove(&channel_id) {
-                    debug!(
-                        "Returning negotiated unsigned external funding tx for channel {:?}: {:?}",
-                        channel_id,
-                        funding_tx.calc_tx_hash()
-                    );
-                    let _ = reply.send(Ok(OpenChannelWithExternalFundingResponse {
-                        channel_id,
-                        unsigned_funding_tx: funding_tx,
-                    }));
-                } else {
-                    warn!(
-                        "No pending external funding reply found when tx became ready for channel {:?}",
-                        channel_id
-                    );
-                }
+    async fn handle_tlc_remove_received_event(
+        &self,
+        myself: FiberActorRef,
+        state: &mut FiberActorState<S, C>,
+        event: FiberActorEvent,
+    ) -> crate::Result<()> {
+        let FiberActorEvent::TlcRemoveReceived(
+            session_key,
+            attempt_id,
+            mut remove_tlc_reason,
+            source,
+        ) = event
+        else {
+            unreachable!("expected TlcRemoveReceived event");
+        };
+        let mut local_error = None;
+        let mut completion = None;
+        if let Some((channel_id, tlc_id)) = source {
+            // Revalidate queued events against the persisted shutdown evidence.
+            let Some(channel) = self.store.get_channel_actor_state(&channel_id) else {
+                return Ok(());
+            };
+            let Some((tlc, error_code)) = collect_onchain_payer_failures(&channel, &self.store)
+                .into_iter()
+                .find(|(tlc, _)| tlc.tlc_id == tlc_id && tlc.session_key() == session_key)
+            else {
+                return Ok(());
+            };
+            let OnChainTimeoutTlcRole::OriginPayer {
+                attempt_id: source_attempt_id,
+            } = tlc.role
+            else {
+                return Ok(());
+            };
+            if source_attempt_id != attempt_id {
+                return Ok(());
+            }
+            // The source determines the local failure; do not trust a stale event reason.
+            remove_tlc_reason = RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+                TlcErr::new(error_code),
+                &tlc.shared_secret,
+            ));
+            // A missing payer record cannot accept this chain outcome. Acknowledge it
+            // so CheckChannels stops selecting the same TLC.
+            let acknowledge = |reason: RemoveTlcReason| {
+                myself.send_message(FiberActorMessage::new_command(
+                    FiberActorCommand::OnChainTlcRemoveCompleted {
+                        downstream_channel_id: channel_id,
+                        downstream_tlc_id: tlc_id,
+                        payment_hash: session_key.payment_hash,
+                        reason,
+                        completion: OnChainTlcRemoveCompletion::Payer,
+                    },
+                ))
+            };
+            // Manually added TLCs have no payer state to persist.
+            let Some(id) = attempt_id else {
+                acknowledge(remove_tlc_reason)?;
+                return Ok(());
+            };
+            let Some(channel_outpoint) = channel.get_funding_transaction_outpoint() else {
+                warn!(
+                    "Will retry excluded payer TLC {:?}: funding outpoint missing",
+                    tlc_id
+                );
+                return Ok(());
+            };
+            let Some(attempt) = self.store.get_attempt(session_key, id) else {
+                warn!(
+                    "Acknowledging on-chain payer TLC {:?}: payment attempt is gone",
+                    tlc_id
+                );
+                acknowledge(remove_tlc_reason)?;
+                return Ok(());
+            };
+            if self.store.get_payment_session(session_key).is_none() {
+                warn!(
+                    "Acknowledging on-chain payer TLC {:?}: payment session is gone",
+                    tlc_id
+                );
+                acknowledge(remove_tlc_reason)?;
+                return Ok(());
+            }
+            local_error = Some(TlcErr::new_channel_fail(
+                error_code,
+                channel.get_local_pubkey(),
+                channel_outpoint.clone(),
+                None,
+            ));
+            completion = Some(PaymentTlcRemoveContext {
+                channel_id,
+                tlc_id,
+                channel_outpoint,
+                tried_times: attempt.tried_times,
+            });
+        }
+        // When a node is restarted, RemoveTLC will also be resent if necessary
+        Box::pin(self.on_remove_tlc_event(
+            myself.clone(),
+            state,
+            session_key,
+            attempt_id,
+            remove_tlc_reason,
+            local_error,
+            completion,
+        ))
+        .await;
+        #[cfg(debug_assertions)]
+        {
+            if let Some(payment_session) = self.store.get_payment_session(session_key) {
+                debug_event!(
+                    myself,
+                    format!(
+                        "after on_remove_tlc_event session_status: {:?}",
+                        payment_session.status
+                    )
+                );
             }
         }
         Ok(())
     }
 
-    async fn handle_command(
+    async fn handle_external_funding_accepted_event(
+        state: &mut FiberActorState<S, C>,
+        event: FiberActorEvent,
+    ) -> crate::Result<()> {
+        let FiberActorEvent::ChannelAcceptedForExternalFunding {
+            peer_id,
+            new_channel_id,
+            old_channel_id,
+            funding_amount,
+            remote_funding_amount,
+            funding_source_lock_script,
+            funding_source_lock_script_cell_deps,
+            funding_cell_lock_script,
+            funding_udt_type_script,
+            local_reserved_ckb_amount,
+            remote_reserved_ckb_amount,
+            funding_fee_rate,
+        } = event
+        else {
+            unreachable!("expected ChannelAcceptedForExternalFunding event");
+        };
+        assert_ne!(
+            new_channel_id, old_channel_id,
+            "new and old channel id must be different"
+        );
+
+        // Update channel mapping
+        if let Some(peer_pubkey) = state.peer_channel_index.get_pubkey(&peer_id) {
+            if let Some(channel) = state.channels.remove(&old_channel_id) {
+                debug!(
+                    "Channel accepted for external funding: {:?} -> {:?}",
+                    old_channel_id, new_channel_id
+                );
+                state.channels.insert(new_channel_id, channel);
+                state.peer_channel_index.replace_channel(
+                    peer_pubkey,
+                    old_channel_id,
+                    new_channel_id,
+                );
+            }
+        }
+
+        state.move_channel_open_record_to_final_id(&old_channel_id, new_channel_id);
+
+        // Move the pending reply to the final channel id. The actual RPC response is
+        // sent only after tx collaboration finishes and the unsigned tx is frozen.
+        let reply = state
+            .pending_external_funding_replies
+            .remove(&old_channel_id)
+            .or_else(|| {
+                state
+                    .pending_external_funding_replies
+                    .remove(&new_channel_id)
+            });
+
+        if let Some(reply) = reply {
+            // Build the local unsigned tx. External funding passes a custom funding
+            // source lock and optional extra cell deps; the shared builder handles both
+            // internal and external funding paths.
+            let request = FundingRequest {
+                script: funding_source_lock_script.clone(),
+                udt_type_script: funding_udt_type_script,
+                local_amount: funding_amount,
+                remote_amount: remote_funding_amount,
+                funding_fee_rate,
+                local_reserved_ckb_amount,
+                remote_reserved_ckb_amount,
+            };
+
+            let funding_tx = FundingTx::new();
+            let (send, recv) = oneshot::channel::<Result<FundingTx, FundingError>>();
+            let rpc_reply = RpcReplyPort::from(send);
+
+            let _ = state
+                .chain_actor
+                .send_message(CkbChainMessage::BuildUnsignedFundingTx {
+                    funding_tx,
+                    request,
+                    funding_source_lock_script,
+                    funding_source_lock_script_cell_deps,
+                    funding_cell_lock_script,
+                    reply: rpc_reply,
+                });
+
+            match Box::pin(ractor::concurrency::timeout(
+                Duration::from_millis(DEFAULT_CHAIN_ACTOR_TIMEOUT),
+                recv,
+            ))
+            .await
+            {
+                Ok(Ok(Ok(built_tx))) => {
+                    if let Some(tx) = built_tx.into_inner() {
+                        debug!(
+                            "Starting external funding tx collaboration for channel {:?} with locally built tx {:?}",
+                            new_channel_id,
+                            tx.hash()
+                        );
+                        state
+                            .pending_external_funding_replies
+                            .insert(new_channel_id, reply);
+                        if let Err(e) = Box::pin(state.send_command_to_channel(
+                            new_channel_id,
+                            ChannelCommand::TxCollaborationCommand(
+                                TxCollaborationCommand::TxUpdate(TxUpdateCommand {
+                                    transaction: tx.data(),
+                                }),
+                            ),
+                        ))
+                        .await
+                        {
+                            error!("Failed to start external funding tx collaboration: {:?}", e);
+                            state.reply_tenant_opening(
+                                new_channel_id,
+                                Err(format!(
+                                    "Failed to start external funding tx collaboration: {e}"
+                                )),
+                            );
+                            if let Some(reply) = state
+                                .pending_external_funding_replies
+                                .remove(&new_channel_id)
+                            {
+                                let _ = reply.send(Err(format!(
+                                    "Failed to start external funding tx collaboration: {}",
+                                    e
+                                )));
+                            }
+                        }
+                    } else {
+                        error!("Built funding tx is empty for channel {:?}", new_channel_id);
+                        state.reply_tenant_opening(
+                            new_channel_id,
+                            Err("Failed to build unsigned funding tx: empty result".into()),
+                        );
+                        let _ = reply.send(Err(
+                            "Failed to build unsigned funding tx: empty result".to_string(),
+                        ));
+                    }
+                }
+                Ok(Ok(Err(e))) => {
+                    error!(
+                        "Failed to build unsigned funding tx for channel {:?}: {:?}",
+                        new_channel_id, e
+                    );
+                    state.reply_tenant_opening(
+                        new_channel_id,
+                        Err(format!("Failed to build unsigned funding tx: {e}")),
+                    );
+                    let _ = reply.send(Err(format!("Failed to build unsigned funding tx: {}", e)));
+                }
+                Ok(Err(e)) => {
+                    error!(
+                        "Channel recv error for channel {:?}: {:?}",
+                        new_channel_id, e
+                    );
+                    state.reply_tenant_opening(
+                        new_channel_id,
+                        Err(format!("Channel recv error: {e}")),
+                    );
+                    let _ = reply.send(Err(format!("Channel recv error: {}", e)));
+                }
+                Err(_) => {
+                    error!(
+                        "Timeout waiting for unsigned funding tx for channel {:?}",
+                        new_channel_id
+                    );
+                    state.reply_tenant_opening(
+                        new_channel_id,
+                        Err("Timeout waiting for unsigned funding tx".into()),
+                    );
+                    let _ = reply.send(Err("Timeout waiting for unsigned funding tx".to_string()));
+                }
+            }
+        } else {
+            warn!(
+                "No pending reply found for external funding channel {:?} (old: {:?})",
+                new_channel_id, old_channel_id
+            );
+        }
+        Ok(())
+    }
+
+    fn handle_sync_command(
         &self,
         myself: FiberActorRef,
         state: &mut FiberActorState<S, C>,
         command: FiberActorCommand,
     ) -> crate::Result<()> {
         match command {
-            FiberActorCommand::SendFiberMessage(message_with_target) => {
-                #[cfg(test)]
-                if state
-                    .test_fiber_message_hold
-                    .as_ref()
-                    .is_some_and(|hold| hold.matches(&message_with_target))
-                {
-                    let remaining = state
-                        .test_fiber_message_hold
-                        .as_ref()
-                        .expect("matching test hold")
-                        .remaining
-                        .get()
-                        - 1;
-                    if let Some(remaining) = NonZeroUsize::new(remaining) {
-                        state
-                            .test_fiber_message_hold
-                            .as_mut()
-                            .expect("matching test hold")
-                            .remaining = remaining;
-                    } else {
-                        state.test_fiber_message_hold = None;
-                    }
-                    state
-                        .test_held_fiber_messages
-                        .push_back(message_with_target);
-                    return Ok(());
-                }
-                let FiberMessageWithTarget { target, message } = message_with_target;
-                state.send_fiber_message(&target, message).await?;
-            }
             #[cfg(test)]
             FiberActorCommand::SetTestFiberMessageHold(hold, reply) => {
                 state.test_fiber_message_hold = Some(hold);
@@ -3193,28 +3248,6 @@ where
                 state.test_fiber_message_hold = None;
                 let messages = state.test_held_fiber_messages.drain(..).collect();
                 let _ = reply.send(messages);
-            }
-            #[cfg(test)]
-            FiberActorCommand::ReleaseTestHeldFiberMessages(reply) => {
-                state.test_fiber_message_hold = None;
-                while let Some(FiberMessageWithTarget { target, message }) =
-                    state.test_held_fiber_messages.pop_front()
-                {
-                    if let Err(error) = state.send_fiber_message(&target, message).await {
-                        let remaining = state.test_held_fiber_messages.len();
-                        let noun = if remaining == 1 {
-                            "message"
-                        } else {
-                            "messages"
-                        };
-                        let _ = reply.send(Err(format!(
-                            "failed to release held Fiber message: {error}; \
-                             {remaining} unattempted {noun} remains queued"
-                        )));
-                        return Ok(());
-                    }
-                }
-                let _ = reply.send(Ok(()));
             }
             #[cfg(test)]
             FiberActorCommand::GetTestHeldFiberMessageCount(reply) => {
@@ -3251,44 +3284,8 @@ where
                 };
                 let _ = reply.send(result);
             }
-            FiberActorCommand::ActivateInProcessPeer(pubkey, reply) => {
-                let result = if !state.in_process_peers.contains_key(&pubkey) {
-                    Err(format!("in-process peer {pubkey:?} is not registered"))
-                } else {
-                    if let Some(channel_ids) = state.peer_channel_index.get_channels(&pubkey) {
-                        for channel_id in channel_ids {
-                            if let Err(error) = state.reestablish_channel(channel_id).await {
-                                error!(
-                                    "Failed to reestablish in-process channel {:x}: {:?}",
-                                    channel_id, error
-                                );
-                            }
-                        }
-                    }
-                    Ok(())
-                };
-                let _ = reply.send(result);
-            }
             FiberActorCommand::UnregisterInProcessPeer(pubkey) => {
                 state.disconnect_in_process_peer(pubkey);
-            }
-            FiberActorCommand::DisconnectPeerForChannelOverflow(channel_id) => {
-                let Some(channel) = state.store.get_channel_actor_state(&channel_id) else {
-                    return Ok(());
-                };
-                let pubkey = channel.get_remote_pubkey();
-                if !state.peer_channel_index.has_channel(&pubkey, &channel_id) {
-                    return Ok(());
-                }
-                if let Some(peer) = state.in_process_peers.get(&pubkey) {
-                    let _ = peer.actor.send_message(FiberActorMessage::new_command(
-                        FiberActorCommand::UnregisterInProcessPeer(state.get_public_key()),
-                    ));
-                    state.disconnect_in_process_peer(pubkey);
-                }
-                if let Some(peer) = state.p2p_peers.get(&pubkey) {
-                    peer.control.disconnect(peer.session_id).await?;
-                }
             }
             FiberActorCommand::CheckChannelsShutdown => {
                 for (_pubkey, channel_id, channel_state) in self.store.get_channel_states(None) {
@@ -3301,7 +3298,6 @@ where
                         if let Some(actor_state) = self.store.get_channel_actor_state(&channel_id) {
                             let funding_lock_script = state
                                 .get_cached_channel_funding_lock_script(channel_id, &actor_state);
-                            // Spawn async task for concurrent RPC call
                             let chain_client = self.chain_client.clone();
                             let myself_clone = myself.clone();
                             crate::tasks::spawn(async move {
@@ -3343,6 +3339,402 @@ where
                     }
                 }
             }
+            FiberActorCommand::SettleHoldTlcSet(payment_hash) => {
+                self.settle_hold_tlc_set(myself, state, payment_hash);
+            }
+            FiberActorCommand::SettleReceivedHoldTlcSet(payment_hash) => {
+                self.settle_received_hold_tlc_set(myself, state, payment_hash);
+            }
+            FiberActorCommand::SettleOnChainFulfilledInvoice(payment_hash) => {
+                self.settle_onchain_fulfilled_invoice(payment_hash);
+            }
+            FiberActorCommand::GetV2PaymentExecution(hash, attempt_id, reply) => {
+                let execution = attempt_id
+                    .and_then(|id| self.store.get_attempt(hash, id))
+                    .map(|attempt| attempt.tried_times);
+                let _ = reply.send(execution);
+            }
+            FiberActorCommand::RelayOnChainTlcRemove {
+                downstream_channel_id,
+                downstream_tlc_id,
+                forwarding_channel_id,
+                forwarding_tlc_id,
+                payment_hash,
+                reason,
+            } => {
+                self.forward_onchain_tlc_remove_upstream(
+                    myself,
+                    state,
+                    downstream_channel_id,
+                    downstream_tlc_id,
+                    forwarding_channel_id,
+                    forwarding_tlc_id,
+                    payment_hash,
+                    reason,
+                );
+            }
+            FiberActorCommand::RemoveTlcResult {
+                channel_id,
+                tlc_id,
+                hold_payment_hash,
+                result,
+            } => {
+                state.pending_remove_tlcs.remove(&(channel_id, tlc_id));
+                match result {
+                    Ok(()) | Err(ProcessingChannelError::WaitingTlcAck) => {
+                        if let Some(payment_hash) = hold_payment_hash {
+                            self.store
+                                .remove_payment_hold_tlc(&payment_hash, &channel_id, tlc_id);
+                        }
+                    }
+                    Err(err) => {
+                        error!(
+                            "Failed to remove tlc {:?} for channel {:?}: {}",
+                            tlc_id, channel_id, err
+                        );
+                    }
+                }
+            }
+            #[cfg(test)]
+            FiberActorCommand::InstallTestChannelActor(channel_id, actor, reply) => {
+                state.channels.insert(channel_id, actor);
+                let _ = reply.send(());
+            }
+            FiberActorCommand::SettleTlcSet(payment_hash, channel_tlc_ids) => {
+                self.settle_tlc_set(myself, state, payment_hash, channel_tlc_ids);
+            }
+            FiberActorCommand::TimeoutHoldTlc(payment_hash, channel_id, tlc_id) => {
+                self.timeout_hold_tlc(myself, state, payment_hash, channel_id, tlc_id);
+            }
+            FiberActorCommand::SubmitChannelSignature(command, reply) => {
+                let SubmitChannelSignatureCommand {
+                    channel_id,
+                    request_id,
+                    partial_signature,
+                    next_material,
+                } = command;
+                let Some(channel) = state.channels.get(&channel_id) else {
+                    let _ = reply.send(Err(format!("channel {:?} not found", channel_id)));
+                    return Ok(());
+                };
+                channel.send_message(ChannelActorMessage::SignerNotification(
+                    ChannelSigner::apply_submitted(
+                        channel_id,
+                        request_id,
+                        partial_signature,
+                        next_material,
+                        Some(reply),
+                    ),
+                ))?;
+            }
+            #[cfg(any(test, feature = "bench"))]
+            FiberActorCommand::GetChannelActor(channel_id, reply) => {
+                let _ = reply.send(state.channels.get(&channel_id).cloned());
+            }
+            FiberActorCommand::VerifyFundingTx {
+                peer: _,
+                local_tx,
+                remote_tx,
+                funding_cell_lock_script,
+                funding_udt_type_script,
+                funding_source_lock_script,
+                funding_fee_rate,
+                reply,
+            } => {
+                let _ = self
+                    .chain_actor
+                    .send_message(CkbChainMessage::VerifyFundingTx {
+                        local_tx,
+                        remote_tx,
+                        reply,
+                        funding_cell_lock_script,
+                        funding_udt_type_script,
+                        funding_source_lock_script,
+                        funding_fee_rate,
+                    });
+            }
+            FiberActorCommand::NotifyFundingTx(tx) => {
+                let _ = self
+                    .chain_actor
+                    .send_message(CkbChainMessage::AddFundingTx(tx.into()));
+            }
+            FiberActorCommand::CheckChannelShutdown(channel_id, rpc_reply) => {
+                if let Some(channel_state) = self.store.get_channel_actor_state(&channel_id) {
+                    let funding_lock_script =
+                        state.get_cached_channel_funding_lock_script(channel_id, &channel_state);
+                    let chain_client = self.chain_client.clone();
+                    let myself_clone = myself.clone();
+                    crate::tasks::spawn(async move {
+                        Self::check_channel_shutdown(
+                            chain_client,
+                            myself_clone,
+                            channel_id,
+                            funding_lock_script,
+                        )
+                        .await;
+                    });
+                    let _ = rpc_reply.send(Ok(()));
+                } else {
+                    tracing::debug!(
+                        "stop check channel shutdown, can't find {channel_id:?} actor state"
+                    );
+                    let _ = rpc_reply.send(Err(format!("Channel not found: {:?}", channel_id)));
+                }
+            }
+            FiberActorCommand::GetPayment(payment_hash, reply) => {
+                match self.on_get_payment(&payment_hash) {
+                    Ok(payment) => {
+                        let _ = reply.send(Ok(payment));
+                    }
+                    Err(e) => {
+                        let _ = reply.send(Err(e.to_string()));
+                    }
+                }
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            FiberActorCommand::GetHostedTenantActivity(reply) => {
+                let _ = reply.send(state.hosted_tenant_activity());
+            }
+            FiberActorCommand::InspectBufferedTrampolineUpstream { request, reply } => {
+                let _ = reply.send(buffered_trampoline_request_status(&state.store, &request));
+            }
+            FiberActorCommand::GetInflightPaymentCount(reply) => {
+                let _ = reply.send(Ok(state.inflight_payments.len() as u32));
+            }
+            #[cfg(test)]
+            FiberActorCommand::GetPaymentActor(hash, reply) => {
+                let _ = reply.send(state.inflight_payments.get(&hash).cloned());
+            }
+            #[cfg(test)]
+            FiberActorCommand::TestSetPaymentActor(hash, actor, reply) => {
+                assert!(state.inflight_payments.insert(hash, actor).is_none());
+                let _ = reply.send(());
+            }
+            FiberActorCommand::GetPendingAcceptChannels(rpc) => {
+                let pending = state
+                    .to_be_accepted_channels
+                    .map
+                    .iter()
+                    .map(
+                        |(channel_id, (pubkey, pending_open))| PendingAcceptChannel {
+                            channel_id: *channel_id,
+                            pubkey: *pubkey,
+                            funding_amount: pending_open.open_channel.funding_amount,
+                            udt_type_script: pending_open
+                                .open_channel
+                                .funding_udt_type_script
+                                .clone(),
+                            created_at: state
+                                .store
+                                .get_channel_open_record(channel_id)
+                                .map(|r| r.created_at)
+                                .unwrap_or_else(crate::now_timestamp_as_millis_u64),
+                        },
+                    )
+                    .collect::<Vec<_>>();
+                let _ = rpc.send(Ok(pending));
+            }
+            FiberActorCommand::SettleInvoice(hash, preimage, reply) => {
+                let _ = reply.send(self.settle_invoice(&myself, hash, preimage));
+            }
+            FiberActorCommand::CancelInvoice(hash, reply) => {
+                let _ = reply.send(self.cancel_invoice(&myself, hash));
+            }
+            FiberActorCommand::AddInvoice(invoice, preimage, reply) => {
+                let _ = reply.send(self.add_invoice(invoice, preimage));
+            }
+            FiberActorCommand::GetInvoice(payment_hash, reply) => {
+                let result = self
+                    .store
+                    .get_invoice(&payment_hash)
+                    .ok_or(InvoiceError::InvoiceNotFound)
+                    .and_then(|invoice| {
+                        let status = self
+                            .store
+                            .get_invoice_status(&payment_hash)
+                            .ok_or(InvoiceError::InvoiceNotFound)?;
+                        let status = match status {
+                            CkbInvoiceStatus::Open if invoice.is_expired() => {
+                                CkbInvoiceStatus::Expired
+                            }
+                            status => status,
+                        };
+                        Ok((invoice, status))
+                    });
+                let _ = reply.send(result);
+            }
+            _ => unreachable!("unexpected sync fiber actor command"),
+        }
+        Ok(())
+    }
+
+    fn handle_command<'a>(
+        &'a self,
+        myself: FiberActorRef,
+        state: &'a mut FiberActorState<S, C>,
+        command: FiberActorCommand,
+    ) -> BoxedFiberFuture<'a, crate::Result<()>> {
+        match command {
+            command @ (FiberActorCommand::SendFiberMessage(..)
+            | FiberActorCommand::ActivateInProcessPeer(..)
+            | FiberActorCommand::DisconnectPeerForChannelOverflow(..)) => Box::pin(
+                Self::handle_network_peer_and_message_command(state, command),
+            ),
+            #[cfg(test)]
+            command @ FiberActorCommand::ReleaseTestHeldFiberMessages(..) => Box::pin(
+                Self::handle_network_peer_and_message_command(state, command),
+            ),
+            command @ (FiberActorCommand::CheckChannels
+            | FiberActorCommand::OpenChannel(..)
+            | FiberActorCommand::AcceptChannel(..)
+            | FiberActorCommand::AbandonChannel(..)
+            | FiberActorCommand::ControlFiberChannel(..)
+            | FiberActorCommand::RemoteForceShutdownChannel(..)) => {
+                Box::pin(self.handle_channel_lifecycle_command(myself, state, command))
+            }
+            command @ (FiberActorCommand::PaymentTlcUpdated(..)
+            | FiberActorCommand::ReconcileOnChainPayerTlc { .. }
+            | FiberActorCommand::CompleteClosedLocalAdd { .. }
+            | FiberActorCommand::RelayV2RemoveEffect { .. }
+            | FiberActorCommand::OnChainTlcRemoveCompleted { .. }) => {
+                Box::pin(self.handle_tlc_settlement_command(myself, state, command))
+            }
+            command @ (FiberActorCommand::SendPaymentOnionPacket(..)
+            | FiberActorCommand::SendPayment(..)
+            | FiberActorCommand::SendPaymentWithRouter(..)
+            | FiberActorCommand::BuildPaymentRouter(..)) => {
+                Box::pin(self.handle_payment_command(myself, state, command))
+            }
+            command @ (FiberActorCommand::UpdateChannelFunding(..)
+            | FiberActorCommand::SignFundingTx(..)
+            | FiberActorCommand::RetryUpdateChannelFunding(..)
+            | FiberActorCommand::RetrySignFundingTx(..)
+            | FiberActorCommand::OpenTenantChannel { .. }
+            | FiberActorCommand::OpenChannelWithExternalFunding(..)
+            | FiberActorCommand::SubmitSignedFundingTx { .. }) => {
+                Box::pin(self.handle_funding_command(myself, state, command))
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            command @ (FiberActorCommand::DispatchBufferedTrampoline { .. }
+            | FiberActorCommand::ReconcileBufferedTrampolineSettlement { .. }
+            | FiberActorCommand::FailBufferedTrampoline { .. }
+            | FiberActorCommand::SettleLspPaymentOutcome { .. }) => {
+                Box::pin(self.handle_trampoline_command(myself, state, command))
+            }
+            command => Box::pin(std::future::ready(
+                self.handle_sync_command(myself, state, command),
+            )),
+        }
+    }
+
+    async fn handle_network_peer_and_message_command(
+        state: &mut FiberActorState<S, C>,
+        command: FiberActorCommand,
+    ) -> crate::Result<()> {
+        match command {
+            FiberActorCommand::SendFiberMessage(message_with_target) => {
+                #[cfg(test)]
+                if state
+                    .test_fiber_message_hold
+                    .as_ref()
+                    .is_some_and(|hold| hold.matches(&message_with_target))
+                {
+                    let remaining = state
+                        .test_fiber_message_hold
+                        .as_ref()
+                        .expect("matching test hold")
+                        .remaining
+                        .get()
+                        - 1;
+                    if let Some(remaining) = NonZeroUsize::new(remaining) {
+                        state
+                            .test_fiber_message_hold
+                            .as_mut()
+                            .expect("matching test hold")
+                            .remaining = remaining;
+                    } else {
+                        state.test_fiber_message_hold = None;
+                    }
+                    state
+                        .test_held_fiber_messages
+                        .push_back(message_with_target);
+                    return Ok(());
+                }
+                let FiberMessageWithTarget { target, message } = message_with_target;
+                Box::pin(state.send_fiber_message(&target, message)).await?;
+            }
+            #[cfg(test)]
+            FiberActorCommand::ReleaseTestHeldFiberMessages(reply) => {
+                state.test_fiber_message_hold = None;
+                while let Some(FiberMessageWithTarget { target, message }) =
+                    state.test_held_fiber_messages.pop_front()
+                {
+                    if let Err(error) = Box::pin(state.send_fiber_message(&target, message)).await {
+                        let remaining = state.test_held_fiber_messages.len();
+                        let noun = if remaining == 1 {
+                            "message"
+                        } else {
+                            "messages"
+                        };
+                        let _ = reply.send(Err(format!(
+                            "failed to release held Fiber message: {error}; \
+                             {remaining} unattempted {noun} remains queued"
+                        )));
+                        return Ok(());
+                    }
+                }
+                let _ = reply.send(Ok(()));
+            }
+            FiberActorCommand::ActivateInProcessPeer(pubkey, reply) => {
+                let result = if !state.in_process_peers.contains_key(&pubkey) {
+                    Err(format!("in-process peer {pubkey:?} is not registered"))
+                } else {
+                    if let Some(channel_ids) = state.peer_channel_index.get_channels(&pubkey) {
+                        for channel_id in channel_ids {
+                            if let Err(error) =
+                                Box::pin(state.reestablish_channel(channel_id)).await
+                            {
+                                error!(
+                                    "Failed to reestablish in-process channel {:x}: {:?}",
+                                    channel_id, error
+                                );
+                            }
+                        }
+                    }
+                    Ok(())
+                };
+                let _ = reply.send(result);
+            }
+            FiberActorCommand::DisconnectPeerForChannelOverflow(channel_id) => {
+                let Some(channel) = state.store.get_channel_actor_state(&channel_id) else {
+                    return Ok(());
+                };
+                let pubkey = channel.get_remote_pubkey();
+                if !state.peer_channel_index.has_channel(&pubkey, &channel_id) {
+                    return Ok(());
+                }
+                if let Some(peer) = state.in_process_peers.get(&pubkey) {
+                    let _ = peer.actor.send_message(FiberActorMessage::new_command(
+                        FiberActorCommand::UnregisterInProcessPeer(state.get_public_key()),
+                    ));
+                    state.disconnect_in_process_peer(pubkey);
+                }
+                if let Some(peer) = state.p2p_peers.get(&pubkey) {
+                    Box::pin(peer.control.disconnect(peer.session_id)).await?;
+                }
+            }
+            _ => unreachable!("unexpected network peer/message command"),
+        }
+        Ok(())
+    }
+
+    async fn handle_channel_lifecycle_command(
+        &self,
+        myself: FiberActorRef,
+        state: &mut FiberActorState<S, C>,
+        command: FiberActorCommand,
+    ) -> crate::Result<()> {
+        match command {
             FiberActorCommand::CheckChannels => {
                 let now = now_timestamp_as_millis_u64();
 
@@ -3355,18 +3747,80 @@ where
                         else {
                             continue;
                         };
-                        self.reconcile_onchain_tlcs_without_live_actor(
+                        Box::pin(self.reconcile_onchain_tlcs_without_live_actor(
                             state,
                             &mut actor_state,
                             now,
                             false,
-                        )
+                        ))
                         .await;
                     }
                 }
 
                 self.retry_hold_tlc_sets(&myself);
             }
+            FiberActorCommand::OpenChannel(open_channel, reply) => {
+                let network_graph = self.network_graph.clone();
+                match Box::pin(state.create_outbound_channel(open_channel, network_graph)).await {
+                    Ok((_, channel_id)) => {
+                        let _ = reply.send(Ok(OpenChannelResponse { channel_id }));
+                    }
+                    Err(err) => {
+                        error!("Failed to create channel: {}", err);
+                        let _ = reply.send(Err(err.to_string()));
+                    }
+                }
+            }
+            FiberActorCommand::AcceptChannel(accept_channel, reply) => {
+                match Box::pin(state.create_inbound_channel(accept_channel)).await {
+                    Ok((_, old_channel_id, new_channel_id)) => {
+                        let _ = reply.send(Ok(AcceptChannelResponse {
+                            old_channel_id,
+                            new_channel_id,
+                        }));
+                    }
+                    Err(err) => {
+                        error!("Failed to accept channel: {}", err);
+                        let _ = reply.send(Err(err.to_string()));
+                    }
+                }
+            }
+            FiberActorCommand::AbandonChannel(channel_id, reply) => {
+                match Box::pin(state.abandon_channel(channel_id)).await {
+                    Ok(_) => {
+                        let _ = reply.send(Ok(()));
+                    }
+                    Err(err) => {
+                        error!("Failed to abandon channel: {}", err);
+                        let _ = reply.send(Err(err.to_string()));
+                    }
+                }
+            }
+            FiberActorCommand::ControlFiberChannel(c) => {
+                Box::pin(state.send_command_to_channel(c.channel_id, c.command)).await?;
+            }
+            FiberActorCommand::RemoteForceShutdownChannel(channel_id, response) => {
+                if let Some(shutdown_tx_response) = response {
+                    Box::pin(self.handle_remote_channel_shutdown(
+                        myself,
+                        channel_id,
+                        shutdown_tx_response,
+                    ))
+                    .await;
+                }
+            }
+            _ => unreachable!("unexpected channel lifecycle command"),
+        }
+        Ok(())
+    }
+
+    async fn handle_tlc_settlement_command(
+        &self,
+        myself: FiberActorRef,
+        state: &mut FiberActorState<S, C>,
+        command: FiberActorCommand,
+    ) -> crate::Result<()> {
+        match command {
             FiberActorCommand::PaymentTlcUpdated(session_key) => {
                 if let Some(session) = self.store.get_payment_session(session_key) {
                     if session.status == PaymentStatus::Failed
@@ -3385,27 +3839,16 @@ where
                                 || session.has_pending_payment_work(&self.store)
                         })
                 {
-                    self.resume_payment_actor_and_send_command(
+                    Box::pin(self.resume_payment_actor_and_send_command(
                         myself,
                         state,
                         session_key,
                         PaymentActorMessage::TlcUpdated,
-                    )
+                    ))
                     .await;
                 } else {
-                    state
-                        .resolve_trampoline_upstream(myself, session_key, None)
-                        .await;
+                    Box::pin(state.resolve_trampoline_upstream(myself, session_key, None)).await;
                 }
-            }
-            FiberActorCommand::SettleHoldTlcSet(payment_hash) => {
-                self.settle_hold_tlc_set(myself, state, payment_hash);
-            }
-            FiberActorCommand::SettleReceivedHoldTlcSet(payment_hash) => {
-                self.settle_received_hold_tlc_set(myself, state, payment_hash);
-            }
-            FiberActorCommand::SettleOnChainFulfilledInvoice(payment_hash) => {
-                self.settle_onchain_fulfilled_invoice(payment_hash);
             }
             FiberActorCommand::ReconcileOnChainPayerTlc {
                 channel_id,
@@ -3415,16 +3858,15 @@ where
                 payment_preimage,
                 reply,
             } => {
-                let result = self
-                    .reconcile_onchain_payer_tlc(
-                        state,
-                        channel_id,
-                        tlc_id,
-                        payment_hash,
-                        attempt_id,
-                        payment_preimage,
-                    )
-                    .await;
+                let result = Box::pin(self.reconcile_onchain_payer_tlc(
+                    state,
+                    channel_id,
+                    tlc_id,
+                    payment_hash,
+                    attempt_id,
+                    payment_preimage,
+                ))
+                .await;
                 if let Err(err) = &result {
                     warn!(
                         "Failed to reconcile on-chain payer TLC {:?} in channel {:?}: {}",
@@ -3473,7 +3915,7 @@ where
                     let _ = reply.send(Err("Closed Add source has no funding outpoint".to_owned()));
                     return Ok(());
                 };
-                self.resume_payment_actor_and_send_command(
+                Box::pin(self.resume_payment_actor_and_send_command(
                     myself,
                     state,
                     command.session_key(),
@@ -3483,16 +3925,9 @@ where
                         command,
                         reply,
                     },
-                )
+                ))
                 .await;
             }
-            FiberActorCommand::GetV2PaymentExecution(hash, attempt_id, reply) => {
-                let execution = attempt_id
-                    .and_then(|id| self.store.get_attempt(hash, id))
-                    .map(|attempt| attempt.tried_times);
-                let _ = reply.send(execution);
-            }
-
             FiberActorCommand::RelayV2RemoveEffect {
                 channel_id,
                 tlc,
@@ -3533,7 +3968,7 @@ where
                     execution,
                     source.get_funding_transaction_outpoint(),
                 ) {
-                    self.on_remove_tlc_event(
+                    Box::pin(self.on_remove_tlc_event(
                         myself,
                         state,
                         tlc.session_key(),
@@ -3546,7 +3981,7 @@ where
                             channel_outpoint: outpoint,
                             tried_times: execution,
                         }),
-                    )
+                    ))
                     .await;
                 } else if tlc.attempt_id.is_none() {
                     self.confirm_onchain_tlc_remove_relay(
@@ -3557,25 +3992,6 @@ where
                         reason,
                     );
                 }
-            }
-            FiberActorCommand::RelayOnChainTlcRemove {
-                downstream_channel_id,
-                downstream_tlc_id,
-                forwarding_channel_id,
-                forwarding_tlc_id,
-                payment_hash,
-                reason,
-            } => {
-                self.forward_onchain_tlc_remove_upstream(
-                    myself,
-                    state,
-                    downstream_channel_id,
-                    downstream_tlc_id,
-                    forwarding_channel_id,
-                    forwarding_tlc_id,
-                    payment_hash,
-                    reason,
-                );
             }
             FiberActorCommand::OnChainTlcRemoveCompleted {
                 downstream_channel_id,
@@ -3653,124 +4069,31 @@ where
                         if let Some(mut source) =
                             self.store.get_channel_actor_state(&downstream_channel_id)
                         {
-                            self.reconcile_onchain_tlcs_without_live_actor(
+                            Box::pin(self.reconcile_onchain_tlcs_without_live_actor(
                                 state,
                                 &mut source,
                                 now_timestamp_as_millis_u64(),
                                 false,
-                            )
+                            ))
                             .await;
                         }
                     }
                 }
             }
-            FiberActorCommand::RemoveTlcResult {
-                channel_id,
-                tlc_id,
-                hold_payment_hash,
-                result,
-            } => {
-                state.pending_remove_tlcs.remove(&(channel_id, tlc_id));
-                match result {
-                    Ok(()) | Err(ProcessingChannelError::WaitingTlcAck) => {
-                        if let Some(payment_hash) = hold_payment_hash {
-                            self.store
-                                .remove_payment_hold_tlc(&payment_hash, &channel_id, tlc_id);
-                        }
-                    }
-                    Err(err) => {
-                        error!(
-                            "Failed to remove tlc {:?} for channel {:?}: {}",
-                            tlc_id, channel_id, err
-                        );
-                    }
-                }
-            }
-            #[cfg(test)]
-            FiberActorCommand::InstallTestChannelActor(channel_id, actor, reply) => {
-                state.channels.insert(channel_id, actor);
-                let _ = reply.send(());
-            }
-            FiberActorCommand::SettleTlcSet(payment_hash, channel_tlc_ids) => {
-                self.settle_tlc_set(myself, state, payment_hash, channel_tlc_ids);
-            }
-            FiberActorCommand::TimeoutHoldTlc(payment_hash, channel_id, tlc_id) => {
-                self.timeout_hold_tlc(myself, state, payment_hash, channel_id, tlc_id);
-            }
-            FiberActorCommand::OpenChannel(open_channel, reply) => {
-                let network_graph = self.network_graph.clone();
-                match state
-                    .create_outbound_channel(open_channel, network_graph)
-                    .await
-                {
-                    Ok((_, channel_id)) => {
-                        let _ = reply.send(Ok(OpenChannelResponse { channel_id }));
-                    }
-                    Err(err) => {
-                        error!("Failed to create channel: {}", err);
-                        let _ = reply.send(Err(err.to_string()));
-                    }
-                }
-            }
-            FiberActorCommand::AcceptChannel(accept_channel, reply) => {
-                match state.create_inbound_channel(accept_channel).await {
-                    Ok((_, old_channel_id, new_channel_id)) => {
-                        let _ = reply.send(Ok(AcceptChannelResponse {
-                            old_channel_id,
-                            new_channel_id,
-                        }));
-                    }
-                    Err(err) => {
-                        error!("Failed to accept channel: {}", err);
-                        let _ = reply.send(Err(err.to_string()));
-                    }
-                }
-            }
-            FiberActorCommand::AbandonChannel(channel_id, reply) => {
-                match state.abandon_channel(channel_id).await {
-                    Ok(_) => {
-                        let _ = reply.send(Ok(()));
-                    }
-                    Err(err) => {
-                        error!("Failed to abandon channel: {}", err);
-                        let _ = reply.send(Err(err.to_string()));
-                    }
-                }
-            }
-            FiberActorCommand::ControlFiberChannel(c) => {
-                state
-                    .send_command_to_channel(c.channel_id, c.command)
-                    .await?
-            }
-            FiberActorCommand::SubmitChannelSignature(command, reply) => {
-                let SubmitChannelSignatureCommand {
-                    channel_id,
-                    request_id,
-                    partial_signature,
-                    next_material,
-                } = command;
-                let Some(channel) = state.channels.get(&channel_id) else {
-                    let _ = reply.send(Err(format!("channel {:?} not found", channel_id)));
-                    return Ok(());
-                };
-                channel.send_message(ChannelActorMessage::SignerNotification(
-                    ChannelSigner::apply_submitted(
-                        channel_id,
-                        request_id,
-                        partial_signature,
-                        next_material,
-                        Some(reply),
-                    ),
-                ))?;
-            }
-            #[cfg(any(test, feature = "bench"))]
-            FiberActorCommand::GetChannelActor(channel_id, reply) => {
-                let _ = reply.send(state.channels.get(&channel_id).cloned());
-            }
+            _ => unreachable!("unexpected TLC settlement command"),
+        }
+        Ok(())
+    }
+
+    async fn handle_payment_command(
+        &self,
+        myself: FiberActorRef,
+        state: &mut FiberActorState<S, C>,
+        command: FiberActorCommand,
+    ) -> crate::Result<()> {
+        match command {
             FiberActorCommand::SendPaymentOnionPacket(command, reply) => {
-                match self
-                    .handle_send_onion_packet_command(state, command.clone())
-                    .await
+                match Box::pin(self.handle_send_onion_packet_command(state, command.clone())).await
                 {
                     Ok(Some(admission)) => {
                         // Let the channel acknowledge its durable local ownership without
@@ -3787,7 +4110,7 @@ where
                         let _ = reply.send(Ok(()));
                     }
                     Err(err) => {
-                        self.on_add_tlc_result_event(
+                        Box::pin(self.on_add_tlc_result_event(
                             myself,
                             state,
                             PaymentSessionKey {
@@ -3800,122 +4123,10 @@ where
                                 err.clone(),
                             )),
                             command.previous_tlc,
-                        )
+                        ))
                         .await;
                         let _ = reply.send(Err(err));
                     }
-                }
-            }
-            FiberActorCommand::UpdateChannelFunding(channel_id, transaction, request) => {
-                self.do_update_channel_funding(&myself, state, channel_id, 0, transaction, request)
-                    .await?
-            }
-            FiberActorCommand::VerifyFundingTx {
-                peer: _,
-                local_tx,
-                remote_tx,
-                funding_cell_lock_script,
-                funding_udt_type_script,
-                funding_source_lock_script,
-                funding_fee_rate,
-                reply,
-            } => {
-                let _ = self
-                    .chain_actor
-                    .send_message(CkbChainMessage::VerifyFundingTx {
-                        local_tx,
-                        remote_tx,
-                        reply,
-                        funding_cell_lock_script,
-                        funding_udt_type_script,
-                        funding_source_lock_script,
-                        funding_fee_rate,
-                    });
-            }
-            FiberActorCommand::NotifyFundingTx(tx) => {
-                let _ = self
-                    .chain_actor
-                    .send_message(CkbChainMessage::AddFundingTx(tx.into()));
-            }
-            FiberActorCommand::SignFundingTx(target, channel_id, funding_tx, partial_witnesses) => {
-                debug!(
-                    "Received SignFundingTx request for transaction {:?} (has_partial_witnesses={})",
-                    &funding_tx,
-                    partial_witnesses.is_some()
-                );
-                self.do_sign_funding_tx(
-                    &myself,
-                    state,
-                    channel_id,
-                    0,
-                    target,
-                    funding_tx,
-                    partial_witnesses,
-                )
-                .await?
-            }
-            FiberActorCommand::RetryUpdateChannelFunding(
-                channel_id,
-                transaction,
-                request,
-                retry_count,
-            ) => {
-                self.do_update_channel_funding(
-                    &myself,
-                    state,
-                    channel_id,
-                    retry_count,
-                    transaction,
-                    request,
-                )
-                .await?
-            }
-            FiberActorCommand::RetrySignFundingTx(
-                target,
-                channel_id,
-                funding_tx,
-                partial_witnesses,
-                retry_count,
-            ) => {
-                self.do_sign_funding_tx(
-                    &myself,
-                    state,
-                    channel_id,
-                    retry_count,
-                    target,
-                    funding_tx,
-                    partial_witnesses,
-                )
-                .await?
-            }
-            FiberActorCommand::CheckChannelShutdown(channel_id, rpc_reply) => {
-                if let Some(channel_state) = self.store.get_channel_actor_state(&channel_id) {
-                    let funding_lock_script =
-                        state.get_cached_channel_funding_lock_script(channel_id, &channel_state);
-                    // Spawn async task for concurrent RPC call
-                    let chain_client = self.chain_client.clone();
-                    let myself_clone = myself.clone();
-                    crate::tasks::spawn(async move {
-                        Self::check_channel_shutdown(
-                            chain_client,
-                            myself_clone,
-                            channel_id,
-                            funding_lock_script,
-                        )
-                        .await;
-                    });
-                    let _ = rpc_reply.send(Ok(()));
-                } else {
-                    tracing::debug!(
-                        "stop check channel shutdown, can't find {channel_id:?} actor state"
-                    );
-                    let _ = rpc_reply.send(Err(format!("Channel not found: {:?}", channel_id)));
-                }
-            }
-            FiberActorCommand::RemoteForceShutdownChannel(channel_id, response) => {
-                if let Some(shutdown_tx_response) = response {
-                    self.handle_remote_channel_shutdown(myself, channel_id, shutdown_tx_response)
-                        .await;
                 }
             }
             FiberActorCommand::SendPayment(payment_request, reply) => {
@@ -3929,8 +4140,7 @@ where
                     }
                 };
 
-                self.start_payment_with_rpc_reply(state, payment_request, reply)
-                    .await;
+                Box::pin(self.start_payment_with_rpc_reply(state, payment_request, reply)).await;
             }
             FiberActorCommand::SendPaymentWithRouter(payment_request, reply) => {
                 let source = self.network_graph.read().await.get_source_pubkey();
@@ -3943,11 +4153,10 @@ where
                             return Ok(());
                         }
                     };
-                self.start_payment_with_rpc_reply(state, payment_request, reply)
-                    .await;
+                Box::pin(self.start_payment_with_rpc_reply(state, payment_request, reply)).await;
             }
             FiberActorCommand::BuildPaymentRouter(build_payment_router, reply) => {
-                match self.on_build_payment_router(build_payment_router).await {
+                match Box::pin(self.on_build_payment_router(build_payment_router)).await {
                     Ok(router) => {
                         let _ = reply.send(Ok(router));
                     }
@@ -3957,353 +4166,82 @@ where
                     }
                 }
             }
-            FiberActorCommand::GetPayment(payment_hash, reply) => {
-                match self.on_get_payment(&payment_hash) {
-                    Ok(payment) => {
-                        let _ = reply.send(Ok(payment));
-                    }
-                    Err(e) => {
-                        let _ = reply.send(Err(e.to_string()));
-                    }
-                }
+            _ => unreachable!("unexpected payment command"),
+        }
+        Ok(())
+    }
+
+    async fn handle_funding_command(
+        &self,
+        myself: FiberActorRef,
+        state: &mut FiberActorState<S, C>,
+        command: FiberActorCommand,
+    ) -> crate::Result<()> {
+        match command {
+            FiberActorCommand::UpdateChannelFunding(channel_id, transaction, request) => {
+                Box::pin(self.do_update_channel_funding(
+                    &myself,
+                    state,
+                    channel_id,
+                    0,
+                    transaction,
+                    request,
+                ))
+                .await?;
             }
-            #[cfg(not(target_arch = "wasm32"))]
-            FiberActorCommand::GetHostedTenantActivity(reply) => {
-                let _ = reply.send(state.hosted_tenant_activity());
+            FiberActorCommand::SignFundingTx(target, channel_id, funding_tx, partial_witnesses) => {
+                debug!(
+                    "Received SignFundingTx request for transaction {:?} (has_partial_witnesses={})",
+                    &funding_tx,
+                    partial_witnesses.is_some()
+                );
+                Box::pin(self.do_sign_funding_tx(
+                    &myself,
+                    state,
+                    channel_id,
+                    0,
+                    target,
+                    funding_tx,
+                    partial_witnesses,
+                ))
+                .await?;
             }
-            FiberActorCommand::InspectBufferedTrampolineUpstream { request, reply } => {
-                let _ = reply.send(buffered_trampoline_request_status(&state.store, &request));
-            }
-            #[cfg(not(target_arch = "wasm32"))]
-            FiberActorCommand::DispatchBufferedTrampoline { request, reply } => {
-                let key = request.hosted_session_key();
-                if let Some(session) = self.store.get_payment_session(key) {
-                    if session.status != PaymentStatus::Failed {
-                        // A lost dispatch reply or replay must not create a second
-                        // payment. Resume the persisted execution after a restart.
-                        if !session.status.is_final() && !state.inflight_payments.contains_key(&key)
-                        {
-                            self.resume_payment_actor_and_send_command(
-                                myself.clone(),
-                                state,
-                                key,
-                                PaymentActorMessage::RetrySendPayment(None),
-                            )
-                            .await;
-                        }
-                        let _ = reply.send(Ok(()));
-                        return Ok(());
-                    }
-                }
-                // The LSP's earlier inspection can become stale while it activates a tenant.
-                // Do not create a new downstream payment after its upstream TLC is gone.
-                match buffered_trampoline_request_status(&state.store, &request) {
-                    BufferedTrampolineUpstreamStatus::Pending => {}
-                    BufferedTrampolineUpstreamStatus::Removed => {
-                        let _ = reply.send(Err(DeliveryDispatchError::Permanent {
-                            reason: "upstream TLC no longer backs hosted delivery".to_string(),
-                            error_code: TlcErrorCode::TemporaryNodeFailure,
-                        }));
-                        return Ok(());
-                    }
-                    BufferedTrampolineUpstreamStatus::Unknown => {
-                        let _ = reply.send(Err(DeliveryDispatchError::Temporary {
-                            reason: "cannot verify hosted delivery upstream TLC".to_string(),
-                        }));
-                        return Ok(());
-                    }
-                }
-                let upstream_tlc_key = request.hosted_session_key().upstream_tlc_key;
-                match self
-                    .try_dispatch_trampoline_payment(state, request, upstream_tlc_key)
-                    .await
-                {
-                    Ok(receiver) => {
-                        crate::tasks::spawn(async move {
-                            let result = match receiver.await {
-                                Ok(result) => result.map(|_| ()).map_err(|error| {
-                                    DeliveryDispatchError::Temporary {
-                                        reason: error.message,
-                                    }
-                                }),
-                                Err(error) => Err(DeliveryDispatchError::Temporary {
-                                    reason: format!(
-                                        "payment actor dropped its startup reply: {error}"
-                                    ),
-                                }),
-                            };
-                            let _ = reply.send(result);
-                        });
-                    }
-                    Err(error) => {
-                        let _ = reply.send(Err(error));
-                    }
-                }
-            }
-            #[cfg(not(target_arch = "wasm32"))]
-            FiberActorCommand::ReconcileBufferedTrampolineSettlement { session_key, reply } => {
-                let result = match state.store.get_payment_session(session_key) {
-                    Some(session) if session.status.is_final() => {
-                        match state.settle_trampoline_payment(&session, None, None).await {
-                            Ok(true) => Ok(()),
-                            Ok(false) => Err(format!(
-                                "upstream trampoline settlement dispatched for {session_key}; awaiting channel persistence"
-                            )),
-                            Err(err) => Err(err),
-                        }
-                    }
-                    Some(_) => Err(format!(
-                        "hosted payment {session_key} is not ready for upstream settlement"
-                    )),
-                    None => Err(format!("hosted payment {session_key} does not exist")),
-                };
-                let _ = reply.send(result);
-            }
-            #[cfg(not(target_arch = "wasm32"))]
-            FiberActorCommand::FailBufferedTrampoline {
+            FiberActorCommand::RetryUpdateChannelFunding(
+                channel_id,
+                transaction,
                 request,
-                reason,
-                error_code,
-                reply,
-            } => {
-                let delivery_port = state.delivery_port.clone();
-                let result = self
-                    .fail_buffered_trampoline(state, delivery_port, request, reason, error_code)
-                    .await;
-                let _ = reply.send(result);
+                retry_count,
+            ) => {
+                Box::pin(self.do_update_channel_funding(
+                    &myself,
+                    state,
+                    channel_id,
+                    retry_count,
+                    transaction,
+                    request,
+                ))
+                .await?;
             }
-            #[cfg(not(target_arch = "wasm32"))]
-            FiberActorCommand::SettleLspPaymentOutcome {
-                session,
-                last_error_packet,
-            } => {
-                let session_key = session.session_key();
-                // The actor kept processing messages while the LSP decided. Do not apply a
-                // delayed decision (or its error packet) to a newer retry/execution of this hash.
-                if let Some(current) = state.store.get_payment_session(session_key) {
-                    if current.created_at == session.created_at
-                        && current.last_updated_at == session.last_updated_at
-                        && current.status == session.status
-                        && current.last_error == session.last_error
-                        && current.last_error_code == session.last_error_code
-                        && current
-                            .request
-                            .trampoline_context
-                            .as_ref()
-                            .map(|c| &c.previous_tlcs)
-                            == session
-                                .request
-                                .trampoline_context
-                                .as_ref()
-                                .map(|c| &c.previous_tlcs)
-                    {
-                        state
-                            .settle_payment_outcome(&current, last_error_packet.as_ref())
-                            .await;
-                    }
-                }
+            FiberActorCommand::RetrySignFundingTx(
+                target,
+                channel_id,
+                funding_tx,
+                partial_witnesses,
+                retry_count,
+            ) => {
+                Box::pin(self.do_sign_funding_tx(
+                    &myself,
+                    state,
+                    channel_id,
+                    retry_count,
+                    target,
+                    funding_tx,
+                    partial_witnesses,
+                ))
+                .await?;
             }
-            FiberActorCommand::GetInflightPaymentCount(reply) => {
-                let _ = reply.send(Ok(state.inflight_payments.len() as u32));
-            }
-            #[cfg(test)]
-            FiberActorCommand::GetPaymentActor(hash, reply) => {
-                let _ = reply.send(state.inflight_payments.get(&hash).cloned());
-            }
-            #[cfg(test)]
-            FiberActorCommand::TestSetPaymentActor(hash, actor, reply) => {
-                assert!(state.inflight_payments.insert(hash, actor).is_none());
-                let _ = reply.send(());
-            }
-            FiberActorCommand::GetPendingAcceptChannels(rpc) => {
-                let pending = state
-                    .to_be_accepted_channels
-                    .map
-                    .iter()
-                    .map(
-                        |(channel_id, (pubkey, pending_open))| PendingAcceptChannel {
-                            channel_id: *channel_id,
-                            pubkey: *pubkey,
-                            funding_amount: pending_open.open_channel.funding_amount,
-                            udt_type_script: pending_open
-                                .open_channel
-                                .funding_udt_type_script
-                                .clone(),
-                            created_at: state
-                                .store
-                                .get_channel_open_record(channel_id)
-                                .map(|r| r.created_at)
-                                .unwrap_or_else(crate::now_timestamp_as_millis_u64),
-                        },
-                    )
-                    .collect::<Vec<_>>();
-                let _ = rpc.send(Ok(pending));
-            }
-
-            FiberActorCommand::SettleInvoice(hash, preimage, reply) => {
-                let _ = reply.send(self.settle_invoice(&myself, hash, preimage));
-            }
-            FiberActorCommand::CancelInvoice(hash, reply) => {
-                let _ = reply.send(self.cancel_invoice(&myself, hash));
-            }
-            FiberActorCommand::AddInvoice(invoice, preimage, reply) => {
-                let _ = reply.send(self.add_invoice(invoice, preimage));
-            }
-            FiberActorCommand::GetInvoice(payment_hash, reply) => {
-                let result = self
-                    .store
-                    .get_invoice(&payment_hash)
-                    .ok_or(InvoiceError::InvoiceNotFound)
-                    .and_then(|invoice| {
-                        let status = self
-                            .store
-                            .get_invoice_status(&payment_hash)
-                            .ok_or(InvoiceError::InvoiceNotFound)?;
-                        let status = match status {
-                            CkbInvoiceStatus::Open if invoice.is_expired() => {
-                                CkbInvoiceStatus::Expired
-                            }
-                            status => status,
-                        };
-                        Ok((invoice, status))
-                    });
-                let _ = reply.send(result);
-            }
-
             FiberActorCommand::OpenTenantChannel { command, reply } => {
-                let outcome: Result<
-                    (
-                        Option<fiber_json_types::OpenChannelWithExternalFundingResult>,
-                        Hash256,
-                    ),
-                    String,
-                > = async {
-                    let signer = command
-                        .external_channel_signer
-                        .as_ref()
-                        .ok_or_else(|| "tenant requires external signer".to_string())?;
-                    let key = signer.base_public_keys.tlc_base_key;
-                    let temp_id: Hash256 =
-                        ckb_hash::blake2b_256([key.serialize().as_slice(), &[0; 33]].concat())
-                            .into();
-                    let command_value =
-                        serde_json::to_value(&command).map_err(|e| e.to_string())?;
-
-                    let existing =
-                        state
-                            .store
-                            .get_tenant_channel_opening(&temp_id)
-                            .or_else(|| {
-                                // AcceptChannel rekeys the opening to its final id. Locate
-                                // that record by signer identity before comparing intent;
-                                // changed parameters must not start another negotiation
-                                // with the same keys and opening nonces.
-                                state.store.list_tenant_channel_openings().into_iter().find(
-                                    |opening| {
-                                        opening
-                                            .command
-                                            .external_channel_signer
-                                            .as_ref()
-                                            .is_some_and(|signer| {
-                                                signer.base_public_keys.tlc_base_key == key
-                                            })
-                                    },
-                                )
-                            });
-
-                    if let Some(mut opening) = existing {
-                        let orphaned = opening.result.is_none()
-                            && state
-                                .store
-                                .get_channel_actor_state(&opening.channel_id)
-                                .is_none()
-                            && state
-                                .store
-                                .get_channel_open_record(&opening.channel_id)
-                                .is_none()
-                            && !state.channels.contains_key(&opening.channel_id);
-                        let failed = opening.terminated || orphaned;
-                        if !failed {
-                            if serde_json::to_value(&opening.command).map_err(|e| e.to_string())?
-                                != command_value
-                            {
-                                return Err(
-                                    "tenant already has a different channel opening for this signer"
-                                        .to_string(),
-                                );
-                            }
-                            if state
-                                .store
-                                .get_channel_open_record(&opening.channel_id)
-                                .is_some_and(|record| {
-                                    record.status == ChannelOpeningStatus::ChannelReady
-                                })
-                            {
-                                return Err("tenant channel is already open".to_string());
-                            }
-                            if opening.result.is_none() {
-                                if let Some(channel) =
-                                    state.store.get_channel_actor_state(&opening.channel_id)
-                                {
-                                    if let Some(external) = &channel.external_funding {
-                                        if !external.signed_submitted {
-                                            let result = channel.tenant_opening_result(
-                                                external.unsigned_funding_tx.clone(),
-                                            )?;
-                                            opening.result = Some(result);
-                                            state.store.put_tenant_channel_opening(opening.clone());
-                                        }
-                                    }
-                                }
-                            }
-                            return Ok((opening.result, opening.channel_id));
-                        }
-                        state.reply_tenant_opening(
-                            opening.channel_id,
-                            Err("tenant channel opening terminated".into()),
-                        );
-                        state
-                            .store
-                            .delete_tenant_channel_opening(&opening.channel_id);
-                        if opening.channel_id != temp_id {
-                            state.store.delete_tenant_channel_opening(&temp_id);
-                        }
-                    }
-
-                    if state
-                        .store
-                        .get_channel_open_record(&temp_id)
-                        .is_some_and(|record| record.status != ChannelOpeningStatus::Failed)
-                    {
-                        return Err("tenant channel is already open".to_string());
-                    }
-
-                    state
-                        .store
-                        .put_tenant_channel_opening(super::channel::TenantChannelOpening {
-                            command: command.clone(),
-                            channel_id: temp_id,
-                            result: None,
-                            terminated: false,
-                        });
-                    match state
-                        .create_outbound_channel_with_external_funding(command)
-                        .await
-                    {
-                        Ok((_, id)) => {
-                            let (sender, _receiver) = tokio::sync::oneshot::channel();
-                            state
-                                .pending_external_funding_replies
-                                .insert(id, sender.into());
-                            Ok((None, temp_id))
-                        }
-                        Err(error) => {
-                            state.store.delete_tenant_channel_opening(&temp_id);
-                            Err(error.to_string())
-                        }
-                    }
-                }
-                .await;
+                let outcome = Box::pin(Self::open_tenant_channel_inner(state, command)).await;
                 match outcome {
                     Ok((Some(result), reply_key)) => {
                         state.reply_tenant_opening(reply_key, Ok(result.clone()));
@@ -4328,14 +4266,10 @@ where
                     "OpenChannelWithExternalFunding request: pubkey={:?}, funding_amount={:?}",
                     open_channel.pubkey, open_channel.funding_amount
                 );
-                match state
-                    .create_outbound_channel_with_external_funding(open_channel)
+                match Box::pin(state.create_outbound_channel_with_external_funding(open_channel))
                     .await
                 {
                     Ok((_channel_actor, temp_channel_id)) => {
-                        // Channel is now in NegotiatingFunding state waiting for AcceptChannel.
-                        // Return the unsigned tx after the acceptor's commitment
-                        // signature has been verified and persisted locally.
                         state
                             .pending_external_funding_replies
                             .insert(temp_channel_id, reply);
@@ -4385,9 +4319,11 @@ where
                         return Ok(());
                     }
 
-                    if let Err(err) = state
-                        .restore_offline_channel(channel_state.get_remote_pubkey(), channel_id)
-                        .await
+                    if let Err(err) = Box::pin(
+                        state
+                            .restore_offline_channel(channel_state.get_remote_pubkey(), channel_id),
+                    )
+                    .await
                     {
                         error!(
                             "Failed to restore channel {:?} for SubmitExternalFundingTx: {:?}",
@@ -4398,13 +4334,11 @@ where
                     }
                 }
 
-                // Forward the command to the channel actor
-                if let Err(e) = state
-                    .send_command_to_channel(
-                        channel_id,
-                        ChannelCommand::SubmitExternalFundingTx(signed_tx, reply),
-                    )
-                    .await
+                if let Err(e) = Box::pin(state.send_command_to_channel(
+                    channel_id,
+                    ChannelCommand::SubmitExternalFundingTx(signed_tx, reply),
+                ))
+                .await
                 {
                     error!(
                         "Failed to send SubmitExternalFundingTx command to channel {:?}: {:?}",
@@ -4412,7 +4346,272 @@ where
                     );
                 }
             }
-        };
+            _ => unreachable!("unexpected funding command"),
+        }
+        Ok(())
+    }
+
+    async fn open_tenant_channel_inner(
+        state: &mut FiberActorState<S, C>,
+        command: OpenChannelWithExternalFundingCommand,
+    ) -> Result<
+        (
+            Option<fiber_json_types::OpenChannelWithExternalFundingResult>,
+            Hash256,
+        ),
+        String,
+    > {
+        let signer = command
+            .external_channel_signer
+            .as_ref()
+            .ok_or_else(|| "tenant requires external signer".to_string())?;
+        let key = signer.base_public_keys.tlc_base_key;
+        let temp_id: Hash256 =
+            ckb_hash::blake2b_256([key.serialize().as_slice(), &[0; 33]].concat()).into();
+        let command_value = serde_json::to_value(&command).map_err(|e| e.to_string())?;
+
+        let existing = state
+            .store
+            .get_tenant_channel_opening(&temp_id)
+            .or_else(|| {
+                state
+                    .store
+                    .list_tenant_channel_openings()
+                    .into_iter()
+                    .find(|opening| {
+                        opening
+                            .command
+                            .external_channel_signer
+                            .as_ref()
+                            .is_some_and(|signer| signer.base_public_keys.tlc_base_key == key)
+                    })
+            });
+
+        if let Some(mut opening) = existing {
+            let orphaned = opening.result.is_none()
+                && state
+                    .store
+                    .get_channel_actor_state(&opening.channel_id)
+                    .is_none()
+                && state
+                    .store
+                    .get_channel_open_record(&opening.channel_id)
+                    .is_none()
+                && !state.channels.contains_key(&opening.channel_id);
+            let failed = opening.terminated || orphaned;
+            if !failed {
+                if serde_json::to_value(&opening.command).map_err(|e| e.to_string())?
+                    != command_value
+                {
+                    return Err(
+                        "tenant already has a different channel opening for this signer"
+                            .to_string(),
+                    );
+                }
+                if state
+                    .store
+                    .get_channel_open_record(&opening.channel_id)
+                    .is_some_and(|record| record.status == ChannelOpeningStatus::ChannelReady)
+                {
+                    return Err("tenant channel is already open".to_string());
+                }
+                if opening.result.is_none() {
+                    if let Some(channel) = state.store.get_channel_actor_state(&opening.channel_id)
+                    {
+                        if let Some(external) = &channel.external_funding {
+                            if !external.signed_submitted {
+                                let result = channel
+                                    .tenant_opening_result(external.unsigned_funding_tx.clone())?;
+                                opening.result = Some(result);
+                                state.store.put_tenant_channel_opening(opening.clone());
+                            }
+                        }
+                    }
+                }
+                return Ok((opening.result, opening.channel_id));
+            }
+            state.reply_tenant_opening(
+                opening.channel_id,
+                Err("tenant channel opening terminated".into()),
+            );
+            state
+                .store
+                .delete_tenant_channel_opening(&opening.channel_id);
+            if opening.channel_id != temp_id {
+                state.store.delete_tenant_channel_opening(&temp_id);
+            }
+        }
+
+        if state
+            .store
+            .get_channel_open_record(&temp_id)
+            .is_some_and(|record| record.status != ChannelOpeningStatus::Failed)
+        {
+            return Err("tenant channel is already open".to_string());
+        }
+
+        state
+            .store
+            .put_tenant_channel_opening(super::channel::TenantChannelOpening {
+                command: command.clone(),
+                channel_id: temp_id,
+                result: None,
+                terminated: false,
+            });
+        match Box::pin(state.create_outbound_channel_with_external_funding(command)).await {
+            Ok((_, id)) => {
+                let (sender, _receiver) = tokio::sync::oneshot::channel();
+                state
+                    .pending_external_funding_replies
+                    .insert(id, sender.into());
+                Ok((None, temp_id))
+            }
+            Err(error) => {
+                state.store.delete_tenant_channel_opening(&temp_id);
+                Err(error.to_string())
+            }
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn handle_trampoline_command(
+        &self,
+        myself: FiberActorRef,
+        state: &mut FiberActorState<S, C>,
+        command: FiberActorCommand,
+    ) -> crate::Result<()> {
+        match command {
+            FiberActorCommand::DispatchBufferedTrampoline { request, reply } => {
+                let key = request.hosted_session_key();
+                if let Some(session) = self.store.get_payment_session(key) {
+                    if session.status != PaymentStatus::Failed {
+                        if !session.status.is_final() && !state.inflight_payments.contains_key(&key)
+                        {
+                            Box::pin(self.resume_payment_actor_and_send_command(
+                                myself.clone(),
+                                state,
+                                key,
+                                PaymentActorMessage::RetrySendPayment(None),
+                            ))
+                            .await;
+                        }
+                        let _ = reply.send(Ok(()));
+                        return Ok(());
+                    }
+                }
+                match buffered_trampoline_request_status(&state.store, &request) {
+                    BufferedTrampolineUpstreamStatus::Pending => {}
+                    BufferedTrampolineUpstreamStatus::Removed => {
+                        let _ = reply.send(Err(DeliveryDispatchError::Permanent {
+                            reason: "upstream TLC no longer backs hosted delivery".to_string(),
+                            error_code: TlcErrorCode::TemporaryNodeFailure,
+                        }));
+                        return Ok(());
+                    }
+                    BufferedTrampolineUpstreamStatus::Unknown => {
+                        let _ = reply.send(Err(DeliveryDispatchError::Temporary {
+                            reason: "cannot verify hosted delivery upstream TLC".to_string(),
+                        }));
+                        return Ok(());
+                    }
+                }
+                let upstream_tlc_key = request.hosted_session_key().upstream_tlc_key;
+                match Box::pin(self.try_dispatch_trampoline_payment(
+                    state,
+                    request,
+                    upstream_tlc_key,
+                ))
+                .await
+                {
+                    Ok(receiver) => {
+                        crate::tasks::spawn(async move {
+                            let result = match receiver.await {
+                                Ok(result) => result.map(|_| ()).map_err(|error| {
+                                    DeliveryDispatchError::Temporary {
+                                        reason: error.message,
+                                    }
+                                }),
+                                Err(error) => Err(DeliveryDispatchError::Temporary {
+                                    reason: format!(
+                                        "payment actor dropped its startup reply: {error}"
+                                    ),
+                                }),
+                            };
+                            let _ = reply.send(result);
+                        });
+                    }
+                    Err(error) => {
+                        let _ = reply.send(Err(error));
+                    }
+                }
+            }
+            FiberActorCommand::ReconcileBufferedTrampolineSettlement { session_key, reply } => {
+                let result = match state.store.get_payment_session(session_key) {
+                    Some(session) if session.status.is_final() => {
+                        match Box::pin(state.settle_trampoline_payment(&session, None, None)).await
+                        {
+                            Ok(true) => Ok(()),
+                            Ok(false) => Err(format!(
+                                "upstream trampoline settlement dispatched for {session_key}; awaiting channel persistence"
+                            )),
+                            Err(err) => Err(err),
+                        }
+                    }
+                    Some(_) => Err(format!(
+                        "hosted payment {session_key} is not ready for upstream settlement"
+                    )),
+                    None => Err(format!("hosted payment {session_key} does not exist")),
+                };
+                let _ = reply.send(result);
+            }
+            FiberActorCommand::FailBufferedTrampoline {
+                request,
+                reason,
+                error_code,
+                reply,
+            } => {
+                let delivery_port = state.delivery_port.clone();
+                let result = Box::pin(self.fail_buffered_trampoline(
+                    state,
+                    delivery_port,
+                    request,
+                    reason,
+                    error_code,
+                ))
+                .await;
+                let _ = reply.send(result);
+            }
+            FiberActorCommand::SettleLspPaymentOutcome {
+                session,
+                last_error_packet,
+            } => {
+                let session_key = session.session_key();
+                if let Some(current) = state.store.get_payment_session(session_key) {
+                    if current.created_at == session.created_at
+                        && current.last_updated_at == session.last_updated_at
+                        && current.status == session.status
+                        && current.last_error == session.last_error
+                        && current.last_error_code == session.last_error_code
+                        && current
+                            .request
+                            .trampoline_context
+                            .as_ref()
+                            .map(|c| &c.previous_tlcs)
+                            == session
+                                .request
+                                .trampoline_context
+                                .as_ref()
+                                .map(|c| &c.previous_tlcs)
+                    {
+                        Box::pin(
+                            state.settle_payment_outcome(&current, last_error_packet.as_ref()),
+                        )
+                        .await;
+                    }
+                }
+            }
+            _ => unreachable!("unexpected trampoline command"),
+        }
         Ok(())
     }
 
@@ -10682,12 +10881,13 @@ where
         );
         match message {
             NetworkActorMessage::PublicEvent(event) => {
-                if let Err(err) = self.handle_public_event(myself, state, event).await {
+                if let Err(err) = Box::pin(self.handle_public_event(myself, state, event)).await {
                     error!("Failed to handle fiber network event: {}", err);
                 }
             }
             NetworkActorMessage::PublicCommand(command) => {
-                if let Err(err) = self.handle_public_command(myself, state, command).await {
+                if let Err(err) = Box::pin(self.handle_public_command(myself, state, command)).await
+                {
                     error!("Failed to handle fiber network command: {}", err);
                 }
             }

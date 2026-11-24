@@ -1458,12 +1458,7 @@ impl Store {
                     .map(|(node_id, _)| node_id)
                     .collect();
                 for node_id in node_ids {
-                    let mut counts = self.watchtower_quota_counts.lock();
-                    let lock = self.watchtower_write_lock(&node_id);
-                    let _guard = lock.lock();
-                    let removed =
-                        self.cleanup_unused_watch_preimages_locked(&node_id, target, || {});
-                    counts.dec_preimages(&node_id, removed);
+                    self.cleanup_unused_watch_preimages_with_hook(&node_id, target, || {});
                 }
             }
         }
@@ -1475,11 +1470,9 @@ impl Store {
         target: WatchtowerPreimageCleanupTarget<'_>,
         before_commit: impl FnOnce(),
     ) {
-        let mut counts = self.watchtower_quota_counts.lock();
         let lock = self.watchtower_write_lock(node_id);
         let _guard = lock.lock();
-        let removed = self.cleanup_unused_watch_preimages_locked(node_id, target, before_commit);
-        counts.dec_preimages(node_id, removed);
+        self.cleanup_unused_watch_preimages_locked(node_id, target, before_commit);
     }
 
     fn cleanup_unused_watch_preimages_locked(
@@ -1526,7 +1519,9 @@ impl Store {
         }
         if removed > 0 {
             before_commit();
+            let mut counts = self.watchtower_quota_counts.lock();
             batch.commit();
+            counts.dec_preimages(node_id, removed);
         }
         removed
     }
@@ -2536,7 +2531,6 @@ impl Store {
         payout_lock_script: Option<Script>,
         quotas: Option<&crate::lsp_config::WatchtowerQuotas>,
     ) -> Result<(), String> {
-        let mut counts = self.watchtower_quota_counts.lock();
         let lock = self.watchtower_write_lock(&node_id);
         let _guard = lock.lock();
         let key = [
@@ -2552,22 +2546,6 @@ impl Store {
         }
         let external = keys.local_settlement.is_external();
         settlement_data.validate_signing_keys(external)?;
-        if let Some(quotas) = quotas {
-            self.ensure_watchtower_quota_counts_initialized(&mut counts);
-            let node_count = counts.channels_per_node.get(&node_id).copied().unwrap_or(0);
-            if node_count >= quotas.max_channels_per_node {
-                return Err(format!(
-                    "watchtower channel quota exceeded for node (max {})",
-                    quotas.max_channels_per_node
-                ));
-            }
-            if counts.channels_total >= quotas.max_channels_total {
-                return Err(format!(
-                    "global watchtower channel quota exceeded (max {})",
-                    quotas.max_channels_total
-                ));
-            }
-        }
         let (local_settlement_key, local_settlement_key_pubkey) = keys.local_settlement.to_parts();
         let value = serialize_to_vec(
             &ChannelData {
@@ -2604,6 +2582,24 @@ impl Store {
             signer_key,
             serialize_to_vec(&signer_state, "WatchtowerSignerState"),
         );
+
+        let mut counts = self.watchtower_quota_counts.lock();
+        if let Some(quotas) = quotas {
+            self.ensure_watchtower_quota_counts_initialized(&mut counts);
+            let node_count = counts.channels_per_node.get(&node_id).copied().unwrap_or(0);
+            if node_count >= quotas.max_channels_per_node {
+                return Err(format!(
+                    "watchtower channel quota exceeded for node (max {})",
+                    quotas.max_channels_per_node
+                ));
+            }
+            if counts.channels_total >= quotas.max_channels_total {
+                return Err(format!(
+                    "global watchtower channel quota exceeded (max {})",
+                    quotas.max_channels_total
+                ));
+            }
+        }
         batch.commit();
         counts.inc_channel(&node_id);
         Ok(())
@@ -2616,16 +2612,22 @@ impl Store {
         preimage: Hash256,
         quotas: Option<&crate::lsp_config::WatchtowerQuotas>,
     ) -> Result<(), String> {
-        let mut counts = self.watchtower_quota_counts.lock();
         let lock = self.watchtower_write_lock(&node_id);
         let _guard = lock.lock();
         let already_exists = self
             .get(Self::watchtower_preimage_key(&node_id, &payment_hash))
             .is_some();
+        if quotas.is_some() && already_exists {
+            return Ok(());
+        }
+        let mut batch = self.batch();
+        let kv = KeyValue::WatchtowerPreimage(payment_hash, node_id.clone(), preimage);
+        batch.put(kv.key(), kv.value());
+        let kv = KeyValue::WatchtowerNodePaymentHash(node_id.clone(), payment_hash);
+        batch.put(kv.key(), kv.value());
+
+        let mut counts = self.watchtower_quota_counts.lock();
         if let Some(quotas) = quotas {
-            if already_exists {
-                return Ok(());
-            }
             self.ensure_watchtower_quota_counts_initialized(&mut counts);
             let node_count = counts
                 .preimages_per_node
@@ -2645,11 +2647,6 @@ impl Store {
                 ));
             }
         }
-        let mut batch = self.batch();
-        let kv = KeyValue::WatchtowerPreimage(payment_hash, node_id.clone(), preimage);
-        batch.put(kv.key(), kv.value());
-        let kv = KeyValue::WatchtowerNodePaymentHash(node_id.clone(), payment_hash);
-        batch.put(kv.key(), kv.value());
         batch.commit();
         if !already_exists {
             counts.inc_preimage(&node_id);
@@ -2743,7 +2740,6 @@ impl WatchtowerStore for Store {
             channel_id.as_ref(),
         ]
         .concat();
-        let mut counts = self.watchtower_quota_counts.lock();
         let lock = self.watchtower_write_lock(&node_id);
         let _guard = lock.lock();
         let superseded = self.get_superseded_remote_settlements(&node_id, &channel_id);
@@ -2753,16 +2749,13 @@ impl WatchtowerStore for Store {
             .map(|v| deserialize_from::<ChannelData>(v.as_ref(), "ChannelData"))
             .map(|channel_data| Self::watch_channel_payment_hashes(&channel_data, &superseded))
             .unwrap_or_default();
-        self.delete(key);
-        if existed {
-            counts.dec_channel(&node_id);
-        }
         let signer_key = [
             &[WATCHTOWER_SIGNER_PREFIX],
             node_id.as_ref(),
             channel_id.as_ref(),
         ]
         .concat();
+        let mut retry_after_ms = None;
         if let Some(raw_signer) = self.get(signer_key.clone()) {
             let signer_state: WatchtowerSignerState =
                 deserialize_from(raw_signer.as_ref(), "WatchtowerSignerState");
@@ -2790,11 +2783,15 @@ impl WatchtowerStore for Store {
                 if !fee_inputs.is_empty() {
                     crate::ckb::held_cells::release_for_watchtower(fee_inputs);
                 }
-                counts.record_retry_after(&node_id, ext.retry_after_ms);
+                if ext.retry_after_ms > 0 {
+                    retry_after_ms = Some(ext.retry_after_ms);
+                }
             }
         }
-        self.delete(signer_key);
-        self.delete(
+        let mut batch = self.batch();
+        batch.delete(key);
+        batch.delete(signer_key);
+        batch.delete(
             [
                 &[WATCHTOWER_SUPERSEDED_SETTLEMENT_PREFIX],
                 node_id.as_ref(),
@@ -2802,12 +2799,21 @@ impl WatchtowerStore for Store {
             ]
             .concat(),
         );
-        let removed_preimages = self.cleanup_unused_watch_preimages_locked(
+        {
+            let mut counts = self.watchtower_quota_counts.lock();
+            batch.commit();
+            if existed {
+                counts.dec_channel(&node_id);
+            }
+            if let Some(ms) = retry_after_ms {
+                counts.record_retry_after(&node_id, ms);
+            }
+        }
+        self.cleanup_unused_watch_preimages_locked(
             &node_id,
             WatchtowerPreimageCleanupTarget::ExactSet(&payment_hashes),
             || {},
         );
-        counts.dec_preimages(&node_id, removed_preimages);
         true
     }
 
