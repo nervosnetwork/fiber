@@ -42,6 +42,11 @@ pub enum FundingError {
     )]
     PeerInputUsesOurFundingLock { input_index: usize },
 
+    #[error(
+        "External funding lock script cannot match the node's local funding source lock script"
+    )]
+    ExternalFundingUsesLocalLock,
+
     #[error("Insufficient cells available for funding: {0}")]
     InsufficientCells(String),
 
@@ -117,7 +122,7 @@ impl FundingError {
             | FromUtf8Error(_) => true,
             CkbTxBuilderError(e) => error_chain_has_transient(e),
             CkbTxUnlockError(e) => error_chain_has_transient(e),
-            PeerInputUsesOurFundingLock { .. } => false,
+            PeerInputUsesOurFundingLock { .. } | ExternalFundingUsesLocalLock => false,
             PeerFundingTxExceedsLimit(_) => false,
             _ => false,
         }

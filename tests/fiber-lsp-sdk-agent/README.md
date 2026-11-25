@@ -1,0 +1,95 @@
+# Checked SDK test agent
+
+The agent exercises the production SDK validation path. It uses Manual policy,
+then explicitly confirms a successfully prepared request. It never infers payment
+approval or opening terms from an LSP signing response.
+
+Pass the trusted LSP public node ID with `--lsp-node-id` (or
+`FIBER_LSP_SDK_AGENT_LSP_NODE_ID`). Registration signs a fresh client request ID
+and the current Unix time in milliseconds, then calls `lsp_register_tenant`
+once. The node ID comes from fixture configuration, not a registration response.
+The fixture agent also performs the hosting provider's role for registration,
+using its test-only operator token. Production applications send the proof to
+their provider backend, which keeps operator credentials outside the user SDK.
+The SDK only exposes explicit token replacement and expiry-window checks.
+
+Before servicing a channel, the local fixture driver must:
+
+1. Send the original `OpenChannelWithExternalFundingParams` to `POST /open-channel` as
+   `{ "params": ... }`, setting `pubkey` to the LSP public node, `public: false`,
+   and the client-owned `external_channel_signer`, plus explicit commitment delay
+   and fee rate. The agent calls the SDK opening entrypoint, which saves intent, sends
+   `open_channel_with_external_funding`, checks live funding inputs through
+   `--ckb-rpc`, and verifies the response using local dev-chain binaries from
+   `--contracts-dir`. It returns the opening result only after SDK verification and persistence.
+2. There is no `/bind` endpoint or driver-supplied commitment baseline.
+3. Use `open_channel` to register the test's exact payment/invoice authorizations,
+   fulfillment preimages when settling TLCs, and close or announcement approvals.
+   These authorizations and the verified channel history persist in the SDK store.
+
+`POST /prepare-channel` allocates the next pending channel key for a tenant that
+already has a bound channel. The multi-channel LSP workflow calls it before opening
+each additional tenant channel. It returns the new `channel_open_signer_material`
+in the `result` object.
+
+The test-only `POST /authorize` control endpoint records driver intent:
+
+- `Invoice`: `channel_id`, SDK `PaymentAuthorization` in `terms`, and the
+  wallet-held `preimage`. Calls `authorize_invoice` before the LSP sees a payment.
+- `ReleasePreimage`: `channel_id`, `payment_hash`, `preimage`, and `target`
+  (`Invoice` or `Watchtower`). Calls SDK `authorize_preimage_release` with the
+  independent chain source, then immediately invokes `settle_invoice` or
+  `create_preimage`. SDK validation failure sends no preimage to the LSP.
+- `Close`: `channel_id`, `local_script`, `remote_script`, `local_fee_rate`,
+  `remote_fee_rate`. The fixture computes exact plain-CKB close fees from those
+  scripts and rates and calls SDK `authorize_close`. An automatically accepting
+  peer contributes zero fees; the initiator uses the explicitly selected rate.
+- `Watchtower`: `channel_id`, `destination`, optional `fee_sponsor_lock`,
+  `max_fee` (integer shannons). This persisted fixture policy permits plain-CKB
+  sponsor inputs locked to `fee_sponsor_lock` (or `destination` when omitted)
+  and caps the total fee. It does not approve arbitrary destinations or copy a
+  signing request into an authorization.
+
+The command-line agent obtains live cells, canonical committed ancestors, input
+maturity and median time from the independent `--ckb-rpc` endpoint. Dependencies
+come from dev-chain genesis, with funding/commitment/auth binaries checked against
+`--contracts-dir`. Commitment ancestry matches the signed template after checking
+the broadcast-time funding dependencies, which are excluded from Fiber’s signing
+message. The adapter supports this plain-CKB fixture; unsupported
+relative timestamp inputs and histories over 128 ancestors fail closed.
+It builds exact `OnchainSpendAuthorization` within the local policy, then uses
+SDK preparation and confirmation, both of which recheck chain evidence.
+`GET /status` includes accepted watchtower request IDs and key purposes per
+channel, plus commitment references with complete SDK-verified revocation
+signatures. Settlement scenarios assert SDK submissions; the preimage scenario
+requires a TLC-key submission, and the revocation scenario requires complete
+evidence for the old peer commitment before broadcasting it.
+
+The inbound fixtures create hold invoices from wallet-owned terms; they never
+give the LSP a preimage before SDK recovery checks pass. Outbound payment control
+is not implemented. Only V2 channels are supported. Nonces are fresh SDK-owned
+pool entries, never derived from a commitment number alone. Requests bind the
+channel ID, commitment owner, number, purpose and exact public nonce; a changed
+binding fails closed rather than producing a review warning. Cooperative close
+uses its own `Closing` purpose. Old unreleased LSP signer stores are unsupported.
+
+The Rust fixtures construct valid commitment locks, participant nonces and peer
+partial signatures. Signing tests reject missing or altered V2 channel/owner/
+nonce bindings, number, purpose and legacy counter metadata without a submission
+or persisted-state mutation. Successful submission replenishes fresh public
+nonces and indexed commitment points. The cooperative-close test signs both
+commitment-owner lanes, rejects a commitment-domain close request, and verifies
+the SDK's closing partial signature against a distinct fresh allocation.
+The watchtower restart test first signs a complete local
+commitment, reopens the file-backed SDK store, and spends that commitment with
+verified input/witness/output data. It also checks that missing evidence and a
+spent input produce no submission and leave the persisted snapshot unchanged.
+
+The agent uses the general WebSocket `channel_signing` and `watchtower_signing`
+subscriptions with its tenant token. Configure the node's `rpc.ws_listening_addr`
+and pass that dedicated endpoint to the agent with `--ws-rpc ws://127.0.0.1:8229`
+(or `FIBER_LSP_SDK_AGENT_WS_RPC`). `--rpc` remains the HTTP endpoint for ordinary
+calls. The server automatically resends pending
+requests on reconnect, using the same updates as live requests. `--once` uses
+the existing signing-status query RPCs for one processing pass and exits; it does
+not require `--ws-rpc`. See [RPC subscriptions](../../crates/fiber-lib/src/rpc/README.md#subscription).

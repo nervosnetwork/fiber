@@ -1,0 +1,42 @@
+meta {
+  name: wait current tenant channel online
+  type: http
+  seq: 5.5
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Authorization: Bearer {{LSP_OPERATOR_TOKEN}}
+}
+
+body:json {
+  {"id":"42","jsonrpc":"2.0","method":"lsp_list_tenants"}
+}
+
+assert {
+  res.body.error: isUndefined
+}
+
+script:post-response {
+  const tenant = (res.body.result.tenants || []).find(item => item.tenant_id === bru.getVar("LSP_TENANT_ID"));
+  const channel = (tenant?.channels || []).find(item => item.channel_id === bru.getVar("CURRENT_CHANNEL_ID") && item.online);
+  const iteration = Number(bru.getVar("CURRENT_ONLINE_ITERATION") || 0);
+  if (channel) {
+    bru.setVar("CURRENT_ONLINE_ITERATION", 0);
+    bru.setNextRequest("check current tenant channel ready");
+    return;
+  }
+  if (iteration + 1 < 30) {
+    bru.setVar("CURRENT_ONLINE_ITERATION", iteration + 1);
+    await new Promise(r => setTimeout(r, 1000));
+    bru.setNextRequest("wait current tenant channel online");
+    return;
+  }
+  throw new Error(`hosted channel did not become online: ${JSON.stringify(tenant)}`);
+}

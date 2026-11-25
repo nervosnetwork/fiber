@@ -1,3 +1,5 @@
+use std::collections::{HashMap, HashSet};
+
 use ckb_sdk::RpcError;
 use ckb_types::{core::TransactionView, packed, prelude::IntoTransactionView as _};
 use ractor::{concurrency::Duration, Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
@@ -37,6 +39,7 @@ pub struct CkbChainState {
     signer: LocalSigner,
     funding_source_lock_script: packed::Script,
     live_cells_exclusion_map: LiveCellsExclusionMap,
+    local_funded_inputs_by_tx: HashMap<packed::Byte32, HashSet<packed::OutPoint>>,
 }
 
 impl CkbChainState {
@@ -75,6 +78,8 @@ pub enum CkbChainMessage {
         funding_fee_rate: u64,
         reply: RpcReplyPort<Result<(), FundingError>>,
     },
+    /// Query the node's own local funding source lock script, if configured.
+    GetFundingSourceLockScript(RpcReplyPort<Option<packed::Script>>),
     /// Add funding tx. This is used to reestablish a channel that is not ready yet.
     /// Adding a funding tx will add its used input cells to the exclusion list.
     AddFundingTx(FundingTx),
@@ -127,6 +132,7 @@ impl Actor for CkbChainActor {
             funding_source_lock_script,
             ckb_tx_tracing_actor,
             live_cells_exclusion_map: Default::default(),
+            local_funded_inputs_by_tx: Default::default(),
         })
     }
 
@@ -164,6 +170,15 @@ impl Actor for CkbChainActor {
                     request.udt_type_script.is_some(),
                     tx.as_ref().is_some(),
                 );
+                let prev_tx_hash = tx.as_ref().map(|t| t.hash());
+                let prev_inputs: HashSet<packed::OutPoint> = tx
+                    .as_ref()
+                    .map(|t| t.input_pts_iter().collect())
+                    .unwrap_or_default();
+                let mut local_inputs = prev_tx_hash
+                    .as_ref()
+                    .and_then(|hash| state.local_funded_inputs_by_tx.get(hash).cloned())
+                    .unwrap_or_default();
                 let context = state.build_funding_context(
                     request.script.clone(),
                     request.udt_type_script.clone(),
@@ -178,11 +193,23 @@ impl Actor for CkbChainActor {
                 };
                 state.publish_held();
                 match &result {
-                    Ok(funding_tx) => debug!(
-                        "[{}] Funding request succeeded: tx_hash={:?}",
-                        myself.get_name().unwrap_or_default(),
-                        funding_tx.as_ref().map(|t| t.hash()),
-                    ),
+                    Ok(funding_tx) => {
+                        if let Some(inner) = funding_tx.as_ref() {
+                            local_inputs.extend(
+                                inner
+                                    .input_pts_iter()
+                                    .filter(|out_point| !prev_inputs.contains(out_point)),
+                            );
+                            state
+                                .local_funded_inputs_by_tx
+                                .insert(inner.hash(), local_inputs);
+                        }
+                        debug!(
+                            "[{}] Funding request succeeded: tx_hash={:?}",
+                            myself.get_name().unwrap_or_default(),
+                            funding_tx.as_ref().map(|t| t.hash()),
+                        );
+                    }
                     Err(err) => debug!(
                         "[{}] Funding request failed: {}",
                         myself.get_name().unwrap_or_default(),
@@ -208,6 +235,10 @@ impl Actor for CkbChainActor {
                     request.udt_type_script.is_some(),
                     funding_source_lock_script.calc_script_hash(),
                 );
+                if funding_source_lock_script == state.funding_source_lock_script {
+                    let _ = reply.send(Err(FundingError::ExternalFundingUsesLocalLock));
+                    return Ok(());
+                }
                 let context = FundingContext {
                     rpc_url: state.config.rpc_url.clone(),
                     funding_source_lock_script,
@@ -266,6 +297,20 @@ impl Actor for CkbChainActor {
                         state
                             .live_cells_exclusion_map
                             .migrate_funding_tx(&local_tx_hash, &funding_tx);
+                        if let Some(new_tx) = funding_tx.as_ref() {
+                            if let Some(local_inputs) =
+                                state.local_funded_inputs_by_tx.remove(&local_tx_hash)
+                            {
+                                state
+                                    .local_funded_inputs_by_tx
+                                    .insert(new_tx.hash(), local_inputs);
+                            } else {
+                                state
+                                    .local_funded_inputs_by_tx
+                                    .entry(new_tx.hash())
+                                    .or_default();
+                            }
+                        }
                         state.publish_held();
                     }
                     Err(err) => {
@@ -279,29 +324,47 @@ impl Actor for CkbChainActor {
                 }
                 let _ = reply.send(result);
             }
+            CkbChainMessage::GetFundingSourceLockScript(reply) => {
+                let _ = reply.send(Some(state.funding_source_lock_script.clone()));
+            }
             CkbChainMessage::AddFundingTx(tx) => {
                 state.live_cells_exclusion_map.add_funding_tx(&tx);
                 state.publish_held();
             }
             CkbChainMessage::RemoveFundingTx(tx_hash) => {
-                state.live_cells_exclusion_map.remove(&tx_hash.into());
+                let tx_hash: packed::Byte32 = tx_hash.into();
+                state.live_cells_exclusion_map.remove(&tx_hash);
+                state.local_funded_inputs_by_tx.remove(&tx_hash);
                 state.publish_held();
             }
             CkbChainMessage::CommitFundingTx(tx_hash, commit_block_number) => {
+                let tx_hash: packed::Byte32 = tx_hash.into();
                 state
                     .live_cells_exclusion_map
-                    .commit(&tx_hash.into(), commit_block_number);
+                    .commit(&tx_hash, commit_block_number);
+                state.local_funded_inputs_by_tx.remove(&tx_hash);
             }
             CkbChainMessage::Sign(tx, reply_port) => {
                 if !reply_port.is_closed() {
                     let tx_hash = tx.as_ref().map(|t| t.hash());
+                    let allowed_local_inputs = tx_hash
+                        .as_ref()
+                        .and_then(|hash| state.local_funded_inputs_by_tx.get(hash).cloned());
                     debug!(
                         "[{}] Signing funding tx: tx_hash={:?}",
                         myself.get_name().unwrap_or_default(),
                         tx_hash,
                     );
                     let rpc_url = state.config.rpc_url.clone();
-                    let result = state.signer.sign_funding_tx(tx, rpc_url).await;
+                    let result = state
+                        .signer
+                        .sign_funding_tx(
+                            tx,
+                            rpc_url,
+                            &state.funding_source_lock_script,
+                            allowed_local_inputs.as_ref(),
+                        )
+                        .await;
                     match &result {
                         Ok(signed) => debug!(
                             "[{}] Funding tx signed: tx_hash={:?}",
@@ -495,4 +558,107 @@ async fn fund_via_shell(
 ) -> Result<FundingTx, FundingError> {
     // Never called in WASM
     unreachable!();
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+    use ractor::call_t;
+    use secp256k1::SecretKey;
+    use tempfile::tempdir;
+
+    struct TestCkbChainActor(SecretKey);
+
+    #[async_trait::async_trait]
+    impl Actor for TestCkbChainActor {
+        type Msg = CkbChainMessage;
+        type State = CkbChainState;
+        type Arguments = CkbConfig;
+
+        async fn pre_start(
+            &self,
+            myself: ActorRef<Self::Msg>,
+            config: Self::Arguments,
+        ) -> Result<Self::State, ActorProcessingErr> {
+            let signer = LocalSigner::new(self.0);
+            let funding_source_lock_script =
+                get_script_by_contract(Contract::Secp256k1Lock, signer.pubkey_hash());
+            let ckb_tx_tracing_actor = Actor::spawn_linked(
+                None,
+                CkbTxTracingActor::new(),
+                CkbTxTracingArguments {
+                    rpc_url: config.rpc_url.clone(),
+                    polling_interval: Duration::from_millis(config.tx_tracing_polling_interval_ms),
+                },
+                myself.into(),
+            )
+            .await?
+            .0;
+            Ok(CkbChainState {
+                config,
+                signer,
+                funding_source_lock_script,
+                ckb_tx_tracing_actor,
+                live_cells_exclusion_map: Default::default(),
+                local_funded_inputs_by_tx: Default::default(),
+            })
+        }
+
+        async fn handle(
+            &self,
+            myself: ActorRef<Self::Msg>,
+            message: Self::Msg,
+            state: &mut Self::State,
+        ) -> Result<(), ActorProcessingErr> {
+            CkbChainActor {}.handle(myself, message, state).await
+        }
+    }
+
+    #[tokio::test]
+    async fn test_build_unsigned_funding_tx_rejects_local_funding_lock() {
+        let dir = tempdir().expect("create tempdir");
+        let config = CkbConfig {
+            base_dir: Some(dir.path().to_path_buf()),
+            rpc_url: "http://127.0.0.1:8114".to_string(),
+            tx_tracing_polling_interval_ms: 4_000,
+            udt_whitelist: None,
+            funding_tx_shell_builder: None,
+        };
+        let secret_key = SecretKey::from_slice(&[9u8; 32]).expect("valid secret key");
+        let (actor, _handle) = Actor::spawn(None, TestCkbChainActor(secret_key), config)
+            .await
+            .expect("spawn TestCkbChainActor");
+
+        let local_lock = call_t!(actor, CkbChainMessage::GetFundingSourceLockScript, 5_000)
+            .expect("rpc call ok")
+            .expect("local funding lock script present");
+
+        let err = call_t!(
+            actor,
+            |reply| CkbChainMessage::BuildUnsignedFundingTx {
+                funding_tx: FundingTx::new(),
+                request: FundingRequest {
+                    script: local_lock.clone(),
+                    udt_type_script: None,
+                    local_amount: 100_000_000_000,
+                    funding_fee_rate: 1000,
+                    remote_amount: 0,
+                    local_reserved_ckb_amount: 0,
+                    remote_reserved_ckb_amount: 0,
+                },
+                funding_source_lock_script: local_lock.clone(),
+                funding_source_lock_script_cell_deps: Vec::new(),
+                funding_cell_lock_script: local_lock,
+                reply,
+            },
+            5_000
+        )
+        .expect("rpc call ok")
+        .expect_err("BuildUnsignedFundingTx must reject local funding lock");
+
+        assert!(
+            matches!(err, FundingError::ExternalFundingUsesLocalLock),
+            "expected ExternalFundingUsesLocalLock, got {err:?}"
+        );
+    }
 }

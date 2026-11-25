@@ -109,6 +109,7 @@ pub fn secret_nonce_v2_parts(
             NoncePurposeV2::Commitment => 0,
             NoncePurposeV2::Revocation => 1,
             NoncePurposeV2::Closing => 2,
+            NoncePurposeV2::ChannelAnnouncement => 3,
         }])
         .build()
 }
@@ -131,9 +132,19 @@ fn check(ok: bool, message: &str) -> Result<(), String> {
     }
 }
 
+struct ValidationKey<'a> {
+    secret: Option<&'a Privkey>,
+    public: Pubkey,
+}
+impl ValidationKey<'_> {
+    fn pubkey(&self) -> Pubkey {
+        self.public
+    }
+}
+
 fn nonce(
     record: &SigningNonceV2,
-    key: &Privkey,
+    key: &ValidationKey<'_>,
     owner: Pubkey,
     purpose: NoncePurposeV2,
     number: u64,
@@ -143,7 +154,9 @@ fn nonce(
         "V2 nonce owner/purpose/number mismatch",
     )?;
     check(
-        record.public_nonce == secret_nonce_v2(record, key).public_nonce(),
+        key.secret.map_or(record.seed == [0; 32], |secret| {
+            record.public_nonce == secret_nonce_v2(record, secret).public_nonce()
+        }),
         "V2 nonce seed/key/public mismatch",
     )?;
     check(
@@ -154,7 +167,7 @@ fn nonce(
 
 fn context(
     record: &SigningNonceV2,
-    key: &Privkey,
+    key: &ValidationKey<'_>,
     keys: [Pubkey; 2],
     message: [u8; 32],
     peer_nonce: Option<PubNonce>,
@@ -193,6 +206,108 @@ fn context(
             message,
         )
         .map_err(|e| format!("Invalid V2 cached local signature: {e}"))?;
+    }
+    Ok(())
+}
+
+/// Maximum number of V2 public nonces accepted in a single RPC request.
+pub const MAX_V2_NONCE_BATCH: usize = 128;
+/// Maximum number of V2 commitment points accepted in a single RPC request.
+pub const MAX_V2_COMMITMENT_POINT_BATCH: usize = 16;
+/// Maximum number of unused V2 public nonces persisted in a channel's pool.
+pub const MAX_V2_NONCE_POOL_SIZE: usize = 256;
+/// Maximum number of V2 commitment points persisted on a channel.
+/// Must exceed `2 * MAX_TLC_NUMBER_IN_FLIGHT + 1 + MAX_V2_COMMITMENT_POINT_LOOKAHEAD` (267)
+/// so a channel at full bilateral TLC capacity can still install lookahead points to settle TLCs.
+pub const MAX_V2_COMMITMENT_POINTS_SIZE: usize = 512;
+/// Maximum lookahead beyond `remote_commitment_number` for pre-installed V2 commitment points.
+pub const MAX_V2_COMMITMENT_POINT_LOOKAHEAD: u64 = 16;
+
+fn external_allocations(channel: &ChannelActorData, key: &ValidationKey<'_>) -> Result<(), String> {
+    let allocations = &channel.signing_context.v2_allocations;
+    let pool = &channel.signing_context.v2_nonce_pool;
+    check(
+        pool.len() <= MAX_V2_NONCE_POOL_SIZE,
+        "External V2 nonce pool exceeds maximum size",
+    )?;
+    check(
+        channel.signing_context.v2_commitment_points.len() <= MAX_V2_COMMITMENT_POINTS_SIZE,
+        "External V2 commitment points exceed maximum size",
+    )?;
+    let mut allocated_nonces = std::collections::HashSet::with_capacity(allocations.len());
+    for record in allocations {
+        check(
+            record.seed == [0; 32] && record.channel_id == channel.id,
+            "External V2 allocation contains secret material or wrong channel",
+        )?;
+        check(
+            allocated_nonces.insert(record.public_nonce.serialize()),
+            "Duplicate external V2 allocation",
+        )?;
+        check(
+            record.signature.is_none() || record.context.is_some(),
+            "External V2 signature without context",
+        )?;
+        let Some(bytes) = &record.context else {
+            continue;
+        };
+        let remote = channel
+            .remote_channel_public_keys
+            .as_ref()
+            .ok_or("External V2 context without remote keys")?
+            .funding_pubkey;
+        let local = key.pubkey();
+        check(
+            record.owner == local || record.owner == remote,
+            "Unknown external V2 allocation owner",
+        )?;
+        let keys = if record.purpose == NoncePurposeV2::Revocation {
+            if record.owner == local {
+                [remote, local]
+            } else {
+                [local, remote]
+            }
+        } else if local <= remote {
+            [local, remote]
+        } else {
+            [remote, local]
+        };
+        check(
+            bytes.len() == 164,
+            "Invalid external V2 allocation context length",
+        )?;
+        let message = bytes[132..]
+            .try_into()
+            .map_err(|_| "Invalid external V2 message")?;
+        context(record, key, keys, message, None, true)?;
+    }
+    let mut seen_pool = std::collections::HashSet::with_capacity(pool.len());
+    for public in pool {
+        let encoded = public.serialize();
+        check(
+            !allocated_nonces.contains(&encoded) && seen_pool.insert(encoded),
+            "Duplicate or already allocated external V2 pool nonce",
+        )?;
+    }
+    let mut seen_points = std::collections::HashMap::with_capacity(
+        channel.signing_context.v2_commitment_points.len(),
+    );
+    for (number, point) in &channel.signing_context.v2_commitment_points {
+        if let Some(existing) = seen_points.get(number) {
+            check(
+                existing == point,
+                "Conflicting external V2 commitment points",
+            )?;
+            continue;
+        }
+        check(
+            crate::channel::is_tlc_key_derivation_safe(
+                &channel.local_channel_public_keys.tlc_base_key,
+                point,
+            ),
+            "Unsafe external V2 commitment point",
+        )?;
+        seen_points.insert(*number, *point);
     }
     Ok(())
 }
@@ -242,7 +357,7 @@ fn commitment_snapshot(
         .remote_channel_public_keys
         .as_ref()
         .ok_or("Missing V2 commitment keys")?;
-    let local = channel.signer.funding_key.pubkey();
+    let local = channel.local_channel_public_keys.funding_pubkey;
     let keys = if for_remote {
         [local, remote.funding_pubkey]
     } else {
@@ -255,7 +370,7 @@ fn commitment_snapshot(
     let witness = crate::watchtower::settlement_data_witness(
         settlement,
         for_remote,
-        channel.signer.tlc_base_key.pubkey(),
+        channel.local_channel_public_keys.tlc_base_key,
         remote.tlc_base_key,
     )?;
     let args = [
@@ -311,7 +426,20 @@ pub fn validate_channel_v2(channel: &ChannelActorData) -> Result<(), String> {
             "Missing funded V2 transaction/history",
         )?;
     }
-    let key = &channel.signer.funding_key;
+    let validation_key = ValidationKey {
+        secret: channel.signer.as_ref().map(|s| &s.funding_key),
+        public: channel.local_channel_public_keys.funding_pubkey,
+    };
+    if let Some(signer) = &channel.signer {
+        check(
+            signer.get_base_public_keys() == channel.local_channel_public_keys,
+            "Local signer/public key mismatch",
+        )?;
+    }
+    let key = &validation_key;
+    if channel.signer.is_none() {
+        external_allocations(channel, key)?;
+    }
     let local = key.pubkey();
     check(
         channel.local_channel_public_keys.funding_pubkey == local,
@@ -585,7 +713,7 @@ pub fn validate_channel_v2(channel: &ChannelActorData) -> Result<(), String> {
             tx_message(&incoming.transaction),
         )
         .map_err(|e| e.to_string())?;
-        if !pending {
+        if !pending || incoming.funding.signature.is_some() {
             let own = incoming
                 .funding
                 .signature
@@ -764,8 +892,8 @@ pub fn validate_channel_v2(channel: &ChannelActorData) -> Result<(), String> {
             )?;
         }
     }
-    // The latest usable commitment is `session.incoming.transaction` itself; there is nothing
-    // left to cross-check.
+    // The latest usable commitment is `session.pending_incoming`/`session.incoming` itself; there
+    // is nothing left to cross-check.
     if session.own.context.is_some() {
         check(
             session

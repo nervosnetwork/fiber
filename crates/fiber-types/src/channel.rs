@@ -532,6 +532,8 @@ pub struct TlcInfo {
     pub forwarding_tlc: Option<(Hash256, u64)>,
     pub removed_confirmed_at: Option<u64>,
     pub applied_flags: AppliedFlags,
+    /// Local payment execution ownership, never sent over the wire.
+    pub upstream_tlc_key: Option<crate::payment::UpstreamTlcKey>,
 }
 
 use std::fmt;
@@ -553,6 +555,13 @@ impl fmt::Debug for TlcInfo {
 }
 
 impl TlcInfo {
+    /// Hosted payment execution owning this TLC.
+    pub fn session_key(&self) -> crate::payment::PaymentSessionKey {
+        crate::payment::PaymentSessionKey {
+            payment_hash: self.payment_hash,
+            upstream_tlc_key: self.upstream_tlc_key,
+        }
+    }
     pub fn log(&self) -> String {
         format!(
             "id: {:?} status: {:?} amount: {:?} removed: {:?} hash: {:?} ",
@@ -961,6 +970,18 @@ pub struct AddTlcCommand {
     /// not be used for new error attribution logic. Removing it requires a storage migration.
     pub is_trampoline_hop: bool,
     pub previous_tlc: Option<PrevTlcInfo>,
+    /// Local payment execution ownership, never sent over the wire.
+    pub upstream_tlc_key: Option<crate::payment::UpstreamTlcKey>,
+}
+
+impl AddTlcCommand {
+    /// Hosted payment execution owning this command.
+    pub fn session_key(&self) -> crate::payment::PaymentSessionKey {
+        crate::payment::PaymentSessionKey {
+            payment_hash: self.payment_hash,
+            upstream_tlc_key: self.upstream_tlc_key,
+        }
+    }
 }
 
 impl fmt::Debug for AddTlcCommand {
@@ -1356,7 +1377,7 @@ pub struct ChannelOpenRecord {
 }
 
 /// Domain separation for a V2 nonce allocation.
-#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NoncePurposeV2 {
     /// Funding-cell signature for an owner's commitment.
     Commitment,
@@ -1364,6 +1385,8 @@ pub enum NoncePurposeV2 {
     Revocation,
     /// Dedicated cooperative funding-cell close signature.
     Closing,
+    /// One-off public channel announcement.
+    ChannelAnnouncement,
 }
 
 /// One fresh nonce and its immutable, exact signing context.
@@ -1388,6 +1411,19 @@ pub struct SigningNonceV2 {
     /// Cached local partial signature, including local aggregation signatures.
     #[serde_as(as = "Option<PartialSignatureAsBytes>")]
     pub signature: Option<PartialSignature>,
+}
+
+impl fmt::Debug for SigningNonceV2 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SigningNonceV2")
+            .field("seed", &"[REDACTED]")
+            .field("channel_id", &self.channel_id)
+            .field("owner", &self.owner)
+            .field("number", &self.number)
+            .field("purpose", &self.purpose)
+            .field("public_nonce", &self.public_nonce)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Packed cached V2 CS, distinct from the public wire domain type.
@@ -1637,6 +1673,14 @@ impl ChannelFeatures {
         }
     }
 
+    /// Decode only the V2 commitment-lock argument layout; V1 is unsupported.
+    pub fn from_lock_args(args: &[u8]) -> Result<Self, String> {
+        if args.len() != Self::LOCK_ARGS_LEN {
+            return Err("invalid V2 commitment lock argument length".into());
+        }
+        Self::from_bits(args[57])
+    }
+
     /// Return the byte stored with the channel and appended to upgraded args.
     pub fn bits(self) -> u8 {
         self.0
@@ -1723,7 +1767,10 @@ pub struct ChannelActorData {
     pub funding_fee_rate: u64,
 
     /// Signer is used to sign the commitment transactions.
-    pub signer: InMemorySigner,
+    pub signer: Option<InMemorySigner>,
+
+    /// Durable external signing requests and public-only V2 nonce allocations.
+    pub signing_context: crate::ChannelSigningContext,
 
     /// Cached channel public keys for easier of access.
     pub local_channel_public_keys: ChannelBasePublicKeys,
@@ -1841,7 +1888,7 @@ pub struct ChannelImmutableData {
     pub funding_fee_rate: u64,
 
     /// Signer is used to sign the commitment transactions.
-    pub signer: InMemorySigner,
+    pub signer: Option<InMemorySigner>,
 
     /// Cached channel public keys for easier of access.
     pub local_channel_public_keys: ChannelBasePublicKeys,
@@ -2024,6 +2071,9 @@ pub struct ChannelMutableData {
     #[serde(default)]
     pub external_funding: Option<ExternalFundingPersistState>,
 
+    /// Durable external signing requests and public-only V2 nonce allocations.
+    pub signing_context: crate::ChannelSigningContext,
+
     /// Independent owner signing sessions.
     pub session: ChannelSessionV2,
 }
@@ -2073,6 +2123,7 @@ impl ChannelActorData {
             connectivity_state,
             external_funding,
             channel_features,
+            signing_context,
             session,
         } = self;
         (
@@ -2120,6 +2171,7 @@ impl ChannelActorData {
                 last_was_revoke,
                 connectivity_state,
                 external_funding,
+                signing_context,
                 session,
             },
         )
@@ -2171,6 +2223,7 @@ impl ChannelActorData {
             last_was_revoke,
             connectivity_state,
             external_funding,
+            signing_context,
             session,
         } = mutable;
         Self {
@@ -2215,20 +2268,21 @@ impl ChannelActorData {
             connectivity_state,
             external_funding,
             channel_features,
+            signing_context,
             session,
         }
     }
 }
 
 impl ChannelActorData {
-    /// Latest commitment transaction, derived from the accepted incoming commitment.
-    ///
-    /// `accept_commitment_v2` installs the usable transaction in `session.incoming` in the same
-    /// step, so the record never needs to store it separately.
+    /// Latest commitment transaction, derived from the accepted incoming commitment
+    /// (or a signed `pending_incoming` commitment awaiting external revocation approval).
     pub fn latest_commitment_transaction(&self) -> Option<Transaction> {
         self.session
-            .incoming
+            .pending_incoming
             .as_ref()
+            .filter(|incoming| incoming.funding.signature.is_some())
+            .or(self.session.incoming.as_ref())
             .map(|incoming| incoming.transaction.clone())
     }
 }

@@ -42,15 +42,19 @@ use crate::payment::{
     SessionRouteNode as JsonSessionRouteNode,
 };
 use crate::serde_utils::{Hash256 as JsonHash256, Privkey as JsonPrivkey, Pubkey as JsonPubkey};
+#[cfg(feature = "watchtower")]
 use crate::watchtower::ChannelFeatures as JsonChannelFeatures;
 
 use ckb_types::prelude::Entity;
+#[cfg(feature = "watchtower")]
+use fiber_types::ChannelFeatures;
 use fiber_types::{
-    ChannelFeatures, ChannelState as InternalChannelState, CloseFlags, Hash256,
+    ChannelState as InternalChannelState, CloseFlags, Hash256,
     InboundTlcStatus as InternalInboundTlcStatus, OutboundTlcStatus as InternalOutboundTlcStatus,
     Pubkey, TlcStatus as InternalTlcStatus,
 };
 
+#[cfg(feature = "watchtower")]
 impl From<ChannelFeatures> for JsonChannelFeatures {
     fn from(features: ChannelFeatures) -> Self {
         Self(features.bits())
@@ -542,6 +546,9 @@ impl From<fiber_types::Attribute> for crate::invoice::Attribute {
             InternalAttr::PaymentSecret(secret) => {
                 JsonAttr::PaymentSecret(JsonHash256::from(secret).to_string())
             }
+            InternalAttr::TrampolineRouteHint(node_id) => {
+                JsonAttr::TrampolineRouteHint(JsonPubkey(node_id.serialize()))
+            }
         }
     }
 }
@@ -591,7 +598,9 @@ mod watchtower_convert {
                 payment_amount: tlc.payment_amount,
                 payment_hash: tlc.payment_hash.into(),
                 expiry: tlc.expiry,
-                local_key: tlc.local_key.into(),
+                local_key: tlc.local_key.map(Into::into),
+                local_key_pubkey: tlc.local_key_pubkey.map(Into::into),
+                local_key_commitment_number: tlc.local_key_commitment_number,
                 remote_key: tlc.remote_key.into(),
             }
         }
@@ -606,7 +615,13 @@ mod watchtower_convert {
                 payment_amount: tlc.payment_amount,
                 payment_hash: tlc.payment_hash.into(),
                 expiry: tlc.expiry,
-                local_key: tlc.local_key.try_into()?,
+                local_key: tlc.local_key.map(TryInto::try_into).transpose()?,
+                local_key_pubkey: tlc
+                    .local_key_pubkey
+                    .map(Pubkey::try_from)
+                    .transpose()
+                    .map_err(|e| format!("invalid local_key_pubkey: {e}"))?,
+                local_key_commitment_number: tlc.local_key_commitment_number,
                 remote_key: Pubkey::try_from(tlc.remote_key)
                     .map_err(|e| format!("invalid remote_key: {e}"))?,
             })

@@ -14,7 +14,7 @@ use crate::fiber::channel::{
     ChannelActor, ChannelActorMessage, ChannelActorState, ChannelActorStateStore,
 };
 use crate::fiber::graph::NetworkGraphStateStore;
-use crate::fiber::network::{NetworkActorCommand, NetworkActorEvent, NetworkActorMessage};
+use crate::fiber::network::{FiberActorCommand, FiberActorEvent, FiberActorMessage, FiberActorRef};
 use crate::fiber::payment::{PaymentSessionExt, SendPaymentDataBuilder};
 use crate::fiber::tests::settle_tlc_set_command_tests::{
     create_test_channel_state_with_tlc, MockStore,
@@ -61,11 +61,11 @@ impl Actor for NullChannelActor {
 /// immediately dropped reply.
 struct SilentNetworkActor;
 
-type SilentNetworkState = Arc<Mutex<Vec<NetworkActorMessage>>>;
+type SilentNetworkState = Arc<Mutex<Vec<FiberActorMessage>>>;
 
 #[async_trait::async_trait]
 impl Actor for SilentNetworkActor {
-    type Msg = NetworkActorMessage;
+    type Msg = FiberActorMessage;
     type State = SilentNetworkState;
     type Arguments = SilentNetworkState;
 
@@ -102,6 +102,7 @@ fn offered_tlc(
     attempt_id: Option<u64>,
 ) -> TlcInfo {
     TlcInfo {
+        upstream_tlc_key: None,
         status: TlcStatus::Outbound(OutboundTlcStatus::Committed),
         tlc_id: TLCId::Offered(tlc_id),
         amount,
@@ -175,7 +176,7 @@ async fn test_pending_forward_is_relinked_to_existing_downstream_tlc() {
     let actor = ChannelActor::new(
         gen_rand_fiber_public_key(),
         gen_rand_fiber_public_key(),
-        network,
+        FiberActorRef::from_fiber(&network),
         store,
         None,
     );
@@ -226,7 +227,7 @@ async fn test_pending_forward_without_downstream_tlc_is_failed_back() {
     let actor = ChannelActor::new(
         gen_rand_fiber_public_key(),
         gen_rand_fiber_public_key(),
-        network,
+        FiberActorRef::from_fiber(&network),
         store,
         None,
     );
@@ -286,7 +287,7 @@ async fn test_failed_forward_dispatch_keeps_recoverable_ownership() {
         let actor = ChannelActor::new(
             state.get_local_pubkey(),
             state.get_remote_pubkey(),
-            stopped,
+            FiberActorRef::from_fiber(&stopped),
             MockStore::new(),
             None,
         );
@@ -322,11 +323,11 @@ async fn test_failed_forward_dispatch_keeps_recoverable_ownership() {
         let (network, task) = Actor::spawn(None, SilentNetworkActor, Default::default())
             .await
             .unwrap();
-        restored.network = Some(network.clone());
+        restored.network = Some(FiberActorRef::from_fiber(&network));
         let actor = ChannelActor::new(
             restored.get_local_pubkey(),
             restored.get_remote_pubkey(),
-            network.clone(),
+            FiberActorRef::from_fiber(&network),
             store,
             None,
         );
@@ -390,6 +391,7 @@ fn queued_forward_add(upstream: Hash256, hash: Hash256) -> fiber_types::AddTlcCo
     )
     .unwrap();
     fiber_types::AddTlcCommand {
+        upstream_tlc_key: None,
         amount: 1000,
         payment_hash: hash,
         attempt_id: None,
@@ -434,7 +436,7 @@ async fn test_pending_forward_queue_survives_recovery_and_relinks_after_creation
         let actor = ChannelActor::new(
             gen_rand_fiber_public_key(),
             gen_rand_fiber_public_key(),
-            network.clone(),
+            FiberActorRef::from_fiber(&network),
             store.clone(),
             None,
         );
@@ -524,7 +526,7 @@ async fn test_pending_forward_queue_must_match_upstream_identity_and_hash() {
         let actor = ChannelActor::new(
             gen_rand_fiber_public_key(),
             gen_rand_fiber_public_key(),
-            network.clone(),
+            FiberActorRef::from_fiber(&network),
             store,
             None,
         );
@@ -599,7 +601,7 @@ async fn test_pending_trampoline_forward_is_resumed_only_for_matching_tlc() {
         let actor = ChannelActor::new(
             gen_rand_fiber_public_key(),
             gen_rand_fiber_public_key(),
-            network.clone(),
+            FiberActorRef::from_fiber(&network),
             store,
             None,
         );
@@ -627,7 +629,7 @@ async fn test_pending_trampoline_forward_is_resumed_only_for_matching_tlc() {
             .await
             .unwrap();
             assert!(
-                matches!(captured.lock().unwrap().as_slice(), [NetworkActorMessage::Event(NetworkActorEvent::RetrySendPayment(hash, None))] if *hash == payment_hash),
+                matches!(captured.lock().unwrap().as_slice(), [FiberActorMessage::Event(FiberActorEvent::RetrySendPayment(hash, None))] if hash.payment_hash == payment_hash),
                 "re-drive the payment owner, including its terminal outcome replay"
             );
         } else {
@@ -677,7 +679,7 @@ async fn test_v2_settled_remove_defers_when_payment_effect_lookup_times_out() {
     let actor = ChannelActor::new(
         gen_rand_fiber_public_key(),
         gen_rand_fiber_public_key(),
-        network,
+        FiberActorRef::from_fiber(&network),
         store,
         None,
     );
@@ -724,18 +726,18 @@ async fn test_v2_inapplicable_settled_remove_closes_instead_of_panicking() {
     state.tlc_state.offered_tlcs.tlcs.push(tlc);
     state.tlc_state.offered_tlcs.next_tlc_id = 1;
 
-    let captured: Arc<Mutex<Vec<NetworkActorMessage>>> = Default::default();
+    let captured: Arc<Mutex<Vec<FiberActorMessage>>> = Default::default();
     let (network, _) = Actor::spawn(None, SilentNetworkActor, captured.clone())
         .await
         .expect("spawn network actor");
-    state.network = Some(network.clone());
+    state.network = Some(FiberActorRef::from_fiber(&network));
     let store = MockStore::new();
     store.insert_channel_actor_state(state.clone());
     let myself = spawn_null_channel_actor().await;
     let actor = ChannelActor::new(
         gen_rand_fiber_public_key(),
         gen_rand_fiber_public_key(),
-        network.clone(),
+        FiberActorRef::from_fiber(&network),
         store,
         None,
     );
@@ -754,7 +756,7 @@ async fn test_v2_inapplicable_settled_remove_closes_instead_of_panicking() {
                 if messages.iter().any(|message| {
                     matches!(
                         message,
-                        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+                        FiberActorMessage::Command(FiberActorCommand::ControlFiberChannel(
                             crate::fiber::channel::ChannelCommandWithId {
                                 channel_id,
                                 command: crate::fiber::channel::ChannelCommand::Shutdown(
@@ -785,5 +787,216 @@ async fn test_v2_inapplicable_settled_remove_closes_instead_of_panicking() {
     assert!(
         state.tlc_state.get(&TLCId::Offered(0)).is_some(),
         "the unsettled tlc must stay in the channel state"
+    );
+}
+
+#[tokio::test]
+async fn test_recover_pending_forward_tlc_preserves_scoped_session_key_with_same_hash_ordinary_payment(
+) {
+    let upstream_channel_id = gen_rand_sha256_hash();
+    let payment_hash = gen_rand_sha256_hash();
+    let mut state =
+        create_test_channel_state_with_tlc(upstream_channel_id, 0, 1000, payment_hash, None);
+    state.id = upstream_channel_id;
+    state
+        .waiting_forward_tlc_tasks
+        .insert(TLCId::Received(0), TEST_SHARED_SECRET);
+    let (store, _dir) = crate::tests::test_utils::generate_store();
+    store.insert_channel_actor_state_for_test(state.clone());
+
+    // Insert an ordinary (unscoped) payment sharing the same payment_hash.
+    let ordinary_request =
+        SendPaymentDataBuilder::new(gen_rand_fiber_public_key(), 500, payment_hash)
+            .max_fee_amount(Some(100))
+            .build()
+            .unwrap();
+    store.insert_payment_session(fiber_types::PaymentSession::new_session(
+        &store,
+        ordinary_request,
+        3,
+    ));
+
+    // Insert the scoped hosted trampoline session owning (upstream_channel_id, 0).
+    let scope = fiber_types::UpstreamTlcKey {
+        incoming_channel_id: upstream_channel_id,
+        incoming_tlc_id: 0,
+    };
+    let mut hosted_request =
+        SendPaymentDataBuilder::new(gen_rand_fiber_public_key(), 900, payment_hash)
+            .max_fee_amount(Some(100))
+            .trampoline_context(Some(fiber_types::TrampolineContext {
+                remaining_trampoline_onion: vec![],
+                previous_tlcs: vec![fiber_types::PrevTlcInfo::new_with_shared_secret(
+                    upstream_channel_id,
+                    0,
+                    100,
+                    TEST_SHARED_SECRET,
+                )],
+                hash_algorithm: HashAlgorithm::CkbHash,
+                max_outgoing_tlc_expiry: None,
+            }))
+            .build()
+            .unwrap();
+    hosted_request.upstream_tlc_key = Some(scope);
+    let expected_key = fiber_types::PaymentSessionKey {
+        payment_hash,
+        upstream_tlc_key: Some(scope),
+    };
+    store.insert_payment_session(fiber_types::PaymentSession::new_session(
+        &store,
+        hosted_request,
+        3,
+    ));
+
+    let captured = SilentNetworkState::default();
+    let (network, handle) = Actor::spawn(None, SilentNetworkActor, captured.clone())
+        .await
+        .unwrap();
+    let myself = spawn_null_channel_actor().await;
+    let actor = ChannelActor::new(
+        gen_rand_fiber_public_key(),
+        gen_rand_fiber_public_key(),
+        FiberActorRef::from_fiber(&network),
+        store,
+        None,
+    );
+    actor.recover_pending_forward_tlcs(&myself, &mut state);
+
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while captured.lock().unwrap().is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+
+    {
+        let messages = captured.lock().unwrap();
+        assert!(
+            messages.iter().any(|msg| matches!(
+                msg,
+                FiberActorMessage::Event(FiberActorEvent::RetrySendPayment(key, None))
+                    if *key == expected_key
+            )),
+            "expected RetrySendPayment with scoped session key {expected_key:?}, got {messages:?}"
+        );
+    }
+    network.stop(None);
+    handle.await.unwrap();
+    myself.stop(None);
+}
+
+#[cfg(all(feature = "lsp", not(target_arch = "wasm32")))]
+#[tokio::test]
+async fn test_recover_pending_forward_tlc_preserves_deferred_hosted_delivery_without_session() {
+    use crate::fiber::delivery::TrampolineForwardingRequest;
+    use crate::lsp::{
+        LspPaymentDelivery, LspPaymentDeliveryStatus, LspPaymentDeliveryStore, TenantId,
+    };
+    use crate::store::NodeNamespace;
+
+    let upstream_channel_id = gen_rand_sha256_hash();
+    let payment_hash = gen_rand_sha256_hash();
+    let mut state =
+        create_test_channel_state_with_tlc(upstream_channel_id, 0, 1000, payment_hash, None);
+    state.id = upstream_channel_id;
+    state
+        .waiting_forward_tlc_tasks
+        .insert(TLCId::Received(0), TEST_SHARED_SECRET);
+    let (store, _dir) = crate::tests::test_utils::generate_store();
+    store.insert_channel_actor_state_for_test(state.clone());
+
+    // Persist a Deferred LspPaymentDelivery (attempt_count == 0, no PaymentSession yet).
+    let delivery = LspPaymentDelivery {
+        payment_hash,
+        tenant_id: TenantId::new("tenant-deferred").unwrap(),
+        private_channel_id: gen_rand_sha256_hash(),
+        status: LspPaymentDeliveryStatus::Deferred,
+        request: TrampolineForwardingRequest {
+            next_node_id: gen_rand_fiber_public_key(),
+            amount_to_forward: 900,
+            payment_hash,
+            tlc_expiry_delta: 3600,
+            tlc_expiry_limit: 7200,
+            build_max_fee_amount: 100,
+            max_parts: None,
+            udt_type_script: None,
+            remaining_trampoline_onion: vec![],
+            previous_tlc: fiber_types::PrevTlcInfo::new_with_shared_secret(
+                upstream_channel_id,
+                0,
+                100,
+                TEST_SHARED_SECRET,
+            ),
+            hash_algorithm: HashAlgorithm::CkbHash,
+            max_outgoing_tlc_expiry: 100_000,
+        },
+        buffer_deadline: 9_999_999,
+        created_at: 1_000,
+        updated_at: 1_000,
+        attempt_count: 0,
+        last_error: None,
+        last_error_code: None,
+    };
+    store
+        .namespaced(NodeNamespace::lsp_metadata())
+        .put_lsp_payment_delivery(&delivery)
+        .unwrap();
+
+    let captured = SilentNetworkState::default();
+    let (network, handle) = Actor::spawn(None, SilentNetworkActor, captured.clone())
+        .await
+        .unwrap();
+    let myself = spawn_null_channel_actor().await;
+    let actor = ChannelActor::new(
+        gen_rand_fiber_public_key(),
+        gen_rand_fiber_public_key(),
+        FiberActorRef::from_fiber(&network),
+        store,
+        None,
+    );
+    actor.recover_pending_forward_tlcs(&myself, &mut state);
+
+    assert!(
+        state.retryable_tlc_operations.is_empty(),
+        "a Deferred hosted delivery with attempt_count == 0 must not be failed back on restart"
+    );
+    assert!(
+        state.is_waiting_forward_result_for_received_tlc(TLCId::Received(0)),
+        "waiting_forward_tlc_tasks must remain intact until LspService resumes or expires the delivery"
+    );
+    assert!(state
+        .tlc_state
+        .get(&TLCId::Received(0))
+        .unwrap()
+        .removed_reason
+        .is_none());
+    network.stop(None);
+    handle.await.unwrap();
+    myself.stop(None);
+}
+
+#[test]
+fn test_buffered_trampoline_upstream_status_treats_force_closing_as_removed() {
+    use crate::fiber::network::{
+        buffered_trampoline_upstream_status, BufferedTrampolineUpstreamStatus,
+    };
+
+    let upstream_channel_id = gen_rand_sha256_hash();
+    let payment_hash = gen_rand_sha256_hash();
+    let mut state =
+        create_test_channel_state_with_tlc(upstream_channel_id, 0, 1000, payment_hash, None);
+    state.id = upstream_channel_id;
+    assert_eq!(
+        buffered_trampoline_upstream_status(&state, payment_hash, 0),
+        BufferedTrampolineUpstreamStatus::Pending
+    );
+
+    state.state = fiber_types::ChannelState::ShuttingDown(
+        fiber_types::ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION,
+    );
+    assert_eq!(
+        buffered_trampoline_upstream_status(&state, payment_hash, 0),
+        BufferedTrampolineUpstreamStatus::Removed
     );
 }

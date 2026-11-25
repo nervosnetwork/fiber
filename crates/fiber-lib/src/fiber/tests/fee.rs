@@ -27,7 +27,9 @@ fn settlement_transaction_uses_full_hash_witness() {
             payment_amount: 1_000,
             payment_hash: Hash256::from([8u8; 32]),
             expiry: 0,
-            local_key: Privkey::from(&[1u8; 32]),
+            local_key: Some(Privkey::from(&[1u8; 32])),
+            local_key_pubkey: None,
+            local_key_commitment_number: None,
             remote_key: Privkey::from(&[2u8; 32]).pubkey(),
         }],
     };
@@ -39,7 +41,7 @@ fn settlement_transaction_uses_full_hash_witness() {
             settlement_data_to_witness(
                 &settlement_data,
                 false,
-                Privkey::from(&[3u8; 32]),
+                Privkey::from(&[3u8; 32]).pubkey(),
                 Privkey::from(&[4u8; 32]).pubkey(),
             )
             .as_slice(),
@@ -88,7 +90,9 @@ fn full_hash_feature_serializes_full_payment_hash_in_tlc() {
         payment_amount: 1_000,
         payment_hash: Hash256::from([8u8; 32]),
         expiry: 0,
-        local_key: Privkey::from(&[1u8; 32]),
+        local_key: Some(Privkey::from(&[1u8; 32])),
+        local_key_pubkey: None,
+        local_key_commitment_number: None,
         remote_key: Privkey::from(&[2u8; 32]).pubkey(),
     };
     let full_hash = settlement_tlc_to_witness(&tlc, false);

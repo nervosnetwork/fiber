@@ -1,0 +1,22 @@
+meta {
+  name: verify external signer submitted a watchtower signature
+  type: http
+  seq: 25
+}
+
+get {
+  url: {{LSP_SDK_AGENT_URL}}/status
+  body: none
+  auth: none
+}
+
+assert {
+  res.status: eq 200
+}
+
+script:post-response {
+  const submissions = res.body.watchtower_submissions[bru.getVar("REMOTE_CHANNEL_ID")];
+  if (!submissions || !submissions.some(s => s.key_purpose.type === "Tlc")) {
+    throw new Error("TLC claim completed without an accepted SDK TLC signature");
+  }
+}

@@ -745,6 +745,10 @@ fn discover_command_defs(rpc_dir: &Path) -> Vec<CommandGroupDef> {
             }
         }
 
+        // The HTTP CLI only supports ordinary methods, not subscription-only traits.
+        if subcommands.is_empty() {
+            continue;
+        }
         groups.push(CommandGroupDef {
             group_name,
             about,

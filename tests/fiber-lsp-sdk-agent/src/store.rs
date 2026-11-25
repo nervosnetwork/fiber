@@ -1,0 +1,188 @@
+//! TEST-ONLY file-backed `SignerStore` for `fiber-lsp-sdk-agent`.
+//!
+//! Do NOT copy this implementation into production wallets: it has no cross-process
+//! file locking (`flock`) and rewrites a full snapshot file on every mutation.
+//! Production wallets should use a durable transactional store (e.g. SQLite WAL with
+//! `PRAGMA synchronous = FULL`, or IndexedDB + Web Locks API `navigator.locks`).
+
+use std::{
+    fs,
+    io::Write,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
+
+use anyhow::{Context, Result};
+use fiber_lsp_sdk::{MemoryStore, MemoryStoreError, SignerStore};
+
+const SNAPSHOT_FILE: &str = "snapshot.bin";
+
+/// `MemoryStore` persisted atomically after every mutation.
+pub struct FileSignerStore {
+    inner: MemoryStore,
+    snapshot_path: PathBuf,
+    persist_lock: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl Clone for FileSignerStore {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            snapshot_path: self.snapshot_path.clone(),
+            persist_lock: Arc::clone(&self.persist_lock),
+        }
+    }
+}
+
+impl FileSignerStore {
+    /// Load an existing snapshot or create an empty store.
+    pub fn open(dir: &Path) -> Result<Self> {
+        fs::create_dir_all(dir)
+            .with_context(|| format!("create signer store directory {}", dir.display()))?;
+        let snapshot_path = dir.join(SNAPSHOT_FILE);
+        let inner = if snapshot_path.exists() {
+            let bytes = fs::read(&snapshot_path)
+                .with_context(|| format!("read {}", snapshot_path.display()))?;
+            MemoryStore::from_snapshot(&bytes).context("decode signer snapshot")?
+        } else {
+            MemoryStore::default()
+        };
+        Ok(Self {
+            inner,
+            snapshot_path,
+            persist_lock: Arc::new(tokio::sync::Mutex::new(())),
+        })
+    }
+
+    fn persist(&self) -> Result<(), MemoryStoreError> {
+        let snapshot = self.inner.snapshot()?;
+        let tmp = self.snapshot_path.with_extension("bin.tmp");
+        let mut file = fs::File::create(&tmp).map_err(|error| {
+            MemoryStoreError::InvalidSnapshot(format!("create {}: {error}", tmp.display()))
+        })?;
+        file.write_all(&snapshot).map_err(|error| {
+            MemoryStoreError::InvalidSnapshot(format!("write {}: {error}", tmp.display()))
+        })?;
+        file.sync_all().map_err(|error| {
+            MemoryStoreError::InvalidSnapshot(format!("sync {}: {error}", tmp.display()))
+        })?;
+        fs::rename(&tmp, &self.snapshot_path).map_err(|error| {
+            MemoryStoreError::InvalidSnapshot(format!(
+                "rename {} -> {}: {error}",
+                tmp.display(),
+                self.snapshot_path.display()
+            ))
+        })?;
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl SignerStore for FileSignerStore {
+    type Error = MemoryStoreError;
+
+    async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, Self::Error> {
+        let _guard = self.persist_lock.lock().await;
+        self.inner.get(key).await
+    }
+
+    async fn insert_if_absent(&self, key: &[u8], value: &[u8]) -> Result<bool, Self::Error> {
+        let _guard = self.persist_lock.lock().await;
+        let inserted = self.inner.insert_if_absent(key, value).await?;
+        if inserted {
+            if let Err(err) = self.persist() {
+                let _ = self.inner.delete(key).await;
+                return Err(err);
+            }
+        }
+        Ok(inserted)
+    }
+
+    async fn compare_and_swap(
+        &self,
+        key: &[u8],
+        expected: Option<&[u8]>,
+        replacement: &[u8],
+    ) -> Result<bool, Self::Error> {
+        let _guard = self.persist_lock.lock().await;
+        let previous = self.inner.get(key).await?;
+        let swapped = self
+            .inner
+            .compare_and_swap(key, expected, replacement)
+            .await?;
+        if swapped {
+            if let Err(err) = self.persist() {
+                match previous {
+                    Some(old) => {
+                        let _ = self.inner.put(key, &old).await;
+                    }
+                    None => {
+                        let _ = self.inner.delete(key).await;
+                    }
+                }
+                return Err(err);
+            }
+        }
+        Ok(swapped)
+    }
+
+    async fn put(&self, key: &[u8], value: &[u8]) -> Result<(), Self::Error> {
+        let _guard = self.persist_lock.lock().await;
+        let previous = self.inner.get(key).await?;
+        self.inner.put(key, value).await?;
+        if let Err(err) = self.persist() {
+            match previous {
+                Some(old) => {
+                    let _ = self.inner.put(key, &old).await;
+                }
+                None => {
+                    let _ = self.inner.delete(key).await;
+                }
+            }
+            return Err(err);
+        }
+        Ok(())
+    }
+
+    async fn delete(&self, key: &[u8]) -> Result<(), Self::Error> {
+        let _guard = self.persist_lock.lock().await;
+        let previous = self.inner.get(key).await?;
+        self.inner.delete(key).await?;
+        if let Err(err) = self.persist() {
+            if let Some(old) = previous {
+                let _ = self.inner.put(key, &old).await;
+            }
+            return Err(err);
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn snapshot_survives_reopen() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = FileSignerStore::open(dir.path()).expect("open store");
+        store.put(b"key", b"value").await.expect("put");
+        drop(store);
+
+        let reopened = FileSignerStore::open(dir.path()).expect("reopen store");
+        assert_eq!(
+            reopened.get(b"key").await.expect("get"),
+            Some(b"value".to_vec())
+        );
+    }
+
+    #[test]
+    fn corrupt_snapshot_is_rejected() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(dir.path().join(SNAPSHOT_FILE), b"not a snapshot").expect("write corrupt file");
+        let error = FileSignerStore::open(dir.path())
+            .err()
+            .expect("corrupt snapshot");
+        assert!(error.to_string().contains("decode signer snapshot"));
+    }
+}

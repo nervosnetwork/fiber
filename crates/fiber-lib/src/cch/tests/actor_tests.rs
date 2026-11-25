@@ -24,7 +24,7 @@ use crate::fiber::{
     graph::NetworkGraphStateStore,
     network::SendPaymentResponse,
     payment::{PaymentSessionExt, SendPaymentCommand, SendPaymentDataBuilder},
-    NetworkActorCommand, NetworkActorMessage,
+    FiberActorCommand, FiberActorMessage, NetworkActorMessage,
 };
 use crate::invoice::{
     Attribute, CkbInvoice, CkbInvoiceStatus, Currency, InvoiceData, InvoiceError, PreimageStore,
@@ -501,8 +501,8 @@ impl Actor for MockNetworkActor {
         state: &mut Self::State,
     ) -> Result<(), ractor::ActorProcessingErr> {
         match message {
-            NetworkActorMessage::Command(cmd) => match cmd {
-                NetworkActorCommand::AddInvoice(invoice, _opt_hash, reply) => {
+            NetworkActorMessage::Fiber(FiberActorMessage::Command(cmd)) => match cmd {
+                FiberActorCommand::AddInvoice(invoice, _opt_hash, reply) => {
                     let delay = *state.add_invoice_delay.lock().unwrap();
                     let reconciliation = *state
                         .add_invoice_reconciliation_before_reply
@@ -554,7 +554,7 @@ impl Actor for MockNetworkActor {
                         let _ = reply.send(Ok(()));
                     }
                 }
-                NetworkActorCommand::GetInvoice(payment_hash, reply) => {
+                FiberActorCommand::GetInvoice(payment_hash, reply) => {
                     let result = state
                         .fiber_invoices
                         .lock()
@@ -564,7 +564,7 @@ impl Actor for MockNetworkActor {
                         .ok_or(InvoiceError::InvoiceNotFound);
                     let _ = reply.send(result);
                 }
-                NetworkActorCommand::SendPayment(cmd, reply) => {
+                FiberActorCommand::SendPayment(cmd, reply) => {
                     // Extract payment hash from invoice
                     let payment_hash = extract_payment_hash_from_command(&cmd);
 
@@ -620,6 +620,7 @@ impl Actor for MockNetworkActor {
                             .unwrap()
                             .as_secs(),
                         failed_error: None,
+                        failed_error_code: None,
                         custom_records: None,
                         fee: 0,
                         #[cfg(any(debug_assertions, test, feature = "bench"))]
@@ -627,7 +628,7 @@ impl Actor for MockNetworkActor {
                     };
                     let _ = reply.send(Ok(response));
                 }
-                NetworkActorCommand::GetPayment(payment_hash, reply) => {
+                FiberActorCommand::GetPayment(payment_hash, reply) => {
                     let result = state
                         .payment_store
                         .as_ref()
@@ -639,7 +640,7 @@ impl Actor for MockNetworkActor {
                         .ok_or_else(|| format!("Payment session not found: {payment_hash:?}"));
                     let _ = reply.send(result);
                 }
-                NetworkActorCommand::SettleInvoice(payment_hash, _preimage, reply) => {
+                FiberActorCommand::SettleInvoice(payment_hash, _preimage, reply) => {
                     if *state.settle_invoice_already_paid.lock().unwrap() {
                         let _ = reply.send(Err(SettleInvoiceError::InvoiceAlreadyPaid));
                         return Ok(());
@@ -656,7 +657,7 @@ impl Actor for MockNetworkActor {
                         failure_reason: None,
                     });
                 }
-                NetworkActorCommand::CancelInvoice(payment_hash, reply) => {
+                FiberActorCommand::CancelInvoice(payment_hash, reply) => {
                     state
                         .cancelled_fiber_invoices
                         .lock()
@@ -847,7 +848,7 @@ async fn assert_cch_real_mpp_outcome(stop_retry: bool, success: bool, restart: b
             payer.store.insert_attempt(attempt);
         }
         call!(payee.network_actor, |reply| {
-            NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+            NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
                     channel_id: held[0].channel_id,
                     command: ChannelCommand::RemoveTlc(
@@ -900,7 +901,7 @@ async fn assert_cch_real_mpp_outcome(stop_retry: bool, success: bool, restart: b
         fail_last
     };
     call!(payee.network_actor, |reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: held[1].channel_id,
                 command: ChannelCommand::RemoveTlc(
@@ -936,7 +937,7 @@ async fn assert_cch_real_mpp_outcome(stop_retry: bool, success: bool, restart: b
             .await;
         if !stop_retry {
             call!(payee.network_actor, |reply| {
-                NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+                NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
                     ChannelCommandWithId {
                         channel_id: held[0].channel_id,
                         command: ChannelCommand::RemoveTlc(

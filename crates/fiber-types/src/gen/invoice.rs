@@ -4279,6 +4279,239 @@ impl molecule::prelude::Builder for PayeePublicKeyBuilder {
     }
 }
 #[derive(Clone)]
+pub struct TrampolineRouteHint(molecule::bytes::Bytes);
+impl ::core::fmt::LowerHex for TrampolineRouteHint {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        use molecule::hex_string;
+        if f.alternate() {
+            write!(f, "0x")?;
+        }
+        write!(f, "{}", hex_string(self.as_slice()))
+    }
+}
+impl ::core::fmt::Debug for TrampolineRouteHint {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{}({:#x})", Self::NAME, self)
+    }
+}
+impl ::core::fmt::Display for TrampolineRouteHint {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{} {{ ", Self::NAME)?;
+        write!(f, "{}: {}", "node_id", self.node_id())?;
+        let extra_count = self.count_extra_fields();
+        if extra_count != 0 {
+            write!(f, ", .. ({} fields)", extra_count)?;
+        }
+        write!(f, " }}")
+    }
+}
+impl ::core::default::Default for TrampolineRouteHint {
+    fn default() -> Self {
+        let v = molecule::bytes::Bytes::from_static(&Self::DEFAULT_VALUE);
+        TrampolineRouteHint::new_unchecked(v)
+    }
+}
+impl TrampolineRouteHint {
+    const DEFAULT_VALUE: [u8; 12] = [12, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0];
+    pub const FIELD_COUNT: usize = 1;
+    pub fn total_size(&self) -> usize {
+        molecule::unpack_number(self.as_slice()) as usize
+    }
+    pub fn field_count(&self) -> usize {
+        if self.total_size() == molecule::NUMBER_SIZE {
+            0
+        } else {
+            (molecule::unpack_number(&self.as_slice()[molecule::NUMBER_SIZE..]) as usize / 4) - 1
+        }
+    }
+    pub fn count_extra_fields(&self) -> usize {
+        self.field_count() - Self::FIELD_COUNT
+    }
+    pub fn has_extra_fields(&self) -> bool {
+        Self::FIELD_COUNT != self.field_count()
+    }
+    pub fn node_id(&self) -> Bytes {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[4..]) as usize;
+        if self.has_extra_fields() {
+            let end = molecule::unpack_number(&slice[8..]) as usize;
+            Bytes::new_unchecked(self.0.slice(start..end))
+        } else {
+            Bytes::new_unchecked(self.0.slice(start..))
+        }
+    }
+    pub fn as_reader<'r>(&'r self) -> TrampolineRouteHintReader<'r> {
+        TrampolineRouteHintReader::new_unchecked(self.as_slice())
+    }
+}
+impl molecule::prelude::Entity for TrampolineRouteHint {
+    type Builder = TrampolineRouteHintBuilder;
+    const NAME: &'static str = "TrampolineRouteHint";
+    fn new_unchecked(data: molecule::bytes::Bytes) -> Self {
+        TrampolineRouteHint(data)
+    }
+    fn as_bytes(&self) -> molecule::bytes::Bytes {
+        self.0.clone()
+    }
+    fn as_slice(&self) -> &[u8] {
+        &self.0[..]
+    }
+    fn from_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
+        TrampolineRouteHintReader::from_slice(slice).map(|reader| reader.to_entity())
+    }
+    fn from_compatible_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
+        TrampolineRouteHintReader::from_compatible_slice(slice).map(|reader| reader.to_entity())
+    }
+    fn new_builder() -> Self::Builder {
+        ::core::default::Default::default()
+    }
+    fn as_builder(self) -> Self::Builder {
+        Self::new_builder().node_id(self.node_id())
+    }
+}
+#[derive(Clone, Copy)]
+pub struct TrampolineRouteHintReader<'r>(&'r [u8]);
+impl<'r> ::core::fmt::LowerHex for TrampolineRouteHintReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        use molecule::hex_string;
+        if f.alternate() {
+            write!(f, "0x")?;
+        }
+        write!(f, "{}", hex_string(self.as_slice()))
+    }
+}
+impl<'r> ::core::fmt::Debug for TrampolineRouteHintReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{}({:#x})", Self::NAME, self)
+    }
+}
+impl<'r> ::core::fmt::Display for TrampolineRouteHintReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{} {{ ", Self::NAME)?;
+        write!(f, "{}: {}", "node_id", self.node_id())?;
+        let extra_count = self.count_extra_fields();
+        if extra_count != 0 {
+            write!(f, ", .. ({} fields)", extra_count)?;
+        }
+        write!(f, " }}")
+    }
+}
+impl<'r> TrampolineRouteHintReader<'r> {
+    pub const FIELD_COUNT: usize = 1;
+    pub fn total_size(&self) -> usize {
+        molecule::unpack_number(self.as_slice()) as usize
+    }
+    pub fn field_count(&self) -> usize {
+        if self.total_size() == molecule::NUMBER_SIZE {
+            0
+        } else {
+            (molecule::unpack_number(&self.as_slice()[molecule::NUMBER_SIZE..]) as usize / 4) - 1
+        }
+    }
+    pub fn count_extra_fields(&self) -> usize {
+        self.field_count() - Self::FIELD_COUNT
+    }
+    pub fn has_extra_fields(&self) -> bool {
+        Self::FIELD_COUNT != self.field_count()
+    }
+    pub fn node_id(&self) -> BytesReader<'r> {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[4..]) as usize;
+        if self.has_extra_fields() {
+            let end = molecule::unpack_number(&slice[8..]) as usize;
+            BytesReader::new_unchecked(&self.as_slice()[start..end])
+        } else {
+            BytesReader::new_unchecked(&self.as_slice()[start..])
+        }
+    }
+}
+impl<'r> molecule::prelude::Reader<'r> for TrampolineRouteHintReader<'r> {
+    type Entity = TrampolineRouteHint;
+    const NAME: &'static str = "TrampolineRouteHintReader";
+    fn to_entity(&self) -> Self::Entity {
+        Self::Entity::new_unchecked(self.as_slice().to_owned().into())
+    }
+    fn new_unchecked(slice: &'r [u8]) -> Self {
+        TrampolineRouteHintReader(slice)
+    }
+    fn as_slice(&self) -> &'r [u8] {
+        self.0
+    }
+    fn verify(slice: &[u8], compatible: bool) -> molecule::error::VerificationResult<()> {
+        use molecule::verification_error as ve;
+        let slice_len = slice.len();
+        if slice_len < molecule::NUMBER_SIZE {
+            return ve!(Self, HeaderIsBroken, molecule::NUMBER_SIZE, slice_len);
+        }
+        let total_size = molecule::unpack_number(slice) as usize;
+        if slice_len != total_size {
+            return ve!(Self, TotalSizeNotMatch, total_size, slice_len);
+        }
+        if slice_len < molecule::NUMBER_SIZE * 2 {
+            return ve!(Self, HeaderIsBroken, molecule::NUMBER_SIZE * 2, slice_len);
+        }
+        let offset_first = molecule::unpack_number(&slice[molecule::NUMBER_SIZE..]) as usize;
+        if offset_first % molecule::NUMBER_SIZE != 0 || offset_first < molecule::NUMBER_SIZE * 2 {
+            return ve!(Self, OffsetsNotMatch);
+        }
+        if slice_len < offset_first {
+            return ve!(Self, HeaderIsBroken, offset_first, slice_len);
+        }
+        let field_count = offset_first / molecule::NUMBER_SIZE - 1;
+        if field_count < Self::FIELD_COUNT {
+            return ve!(Self, FieldCountNotMatch, Self::FIELD_COUNT, field_count);
+        } else if !compatible && field_count > Self::FIELD_COUNT {
+            return ve!(Self, FieldCountNotMatch, Self::FIELD_COUNT, field_count);
+        };
+        let mut offsets: Vec<usize> = slice[molecule::NUMBER_SIZE..offset_first]
+            .chunks_exact(molecule::NUMBER_SIZE)
+            .map(|x| molecule::unpack_number(x) as usize)
+            .collect();
+        offsets.push(total_size);
+        if offsets.windows(2).any(|i| i[0] > i[1]) {
+            return ve!(Self, OffsetsNotMatch);
+        }
+        BytesReader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
+        Ok(())
+    }
+}
+#[derive(Clone, Debug, Default)]
+pub struct TrampolineRouteHintBuilder {
+    pub(crate) node_id: Bytes,
+}
+impl TrampolineRouteHintBuilder {
+    pub const FIELD_COUNT: usize = 1;
+    pub fn node_id(mut self, v: Bytes) -> Self {
+        self.node_id = v;
+        self
+    }
+}
+impl molecule::prelude::Builder for TrampolineRouteHintBuilder {
+    type Entity = TrampolineRouteHint;
+    const NAME: &'static str = "TrampolineRouteHintBuilder";
+    fn expected_length(&self) -> usize {
+        molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1) + self.node_id.as_slice().len()
+    }
+    fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
+        let mut total_size = molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1);
+        let mut offsets = Vec::with_capacity(Self::FIELD_COUNT);
+        offsets.push(total_size);
+        total_size += self.node_id.as_slice().len();
+        writer.write_all(&molecule::pack_number(total_size as molecule::Number))?;
+        for offset in offsets.into_iter() {
+            writer.write_all(&molecule::pack_number(offset as molecule::Number))?;
+        }
+        writer.write_all(self.node_id.as_slice())?;
+        Ok(())
+    }
+    fn build(&self) -> Self::Entity {
+        let mut inner = Vec::with_capacity(self.expected_length());
+        self.write(&mut inner)
+            .unwrap_or_else(|_| panic!("{} build should be ok", Self::NAME));
+        TrampolineRouteHint::new_unchecked(inner.into())
+    }
+}
+#[derive(Clone)]
 pub struct HashAlgorithm(molecule::bytes::Bytes);
 impl ::core::fmt::LowerHex for HashAlgorithm {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
@@ -4608,7 +4841,7 @@ impl ::core::default::Default for InvoiceAttr {
 }
 impl InvoiceAttr {
     const DEFAULT_VALUE: [u8; 12] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-    pub const ITEMS_COUNT: usize = 10;
+    pub const ITEMS_COUNT: usize = 11;
     pub fn item_id(&self) -> molecule::Number {
         molecule::unpack_number(self.as_slice())
     }
@@ -4625,6 +4858,7 @@ impl InvoiceAttr {
             7 => PayeePublicKey::new_unchecked(inner).into(),
             8 => HashAlgorithm::new_unchecked(inner).into(),
             9 => PaymentSecret::new_unchecked(inner).into(),
+            10 => TrampolineRouteHint::new_unchecked(inner).into(),
             _ => panic!("{}: invalid data", Self::NAME),
         }
     }
@@ -4681,7 +4915,7 @@ impl<'r> ::core::fmt::Display for InvoiceAttrReader<'r> {
     }
 }
 impl<'r> InvoiceAttrReader<'r> {
-    pub const ITEMS_COUNT: usize = 10;
+    pub const ITEMS_COUNT: usize = 11;
     pub fn item_id(&self) -> molecule::Number {
         molecule::unpack_number(self.as_slice())
     }
@@ -4698,6 +4932,7 @@ impl<'r> InvoiceAttrReader<'r> {
             7 => PayeePublicKeyReader::new_unchecked(inner).into(),
             8 => HashAlgorithmReader::new_unchecked(inner).into(),
             9 => PaymentSecretReader::new_unchecked(inner).into(),
+            10 => TrampolineRouteHintReader::new_unchecked(inner).into(),
             _ => panic!("{}: invalid data", Self::NAME),
         }
     }
@@ -4733,6 +4968,7 @@ impl<'r> molecule::prelude::Reader<'r> for InvoiceAttrReader<'r> {
             7 => PayeePublicKeyReader::verify(inner_slice, compatible),
             8 => HashAlgorithmReader::verify(inner_slice, compatible),
             9 => PaymentSecretReader::verify(inner_slice, compatible),
+            10 => TrampolineRouteHintReader::verify(inner_slice, compatible),
             _ => ve!(Self, UnknownItem, Self::ITEMS_COUNT, item_id),
         }?;
         Ok(())
@@ -4741,7 +4977,7 @@ impl<'r> molecule::prelude::Reader<'r> for InvoiceAttrReader<'r> {
 #[derive(Clone, Debug, Default)]
 pub struct InvoiceAttrBuilder(pub(crate) InvoiceAttrUnion);
 impl InvoiceAttrBuilder {
-    pub const ITEMS_COUNT: usize = 10;
+    pub const ITEMS_COUNT: usize = 11;
     pub fn set<I>(mut self, v: I) -> Self
     where
         I: ::core::convert::Into<InvoiceAttrUnion>,
@@ -4779,6 +5015,7 @@ pub enum InvoiceAttrUnion {
     PayeePublicKey(PayeePublicKey),
     HashAlgorithm(HashAlgorithm),
     PaymentSecret(PaymentSecret),
+    TrampolineRouteHint(TrampolineRouteHint),
 }
 #[derive(Debug, Clone, Copy)]
 pub enum InvoiceAttrUnionReader<'r> {
@@ -4792,6 +5029,7 @@ pub enum InvoiceAttrUnionReader<'r> {
     PayeePublicKey(PayeePublicKeyReader<'r>),
     HashAlgorithm(HashAlgorithmReader<'r>),
     PaymentSecret(PaymentSecretReader<'r>),
+    TrampolineRouteHint(TrampolineRouteHintReader<'r>),
 }
 impl ::core::default::Default for InvoiceAttrUnion {
     fn default() -> Self {
@@ -4837,6 +5075,9 @@ impl ::core::fmt::Display for InvoiceAttrUnion {
             InvoiceAttrUnion::PaymentSecret(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, PaymentSecret::NAME, item)
             }
+            InvoiceAttrUnion::TrampolineRouteHint(ref item) => {
+                write!(f, "{}::{}({})", Self::NAME, TrampolineRouteHint::NAME, item)
+            }
         }
     }
 }
@@ -4879,6 +5120,9 @@ impl<'r> ::core::fmt::Display for InvoiceAttrUnionReader<'r> {
             InvoiceAttrUnionReader::PaymentSecret(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, PaymentSecret::NAME, item)
             }
+            InvoiceAttrUnionReader::TrampolineRouteHint(ref item) => {
+                write!(f, "{}::{}({})", Self::NAME, TrampolineRouteHint::NAME, item)
+            }
         }
     }
 }
@@ -4895,6 +5139,7 @@ impl InvoiceAttrUnion {
             InvoiceAttrUnion::PayeePublicKey(ref item) => write!(f, "{}", item),
             InvoiceAttrUnion::HashAlgorithm(ref item) => write!(f, "{}", item),
             InvoiceAttrUnion::PaymentSecret(ref item) => write!(f, "{}", item),
+            InvoiceAttrUnion::TrampolineRouteHint(ref item) => write!(f, "{}", item),
         }
     }
 }
@@ -4911,6 +5156,7 @@ impl<'r> InvoiceAttrUnionReader<'r> {
             InvoiceAttrUnionReader::PayeePublicKey(ref item) => write!(f, "{}", item),
             InvoiceAttrUnionReader::HashAlgorithm(ref item) => write!(f, "{}", item),
             InvoiceAttrUnionReader::PaymentSecret(ref item) => write!(f, "{}", item),
+            InvoiceAttrUnionReader::TrampolineRouteHint(ref item) => write!(f, "{}", item),
         }
     }
 }
@@ -4962,6 +5208,11 @@ impl ::core::convert::From<HashAlgorithm> for InvoiceAttrUnion {
 impl ::core::convert::From<PaymentSecret> for InvoiceAttrUnion {
     fn from(item: PaymentSecret) -> Self {
         InvoiceAttrUnion::PaymentSecret(item)
+    }
+}
+impl ::core::convert::From<TrampolineRouteHint> for InvoiceAttrUnion {
+    fn from(item: TrampolineRouteHint) -> Self {
+        InvoiceAttrUnion::TrampolineRouteHint(item)
     }
 }
 impl<'r> ::core::convert::From<ExpiryTimeReader<'r>> for InvoiceAttrUnionReader<'r> {
@@ -5016,6 +5267,11 @@ impl<'r> ::core::convert::From<PaymentSecretReader<'r>> for InvoiceAttrUnionRead
         InvoiceAttrUnionReader::PaymentSecret(item)
     }
 }
+impl<'r> ::core::convert::From<TrampolineRouteHintReader<'r>> for InvoiceAttrUnionReader<'r> {
+    fn from(item: TrampolineRouteHintReader<'r>) -> Self {
+        InvoiceAttrUnionReader::TrampolineRouteHint(item)
+    }
+}
 impl InvoiceAttrUnion {
     pub const NAME: &'static str = "InvoiceAttrUnion";
     pub fn as_bytes(&self) -> molecule::bytes::Bytes {
@@ -5030,6 +5286,7 @@ impl InvoiceAttrUnion {
             InvoiceAttrUnion::PayeePublicKey(item) => item.as_bytes(),
             InvoiceAttrUnion::HashAlgorithm(item) => item.as_bytes(),
             InvoiceAttrUnion::PaymentSecret(item) => item.as_bytes(),
+            InvoiceAttrUnion::TrampolineRouteHint(item) => item.as_bytes(),
         }
     }
     pub fn as_slice(&self) -> &[u8] {
@@ -5044,6 +5301,7 @@ impl InvoiceAttrUnion {
             InvoiceAttrUnion::PayeePublicKey(item) => item.as_slice(),
             InvoiceAttrUnion::HashAlgorithm(item) => item.as_slice(),
             InvoiceAttrUnion::PaymentSecret(item) => item.as_slice(),
+            InvoiceAttrUnion::TrampolineRouteHint(item) => item.as_slice(),
         }
     }
     pub fn item_id(&self) -> molecule::Number {
@@ -5058,6 +5316,7 @@ impl InvoiceAttrUnion {
             InvoiceAttrUnion::PayeePublicKey(_) => 7,
             InvoiceAttrUnion::HashAlgorithm(_) => 8,
             InvoiceAttrUnion::PaymentSecret(_) => 9,
+            InvoiceAttrUnion::TrampolineRouteHint(_) => 10,
         }
     }
     pub fn item_name(&self) -> &str {
@@ -5072,6 +5331,7 @@ impl InvoiceAttrUnion {
             InvoiceAttrUnion::PayeePublicKey(_) => "PayeePublicKey",
             InvoiceAttrUnion::HashAlgorithm(_) => "HashAlgorithm",
             InvoiceAttrUnion::PaymentSecret(_) => "PaymentSecret",
+            InvoiceAttrUnion::TrampolineRouteHint(_) => "TrampolineRouteHint",
         }
     }
     pub fn as_reader<'r>(&'r self) -> InvoiceAttrUnionReader<'r> {
@@ -5086,6 +5346,7 @@ impl InvoiceAttrUnion {
             InvoiceAttrUnion::PayeePublicKey(item) => item.as_reader().into(),
             InvoiceAttrUnion::HashAlgorithm(item) => item.as_reader().into(),
             InvoiceAttrUnion::PaymentSecret(item) => item.as_reader().into(),
+            InvoiceAttrUnion::TrampolineRouteHint(item) => item.as_reader().into(),
         }
     }
 }
@@ -5103,6 +5364,7 @@ impl<'r> InvoiceAttrUnionReader<'r> {
             InvoiceAttrUnionReader::PayeePublicKey(item) => item.as_slice(),
             InvoiceAttrUnionReader::HashAlgorithm(item) => item.as_slice(),
             InvoiceAttrUnionReader::PaymentSecret(item) => item.as_slice(),
+            InvoiceAttrUnionReader::TrampolineRouteHint(item) => item.as_slice(),
         }
     }
     pub fn item_id(&self) -> molecule::Number {
@@ -5117,6 +5379,7 @@ impl<'r> InvoiceAttrUnionReader<'r> {
             InvoiceAttrUnionReader::PayeePublicKey(_) => 7,
             InvoiceAttrUnionReader::HashAlgorithm(_) => 8,
             InvoiceAttrUnionReader::PaymentSecret(_) => 9,
+            InvoiceAttrUnionReader::TrampolineRouteHint(_) => 10,
         }
     }
     pub fn item_name(&self) -> &str {
@@ -5131,6 +5394,7 @@ impl<'r> InvoiceAttrUnionReader<'r> {
             InvoiceAttrUnionReader::PayeePublicKey(_) => "PayeePublicKey",
             InvoiceAttrUnionReader::HashAlgorithm(_) => "HashAlgorithm",
             InvoiceAttrUnionReader::PaymentSecret(_) => "PaymentSecret",
+            InvoiceAttrUnionReader::TrampolineRouteHint(_) => "TrampolineRouteHint",
         }
     }
 }
@@ -5181,6 +5445,11 @@ impl From<HashAlgorithm> for InvoiceAttr {
 }
 impl From<PaymentSecret> for InvoiceAttr {
     fn from(value: PaymentSecret) -> Self {
+        Self::new_builder().set(value).build()
+    }
+}
+impl From<TrampolineRouteHint> for InvoiceAttr {
+    fn from(value: TrampolineRouteHint) -> Self {
         Self::new_builder().set(value).build()
     }
 }

@@ -1,13 +1,10 @@
 use fiber_store::backend::StorageBackend;
 use fiber_store::db_migrate::DbMigrate;
-use fiber_store::migrations::decode_as_new;
-use fiber_types_0100::ChannelActorData as OldChannelActorData;
-
-#[path = "../../../../fiber-store/src/migrations/v2_only/test_utils.rs"]
-mod migration_fixtures;
 use fiber_store::migration::{
     MigrateError, Migration, Migrations, INIT_DB_VERSION, LATEST_DB_VERSION, MIGRATION_VERSION_KEY,
 };
+use fiber_store::migrations::decode_as_new;
+use fiber_types_0100::ChannelActorData as OldChannelActorData;
 use std::cmp::Ordering;
 use std::sync::{Arc, RwLock};
 
@@ -22,6 +19,95 @@ fn gen_path() -> std::path::PathBuf {
 fn gen_store() -> fiber_store::Store {
     let path = gen_path();
     fiber_store::Store::open_db(&path).unwrap()
+}
+
+// This real-channel fixture has no unsettled TLCs in its signed snapshots. The
+// store migration's own tests cover the released wire layout with pending TLCs.
+fn released_v2_without_pending_tlcs(
+    channel: fiber_types::ChannelActorData,
+) -> (
+    OldChannelActorData,
+    Option<(u32, fiber_types::ChannelSessionV2)>,
+) {
+    const RELEASED_SESSION_MARKER: u32 = 0x56320001;
+    let session = channel.session.clone();
+    assert!(session
+        .outgoing
+        .as_ref()
+        .is_none_or(|outgoing| outgoing.settlement.tlcs.is_empty()));
+    assert!(session
+        .incoming
+        .as_ref()
+        .is_none_or(|incoming| incoming.settlement.tlcs.is_empty()));
+    assert!(session
+        .pending_incoming
+        .as_ref()
+        .is_none_or(|incoming| incoming.settlement.tlcs.is_empty()));
+    assert!(session
+        .revocation_effect
+        .as_ref()
+        .is_none_or(|(_, settlement)| settlement.tlcs.is_empty()));
+    assert!(session
+        .bootstrap_settlement
+        .as_ref()
+        .is_none_or(|settlement| settlement.tlcs.is_empty()));
+    let latest_commitment_transaction = channel.latest_commitment_transaction();
+    let old = OldChannelActorData {
+        state: decode_as_new(channel.state).unwrap(),
+        public_channel_info: decode_as_new(channel.public_channel_info).unwrap(),
+        local_tlc_info: decode_as_new(channel.local_tlc_info).unwrap(),
+        remote_tlc_info: decode_as_new(channel.remote_tlc_info).unwrap(),
+        local_pubkey: decode_as_new(channel.local_pubkey).unwrap(),
+        remote_pubkey: decode_as_new(channel.remote_pubkey).unwrap(),
+        id: decode_as_new(channel.id).unwrap(),
+        funding_tx: channel.funding_tx,
+        funding_tx_confirmed_at: channel.funding_tx_confirmed_at,
+        funding_udt_type_script: channel.funding_udt_type_script,
+        latest_commitment_transaction,
+        is_acceptor: channel.is_acceptor,
+        is_one_way: channel.is_one_way,
+        to_local_amount: channel.to_local_amount,
+        to_remote_amount: channel.to_remote_amount,
+        local_reserved_ckb_amount: channel.local_reserved_ckb_amount,
+        remote_reserved_ckb_amount: channel.remote_reserved_ckb_amount,
+        commitment_fee_rate: channel.commitment_fee_rate,
+        commitment_delay_epoch: channel.commitment_delay_epoch,
+        funding_fee_rate: channel.funding_fee_rate,
+        signer: decode_as_new(channel.signer.expect("released channel has a local signer"))
+            .unwrap(),
+        local_channel_public_keys: decode_as_new(channel.local_channel_public_keys).unwrap(),
+        commitment_numbers: decode_as_new(channel.commitment_numbers).unwrap(),
+        local_constraints: decode_as_new(channel.local_constraints).unwrap(),
+        remote_constraints: decode_as_new(channel.remote_constraints).unwrap(),
+        tlc_state: serde_json::from_value(serde_json::to_value(channel.tlc_state).unwrap())
+            .unwrap(),
+        retryable_tlc_operations: serde_json::from_value(
+            serde_json::to_value(channel.retryable_tlc_operations).unwrap(),
+        )
+        .unwrap(),
+        waiting_forward_tlc_tasks: decode_as_new(channel.waiting_forward_tlc_tasks).unwrap(),
+        remote_shutdown_script: channel.remote_shutdown_script,
+        local_shutdown_script: channel.local_shutdown_script,
+        remote_commitment_points: decode_as_new(channel.remote_commitment_points).unwrap(),
+        remote_channel_public_keys: decode_as_new(channel.remote_channel_public_keys).unwrap(),
+        local_shutdown_info: decode_as_new(channel.local_shutdown_info).unwrap(),
+        remote_shutdown_info: decode_as_new(channel.remote_shutdown_info).unwrap(),
+        shutdown_transaction_hash: channel.shutdown_transaction_hash,
+        reestablishing: channel.reestablishing,
+        created_at: channel.created_at,
+        pending_replay_updates: decode_as_new(channel.pending_replay_updates).unwrap(),
+        last_was_revoke: channel.last_was_revoke,
+        connectivity_state: decode_as_new(channel.connectivity_state).unwrap(),
+        external_funding: decode_as_new(channel.external_funding).unwrap(),
+        last_committed_remote_nonce: None,
+        remote_revocation_nonce_for_verify: None,
+        remote_revocation_nonce_for_send: None,
+        remote_revocation_nonce_for_next: None,
+        last_revoke_ack_msg: None,
+        commitment_contract_features:
+            fiber_types_0100::CommitmentContractFeatures::ONCHAIN_FULL_PAYMENT_HASH,
+    };
+    (old, Some((RELEASED_SESSION_MARKER, session)))
 }
 
 #[test]
@@ -256,10 +342,45 @@ fn test_upgrade_rejects_other_channel_record_suffixes_without_writes() {
     use crate::store::sample::StoreSample;
     use fiber_types::schema::{CHANNEL_OPEN_RECORD_PREFIX, WATCHTOWER_CHANNEL_PREFIX};
 
+    fn to_old_settlement(s: fiber_types::SettlementData) -> fiber_types_0100::SettlementData {
+        fiber_types_0100::SettlementData {
+            local_amount: s.local_amount,
+            remote_amount: s.remote_amount,
+            tlcs: s
+                .tlcs
+                .into_iter()
+                .map(|tlc| fiber_types_0100::SettlementTlc {
+                    tlc_id: decode_as_new(tlc.tlc_id).unwrap(),
+                    hash_algorithm: decode_as_new(tlc.hash_algorithm).unwrap(),
+                    payment_amount: tlc.payment_amount,
+                    payment_hash: decode_as_new(tlc.payment_hash).unwrap(),
+                    expiry: tlc.expiry,
+                    local_key: decode_as_new(tlc.local_key.expect("local key")).unwrap(),
+                    remote_key: decode_as_new(tlc.remote_key).unwrap(),
+                })
+                .collect(),
+        }
+    }
+
     // The keys carry the record's own channel id, so a rejection can only come from the appended
     // byte rather than from a malformed key.
     let open = fiber_types::ChannelOpenRecord::samples(42)[0].clone();
-    let watch = fiber_types::ChannelData::samples(42)[0].clone();
+    let new_watch = fiber_types::ChannelData::samples(42)[0].clone();
+    let watch = fiber_types_0100::ChannelData {
+        channel_id: decode_as_new(new_watch.channel_id).unwrap(),
+        funding_udt_type_script: new_watch.funding_udt_type_script,
+        local_settlement_key: decode_as_new(new_watch.local_settlement_key.expect("local key"))
+            .unwrap(),
+        remote_settlement_key: decode_as_new(new_watch.remote_settlement_key).unwrap(),
+        local_funding_pubkey: decode_as_new(new_watch.local_funding_pubkey).unwrap(),
+        remote_funding_pubkey: decode_as_new(new_watch.remote_funding_pubkey).unwrap(),
+        remote_settlement_data: to_old_settlement(new_watch.remote_settlement_data),
+        pending_remote_settlement_data: to_old_settlement(new_watch.pending_remote_settlement_data),
+        local_settlement_data: to_old_settlement(new_watch.local_settlement_data),
+        revocation_data: decode_as_new(new_watch.revocation_data).unwrap(),
+        commitment_contract_features:
+            fiber_types_0100::CommitmentContractFeatures::ONCHAIN_FULL_PAYMENT_HASH,
+    };
     let mut watch_key = vec![WATCHTOWER_CHANNEL_PREFIX];
     watch_key.extend_from_slice(&[7u8; 33]);
     watch_key.extend_from_slice(watch.channel_id.as_ref());
@@ -405,9 +526,11 @@ fn test_v2_current_epoch_rejects_bootstrap_session_as_closed_channel() {
 #[test]
 fn test_check_validate_accepts_released_records() {
     use fiber_types::sample::StoreSample;
-    // A released database carries the legacy feature byte (`0x00`) in its opening records, which
-    // the current types reject: read-only validation must leave those to the migration instead of
-    // failing on a database that can upgrade. The watchtower records share the same gate.
+    // A released database carries the legacy feature byte (`0x00`) in its opening records, the
+    // released payment-session layout (without `upstream_tlc_key`), and released superseded
+    // watchtower settlement snapshots (with untagged `SettlementTlc::local_key`), all of which the
+    // current types reject: read-only validation must leave those to the migration instead of
+    // failing on a database that can upgrade.
     let channel = fiber_types::ChannelActorData::samples(41).remove(0);
     let old_open = fiber_types_0100::ChannelOpenRecord {
         channel_id: decode_as_new(channel.id).unwrap(),
@@ -425,11 +548,82 @@ fn test_check_validate_accepts_released_records() {
         old_open.channel_id.as_ref(),
     ]
     .concat();
+
+    let payment_hash = fiber_types_0100::Hash256::from([0x42; 32]);
+    let old_session = fiber_types_0100::PaymentSession {
+        request: fiber_types_0100::SendPaymentData {
+            target_pubkey: fiber_types_0100::Privkey::from(&[0x04; 32]).pubkey(),
+            amount: 123_456,
+            payment_hash,
+            invoice: None,
+            final_tlc_expiry_delta: 100,
+            tlc_expiry_limit: 1000,
+            timeout: None,
+            max_fee_amount: Some(1_000),
+            max_parts: None,
+            keysend: false,
+            udt_type_script: None,
+            preimage: None,
+            custom_records: None,
+            allow_self_payment: false,
+            hop_hints: vec![],
+            router: vec![],
+            allow_mpp: false,
+            dry_run: false,
+            trampoline_hops: None,
+            trampoline_context: None,
+        },
+        last_error: Some("released error".to_owned()),
+        last_error_code: None,
+        try_limit: 3,
+        status: fiber_types_0100::PaymentStatus::Failed,
+        created_at: 100,
+        last_updated_at: 200,
+        cached_attempts: vec![],
+    };
+    let old_session_bytes = bincode::serialize(&old_session).unwrap();
+    assert!(
+        bincode::deserialize::<fiber_types::PaymentSession>(&old_session_bytes).is_err(),
+        "released PaymentSession bytes must fail deserialization against current PaymentSession"
+    );
+    let session_key = [
+        &[fiber_types::schema::PAYMENT_SESSION_PREFIX],
+        payment_hash.as_ref(),
+    ]
+    .concat();
+
+    let old_superseded = vec![fiber_types_0100::SettlementData {
+        local_amount: 500_000,
+        remote_amount: 750_000,
+        tlcs: vec![fiber_types_0100::SettlementTlc {
+            tlc_id: fiber_types_0100::TLCId::Offered(7),
+            hash_algorithm: fiber_types_0100::HashAlgorithm::CkbHash,
+            payment_amount: 88_000,
+            payment_hash: fiber_types_0100::Hash256::from([0xab; 32]),
+            expiry: 1_700_000_000_000,
+            // Leading 0x02 byte is an invalid Option tag in head SettlementTlc.
+            local_key: fiber_types_0100::Privkey::from(&[0x02u8; 32]),
+            remote_key: fiber_types_0100::Privkey::from(&[0x03u8; 32]).pubkey(),
+        }],
+    }];
+    let old_superseded_bytes = bincode::serialize(&old_superseded).unwrap();
+    assert!(
+        bincode::deserialize::<Vec<fiber_types::SettlementData>>(&old_superseded_bytes).is_err(),
+        "released superseded settlement bytes must fail deserialization against current SettlementData"
+    );
+    let superseded_key = [
+        &[fiber_types::schema::WATCHTOWER_SUPERSEDED_SETTLEMENT_PREFIX],
+        channel.id.as_ref(),
+    ]
+    .concat();
+
     let path = gen_path();
     {
         let store = fiber_store::Store::open_db(&path).unwrap();
         store.put(MIGRATION_VERSION_KEY, INIT_DB_VERSION);
         store.put(open_key, bincode::serialize(&old_open).unwrap());
+        store.put(session_key, old_session_bytes);
+        store.put(superseded_key, old_superseded_bytes);
     }
     crate::store::check_validate(&path)
         .expect("released records must not block read-only validation");
@@ -452,7 +646,7 @@ async fn test_upgrade_retains_real_v2_signed_history_and_remains_valid() {
     assert!(channel.session.outgoing.is_some());
     assert!(channel.session.incoming.is_some());
     let original = bincode::serialize(&channel.core).unwrap();
-    let old = migration_fixtures::released_v2(channel.core.clone());
+    let old = released_v2_without_pending_tlcs(channel.core.clone());
     let key = [&[0], id.as_ref()].concat();
     let path = gen_path();
     {
@@ -478,4 +672,90 @@ async fn test_upgrade_retains_real_v2_signed_history_and_remains_valid() {
     );
     drop(store);
     crate::store::check_validate(&path).expect("upgraded signed history remains valid");
+}
+
+#[test]
+fn test_upgrade_migrates_released_shutdown_settlement_record_with_tlc() {
+    use crate::fiber::channel::ChannelActorStateStore;
+    use fiber_types::schema::CHANNEL_SHUTDOWN_SETTLEMENT_PREFIX;
+
+    let channel_id = fiber_types::Hash256::from([0x91; 32]);
+    let raw_key = [0x02u8; 32];
+    let old_local_key = fiber_types_0100::Privkey::from(&raw_key);
+    let expected_local_key = fiber_types::Privkey::from(&raw_key);
+    let old_remote_key = fiber_types_0100::Privkey::from(&[0x03u8; 32]).pubkey();
+    let expected_remote_key: fiber_types::Pubkey = decode_as_new(old_remote_key).unwrap();
+
+    let old_record = fiber_types_0100::ShutdownSettlementRecord {
+        shutdown_tx_hash: ckb_types::H256::from([0xab; 32]),
+        for_remote: true,
+        commitment_number: 14,
+        settlement_data: fiber_types_0100::SettlementData {
+            local_amount: 500_000,
+            remote_amount: 750_000,
+            tlcs: vec![fiber_types_0100::SettlementTlc {
+                tlc_id: fiber_types_0100::TLCId::Offered(9),
+                hash_algorithm: fiber_types_0100::HashAlgorithm::CkbHash,
+                payment_amount: 88_000,
+                payment_hash: fiber_types_0100::Hash256::from([0xcd; 32]),
+                expiry: 1_700_000_012_345,
+                local_key: old_local_key,
+                remote_key: old_remote_key,
+            }],
+        },
+    };
+    let old_bytes = bincode::serialize(&old_record).unwrap();
+    // Prove the unmigrated v0.10.1 bytes silently fail deserialization in Store::get_shutdown_settlement_record.
+    assert!(
+        bincode::deserialize::<fiber_types::ShutdownSettlementRecord>(&old_bytes).is_err(),
+        "unmigrated v0.10.1 prefix-49 record with 0x02-prefixed TLC key must not deserialize as head"
+    );
+
+    let key = [&[CHANNEL_SHUTDOWN_SETTLEMENT_PREFIX], channel_id.as_ref()].concat();
+    let path = gen_path();
+    {
+        let store = fiber_store::Store::open_db(&path).unwrap();
+        store.put(MIGRATION_VERSION_KEY, INIT_DB_VERSION);
+        store.put(&key, &old_bytes);
+    }
+
+    crate::store::check_validate(&path)
+        .expect("read-only validation accepts an upgradeable released prefix-49 snapshot");
+    {
+        let store = fiber_store::Store::open_db(&path).unwrap();
+        assert_eq!(
+            store.get(MIGRATION_VERSION_KEY).unwrap(),
+            INIT_DB_VERSION.as_bytes()
+        );
+        assert_eq!(store.get(&key).unwrap(), old_bytes);
+    }
+
+    let store = crate::store::open_store(&path).expect("migrate released prefix-49 snapshot");
+    assert_eq!(
+        store.get(MIGRATION_VERSION_KEY).unwrap(),
+        LATEST_DB_VERSION.as_bytes()
+    );
+
+    let restored = store
+        .get_shutdown_settlement_record(&channel_id)
+        .expect("migrated shutdown settlement record must be readable through normal getter");
+    assert_eq!(restored.shutdown_tx_hash, old_record.shutdown_tx_hash);
+    assert_eq!(restored.for_remote, old_record.for_remote);
+    assert_eq!(restored.commitment_number, old_record.commitment_number);
+    assert_eq!(restored.settlement_data.local_amount, 500_000);
+    assert_eq!(restored.settlement_data.remote_amount, 750_000);
+    assert_eq!(restored.settlement_data.tlcs.len(), 1);
+    let tlc = &restored.settlement_data.tlcs[0];
+    assert_eq!(tlc.tlc_id, fiber_types::TLCId::Offered(9));
+    assert_eq!(tlc.hash_algorithm, fiber_types::HashAlgorithm::CkbHash);
+    assert_eq!(tlc.payment_amount, 88_000);
+    assert_eq!(tlc.payment_hash, fiber_types::Hash256::from([0xcd; 32]));
+    assert_eq!(tlc.expiry, 1_700_000_012_345);
+    assert_eq!(tlc.local_key.as_ref(), Some(&expected_local_key));
+    assert_eq!(tlc.local_key_pubkey, Some(expected_local_key.pubkey()));
+    assert_eq!(tlc.local_key_commitment_number, None);
+    assert_eq!(tlc.remote_key, expected_remote_key);
+
+    drop(store);
+    crate::store::check_validate(&path).expect("upgraded prefix-49 snapshot remains valid");
 }

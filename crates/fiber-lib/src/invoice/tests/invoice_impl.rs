@@ -119,6 +119,32 @@ fn test_invoice_bc32m() {
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_trampoline_route_hint_roundtrip() {
+    let (private_key, payee) = gen_rand_secp256k1_keypair_tuple();
+    let trampoline = gen_rand_fiber_public_key();
+    let invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(1_000))
+        .payment_preimage(gen_rand_sha256_hash())
+        .payee_pub_key(payee)
+        .trampoline_route_hint(trampoline.into())
+        .build_with_sign(|message| Secp256k1::new().sign_ecdsa_recoverable(message, &private_key))
+        .expect("build invoice with trampoline route hint");
+
+    assert!(invoice.allow_trampoline_routing());
+    assert_eq!(
+        invoice.trampoline_route_hint(),
+        Some(&secp256k1::PublicKey::from(trampoline))
+    );
+
+    let decoded = invoice
+        .to_string()
+        .parse::<CkbInvoice>()
+        .expect("decode invoice with trampoline route hint");
+    assert_eq!(decoded, invoice);
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_invoice_from_str_err() {
     let invoice = mock_invoice();
 
@@ -592,4 +618,48 @@ fn test_invoice_with_mpp_option() {
     assert!(!invoice.allow_mpp());
     let payment_secret = invoice.payment_secret();
     assert!(payment_secret.is_none());
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_invoice_rejects_oversized_fallback_address_and_raw_data() {
+    use ckb_types::prelude::{Builder, Entity, Pack};
+    use fiber_types::{MAX_FALLBACK_ADDRESS_LENGTH, MAX_INVOICE_DATA_LENGTH};
+
+    let payment_hash = gen_rand_sha256_hash();
+    let oversized_addr = "a".repeat(MAX_FALLBACK_ADDRESS_LENGTH + 1);
+    let err = InvoiceBuilder::new(Currency::Fibb)
+        .amount(Some(100))
+        .payment_hash(payment_hash)
+        .fallback_address(oversized_addr)
+        .build()
+        .unwrap_err();
+    assert_eq!(
+        err,
+        InvoiceError::FallbackAddressTooLong {
+            len: MAX_FALLBACK_ADDRESS_LENGTH + 1,
+            max: MAX_FALLBACK_ADDRESS_LENGTH,
+        }
+    );
+
+    // A huge UDT type script pushing RawInvoiceData over MAX_INVOICE_DATA_LENGTH must be rejected.
+    let huge_script = ckb_types::packed::Script::new_builder()
+        .args(vec![0u8; MAX_INVOICE_DATA_LENGTH + 1].pack())
+        .build();
+    let err = InvoiceBuilder::new(Currency::Fibb)
+        .amount(Some(100))
+        .payment_hash(payment_hash)
+        .udt_type_script(huge_script)
+        .build()
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            InvoiceError::InvoiceDataTooLong {
+                len,
+                max: MAX_INVOICE_DATA_LENGTH
+            } if len > MAX_INVOICE_DATA_LENGTH
+        ),
+        "expected InvoiceDataTooLong, got {err:?}"
+    );
 }

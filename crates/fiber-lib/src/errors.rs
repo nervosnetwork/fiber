@@ -45,6 +45,8 @@ pub enum Error {
     ChannelMessagingErr(#[from] MessagingErr<ChannelActorMessage>),
     #[error("Failed to send network actor message: {0}")]
     NetworkMessagingErr(#[from] MessagingErr<NetworkActorMessage>),
+    #[error("Fiber actor messaging error: {0}")]
+    FiberMessagingErr(#[from] MessagingErr<crate::fiber::FiberActorMessage>),
     #[error("Failed to in-flight tx actor message: {0}")]
     InFlightCkbTxActorMessagingErr(#[from] MessagingErr<InFlightCkbTxActorMessage>),
     #[error("Failed to processing channel: {0}")]
@@ -53,8 +55,8 @@ pub enum Error {
     CkbInvoiceError(#[from] InvoiceError),
     #[error("Funding error: {0}")]
     FundingError(#[from] FundingError),
-    #[error("Build payment route error: {0}")]
-    BuildPaymentRouteError(String),
+    #[error("Build payment route error: Failed to build route, {0}")]
+    BuildPaymentRouteError(PathFindError),
     #[error("Send payment error: {0}")]
     SendPaymentError(String),
     #[error("Send payment first hop error: {0}")]

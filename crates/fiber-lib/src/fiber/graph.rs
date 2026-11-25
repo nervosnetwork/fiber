@@ -15,6 +15,7 @@ use crate::fiber::history::SentNode;
 use crate::fiber::key::KeyPair;
 use crate::fiber::path::NodeHeapElement;
 use crate::fiber::types::{TrampolineHopPayload, TrampolineOnionPacket};
+use crate::fiber_types::PaymentSessionKey;
 use crate::now_timestamp_as_millis_u64;
 use crate::utils::arithmetic::{
     checked_add_u128, checked_add_u64, checked_f64_to_u128, checked_mul_u128, checked_sum_u128,
@@ -446,6 +447,9 @@ pub struct NetworkGraph<S> {
     pub always_process_gossip_message: bool,
     // The pubkey of the node that is running this instance of the network graph.
     source: Pubkey,
+    scope: NetworkGraphScope,
+    // The public LSP that owns this hosted tenant runtime, independent of channel liveness.
+    hosted_lsp: Option<Pubkey>,
     // All the channels in the network.
     pub(crate) channels: HashMap<OutPoint, ChannelInfo>,
     // Index: node_id -> set of channel outpoints involving this node
@@ -478,6 +482,15 @@ pub struct NetworkGraph<S> {
 
     #[cfg(any(feature = "metrics", test, feature = "bench"))]
     pub(crate) payment_find_path_stats: Arc<Mutex<HashMap<Hash256, u128>>>,
+}
+
+/// Selects which routing information a Fiber actor may retain.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NetworkGraphScope {
+    /// Public nodes load and process the shared gossip graph.
+    Public,
+    /// Hosted tenants retain only channel events owned by their Fiber actor.
+    OwnedChannelsOnly,
 }
 
 #[derive(Error, Debug)]
@@ -525,10 +538,41 @@ where
         + 'static,
 {
     pub fn new(store: S, source: Pubkey, announce_private_addr: bool) -> Self {
-        let mut network_graph = Self {
+        let mut network_graph = Self::empty(
+            store,
+            source,
+            announce_private_addr,
+            NetworkGraphScope::Public,
+        );
+        network_graph.load_from_store();
+        network_graph
+    }
+
+    /// Build a graph view for a local-only hosted tenant.
+    ///
+    /// The view starts empty and is populated only by owned-channel events. It
+    /// deliberately does not load public gossip from the shared physical store;
+    /// the tenant only needs its private first-hop channel to the public LSP
+    /// node when constructing a trampoline payment.
+    #[cfg(all(not(target_arch = "wasm32"), feature = "lsp"))]
+    pub(crate) fn new_owned_channels(store: S, source: Pubkey, hosted_lsp: Pubkey) -> Self {
+        let mut graph = Self::empty(store, source, false, NetworkGraphScope::OwnedChannelsOnly);
+        graph.hosted_lsp = Some(hosted_lsp);
+        graph
+    }
+
+    fn empty(
+        store: S,
+        source: Pubkey,
+        announce_private_addr: bool,
+        scope: NetworkGraphScope,
+    ) -> Self {
+        Self {
             #[cfg(any(test, feature = "bench"))]
             always_process_gossip_message: false,
             source,
+            scope,
+            hosted_lsp: None,
             channels: HashMap::new(),
             node_channels: HashMap::new(),
             channel_stats: Default::default(),
@@ -541,9 +585,7 @@ where
             fixed_rand_expiry_delta: None,
             #[cfg(any(feature = "metrics", test, feature = "bench"))]
             payment_find_path_stats: Default::default(),
-        };
-        network_graph.load_from_store();
-        network_graph
+        }
     }
 
     pub fn get_latest_cursor(&self) -> &Cursor {
@@ -583,6 +625,9 @@ where
         &mut self,
         messages: Vec<BroadcastMessageWithTimestamp>,
     ) -> bool {
+        if self.scope == NetworkGraphScope::OwnedChannelsOnly {
+            return false;
+        }
         if messages.is_empty() {
             return false;
         }
@@ -1118,6 +1163,11 @@ where
         self.source
     }
 
+    /// The hosted tenant's configured LSP, not inferred from currently active channels.
+    pub(crate) fn hosted_lsp(&self) -> Option<Pubkey> {
+        self.hosted_lsp
+    }
+
     pub(crate) fn mark_channel_failed(&mut self, channel_outpoint: &OutPoint) {
         if let Some(channel) = self.channels.get_mut(channel_outpoint) {
             if let Some(info) = channel.update_of_node2.as_mut() {
@@ -1199,7 +1249,7 @@ where
         self.history.apply_internal_result(internal_result);
         let is_send_payment_with_router = self
             .store
-            .get_payment_session(attempt.payment_hash)
+            .get_payment_session(attempt.session_key())
             .is_some_and(|p| p.is_payment_with_router());
         return need_to_retry && !is_send_payment_with_router;
     }
@@ -1220,7 +1270,7 @@ where
         self.history.apply_internal_result(internal_result);
         let is_send_payment_with_router = self
             .store
-            .get_payment_session(attempt.payment_hash)
+            .get_payment_session(attempt.session_key())
             .is_some_and(|p| p.is_payment_with_router());
         return need_to_retry && !is_send_payment_with_router;
     }
@@ -3085,17 +3135,23 @@ where
 }
 
 pub trait NetworkGraphStateStore {
-    fn get_payment_session(&self, payment_hash: Hash256) -> Option<PaymentSession>;
+    fn get_payment_session(
+        &self,
+        payment_hash: impl Into<PaymentSessionKey>,
+    ) -> Option<PaymentSession>;
     /// Returns the payment status stored in the session record without recomputing it from
     /// separately persisted attempts.
-    fn get_persisted_payment_status(&self, payment_hash: Hash256) -> Option<PaymentStatus>;
+    fn get_persisted_payment_status(
+        &self,
+        payment_hash: impl Into<PaymentSessionKey>,
+    ) -> Option<PaymentStatus>;
     fn get_all_payment_sessions(&self) -> Vec<PaymentSession>;
     /// Payment hashes with attempt-channel wake-up entries, including final
     /// attempts whose channel work may not have completed. Reads only index keys.
     fn get_payment_hashes_with_channel_index(&self) -> HashSet<Hash256>;
     /// Repair legacy route-index aliases and retire completed recovery keys at startup.
     /// Reads only indexed payments; returns their hashes for result/upstream recovery.
-    fn reconcile_attempts_channel_index(&self) -> HashSet<Hash256>;
+    fn reconcile_attempts_channel_index(&self) -> HashSet<PaymentSessionKey>;
     /// Returns list views with their resolved status; unindexed legacy failures do not probe channels.
     fn get_payment_sessions_with_status(&self, status: PaymentStatus) -> Vec<PaymentSession>;
     /// Get payment list views with resolved status and pagination support.
@@ -3111,7 +3167,7 @@ pub trait NetworkGraphStateStore {
     ) -> Vec<PaymentSession>;
     fn insert_payment_session(&self, session: PaymentSession);
     /// Publish the current effective result without rewriting the session record.
-    fn publish_payment_result(&self, payment_hash: Hash256);
+    fn publish_payment_result(&self, payment_hash: impl Into<PaymentSessionKey>);
     fn insert_payment_history_result(
         &mut self,
         channel_outpoint: OutPoint,
@@ -3120,20 +3176,19 @@ pub trait NetworkGraphStateStore {
     );
     fn remove_channel_history(&mut self, channel_outpoint: &OutPoint);
     fn get_payment_history_results(&self) -> Vec<(OutPoint, Direction, TimedResult)>;
-    fn get_attempt(&self, payment_hash: Hash256, attempt_id: u64) -> Option<Attempt>;
+    fn get_attempt(
+        &self,
+        payment_hash: impl Into<PaymentSessionKey>,
+        attempt_id: u64,
+    ) -> Option<Attempt>;
     fn insert_attempt(&self, attempt: Attempt);
-    fn get_attempts(&self, payment_hash: Hash256) -> Vec<Attempt>;
+    fn get_attempts(&self, payment_hash: impl Into<PaymentSessionKey>) -> Vec<Attempt>;
     /// Deletes all attempts and their channel index entries for the given payment hash.
-    fn delete_attempts(&self, payment_hash: Hash256);
-    /// Deletes attempts that have not settled yet, keeping `Success` attempts and
-    /// their channel index entries.
-    ///
-    /// Retrying a failed payment must not forget value that was already delivered.
-    /// Keeping settled attempts lets the rebuilt session derive the unpaid remainder
-    /// instead of re-dispatching the full payment amount.
-    fn delete_unsettled_attempts(&self, payment_hash: Hash256);
+    fn delete_attempts(&self, payment_hash: impl Into<PaymentSessionKey>);
+    /// Deletes unsettled attempts, retaining delivered value and its channel index.
+    fn delete_unsettled_attempts(&self, payment_hash: impl Into<PaymentSessionKey>);
     /// Clears only the channel index entries for attempts, keeping the attempt records.
-    fn clear_attempts_channel_index(&self, payment_hash: Hash256);
+    fn clear_attempts_channel_index(&self, payment_hash: impl Into<PaymentSessionKey>);
     /// Returns attempts that should be woken by a ChannelReady scan.
     ///
     /// Retrying attempts are always returned. Created attempts are returned only

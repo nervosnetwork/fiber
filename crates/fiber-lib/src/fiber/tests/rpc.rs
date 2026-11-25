@@ -126,7 +126,8 @@ async fn test_list_payments_filters_effective_status_with_cursor() {
         assert!(end.last_cursor.is_none());
     }
     assert_eq!(
-        node.store.get_persisted_payment_status([1; 32].into()),
+        node.store
+            .get_persisted_payment_status(Hash256::from([1; 32])),
         Some(fiber_types::PaymentStatus::Created)
     );
 }
@@ -203,6 +204,7 @@ async fn test_rpc_basic() {
             "get_payment",
             GetPaymentCommandParams {
                 payment_hash: payment_hash.into(),
+                tenant_id: None,
             },
         )
         .await
@@ -770,6 +772,7 @@ async fn test_rpc_basic_with_auth() {
             "get_payment",
             GetPaymentCommandParams {
                 payment_hash: payment_hash.into(),
+                tenant_id: None,
             },
         )
         .await

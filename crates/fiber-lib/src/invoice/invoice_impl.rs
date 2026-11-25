@@ -1,6 +1,6 @@
 use fiber_types::{
     Attribute, CkbInvoice, CkbScript, Currency, FeatureVector, Hash256, HashAlgorithm, InvoiceData,
-    InvoiceError, MAX_DESCRIPTION_LENGTH,
+    InvoiceError, MAX_DESCRIPTION_LENGTH, MAX_FALLBACK_ADDRESS_LENGTH, MAX_INVOICE_DATA_LENGTH,
 };
 
 use crate::time::UNIX_EPOCH;
@@ -100,6 +100,11 @@ impl InvoiceBuilder {
     attr_setter!(payment_secret, PaymentSecret, Hash256);
     attr_setter!(hash_algorithm, HashAlgorithm, HashAlgorithm);
 
+    pub fn trampoline_route_hint(self, node_id: PublicKey) -> Self {
+        self.allow_trampoline_routing(true)
+            .add_attr(Attribute::TrampolineRouteHint(node_id))
+    }
+
     fn update_feature_vector<F>(self, f: F) -> Self
     where
         F: FnOnce(&mut FeatureVector),
@@ -164,15 +169,23 @@ impl InvoiceBuilder {
             .elapsed()
             .expect("Duration since unix epoch")
             .as_millis();
+        let data = InvoiceData {
+            timestamp,
+            payment_hash,
+            attrs: self.attrs,
+        };
+        let encoded_len = data.encoded_data_len();
+        if encoded_len > MAX_INVOICE_DATA_LENGTH {
+            return Err(InvoiceError::InvoiceDataTooLong {
+                len: encoded_len,
+                max: MAX_INVOICE_DATA_LENGTH,
+            });
+        }
         Ok(CkbInvoice {
             currency: self.currency,
             amount: self.amount,
             signature: None,
-            data: InvoiceData {
-                timestamp,
-                payment_hash,
-                attrs: self.attrs,
-            },
+            data,
         })
     }
 
@@ -211,6 +224,18 @@ impl InvoiceBuilder {
             _ => None,
         }) {
             return Err(InvoiceError::DescriptionTooLong(len));
+        }
+
+        if let Some(len) = self.attrs.iter().find_map(|attr| match attr {
+            Attribute::FallbackAddr(addr) if addr.len() > MAX_FALLBACK_ADDRESS_LENGTH => {
+                Some(addr.len())
+            }
+            _ => None,
+        }) {
+            return Err(InvoiceError::FallbackAddressTooLong {
+                len,
+                max: MAX_FALLBACK_ADDRESS_LENGTH,
+            });
         }
 
         // check is there any deprecated attribute key set

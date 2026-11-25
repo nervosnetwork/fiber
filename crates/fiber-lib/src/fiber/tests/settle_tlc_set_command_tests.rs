@@ -17,9 +17,9 @@ use crate::time::SystemTime;
 use ckb_types::packed::{OutPoint, Script};
 use fiber_sphinx::OnionErrorPacket;
 use fiber_types::{
-    AppliedFlags, ChannelActorData, ChannelBasePublicKeys, ChannelState, ChannelTlcInfo,
-    CommitmentNumbers, InMemorySigner, PaymentCustomRecords, ShutdownSettlementRecord, TLCId,
-    TlcInfo, TlcState, TlcStatus,
+    AppliedFlags, ChannelActorData, ChannelState, ChannelTlcInfo, CommitmentNumbers,
+    InMemorySigner, PaymentCustomRecords, ShutdownSettlementRecord, TLCId, TlcInfo, TlcState,
+    TlcStatus,
 };
 use fiber_types::{ChannelConstraints, InboundTlcStatus};
 use fiber_types::{HashAlgorithm, RemoveTlcFulfill, TlcErr, TlcErrorCode};
@@ -221,13 +221,20 @@ impl PreimageStore for MockStore {
 }
 
 impl ChannelActorStateStore for MockStore {
-    fn has_trampoline_payment_for_tlc(
+    fn get_ordinary_trampoline_context(
+        &self,
+        _payment_hash: Hash256,
+    ) -> Option<fiber_types::TrampolineContext> {
+        None
+    }
+
+    fn trampoline_payment_session_for_tlc(
         &self,
         _payment_hash: Hash256,
         _channel_id: Hash256,
         _tlc_id: u64,
-    ) -> bool {
-        false
+    ) -> Option<crate::fiber_types::PaymentSessionKey> {
+        None
     }
 
     fn get_channel_actor_state(&self, id: &Hash256) -> Option<ChannelActorState> {
@@ -372,6 +379,7 @@ pub(crate) fn create_test_channel_state_with_tlc(
     total_amount: Option<u128>,
 ) -> ChannelActorState {
     let tlc_info = TlcInfo {
+        upstream_tlc_key: None,
         status: TlcStatus::Inbound(InboundTlcStatus::Committed),
         tlc_id: TLCId::Received(tlc_id),
         amount,
@@ -399,8 +407,10 @@ pub(crate) fn create_test_channel_state_with_tlc(
     let signer = InMemorySigner::generate_from_seed(&seed);
 
     ChannelActorState {
+        channel_signer: crate::fiber::channel_signer::ChannelSigner::local(signer.clone()),
         core: ChannelActorData {
             state: ChannelState::ChannelReady,
+            signing_context: Default::default(),
             public_channel_info: None,
             local_tlc_info: ChannelTlcInfo::default(),
             remote_tlc_info: None,
@@ -420,11 +430,8 @@ pub(crate) fn create_test_channel_state_with_tlc(
             commitment_delay_epoch: 0,
             funding_fee_rate: 0,
             session: crate::fiber::session::new_session(channel_id, &signer.funding_key, None),
-            signer,
-            local_channel_public_keys: ChannelBasePublicKeys {
-                funding_pubkey: gen_rand_fiber_public_key(),
-                tlc_base_key: gen_rand_fiber_public_key(),
-            },
+            local_channel_public_keys: signer.get_base_public_keys(),
+            signer: Some(signer),
             commitment_numbers: CommitmentNumbers::default(),
             local_constraints: ChannelConstraints::default(),
             remote_constraints: ChannelConstraints::default(),
@@ -456,12 +463,14 @@ pub(crate) fn create_test_channel_state_with_tlc(
         pending_remove_effects_v2: 0,
         pending_payment_notifications: Default::default(),
         replayed_tlc_updates_v2: 0,
+        resigning_outgoing_v2: false,
         defer_peer_tlc_updates: false,
         deferred_peer_tlc_updates: std::collections::VecDeque::new(),
         ephemeral_config: Default::default(),
         funding_abort_detail: None,
         private_key: None,
         needs_backup: false,
+        pending_messages: Default::default(),
         musig2_agg_context_local_first: Default::default(),
         musig2_agg_context_remote_first: Default::default(),
     }
@@ -1680,4 +1689,435 @@ fn test_rejected_tlcs_are_still_logged_as_error() {
         [1, 1],
         "ERROR events for a rejected extra TLC and a TLC on a paid invoice"
     );
+}
+
+#[test]
+fn test_mpp_excludes_failed_and_queued_fail_tlcs_for_hold_and_non_hold_invoices() {
+    use fiber_types::{RemoveTlcReason, TlcErr, TlcErrPacket};
+
+    for (is_non_hold, fail_via_queue) in
+        [(true, true), (true, false), (false, true), (false, false)]
+    {
+        let preimage = gen_rand_sha256_hash();
+        let payment_hash = Hash256::from(ckb_hash::blake2b_256(preimage));
+        let channel_0 = gen_rand_sha256_hash();
+        let channel_1 = gen_rand_sha256_hash();
+
+        let mut state_0 =
+            create_test_channel_state_with_tlc(channel_0, 0, 500, payment_hash, Some(1000));
+        let fail_reason = RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+            TlcErr::new(TlcErrorCode::HoldTlcTimeout),
+            &[0u8; 32],
+        ));
+        if fail_via_queue {
+            // Simulates a RemoveTlcFail queued while the channel is in WaitingTlcAck.
+            state_0.retryable_tlc_operations.push_back(
+                fiber_types::RetryableTlcOperation::RemoveTlc(TLCId::Received(0), fail_reason),
+            );
+        } else {
+            state_0
+                .tlc_state
+                .received_tlcs
+                .tlcs
+                .first_mut()
+                .unwrap()
+                .removed_reason = Some(fail_reason);
+        }
+        let state_1 =
+            create_test_channel_state_with_tlc(channel_1, 1, 500, payment_hash, Some(1000));
+
+        let mut store = MockStore::new()
+            .with_invoice(
+                create_test_invoice(payment_hash, Some(1000), true),
+                CkbInvoiceStatus::Open,
+            )
+            .with_channel_state(state_0)
+            .with_channel_state(state_1)
+            .with_hold_tlc(payment_hash, channel_0, 0)
+            .with_hold_tlc(payment_hash, channel_1, 1);
+        if is_non_hold {
+            store = store.with_preimage(payment_hash, preimage);
+        }
+
+        let settlements = SettleTlcSetCommand::new_hold_tlc_set(payment_hash, &store).run();
+        assert!(
+            settlements.is_empty(),
+            "failed/queued-fail MPP part must not allow underpaid settlement (is_non_hold={is_non_hold}, fail_via_queue={fail_via_queue})"
+        );
+        assert_eq!(
+            store.get_invoice_status(&payment_hash),
+            Some(CkbInvoiceStatus::Open),
+            "invoice must remain Open when one MPP part is already failed/queued-fail"
+        );
+    }
+}
+
+#[test]
+fn test_mpp_retains_queued_fulfill_tlc_during_settlement_retry() {
+    use fiber_types::{RemoveTlcFulfill, RemoveTlcReason};
+
+    let preimage = gen_rand_sha256_hash();
+    let payment_hash = Hash256::from(ckb_hash::blake2b_256(preimage));
+    let channel_0 = gen_rand_sha256_hash();
+    let channel_1 = gen_rand_sha256_hash();
+
+    let mut state_0 =
+        create_test_channel_state_with_tlc(channel_0, 0, 500, payment_hash, Some(1000));
+    state_0
+        .retryable_tlc_operations
+        .push_back(fiber_types::RetryableTlcOperation::RemoveTlc(
+            TLCId::Received(0),
+            RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+                payment_preimage: preimage,
+            }),
+        ));
+    let state_1 = create_test_channel_state_with_tlc(channel_1, 1, 500, payment_hash, Some(1000));
+
+    let store = MockStore::new()
+        .with_invoice(
+            create_test_invoice(payment_hash, Some(1000), true),
+            CkbInvoiceStatus::Open,
+        )
+        .with_preimage(payment_hash, preimage)
+        .with_channel_state(state_0)
+        .with_channel_state(state_1)
+        .with_hold_tlc(payment_hash, channel_0, 0)
+        .with_hold_tlc(payment_hash, channel_1, 1);
+
+    let settlements = SettleTlcSetCommand::new_hold_tlc_set(payment_hash, &store).run();
+    assert_eq!(settlements.len(), 2);
+    assert!(settlements.iter().all(is_fulfill_settlement));
+    assert_eq!(
+        store.get_invoice_status(&payment_hash),
+        Some(CkbInvoiceStatus::Received)
+    );
+}
+
+#[test]
+fn test_received_hold_settle_rejects_overpaid_and_counts_already_fulfilling() {
+    use fiber_types::{RemoveTlcFulfill, RemoveTlcReason};
+
+    // Case 1: Hold MPP invoice already marked Received, then an extra overpaid TLC arrives
+    // before preimage reveal. Settling must fulfill only enough parts to cover the invoice
+    // and reject the overpaid TLC.
+    let preimage = gen_rand_sha256_hash();
+    let payment_hash = Hash256::from(ckb_hash::blake2b_256(preimage));
+    let ch0 = gen_rand_sha256_hash();
+    let ch1 = gen_rand_sha256_hash();
+    let ch2 = gen_rand_sha256_hash();
+
+    let store = MockStore::new()
+        .with_invoice(
+            create_test_invoice(payment_hash, Some(1000), true),
+            CkbInvoiceStatus::Received,
+        )
+        .with_preimage(payment_hash, preimage)
+        .with_channel_state(create_test_channel_state_with_tlc(
+            ch0,
+            0,
+            600,
+            payment_hash,
+            Some(1000),
+        ))
+        .with_channel_state(create_test_channel_state_with_tlc(
+            ch1,
+            1,
+            400,
+            payment_hash,
+            Some(1000),
+        ))
+        .with_channel_state(create_test_channel_state_with_tlc(
+            ch2,
+            2,
+            500,
+            payment_hash,
+            Some(1000),
+        ))
+        .with_hold_tlc(payment_hash, ch0, 0)
+        .with_hold_tlc(payment_hash, ch1, 1)
+        .with_hold_tlc(payment_hash, ch2, 2);
+
+    let settlements = SettleTlcSetCommand::new_received_hold_tlc_set(payment_hash, &store).run();
+    assert_eq!(settlements.len(), 3);
+    assert_eq!(
+        settlements
+            .iter()
+            .filter(|s| is_fulfill_settlement(s))
+            .count(),
+        2
+    );
+    assert_eq!(
+        settlements
+            .iter()
+            .filter(|s| get_error_code(s) == Some(TlcErrorCode::HoldTlcTimeout))
+            .count(),
+        1
+    );
+
+    // Case 2: One MPP part (600) is already fulfilling on ch0 (and removed from payment_hold_tlcs);
+    // ch1 (400) completes the invoice and ch2 (500) is rejected as overpaid.
+    let mut state_0 = create_test_channel_state_with_tlc(ch0, 0, 600, payment_hash, Some(1000));
+    state_0
+        .tlc_state
+        .received_tlcs
+        .tlcs
+        .iter_mut()
+        .find(|t| t.tlc_id == TLCId::Received(0))
+        .unwrap()
+        .removed_reason = Some(RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+        payment_preimage: preimage,
+    }));
+    let store2 = MockStore::new()
+        .with_invoice(
+            create_test_invoice(payment_hash, Some(1000), true),
+            CkbInvoiceStatus::Received,
+        )
+        .with_preimage(payment_hash, preimage)
+        .with_channel_state(state_0)
+        .with_channel_state(create_test_channel_state_with_tlc(
+            ch1,
+            1,
+            400,
+            payment_hash,
+            Some(1000),
+        ))
+        .with_channel_state(create_test_channel_state_with_tlc(
+            ch2,
+            2,
+            500,
+            payment_hash,
+            Some(1000),
+        ))
+        .with_hold_tlc(payment_hash, ch1, 1)
+        .with_hold_tlc(payment_hash, ch2, 2);
+
+    let settlements2 = SettleTlcSetCommand::new_received_hold_tlc_set(payment_hash, &store2).run();
+    assert_eq!(settlements2.len(), 2);
+    assert_eq!(
+        settlements2
+            .iter()
+            .filter(|s| is_fulfill_settlement(s))
+            .count(),
+        1
+    );
+    assert_eq!(
+        settlements2
+            .iter()
+            .filter(|s| get_error_code(s) == Some(TlcErrorCode::HoldTlcTimeout))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn test_hold_mpp_counts_closed_awaiting_onchain_part_and_settles_open_part() {
+    use fiber_types::{CloseFlags, RemoveTlcReason, TlcErr, TlcErrPacket};
+
+    // Case 1: Split hold-MPP invoice (1000) is Received and preimage is revealed.
+    // Part 0 (600) is on a force-closed channel waiting on-chain settlement (claimable by
+    // watchtower), and part 1 (400) is on an open ChannelReady channel. The open part must
+    // be fulfilled off-chain without emitting an off-chain settlement to the closed channel.
+    let preimage = gen_rand_sha256_hash();
+    let payment_hash = Hash256::from(ckb_hash::blake2b_256(preimage));
+    let ch_closed = gen_rand_sha256_hash();
+    let ch_open = gen_rand_sha256_hash();
+    let ch_overpaid = gen_rand_sha256_hash();
+
+    let mut closed_state =
+        create_test_channel_state_with_tlc(ch_closed, 0, 600, payment_hash, Some(1000));
+    closed_state.state = ChannelState::Closed(
+        CloseFlags::UNCOOPERATIVE_REMOTE | CloseFlags::WAITING_ONCHAIN_SETTLEMENT,
+    );
+    let open_state = create_test_channel_state_with_tlc(ch_open, 1, 400, payment_hash, Some(1000));
+
+    let store = MockStore::new()
+        .with_invoice(
+            create_test_invoice(payment_hash, Some(1000), true),
+            CkbInvoiceStatus::Received,
+        )
+        .with_preimage(payment_hash, preimage)
+        .with_channel_state(closed_state.clone())
+        .with_channel_state(open_state.clone())
+        .with_hold_tlc(payment_hash, ch_closed, 0)
+        .with_hold_tlc(payment_hash, ch_open, 1);
+
+    let settlements = SettleTlcSetCommand::new_received_hold_tlc_set(payment_hash, &store).run();
+    assert_eq!(settlements.len(), 1);
+    assert_eq!(settlements[0].channel_id(), ch_open);
+    assert_eq!(settlements[0].tlc_id(), 1);
+    assert!(is_fulfill_settlement(&settlements[0]));
+
+    // Case 2: With an additional overpaid open part (500), the closed part (600) + open part (400)
+    // satisfy the invoice total (1000), so ch_open is fulfilled and ch_overpaid is rejected.
+    let overpaid_state =
+        create_test_channel_state_with_tlc(ch_overpaid, 2, 500, payment_hash, Some(1000));
+    let store_overpaid = MockStore::new()
+        .with_invoice(
+            create_test_invoice(payment_hash, Some(1000), true),
+            CkbInvoiceStatus::Received,
+        )
+        .with_preimage(payment_hash, preimage)
+        .with_channel_state(closed_state.clone())
+        .with_channel_state(open_state.clone())
+        .with_channel_state(overpaid_state)
+        .with_hold_tlc(payment_hash, ch_closed, 0)
+        .with_hold_tlc(payment_hash, ch_open, 1)
+        .with_hold_tlc(payment_hash, ch_overpaid, 2);
+
+    let settlements_overpaid =
+        SettleTlcSetCommand::new_received_hold_tlc_set(payment_hash, &store_overpaid).run();
+    assert_eq!(settlements_overpaid.len(), 2);
+    let fulfilled: Vec<_> = settlements_overpaid
+        .iter()
+        .filter(|s| is_fulfill_settlement(s))
+        .collect();
+    let rejected: Vec<_> = settlements_overpaid
+        .iter()
+        .filter(|s| !is_fulfill_settlement(s))
+        .collect();
+    assert_eq!(fulfilled.len(), 1);
+    assert_eq!(fulfilled[0].channel_id(), ch_open);
+    assert_eq!(rejected.len(), 1);
+    assert_eq!(rejected[0].channel_id(), ch_overpaid);
+    assert_eq!(
+        get_error_code(rejected[0]),
+        Some(TlcErrorCode::HoldTlcTimeout)
+    );
+
+    // Case 3: Open hold-MPP invoice (preimage not yet revealed): closed awaiting-onchain part (600)
+    // + open part (400) marks the invoice Received while waiting for preimage reveal.
+    let store_open = MockStore::new()
+        .with_invoice(
+            create_test_invoice(payment_hash, Some(1000), true),
+            CkbInvoiceStatus::Open,
+        )
+        .with_channel_state(closed_state.clone())
+        .with_channel_state(open_state.clone())
+        .with_hold_tlc(payment_hash, ch_closed, 0)
+        .with_hold_tlc(payment_hash, ch_open, 1);
+
+    let settlements_open = SettleTlcSetCommand::new_hold_tlc_set(payment_hash, &store_open).run();
+    assert!(settlements_open.is_empty());
+    assert_eq!(
+        store_open.get_invoice_status(&payment_hash),
+        Some(CkbInvoiceStatus::Received)
+    );
+
+    // Case 4: A cooperatively closed channel or a force-closed TLC already marked RemoveTlcFail
+    // must NOT count toward the settlement total.
+    let mut coop_closed_state =
+        create_test_channel_state_with_tlc(ch_closed, 0, 600, payment_hash, Some(1000));
+    coop_closed_state.state = ChannelState::Closed(CloseFlags::COOPERATIVE);
+    let store_coop = MockStore::new()
+        .with_invoice(
+            create_test_invoice(payment_hash, Some(1000), true),
+            CkbInvoiceStatus::Received,
+        )
+        .with_preimage(payment_hash, preimage)
+        .with_channel_state(coop_closed_state)
+        .with_channel_state(open_state.clone())
+        .with_hold_tlc(payment_hash, ch_closed, 0)
+        .with_hold_tlc(payment_hash, ch_open, 1);
+    assert!(
+        SettleTlcSetCommand::new_received_hold_tlc_set(payment_hash, &store_coop)
+            .run()
+            .is_empty()
+    );
+
+    let mut failed_closed_state = closed_state.clone();
+    failed_closed_state.tlc_state.received_tlcs.tlcs[0].removed_reason =
+        Some(RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+            TlcErr::new(TlcErrorCode::HoldTlcTimeout),
+            &TEST_SHARED_SECRET,
+        )));
+    let store_failed_closed = MockStore::new()
+        .with_invoice(
+            create_test_invoice(payment_hash, Some(1000), true),
+            CkbInvoiceStatus::Received,
+        )
+        .with_preimage(payment_hash, preimage)
+        .with_channel_state(failed_closed_state)
+        .with_channel_state(open_state.clone())
+        .with_hold_tlc(payment_hash, ch_closed, 0)
+        .with_hold_tlc(payment_hash, ch_open, 1);
+    assert!(
+        SettleTlcSetCommand::new_received_hold_tlc_set(payment_hash, &store_failed_closed)
+            .run()
+            .is_empty()
+    );
+
+    // Case 5: A closed awaiting-onchain TLC whose watchtower on-chain settlement record already
+    // proves timeout without preimage (while `removed_reason` is still `None` before ChannelActor
+    // reconciles) must NOT count toward fulfillment.
+    let store_onchain_timed_out = MockStore::new()
+        .with_invoice(
+            create_test_invoice(payment_hash, Some(1000), true),
+            CkbInvoiceStatus::Received,
+        )
+        .with_preimage(payment_hash, preimage)
+        .with_channel_state(closed_state.clone())
+        .with_channel_state(open_state.clone())
+        .with_hold_tlc(payment_hash, ch_closed, 0)
+        .with_hold_tlc(payment_hash, ch_open, 1)
+        .with_onchain_settled(
+            ch_closed,
+            TLCId::Received(0),
+            payment_hash,
+            HashAlgorithm::CkbHash,
+        );
+    assert!(
+        SettleTlcSetCommand::new_received_hold_tlc_set(payment_hash, &store_onchain_timed_out)
+            .run()
+            .is_empty(),
+        "on-chain timed-out closed TLC must not count toward MPP fulfillment"
+    );
+
+    // Case 6: An already-expired closed awaiting-onchain TLC with `removed_reason: None` and no
+    // on-chain fulfillment proof must NOT count toward fulfillment; if it DOES have an on-chain
+    // fulfillment proof with the valid preimage, it still counts.
+    let mut expired_closed_state = closed_state;
+    expired_closed_state.tlc_state.received_tlcs.tlcs[0].expiry =
+        now_timestamp_as_millis_u64().saturating_sub(1);
+    let store_expired_unfulfilled = MockStore::new()
+        .with_invoice(
+            create_test_invoice(payment_hash, Some(1000), true),
+            CkbInvoiceStatus::Received,
+        )
+        .with_preimage(payment_hash, preimage)
+        .with_channel_state(expired_closed_state.clone())
+        .with_channel_state(open_state.clone())
+        .with_hold_tlc(payment_hash, ch_closed, 0)
+        .with_hold_tlc(payment_hash, ch_open, 1);
+    assert!(
+        SettleTlcSetCommand::new_received_hold_tlc_set(payment_hash, &store_expired_unfulfilled)
+            .run()
+            .is_empty(),
+        "expired unfulfilled closed TLC must not count toward MPP fulfillment"
+    );
+
+    let store_expired_onchain_fulfilled = MockStore::new()
+        .with_invoice(
+            create_test_invoice(payment_hash, Some(1000), true),
+            CkbInvoiceStatus::Received,
+        )
+        .with_preimage(payment_hash, preimage)
+        .with_channel_state(expired_closed_state)
+        .with_channel_state(open_state)
+        .with_hold_tlc(payment_hash, ch_closed, 0)
+        .with_hold_tlc(payment_hash, ch_open, 1)
+        .with_onchain_preimage(
+            ch_closed,
+            TLCId::Received(0),
+            payment_hash,
+            HashAlgorithm::CkbHash,
+            preimage,
+        );
+    let settlements_onchain_fulfilled = SettleTlcSetCommand::new_received_hold_tlc_set(
+        payment_hash,
+        &store_expired_onchain_fulfilled,
+    )
+    .run();
+    assert_eq!(settlements_onchain_fulfilled.len(), 1);
+    assert_eq!(settlements_onchain_fulfilled[0].channel_id(), ch_open);
+    assert!(is_fulfill_settlement(&settlements_onchain_fulfilled[0]));
 }
