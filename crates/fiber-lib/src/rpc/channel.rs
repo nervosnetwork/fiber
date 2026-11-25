@@ -182,6 +182,58 @@ fn pending_accept_channel_to_rpc(pending: PendingAcceptChannel) -> Channel {
     }
 }
 
+/// RAII guard for an in-flight hosted tenant watchtower channel quota reservation.
+///
+/// Dropping the guard without calling [`Self::confirm`] automatically releases the
+/// reservation in `LspService` (covering RPC errors, timeouts, and dropped/cancelled
+/// futures) and refreshes that tenant's persisted pending count.
+#[cfg(not(target_arch = "wasm32"))]
+struct WatchtowerQuotaReservationGuard {
+    #[cfg(feature = "lsp")]
+    lsp_actor: ractor::ActorRef<crate::lsp::LspServiceMessage>,
+    #[cfg(feature = "lsp")]
+    tenant_id: crate::fiber_types::TenantId,
+    #[cfg(feature = "lsp")]
+    reservation_id: u64,
+    #[cfg(feature = "lsp")]
+    released: bool,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl WatchtowerQuotaReservationGuard {
+    fn confirm(#[allow(unused_mut)] mut self, opened_channel_id: fiber_types::Hash256) {
+        #[cfg(feature = "lsp")]
+        {
+            self.released = true;
+            let _ = self.lsp_actor.send_message(
+                crate::lsp::LspServiceMessage::ReleaseTenantWatchtowerChannelQuota {
+                    tenant_id: self.tenant_id.clone(),
+                    reservation_id: self.reservation_id,
+                    opened_channel_id: Some(opened_channel_id),
+                },
+            );
+        }
+        #[cfg(not(feature = "lsp"))]
+        let _ = opened_channel_id;
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for WatchtowerQuotaReservationGuard {
+    fn drop(&mut self) {
+        #[cfg(feature = "lsp")]
+        if !self.released {
+            let _ = self.lsp_actor.send_message(
+                crate::lsp::LspServiceMessage::ReleaseTenantWatchtowerChannelQuota {
+                    tenant_id: self.tenant_id.clone(),
+                    reservation_id: self.reservation_id,
+                    opened_channel_id: None,
+                },
+            );
+        }
+    }
+}
+
 pub struct ChannelRpcServerImpl<S> {
     backend: BackendResolver<S>,
 }
@@ -213,31 +265,56 @@ impl<S: RpcBackendStore> ChannelRpcServerImpl<S> {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    async fn check_tenant_watchtower_admission(
+    async fn reserve_tenant_watchtower_admission(
         &self,
         tenant_id: &crate::fiber_types::TenantId,
-    ) -> Result<(), ErrorObjectOwned> {
+        opening_temp_channel_id: Option<fiber_types::Hash256>,
+    ) -> Result<WatchtowerQuotaReservationGuard, ErrorObjectOwned> {
         #[cfg(feature = "lsp")]
         {
             let lsp_actor = self
                 .backend
                 .lsp()
                 .as_ref()
-                .ok_or_else(|| rpc_error("hosted LSP service is not enabled"))?;
-            ractor::call_t!(
+                .ok_or_else(|| rpc_error("hosted LSP service is not enabled"))?
+                .clone();
+            let reservation_id = ractor::call_t!(
                 lsp_actor,
-                |reply| crate::lsp::LspServiceMessage::CheckTenantWatchtowerChannelQuota(
-                    tenant_id.clone(),
+                |reply| crate::lsp::LspServiceMessage::ReserveTenantWatchtowerChannelQuota {
+                    tenant_id: tenant_id.clone(),
+                    opening_temp_channel_id,
                     reply,
-                ),
+                },
                 10_000
             )
             .rpc_err()?
             .rpc_err()?;
+            Ok(WatchtowerQuotaReservationGuard {
+                lsp_actor,
+                tenant_id: tenant_id.clone(),
+                reservation_id,
+                released: false,
+            })
+        }
+        #[cfg(not(feature = "lsp"))]
+        {
+            let _ = (tenant_id, opening_temp_channel_id);
+            Ok(WatchtowerQuotaReservationGuard {})
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn refresh_tenant_watchtower_pending(&self, tenant_id: &crate::fiber_types::TenantId) {
+        #[cfg(feature = "lsp")]
+        if let Some(lsp_actor) = self.backend.lsp().as_ref() {
+            let _ = lsp_actor.send_message(
+                crate::lsp::LspServiceMessage::RefreshTenantWatchtowerChannelQuota(
+                    tenant_id.clone(),
+                ),
+            );
         }
         #[cfg(not(feature = "lsp"))]
         let _ = tenant_id;
-        Ok(())
     }
 
     /// The public backend, for callers that hold no request (wasm bindings).
@@ -276,7 +353,7 @@ where
         params: OpenChannelParams,
     ) -> Result<OpenChannelResult, ErrorObjectOwned> {
         let backend = self.backend_for(extensions).await?;
-        if let Some(tenant) = backend.tenant() {
+        let reservation = if let Some(tenant) = backend.tenant() {
             let pubkey = Pubkey::try_from(params.pubkey).rpc_err()?;
             if pubkey != tenant.public_node_id {
                 return Err(rpc_error(
@@ -286,10 +363,18 @@ where
             if params.public.unwrap_or(true) {
                 return Err(rpc_error("hosted tenant channels must be private"));
             }
-            self.check_tenant_watchtower_admission(&tenant.tenant_id)
-                .await?;
+            Some(
+                self.reserve_tenant_watchtower_admission(&tenant.tenant_id, None)
+                    .await?,
+            )
+        } else {
+            None
+        };
+        let result = backend.open_channel(params).await;
+        if let (Ok(opened), Some(guard)) = (&result, reservation) {
+            guard.confirm(opened.temporary_channel_id.into());
         }
-        backend.open_channel(params).await
+        result
     }
 
     /// Accepts a channel opening request from a peer.
@@ -311,10 +396,15 @@ where
         extensions: &Extensions,
         params: AbandonChannelParams,
     ) -> Result<(), ErrorObjectOwned> {
-        self.backend_for(extensions)
-            .await?
-            .abandon_channel(params)
-            .await
+        let backend = self.backend_for(extensions).await?;
+        let tenant_id = backend.tenant().map(|tenant| tenant.tenant_id.clone());
+        let result = backend.abandon_channel(params).await;
+        if result.is_ok() {
+            if let Some(tenant_id) = tenant_id {
+                self.refresh_tenant_watchtower_pending(&tenant_id);
+            }
+        }
+        result
     }
 
     /// Lists all channels.
@@ -335,10 +425,15 @@ where
         extensions: &Extensions,
         params: ShutdownChannelParams,
     ) -> Result<(), ErrorObjectOwned> {
-        self.backend_for(extensions)
-            .await?
-            .shutdown_channel(params)
-            .await
+        let backend = self.backend_for(extensions).await?;
+        let tenant_id = backend.tenant().map(|tenant| tenant.tenant_id.clone());
+        let result = backend.shutdown_channel(params).await;
+        if result.is_ok() {
+            if let Some(tenant_id) = tenant_id {
+                self.refresh_tenant_watchtower_pending(&tenant_id);
+            }
+        }
+        result
     }
 
     /// Updates a channel.
@@ -366,15 +461,22 @@ where
             let actor = backend.actor_opt().cloned().ok_or_else(|| {
                 rpc_error("tenant channel opening requires a running Fiber actor")
             })?;
-            let admission_error = self
-                .check_tenant_watchtower_admission(&tenant.tenant_id)
+            let opening_temp_channel_id = command.external_channel_signer.as_ref().map(|signer| {
+                crate::fiber::channel::derive_temp_channel_id_from_tlc_key(
+                    &signer.base_public_keys.tlc_base_key,
+                )
+            });
+            let (reservation, admission_error) = match self
+                .reserve_tenant_watchtower_admission(&tenant.tenant_id, opening_temp_channel_id)
                 .await
-                .err()
-                .map(|error| error.message().to_string());
+            {
+                Ok(guard) => (Some(guard), None),
+                Err(error) => (None, Some(error.message().to_string())),
+            };
             // The actor owns the durable tenant opening; a disconnected caller can retry an
             // existing in-flight opening even when quota is full, while any new opening is gated
             // on `admission_error` inside `open_tenant_channel_inner`.
-            return ractor::call_t!(
+            let result = ractor::call_t!(
                 actor,
                 |reply| FiberActorMessage::new_command(FiberActorCommand::OpenTenantChannel {
                     command,
@@ -389,6 +491,10 @@ where
                 ))
             })?
             .map_err(rpc_error);
+            if let (Ok(opened), Some(guard)) = (&result, reservation) {
+                guard.confirm(opened.channel_id.into());
+            }
+            return result;
         }
         backend.open_channel_with_external_funding(params).await
     }
@@ -399,10 +505,15 @@ where
         extensions: &Extensions,
         params: SubmitSignedFundingTxParams,
     ) -> Result<SubmitSignedFundingTxResult, ErrorObjectOwned> {
-        self.backend_for(extensions)
-            .await?
-            .submit_signed_funding_tx(params)
-            .await
+        let backend = self.backend_for(extensions).await?;
+        let tenant_id = backend.tenant().map(|tenant| tenant.tenant_id.clone());
+        let result = backend.submit_signed_funding_tx(params).await;
+        if result.is_ok() {
+            if let Some(tenant_id) = tenant_id {
+                self.refresh_tenant_watchtower_pending(&tenant_id);
+            }
+        }
+        result
     }
 
     async fn get_channel_signing_status(

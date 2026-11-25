@@ -84,6 +84,24 @@ pub enum LspServiceMessage {
     GetPublicNodeId(RpcReplyPort<Pubkey>),
     GetWatchtowerQuotas(RpcReplyPort<crate::lsp_config::WatchtowerQuotas>),
     CheckTenantWatchtowerChannelQuota(TenantId, RpcReplyPort<Result<(), String>>),
+    /// Atomically checks watchtower channel quota and reserves an in-flight opening slot
+    /// for `tenant_id` until released or confirmed by the caller.
+    ReserveTenantWatchtowerChannelQuota {
+        tenant_id: TenantId,
+        opening_temp_channel_id: Option<Hash256>,
+        reply: RpcReplyPort<Result<u64, String>>,
+    },
+    /// Releases a previously acquired watchtower quota reservation and refreshes only
+    /// `tenant_id`'s cached pending unwatched opening count from store.
+    ReleaseTenantWatchtowerChannelQuota {
+        tenant_id: TenantId,
+        reservation_id: u64,
+        opened_channel_id: Option<Hash256>,
+    },
+    /// Recomputes only `tenant_id`'s cached pending unwatched opening count from store.
+    RefreshTenantWatchtowerChannelQuota(TenantId),
+    /// Recomputes the cached pending unwatched opening count for the tenant owning `node_id`.
+    RefreshTenantWatchtowerChannelQuotaByNodeId(fiber_types::NodeId),
     GetTenantTokenEpochs(RpcReplyPort<crate::rpc::biscuit::TenantTokenEpochs>),
     RevokeTenantTokens(TenantId, RpcReplyPort<Result<u64, String>>),
     RegisterAuthenticatedTenant {
@@ -140,6 +158,14 @@ pub enum LspServiceMessage {
     PaymentOutcomeSettled(SettledPaymentOutcome),
 }
 
+/// In-flight watchtower quota slot held while an opening RPC is executing.
+#[cfg(feature = "watchtower")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct InFlightQuotaReservation {
+    reservation_id: u64,
+    opening_temp_channel_id: Option<Hash256>,
+}
+
 /// Top-level container for the multi-tenant LSP subsystem.
 pub struct LspService;
 
@@ -167,6 +193,16 @@ pub struct LspServiceState {
     // Deduplicates pending delivery retry timers so overlapping failure paths
     // (e.g., temporary dispatch failure and PaymentOutcomeReady) arm only one timer.
     scheduled_delivery_retries: HashMap<LspPaymentDeliveryKey, AbortHandle>,
+    // Cached per-tenant effective pending unwatched channel counts (persisted openings
+    // unioned with in-flight reservations), keeping global quota checks O(1) across tenants.
+    #[cfg(feature = "watchtower")]
+    pending_unwatched_by_tenant: HashMap<TenantId, usize>,
+    #[cfg(feature = "watchtower")]
+    pending_unwatched_total: usize,
+    #[cfg(feature = "watchtower")]
+    in_flight_quota_reservations: HashMap<TenantId, Vec<InFlightQuotaReservation>>,
+    #[cfg(feature = "watchtower")]
+    next_quota_reservation_id: u64,
 }
 
 impl LspServiceState {
@@ -247,75 +283,208 @@ impl LspServiceState {
     }
 
     #[cfg(feature = "watchtower")]
-    fn pending_unwatched_openings_for_tenant(
+    fn persisted_pending_unwatched_ids_for_tenant(
         &self,
         tenant: &crate::lsp::HostedTenantRecord,
-    ) -> usize {
+    ) -> HashSet<Hash256> {
         use crate::fiber::channel::{derive_temp_channel_id_from_tlc_key, ChannelOpenRecordStore};
         use crate::fiber_types::{ChannelOpeningStatus, NegotiatingFundingFlags};
         use crate::watchtower::WatchtowerStore;
 
         let node_id = tenant_watchtower_node_id(&tenant.tenant_pubkey);
-        let watched_for_tenant = self.watchtower_store.get_watch_channels_for_node(&node_id);
         let tenant_store = self
             .store
             .namespaced(NodeNamespace::hosted_tenant(tenant.tenant_id.as_str()));
-        tenant_store
-            .list_tenant_channel_openings()
-            .into_iter()
-            .filter(|opening| {
-                if opening.terminated
-                    || watched_for_tenant
-                        .iter()
-                        .any(|watched| watched.channel_id == opening.channel_id)
-                {
-                    return false;
-                }
-                let open_record = tenant_store.get_channel_open_record(&opening.channel_id);
-                if open_record.as_ref().is_some_and(|record| {
-                    matches!(
-                        record.status,
-                        ChannelOpeningStatus::Failed | ChannelOpeningStatus::ChannelReady
-                    )
-                }) {
-                    return false;
-                }
-                let channel_state = tenant_store.get_channel_actor_state(&opening.channel_id);
-                if channel_state.as_ref().is_some_and(|channel| channel.is_closed()) {
-                    return false;
-                }
-                let temp_id = opening
-                    .command
-                    .external_channel_signer
-                    .as_ref()
-                    .map(|signer| {
-                        derive_temp_channel_id_from_tlc_key(&signer.base_public_keys.tlc_base_key)
-                    });
-                let stale_pre_funding = opening.result.is_none()
-                    && temp_id.is_some_and(|id| opening.channel_id != id)
-                    && channel_state.as_ref().is_some_and(|channel| {
-                        channel.reestablishing
-                            && channel.external_funding.is_none()
-                            && matches!(
-                                channel.state,
-                                ChannelState::NegotiatingFunding(flags)
-                                    if !flags.contains(NegotiatingFundingFlags::AWAITING_EXTERNAL_FUNDING)
-                            )
-                            && channel.session.outgoing.is_none()
-                            && channel.session.incoming.is_none()
-                            && channel.session.pending_incoming.is_none()
-                    });
-                if stale_pre_funding {
-                    return false;
-                }
-                opening.result.is_some()
-                    || channel_state.is_some()
-                    || (open_record.is_some() && self.supervisor.is_active(&tenant.tenant_id))
-            })
-            .count()
+        let tenant_active = self.supervisor.is_active(&tenant.tenant_id);
+        let mut pending_ids = HashSet::new();
+        let mut seen_opening_ids = HashSet::new();
+
+        for opening in tenant_store.list_tenant_channel_openings() {
+            let temp_id = opening
+                .command
+                .external_channel_signer
+                .as_ref()
+                .map(|signer| {
+                    derive_temp_channel_id_from_tlc_key(&signer.base_public_keys.tlc_base_key)
+                });
+            seen_opening_ids.insert(opening.channel_id);
+            if let Some(id) = temp_id {
+                seen_opening_ids.insert(id);
+            }
+            if opening.terminated
+                || self
+                    .watchtower_store
+                    .get_watch_channel(&node_id, &opening.channel_id)
+                    .is_some()
+            {
+                continue;
+            }
+            let open_record = tenant_store.get_channel_open_record(&opening.channel_id);
+            if open_record.as_ref().is_some_and(|record| {
+                matches!(
+                    record.status,
+                    ChannelOpeningStatus::Failed | ChannelOpeningStatus::ChannelReady
+                )
+            }) {
+                continue;
+            }
+            let channel_state = tenant_store.get_channel_actor_state(&opening.channel_id);
+            if channel_state
+                .as_ref()
+                .is_some_and(|channel| channel.is_closed())
+            {
+                continue;
+            }
+            let stale_pre_funding = opening.result.is_none()
+                && temp_id.is_some_and(|id| opening.channel_id != id)
+                && channel_state.as_ref().is_some_and(|channel| {
+                    channel.reestablishing
+                        && channel.external_funding.is_none()
+                        && matches!(
+                            channel.state,
+                            ChannelState::NegotiatingFunding(flags)
+                                if !flags.contains(NegotiatingFundingFlags::AWAITING_EXTERNAL_FUNDING)
+                        )
+                        && channel.session.outgoing.is_none()
+                        && channel.session.incoming.is_none()
+                        && channel.session.pending_incoming.is_none()
+                });
+            if stale_pre_funding {
+                continue;
+            }
+            if opening.result.is_some() || channel_state.is_some() || tenant_active {
+                pending_ids.insert(temp_id.unwrap_or(opening.channel_id));
+            }
+        }
+
+        // Also count standalone non-terminal ChannelOpenRecords (e.g. from `open_channel`
+        // without a TenantChannelOpening) so openings stay counted across temp -> final
+        // channel ID transitions until watched, failed, or closed.
+        for record in tenant_store.get_channel_open_records() {
+            if seen_opening_ids.contains(&record.channel_id) {
+                continue;
+            }
+            if matches!(
+                record.status,
+                ChannelOpeningStatus::Failed | ChannelOpeningStatus::ChannelReady
+            ) {
+                continue;
+            }
+            if self
+                .watchtower_store
+                .get_watch_channel(&node_id, &record.channel_id)
+                .is_some()
+            {
+                continue;
+            }
+            let channel_state = tenant_store.get_channel_actor_state(&record.channel_id);
+            if channel_state
+                .as_ref()
+                .is_some_and(|channel| channel.is_closed())
+            {
+                continue;
+            }
+            if channel_state.is_some() || tenant_active {
+                pending_ids.insert(record.channel_id);
+            }
+        }
+
+        pending_ids
     }
 
-    fn check_tenant_watchtower_channel_quota(&self, tenant_id: &TenantId) -> Result<(), String> {
+    #[cfg(feature = "watchtower")]
+    fn set_tenant_pending_unwatched(&mut self, tenant_id: &TenantId, new_count: usize) {
+        let old_count = if new_count == 0 {
+            self.pending_unwatched_by_tenant
+                .remove(tenant_id)
+                .unwrap_or(0)
+        } else {
+            self.pending_unwatched_by_tenant
+                .insert(tenant_id.clone(), new_count)
+                .unwrap_or(0)
+        };
+        self.pending_unwatched_total = self
+            .pending_unwatched_total
+            .saturating_sub(old_count)
+            .saturating_add(new_count);
+    }
+
+    #[cfg(feature = "watchtower")]
+    fn compute_and_cache_tenant_pending(
+        &mut self,
+        tenant_id: &TenantId,
+        persisted_ids: &HashSet<Hash256>,
+    ) -> usize {
+        let unmatched_in_flight = self
+            .in_flight_quota_reservations
+            .get(tenant_id)
+            .map(|reservations| {
+                reservations
+                    .iter()
+                    .filter(|res| {
+                        res.opening_temp_channel_id
+                            .is_none_or(|temp_id| !persisted_ids.contains(&temp_id))
+                    })
+                    .count()
+            })
+            .unwrap_or(0);
+        let effective = persisted_ids.len().saturating_add(unmatched_in_flight);
+        self.set_tenant_pending_unwatched(tenant_id, effective);
+        effective
+    }
+
+    #[cfg(feature = "watchtower")]
+    fn refresh_tenant_pending_unwatched(
+        &mut self,
+        tenant: &crate::lsp::HostedTenantRecord,
+    ) -> usize {
+        let persisted_ids = self.persisted_pending_unwatched_ids_for_tenant(tenant);
+        self.compute_and_cache_tenant_pending(&tenant.tenant_id, &persisted_ids)
+    }
+
+    #[cfg(feature = "watchtower")]
+    fn refresh_tenant_pending_unwatched_by_id(&mut self, tenant_id: &TenantId) {
+        match self.registry.get(tenant_id) {
+            Ok(Some(tenant)) => {
+                self.refresh_tenant_pending_unwatched(&tenant);
+            }
+            Ok(None) => {
+                self.set_tenant_pending_unwatched(tenant_id, 0);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %tenant_id,
+                    %error,
+                    "Failed to load tenant while refreshing pending watchtower quota count"
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "watchtower")]
+    fn refresh_tenant_pending_unwatched_by_node_id(&mut self, node_id: &fiber_types::NodeId) {
+        let Ok(tenant_pubkey) = Pubkey::from_slice(node_id.as_ref()) else {
+            return;
+        };
+        match self.registry.find_by_tenant_pubkey(&tenant_pubkey) {
+            Ok(Some(tenant)) => {
+                self.refresh_tenant_pending_unwatched(&tenant);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(
+                    ?tenant_pubkey,
+                    %error,
+                    "Failed to load tenant while refreshing pending watchtower quota count by node_id"
+                );
+            }
+        }
+    }
+
+    fn check_tenant_watchtower_channel_quota(
+        &mut self,
+        tenant_id: &TenantId,
+    ) -> Result<(), String> {
         let tenant = self
             .registry
             .get(tenant_id)?
@@ -326,14 +495,8 @@ impl LspServiceState {
 
             let node_id = tenant_watchtower_node_id(&tenant.tenant_pubkey);
             let quotas = self.config.watchtower_quotas();
-            let pending_node = self.pending_unwatched_openings_for_tenant(&tenant);
-            let mut pending_total = pending_node;
-            for other in self.registry.list()? {
-                if other.tenant_id != tenant.tenant_id {
-                    pending_total = pending_total
-                        .saturating_add(self.pending_unwatched_openings_for_tenant(&other));
-                }
-            }
+            let pending_node = self.refresh_tenant_pending_unwatched(&tenant);
+            let pending_total = self.pending_unwatched_total;
             self.watchtower_store
                 .check_watch_channel_quota_with_pending(
                     &node_id,
@@ -345,6 +508,71 @@ impl LspServiceState {
         #[cfg(not(feature = "watchtower"))]
         let _ = tenant;
         Ok(())
+    }
+
+    fn reserve_tenant_watchtower_channel_quota(
+        &mut self,
+        tenant_id: &TenantId,
+        opening_temp_channel_id: Option<Hash256>,
+    ) -> Result<u64, String> {
+        let tenant = self
+            .registry
+            .get(tenant_id)?
+            .ok_or_else(|| format!("tenant {tenant_id} is not registered"))?;
+        #[cfg(feature = "watchtower")]
+        {
+            use crate::watchtower::WatchtowerStore;
+
+            let node_id = tenant_watchtower_node_id(&tenant.tenant_pubkey);
+            let quotas = self.config.watchtower_quotas();
+            let persisted_ids = self.persisted_pending_unwatched_ids_for_tenant(&tenant);
+            let pending_node =
+                self.compute_and_cache_tenant_pending(&tenant.tenant_id, &persisted_ids);
+            let pending_total = self.pending_unwatched_total;
+            self.watchtower_store
+                .check_watch_channel_quota_with_pending(
+                    &node_id,
+                    pending_node,
+                    pending_total,
+                    &quotas,
+                )?;
+            let reservation_id = self.next_quota_reservation_id;
+            self.next_quota_reservation_id = self.next_quota_reservation_id.wrapping_add(1).max(1);
+            self.in_flight_quota_reservations
+                .entry(tenant.tenant_id.clone())
+                .or_default()
+                .push(InFlightQuotaReservation {
+                    reservation_id,
+                    opening_temp_channel_id,
+                });
+            self.compute_and_cache_tenant_pending(&tenant.tenant_id, &persisted_ids);
+            Ok(reservation_id)
+        }
+        #[cfg(not(feature = "watchtower"))]
+        {
+            let _ = (tenant, opening_temp_channel_id);
+            Ok(0)
+        }
+    }
+
+    fn release_tenant_watchtower_channel_quota(
+        &mut self,
+        tenant_id: &TenantId,
+        reservation_id: u64,
+        _opened_channel_id: Option<Hash256>,
+    ) {
+        #[cfg(feature = "watchtower")]
+        {
+            if let Some(reservations) = self.in_flight_quota_reservations.get_mut(tenant_id) {
+                reservations.retain(|res| res.reservation_id != reservation_id);
+                if reservations.is_empty() {
+                    self.in_flight_quota_reservations.remove(tenant_id);
+                }
+            }
+            self.refresh_tenant_pending_unwatched_by_id(tenant_id);
+        }
+        #[cfg(not(feature = "watchtower"))]
+        let _ = (tenant_id, reservation_id, _opened_channel_id);
     }
 
     fn issue_tenant_token(
@@ -516,6 +744,7 @@ impl Actor for LspService {
                 max_pending_deliveries_per_tenant: args.config.max_pending_deliveries_per_tenant,
             },
         );
+        args.runtime_factory.set_lsp_service(myself.clone());
         let supervisor =
             TenantSupervisor::new(args.runtime_factory.clone(), args.config.max_active_tenants);
         for delivery in delivery_manager
@@ -531,16 +760,16 @@ impl Actor for LspService {
         myself.send_interval(Duration::from_secs(5), || {
             LspServiceMessage::ReconcileInFlightDeliveries
         });
+        let tenants = registry.list().map_err(anyhow::Error::msg)?;
         let token_epochs = crate::rpc::biscuit::TenantTokenEpochs::from_map(
-            registry
-                .list()
-                .map_err(anyhow::Error::msg)?
-                .into_iter()
+            tenants
+                .iter()
                 .filter(|record| record.token_epoch > 0)
-                .map(|record| (record.tenant_id, record.token_epoch))
+                .map(|record| (record.tenant_id.clone(), record.token_epoch))
                 .collect(),
         );
-        Ok(LspServiceState {
+        #[allow(unused_mut)]
+        let mut state = LspServiceState {
             config: args.config,
             public_node_id: args.public_node_id,
             public_network_actor: args.public_network_actor,
@@ -558,7 +787,20 @@ impl Actor for LspService {
             token_epochs,
             reconciling_deliveries: HashSet::new(),
             scheduled_delivery_retries: HashMap::new(),
-        })
+            #[cfg(feature = "watchtower")]
+            pending_unwatched_by_tenant: HashMap::new(),
+            #[cfg(feature = "watchtower")]
+            pending_unwatched_total: 0,
+            #[cfg(feature = "watchtower")]
+            in_flight_quota_reservations: HashMap::new(),
+            #[cfg(feature = "watchtower")]
+            next_quota_reservation_id: 1,
+        };
+        #[cfg(feature = "watchtower")]
+        for tenant in &tenants {
+            state.refresh_tenant_pending_unwatched(tenant);
+        }
+        Ok(state)
     }
 
     async fn handle(
@@ -599,6 +841,40 @@ impl Actor for LspService {
             }
             LspServiceMessage::CheckTenantWatchtowerChannelQuota(tenant_id, reply) => {
                 let _ = reply.send(state.check_tenant_watchtower_channel_quota(&tenant_id));
+            }
+            LspServiceMessage::ReserveTenantWatchtowerChannelQuota {
+                tenant_id,
+                opening_temp_channel_id,
+                reply,
+            } => {
+                let _ =
+                    reply.send(state.reserve_tenant_watchtower_channel_quota(
+                        &tenant_id,
+                        opening_temp_channel_id,
+                    ));
+            }
+            LspServiceMessage::ReleaseTenantWatchtowerChannelQuota {
+                tenant_id,
+                reservation_id,
+                opened_channel_id,
+            } => {
+                state.release_tenant_watchtower_channel_quota(
+                    &tenant_id,
+                    reservation_id,
+                    opened_channel_id,
+                );
+            }
+            LspServiceMessage::RefreshTenantWatchtowerChannelQuota(tenant_id) => {
+                #[cfg(feature = "watchtower")]
+                state.refresh_tenant_pending_unwatched_by_id(&tenant_id);
+                #[cfg(not(feature = "watchtower"))]
+                let _ = tenant_id;
+            }
+            LspServiceMessage::RefreshTenantWatchtowerChannelQuotaByNodeId(node_id) => {
+                #[cfg(feature = "watchtower")]
+                state.refresh_tenant_pending_unwatched_by_node_id(&node_id);
+                #[cfg(not(feature = "watchtower"))]
+                let _ = node_id;
             }
             LspServiceMessage::GetTenantTokenEpochs(reply) => {
                 let _ = reply.send(state.token_epochs.clone());
@@ -683,6 +959,8 @@ impl Actor for LspService {
                     match state.supervisor.evict(&tenant_id).await {
                         Ok(_) => {
                             state.ready_tenants.remove(&tenant_id);
+                            #[cfg(feature = "watchtower")]
+                            state.refresh_tenant_pending_unwatched_by_id(&tenant_id);
                             state.get_tenant_status(&tenant_id)
                         }
                         Err(error) => Err(format!("cannot evict tenant {tenant_id}: {error}")),
@@ -837,30 +1115,35 @@ impl Actor for LspService {
             LspServiceMessage::TenantChannelOnline(tenant_pubkey, channel_id) => {
                 if let Some(tenant) = state.registry.find_by_tenant_pubkey(&tenant_pubkey)? {
                     #[cfg(feature = "watchtower")]
-                    if let Err(error) = super::watch::ensure_hosted_watch_channel(
-                        &state.signing_events,
-                        &state.watchtower_store,
-                        &tenant,
-                        channel_id,
-                        &state.config.watchtower_quotas(),
-                    ) {
-                        let remove_tenant =
-                            if let Some(ready) = state.ready_tenants.get_mut(&tenant.tenant_id) {
+                    {
+                        let watch_result = super::watch::ensure_hosted_watch_channel(
+                            &state.signing_events,
+                            &state.watchtower_store,
+                            &tenant,
+                            channel_id,
+                            &state.config.watchtower_quotas(),
+                        );
+                        state.refresh_tenant_pending_unwatched(&tenant);
+                        if let Err(error) = watch_result {
+                            let remove_tenant = if let Some(ready) =
+                                state.ready_tenants.get_mut(&tenant.tenant_id)
+                            {
                                 ready.remove(&channel_id);
                                 ready.is_empty()
                             } else {
                                 false
                             };
-                        if remove_tenant {
-                            state.ready_tenants.remove(&tenant.tenant_id);
+                            if remove_tenant {
+                                state.ready_tenants.remove(&tenant.tenant_id);
+                            }
+                            tracing::warn!(
+                                tenant_id = %tenant.tenant_id,
+                                %channel_id,
+                                %error,
+                                "Refusing to mark hosted channel online without watchtower monitoring"
+                            );
+                            return Ok(());
                         }
-                        tracing::warn!(
-                            tenant_id = %tenant.tenant_id,
-                            %channel_id,
-                            %error,
-                            "Refusing to mark hosted channel online without watchtower monitoring"
-                        );
-                        return Ok(());
                     }
                     let tenant_store = state
                         .store
@@ -912,6 +1195,8 @@ impl Actor for LspService {
                     if remove_tenant {
                         state.ready_tenants.remove(&tenant.tenant_id);
                     }
+                    #[cfg(feature = "watchtower")]
+                    state.refresh_tenant_pending_unwatched(&tenant);
                 }
             }
             LspServiceMessage::PaymentOutcomeReady(request, reply) => {

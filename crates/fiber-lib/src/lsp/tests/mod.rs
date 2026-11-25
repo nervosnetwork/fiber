@@ -4961,10 +4961,13 @@ async fn hosted_channel_admission_quota_releases_closed_channels_enforces_global
     public_actor.stop(None);
     service.stop_and_wait(None, None).await.unwrap();
 
-    // 3. Global `max_channels_total` must include `pending_unwatched` across tenants:
+    // 3. Global `max_channels_total` must include `pending_unwatched` across OTHER tenants:
     //    with `max_watch_channels_per_tenant = 2, max_watch_channels = 2`,
-    //    Tenant A has 1 watched channel and Tenant B has 1 pending unwatched opening
-    //    => `channels_total (1) + pending_total (1) >= 2` rejects Tenant B's 2nd open.
+    //    Tenant A has 1 watched channel (and 0 pending openings of its own) and
+    //    Tenant B has 1 pending unwatched opening
+    //    => `channels_total (1) + pending_total (1) >= 2` rejects Tenant A's 2nd open.
+    //    Checking Tenant A specifically guarantees dropping the cross-tenant global pending
+    //    term causes this test to fail.
     let root2 = tempdir().expect("temporary directory");
     let mut config2 = lsp_config(root2.path().join("lsp"));
     config2.max_watch_channels_per_tenant = 2;
@@ -4974,10 +4977,10 @@ async fn hosted_channel_admission_quota_releases_closed_channels_enforces_global
     let expected_tenant_b_id = TenantId::from_root_signer_pubkey(&tenant_b_root.pubkey());
     let service2 = start_test_lsp_service(
         store2.clone(),
-        config2,
+        config2.clone(),
         Arc::new(
             FakeRuntimeFactory::new(Arc::new(AtomicUsize::new(0)))
-                .with_protocol_secret(expected_tenant_b_id, 2),
+                .with_protocol_secret(expected_tenant_b_id.clone(), 2),
         ),
         lsp_key.clone(),
         Arc::new(AtomicUsize::new(0)),
@@ -5036,27 +5039,1108 @@ async fn hosted_channel_admission_quota_releases_closed_channels_enforces_global
         result: None,
         terminated: false,
     });
+    service2
+        .send_message(LspServiceMessage::RefreshTenantWatchtowerChannelQuota(
+            tenant_b_id.clone(),
+        ))
+        .unwrap();
     ractor::call!(service2, |reply| {
-        LspServiceMessage::CheckTenantWatchtowerChannelQuota(tenant_b_id.clone(), reply)
+        LspServiceMessage::CheckTenantWatchtowerChannelQuota(tenant_a_id.clone(), reply)
     })
     .unwrap()
-    .expect("orphaned pre-state opening on cold tenant must not consume global quota");
+    .expect("orphaned pre-state opening on cold tenant must not consume global quota for Tenant A");
 
     // Once Tenant B has a persisted ChannelActorState for the unwatched opening, global quota
-    // must count it (`channels_total (1) + pending_total (1) >= 2`).
+    // must reject Tenant A (`channels_total (1) + pending_total (1) >= 2`) even though Tenant A
+    // has 0 pending openings of its own and `channels_per_node(A) == 1 < 2`.
     let mut state_b_pending = ChannelActorState::samples(211).remove(0);
     state_b_pending.id = ch_b_pending;
     state_b_pending.remote_pubkey = lsp_key.pubkey();
     tenant_b_store.insert_channel_actor_state(state_b_pending);
+    service2
+        .send_message(LspServiceMessage::RefreshTenantWatchtowerChannelQuota(
+            tenant_b_id.clone(),
+        ))
+        .unwrap();
 
     let global_err = ractor::call!(service2, |reply| {
-        LspServiceMessage::CheckTenantWatchtowerChannelQuota(tenant_b_id.clone(), reply)
+        LspServiceMessage::CheckTenantWatchtowerChannelQuota(tenant_a_id.clone(), reply)
     })
     .unwrap()
-    .expect_err("global quota must account for pending unwatched openings");
+    .expect_err("global quota must account for OTHER tenants' pending unwatched openings");
     assert!(
         global_err.contains("global watchtower channel quota exceeded"),
         "{global_err}"
     );
     service2.stop_and_wait(None, None).await.unwrap();
+
+    // Restarting LspService must initialize the cached cross-tenant pending counter in pre_start
+    // so Tenant A is still rejected immediately after restart without scanning on every check.
+    let service3 = start_test_lsp_service(
+        store2.clone(),
+        config2,
+        Arc::new(
+            FakeRuntimeFactory::new(Arc::new(AtomicUsize::new(0)))
+                .with_protocol_secret(expected_tenant_b_id, 2),
+        ),
+        lsp_key,
+        Arc::new(AtomicUsize::new(0)),
+        Arc::new(AtomicUsize::new(0)),
+    )
+    .await;
+    let restart_global_err = ractor::call!(service3, |reply| {
+        LspServiceMessage::CheckTenantWatchtowerChannelQuota(tenant_a_id, reply)
+    })
+    .unwrap()
+    .expect_err("pre_start must seed cross-tenant pending unwatched count");
+    assert!(
+        restart_global_err.contains("global watchtower channel quota exceeded"),
+        "{restart_global_err}"
+    );
+    service3.stop_and_wait(None, None).await.unwrap();
+}
+
+#[cfg(feature = "watchtower")]
+#[tokio::test]
+async fn hosted_channel_admission_quota_serializes_concurrent_opens_and_releases_on_error_or_drop()
+{
+    use crate::fiber::channel::{
+        derive_temp_channel_id_from_tlc_key, ChannelOpenRecordStore, TenantChannelOpening,
+    };
+    use crate::fiber::network::OpenChannelResponse;
+    use crate::rpc::channel::{
+        to_rpc_channel_open_signer_material, ChannelRpcServer, ChannelRpcServerImpl,
+        OpenChannelParams, OpenChannelWithExternalFundingParams,
+    };
+    use crate::rpc::tenant::AuthenticatedTenant;
+    use fiber_json_types::ChannelOpenSignerMaterial as JsonChannelOpenSignerMaterial;
+    use fiber_types::{ChannelBasePublicKeys, ChannelOpenRecord, ChannelOpenSignerMaterial};
+    use jsonrpsee::Extensions;
+    use musig2::SecNonce;
+    use tokio::sync::{watch, Mutex as TokioMutex};
+
+    let make_signer_material =
+        |seed: u8| -> (ChannelOpenSignerMaterial, JsonChannelOpenSignerMaterial) {
+            let base_keys = ChannelBasePublicKeys {
+                funding_pubkey: Privkey::from(&[seed; 32]).pubkey(),
+                tlc_base_key: Privkey::from(&[seed.wrapping_add(1); 32]).pubkey(),
+            };
+            let nonce = |offset: u8| {
+                SecNonce::build([seed.wrapping_add(offset); 32])
+                    .build()
+                    .public_nonce()
+            };
+            let internal = ChannelOpenSignerMaterial {
+                base_public_keys: base_keys,
+                v2_nonces: vec![nonce(2), nonce(3)],
+                first_commitment_point: Privkey::from(&[seed.wrapping_add(4); 32]).pubkey(),
+                second_commitment_point: Privkey::from(&[seed.wrapping_add(5); 32]).pubkey(),
+                commitment_nonce: nonce(6),
+                next_commitment_nonce: nonce(7),
+                revocation_nonce: nonce(8),
+                channel_announcement_nonce: None,
+            };
+            let json = to_rpc_channel_open_signer_material(&internal);
+            (internal, json)
+        };
+
+    let make_external_params =
+        |lsp_pubkey: fiber_types::Pubkey, signer: JsonChannelOpenSignerMaterial| {
+            OpenChannelWithExternalFundingParams {
+                pubkey: lsp_pubkey.into(),
+                funding_amount: 100_000_000_000,
+                public: Some(false),
+                funding_udt_type_script: None,
+                shutdown_script: Script::default().into(),
+                funding_lock_script: Script::default().into(),
+                funding_lock_script_cell_deps: Some(Vec::new()),
+                commitment_delay_epoch: None,
+                commitment_fee_rate: None,
+                funding_fee_rate: None,
+                tlc_expiry_delta: None,
+                tlc_min_value: None,
+                tlc_fee_proportional_millionths: None,
+                max_tlc_value_in_flight: None,
+                max_tlc_number_in_flight: None,
+                external_channel_signer: Some(signer),
+            }
+        };
+
+    #[derive(Clone)]
+    enum ActorBehavior {
+        /// Hold admitted openings until `release` becomes `true`; optionally persist
+        /// `TenantChannelOpening` immediately upon arrival (like real `FiberActor`).
+        HoldUntilRelease {
+            entered: watch::Sender<usize>,
+            release: watch::Receiver<bool>,
+            persist_before_wait: bool,
+            persist_on_complete: bool,
+        },
+        /// Return an error without persisting anything (tests RAII release on error).
+        Fail(String),
+    }
+
+    struct ConcurrentOpenControl {
+        behavior: TokioMutex<ActorBehavior>,
+        admitted_external_opens: AtomicUsize,
+        admitted_open_channels: AtomicUsize,
+    }
+
+    struct ConcurrentOpenTenantActor {
+        tenant_store: Store,
+        control: Arc<ConcurrentOpenControl>,
+    }
+
+    #[async_trait]
+    impl Actor for ConcurrentOpenTenantActor {
+        type Msg = NetworkActorMessage;
+        type State = ();
+        type Arguments = ();
+
+        async fn pre_start(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            _args: Self::Arguments,
+        ) -> Result<Self::State, ActorProcessingErr> {
+            Ok(())
+        }
+
+        async fn handle(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            message: Self::Msg,
+            _state: &mut Self::State,
+        ) -> Result<(), ActorProcessingErr> {
+            match message {
+                NetworkActorMessage::Fiber(FiberActorMessage::Command(
+                    FiberActorCommand::OpenTenantChannel {
+                        command,
+                        admission_error,
+                        reply,
+                    },
+                )) => {
+                    if let Some(err) = admission_error {
+                        let _ = reply.send(Err(err));
+                        return Ok(());
+                    }
+                    self.control
+                        .admitted_external_opens
+                        .fetch_add(1, Ordering::SeqCst);
+                    let behavior = self.control.behavior.lock().await.clone();
+                    let tenant_store = self.tenant_store.clone();
+                    match behavior {
+                        ActorBehavior::Fail(msg) => {
+                            let _ = reply.send(Err(msg));
+                        }
+                        ActorBehavior::HoldUntilRelease {
+                            entered,
+                            release,
+                            persist_before_wait,
+                            persist_on_complete,
+                        } => {
+                            let temp_id = derive_temp_channel_id_from_tlc_key(
+                                &command
+                                    .external_channel_signer
+                                    .as_ref()
+                                    .expect("signer")
+                                    .base_public_keys
+                                    .tlc_base_key,
+                            );
+                            let opening_result =
+                                fiber_json_types::OpenChannelWithExternalFundingResult {
+                                    channel_id: temp_id.into(),
+                                    unsigned_funding_tx: ckb_jsonrpc_types::Transaction::default(),
+                                    opening_context: None,
+                                };
+                            if persist_before_wait {
+                                tenant_store.insert_channel_open_record(ChannelOpenRecord::new(
+                                    temp_id,
+                                    command.pubkey,
+                                    command.funding_amount,
+                                ));
+                                tenant_store.put_tenant_channel_opening(TenantChannelOpening {
+                                    command: command.clone(),
+                                    channel_id: temp_id,
+                                    result: None,
+                                    terminated: false,
+                                });
+                            }
+                            let mut release = release;
+                            entered.send_modify(|count| *count += 1);
+                            tokio::spawn(async move {
+                                let _ = release.wait_for(|&released| released).await;
+                                if persist_on_complete {
+                                    tenant_store.put_tenant_channel_opening(TenantChannelOpening {
+                                        command,
+                                        channel_id: temp_id,
+                                        result: Some(opening_result.clone()),
+                                        terminated: false,
+                                    });
+                                }
+                                let _ = reply.send(Ok(opening_result));
+                            });
+                        }
+                    }
+                }
+                NetworkActorMessage::Fiber(FiberActorMessage::Command(
+                    FiberActorCommand::OpenChannel(command, reply),
+                )) => {
+                    self.control
+                        .admitted_open_channels
+                        .fetch_add(1, Ordering::SeqCst);
+                    let behavior = self.control.behavior.lock().await.clone();
+                    let tenant_store = self.tenant_store.clone();
+                    match behavior {
+                        ActorBehavior::Fail(msg) => {
+                            let _ = reply.send(Err(msg));
+                        }
+                        ActorBehavior::HoldUntilRelease {
+                            entered,
+                            release,
+                            persist_on_complete,
+                            ..
+                        } => {
+                            let temp_id = Hash256::from([0x91; 32]);
+                            let mut release = release;
+                            entered.send_modify(|count| *count += 1);
+                            tokio::spawn(async move {
+                                let _ = release.wait_for(|&released| released).await;
+                                if persist_on_complete {
+                                    tenant_store.insert_channel_open_record(
+                                        ChannelOpenRecord::new(
+                                            temp_id,
+                                            command.pubkey,
+                                            command.funding_amount,
+                                        ),
+                                    );
+                                }
+                                let _ = reply.send(Ok(OpenChannelResponse {
+                                    channel_id: temp_id,
+                                }));
+                            });
+                        }
+                    }
+                }
+                _ => {}
+            }
+            Ok(())
+        }
+    }
+
+    struct ConcurrentOpenRuntimeFactory {
+        store: Store,
+        public_node_id: fiber_types::Pubkey,
+        tenant_pubkeys: HashMap<TenantId, fiber_types::Pubkey>,
+        controls: HashMap<TenantId, Arc<ConcurrentOpenControl>>,
+    }
+
+    #[async_trait]
+    impl TenantRuntimeFactory for ConcurrentOpenRuntimeFactory {
+        fn provision(&self, tenant_id: &TenantId) -> Result<HostedTenantRecord, String> {
+            let tenant_pubkey = *self
+                .tenant_pubkeys
+                .get(tenant_id)
+                .ok_or_else(|| format!("unexpected tenant {tenant_id}"))?;
+            Ok(HostedTenantRecord {
+                tenant_id: tenant_id.clone(),
+                root_signer_pubkey: None,
+                tenant_pubkey,
+                created_at: 42,
+                token_epoch: 0,
+            })
+        }
+
+        async fn start(&self, record: &HostedTenantRecord) -> Result<HostedTenantRuntime, String> {
+            let tenant_store = self
+                .store
+                .namespaced(NodeNamespace::hosted_tenant(record.tenant_id.as_str()));
+            let control = self
+                .controls
+                .get(&record.tenant_id)
+                .expect("tenant control")
+                .clone();
+            let actor = Actor::spawn(
+                None,
+                ConcurrentOpenTenantActor {
+                    tenant_store: tenant_store.clone(),
+                    control,
+                },
+                (),
+            )
+            .await
+            .map_err(|error| error.to_string())?
+            .0;
+            let rpc_context = crate::rpc::tenant::HostedTenantRpcContext {
+                tenant_id: record.tenant_id.clone(),
+                public_node_id: self.public_node_id,
+                fiber_actor: crate::fiber::FiberActorRef::from_network(&actor),
+                store: tenant_store,
+                config: crate::FiberConfig::default(),
+            };
+            Ok(
+                HostedTenantRuntime::network_backed(record.tenant_pubkey, actor)
+                    .with_rpc_context(rpc_context),
+            )
+        }
+    }
+
+    let lsp_key = Privkey::from(&[9; 32]);
+    let root_a = test_root_signer();
+    let root_b = Privkey::from(&[0x66; 32]);
+    let tenant_a_expected = TenantId::from_root_signer_pubkey(&root_a.pubkey());
+    let tenant_b_expected = TenantId::from_root_signer_pubkey(&root_b.pubkey());
+    let tenant_a_key = Privkey::from(&[1; 32]);
+    let tenant_b_key = Privkey::from(&[2; 32]);
+
+    // 1. At max_watch_channels_per_tenant = 1: two concurrent open_channel_with_external_funding
+    //    requests joined via tokio::join! must serialize atomically: exactly 1 succeeds and 1 is
+    //    rejected with "quota exceeded".
+    let root = tempdir().expect("temporary directory");
+    let mut config = lsp_config(root.path().join("lsp"));
+    config.max_watch_channels_per_tenant = 1;
+    config.max_watch_channels = 2;
+    let store = open_lsp_store(&config);
+    let (entered_tx, mut entered_rx) = watch::channel(0usize);
+    let (release_tx, release_rx) = watch::channel(false);
+    let control_a = Arc::new(ConcurrentOpenControl {
+        behavior: TokioMutex::new(ActorBehavior::HoldUntilRelease {
+            entered: entered_tx,
+            release: release_rx,
+            persist_before_wait: false,
+            persist_on_complete: true,
+        }),
+        admitted_external_opens: AtomicUsize::new(0),
+        admitted_open_channels: AtomicUsize::new(0),
+    });
+    let mut tenant_pubkeys = HashMap::new();
+    tenant_pubkeys.insert(tenant_a_expected.clone(), tenant_a_key.pubkey());
+    let mut controls = HashMap::new();
+    controls.insert(tenant_a_expected.clone(), control_a.clone());
+
+    let service = start_test_lsp_service(
+        store.clone(),
+        config.clone(),
+        Arc::new(ConcurrentOpenRuntimeFactory {
+            store: store.clone(),
+            public_node_id: lsp_key.pubkey(),
+            tenant_pubkeys,
+            controls,
+        }),
+        lsp_key.clone(),
+        Arc::new(AtomicUsize::new(0)),
+        Arc::new(AtomicUsize::new(0)),
+    )
+    .await;
+    let tenant_a_id = register_authenticated_test_tenant(&service, &lsp_key, &root_a).await;
+    let (public_actor, _) = Actor::spawn(None, BusyNetworkActor, ()).await.unwrap();
+    let rpc = ChannelRpcServerImpl::new(public_actor.clone(), store.clone())
+        .with_lsp_actor(Some(service.clone()));
+    let mut ext_a = Extensions::new();
+    ext_a.insert(AuthenticatedTenant(tenant_a_id.clone()));
+
+    let (_, signer_1) = make_signer_material(30);
+    let (_, signer_2) = make_signer_material(40);
+    let params_1 = make_external_params(lsp_key.pubkey(), signer_1);
+    let params_2 = make_external_params(lsp_key.pubkey(), signer_2);
+
+    let (res1, res2) = tokio::join!(
+        ChannelRpcServer::open_channel_with_external_funding(&rpc, &ext_a, params_1),
+        async {
+            // Wait until the first request holds its reservation inside the tenant actor so both
+            // requests are guaranteed to be in-flight concurrently.
+            let _ = entered_rx.wait_for(|&count| count >= 1).await;
+            let res =
+                ChannelRpcServer::open_channel_with_external_funding(&rpc, &ext_a, params_2).await;
+            let _ = release_tx.send(true);
+            res
+        }
+    );
+    assert!(res1.is_ok(), "first concurrent open must succeed: {res1:?}");
+    let err2 = res2.expect_err("second concurrent open must be rejected by atomic reservation");
+    assert!(err2.to_string().contains("quota exceeded"), "{err2}");
+    assert_eq!(
+        control_a.admitted_external_opens.load(Ordering::SeqCst),
+        1,
+        "only one concurrent open may pass admission"
+    );
+
+    // Zero-gap handoff: once Call 1 confirmed, the persisted TenantChannelOpening continues to
+    // occupy the slot, so a sequential 3rd open with a new signer is also rejected.
+    let (_, signer_3) = make_signer_material(50);
+    let err3 = ChannelRpcServer::open_channel_with_external_funding(
+        &rpc,
+        &ext_a,
+        make_external_params(lsp_key.pubkey(), signer_3),
+    )
+    .await
+    .expect_err("confirmed opening must remain counted without gap");
+    assert!(err3.to_string().contains("quota exceeded"), "{err3}");
+
+    // Clear tenant A's persisted opening so we can test RAII error/drop release and open_channel.
+    let tenant_a_store = store.namespaced(NodeNamespace::hosted_tenant(tenant_a_id.as_str()));
+    for opening in tenant_a_store.list_tenant_channel_openings() {
+        tenant_a_store.delete_tenant_channel_opening(&opening.channel_id);
+        tenant_a_store.delete_channel_open_record(&opening.channel_id);
+    }
+    service
+        .send_message(LspServiceMessage::RefreshTenantWatchtowerChannelQuota(
+            tenant_a_id.clone(),
+        ))
+        .unwrap();
+
+    // 2. RAII release on RPC error: an actor failure must release the reservation immediately.
+    *control_a.behavior.lock().await = ActorBehavior::Fail("simulated actor failure".to_string());
+    let (_, signer_err) = make_signer_material(60);
+    let actor_err = ChannelRpcServer::open_channel_with_external_funding(
+        &rpc,
+        &ext_a,
+        make_external_params(lsp_key.pubkey(), signer_err),
+    )
+    .await
+    .expect_err("actor error should propagate");
+    assert!(
+        actor_err.to_string().contains("simulated actor failure"),
+        "{actor_err}"
+    );
+    ractor::call!(service, |reply| {
+        LspServiceMessage::CheckTenantWatchtowerChannelQuota(tenant_a_id.clone(), reply)
+    })
+    .unwrap()
+    .expect("failed open must immediately release its quota reservation");
+
+    // 3. RAII release on future cancellation/drop: dropping an in-flight RPC future must release
+    //    its quota reservation via WatchtowerQuotaReservationGuard::drop.
+    let (drop_entered_tx, mut drop_entered_rx) = watch::channel(0usize);
+    let (drop_release_tx, drop_release_rx) = watch::channel(false);
+    *control_a.behavior.lock().await = ActorBehavior::HoldUntilRelease {
+        entered: drop_entered_tx,
+        release: drop_release_rx,
+        persist_before_wait: false,
+        persist_on_complete: false,
+    };
+    let (_, signer_drop) = make_signer_material(70);
+    let drop_params = make_external_params(lsp_key.pubkey(), signer_drop);
+    {
+        let mut inflight = Box::pin(ChannelRpcServer::open_channel_with_external_funding(
+            &rpc,
+            &ext_a,
+            drop_params,
+        ));
+        tokio::select! {
+            _ = &mut inflight => panic!("in-flight open should stay pending until released"),
+            _ = drop_entered_rx.wait_for(|&count| count >= 1) => {}
+        }
+        // `inflight` is dropped here while holding the reservation guard.
+    }
+    let _ = drop_release_tx.send(true);
+    ractor::call!(service, |reply| {
+        LspServiceMessage::CheckTenantWatchtowerChannelQuota(tenant_a_id.clone(), reply)
+    })
+    .unwrap()
+    .expect("dropped in-flight RPC future must release its quota reservation");
+
+    // 4. Two concurrent `open_channel` requests at quota=1: exactly 1 succeeds and 1 is rejected.
+    let (oc_entered_tx, mut oc_entered_rx) = watch::channel(0usize);
+    let (oc_release_tx, oc_release_rx) = watch::channel(false);
+    *control_a.behavior.lock().await = ActorBehavior::HoldUntilRelease {
+        entered: oc_entered_tx,
+        release: oc_release_rx,
+        persist_before_wait: false,
+        persist_on_complete: false,
+    };
+    let open_channel_params = || OpenChannelParams {
+        pubkey: lsp_key.pubkey().into(),
+        funding_amount: 100_000_000_000,
+        public: Some(false),
+        one_way: None,
+        funding_udt_type_script: None,
+        shutdown_script: None,
+        commitment_delay_epoch: None,
+        commitment_fee_rate: None,
+        funding_fee_rate: None,
+        tlc_expiry_delta: None,
+        tlc_min_value: None,
+        tlc_fee_proportional_millionths: None,
+        max_tlc_value_in_flight: None,
+        max_tlc_number_in_flight: None,
+    };
+    let (oc1, oc2) = tokio::join!(
+        ChannelRpcServer::open_channel(&rpc, &ext_a, open_channel_params()),
+        async {
+            let _ = oc_entered_rx.wait_for(|&count| count >= 1).await;
+            let res = ChannelRpcServer::open_channel(&rpc, &ext_a, open_channel_params()).await;
+            let _ = oc_release_tx.send(true);
+            res
+        }
+    );
+    assert!(
+        oc1.is_ok(),
+        "first concurrent open_channel must succeed: {:?}",
+        oc1.err()
+    );
+    let oc2_err = oc2
+        .err()
+        .expect("second concurrent open_channel must be rejected");
+    assert!(oc2_err.to_string().contains("quota exceeded"), "{oc2_err}");
+    assert_eq!(
+        control_a.admitted_open_channels.load(Ordering::SeqCst),
+        1,
+        "only one concurrent open_channel may reach the tenant actor"
+    );
+
+    public_actor.stop(None);
+    service.stop_and_wait(None, None).await.unwrap();
+
+    // 5. At max_watch_channels_per_tenant = 2, persisting TenantChannelOpening while Call 1 is
+    //    still in-flight must NOT double-count Call 1 and falsely reject Call 2; a 3rd concurrent
+    //    open must still be rejected.
+    let root_dc = tempdir().expect("temporary directory");
+    let mut config_dc = lsp_config(root_dc.path().join("lsp"));
+    config_dc.max_watch_channels_per_tenant = 2;
+    config_dc.max_watch_channels = 4;
+    let store_dc = open_lsp_store(&config_dc);
+    let (entered_dc_tx, mut entered_dc_rx1) = watch::channel(0usize);
+    let mut entered_dc_rx2 = entered_dc_rx1.clone();
+    let (release_dc_tx, release_dc_rx) = watch::channel(false);
+    let control_dc = Arc::new(ConcurrentOpenControl {
+        behavior: TokioMutex::new(ActorBehavior::HoldUntilRelease {
+            entered: entered_dc_tx,
+            release: release_dc_rx,
+            persist_before_wait: true,
+            persist_on_complete: true,
+        }),
+        admitted_external_opens: AtomicUsize::new(0),
+        admitted_open_channels: AtomicUsize::new(0),
+    });
+    let mut tenant_pubkeys_dc = HashMap::new();
+    tenant_pubkeys_dc.insert(tenant_a_expected.clone(), tenant_a_key.pubkey());
+    let mut controls_dc = HashMap::new();
+    controls_dc.insert(tenant_a_expected.clone(), control_dc.clone());
+
+    let service_dc = start_test_lsp_service(
+        store_dc.clone(),
+        config_dc,
+        Arc::new(ConcurrentOpenRuntimeFactory {
+            store: store_dc.clone(),
+            public_node_id: lsp_key.pubkey(),
+            tenant_pubkeys: tenant_pubkeys_dc,
+            controls: controls_dc,
+        }),
+        lsp_key.clone(),
+        Arc::new(AtomicUsize::new(0)),
+        Arc::new(AtomicUsize::new(0)),
+    )
+    .await;
+    let tenant_a_dc = register_authenticated_test_tenant(&service_dc, &lsp_key, &root_a).await;
+    let (public_actor_dc, _) = Actor::spawn(None, BusyNetworkActor, ()).await.unwrap();
+    let rpc_dc = ChannelRpcServerImpl::new(public_actor_dc.clone(), store_dc.clone())
+        .with_lsp_actor(Some(service_dc.clone()));
+    let mut ext_dc = Extensions::new();
+    ext_dc.insert(AuthenticatedTenant(tenant_a_dc));
+
+    let (_, signer_dc1) = make_signer_material(80);
+    let (_, signer_dc2) = make_signer_material(90);
+    let (_, signer_dc3) = make_signer_material(100);
+    let (dc1, dc2, dc3) = tokio::join!(
+        ChannelRpcServer::open_channel_with_external_funding(
+            &rpc_dc,
+            &ext_dc,
+            make_external_params(lsp_key.pubkey(), signer_dc1),
+        ),
+        async {
+            let _ = entered_dc_rx1.wait_for(|&count| count >= 1).await;
+            ChannelRpcServer::open_channel_with_external_funding(
+                &rpc_dc,
+                &ext_dc,
+                make_external_params(lsp_key.pubkey(), signer_dc2),
+            )
+            .await
+        },
+        async {
+            let _ = entered_dc_rx2.wait_for(|&count| count >= 2).await;
+            let res = ChannelRpcServer::open_channel_with_external_funding(
+                &rpc_dc,
+                &ext_dc,
+                make_external_params(lsp_key.pubkey(), signer_dc3),
+            )
+            .await;
+            let _ = release_dc_tx.send(true);
+            res
+        }
+    );
+    assert!(dc1.is_ok(), "first open at quota=2 must succeed: {dc1:?}");
+    assert!(
+        dc2.is_ok(),
+        "second concurrent open at quota=2 must not be double-counted: {dc2:?}"
+    );
+    let dc3_err = dc3.expect_err("third concurrent open at quota=2 must be rejected");
+    assert!(dc3_err.to_string().contains("quota exceeded"), "{dc3_err}");
+
+    public_actor_dc.stop(None);
+    service_dc.stop_and_wait(None, None).await.unwrap();
+
+    // 6. Cross-tenant concurrent race for the last global quota slot
+    //    (max_watch_channels_per_tenant = 1, max_watch_channels = 1):
+    //    Tenant A and Tenant B race concurrently -> Tenant A takes the global slot while Tenant B
+    //    has 0 channels of its own, so Tenant B is rejected with
+    //    "global watchtower channel quota exceeded".
+    let root_g = tempdir().expect("temporary directory");
+    let mut config_g = lsp_config(root_g.path().join("lsp"));
+    config_g.max_watch_channels_per_tenant = 1;
+    config_g.max_watch_channels = 1;
+    let store_g = open_lsp_store(&config_g);
+    let (entered_g_tx, mut entered_g_rx) = watch::channel(0usize);
+    let (release_g_tx, release_g_rx) = watch::channel(false);
+    let control_ga = Arc::new(ConcurrentOpenControl {
+        behavior: TokioMutex::new(ActorBehavior::HoldUntilRelease {
+            entered: entered_g_tx,
+            release: release_g_rx,
+            persist_before_wait: false,
+            persist_on_complete: true,
+        }),
+        admitted_external_opens: AtomicUsize::new(0),
+        admitted_open_channels: AtomicUsize::new(0),
+    });
+    let control_gb = Arc::new(ConcurrentOpenControl {
+        behavior: TokioMutex::new(ActorBehavior::Fail(
+            "Tenant B should be rejected by global quota before actor execution".to_string(),
+        )),
+        admitted_external_opens: AtomicUsize::new(0),
+        admitted_open_channels: AtomicUsize::new(0),
+    });
+    let mut tenant_pubkeys_g = HashMap::new();
+    tenant_pubkeys_g.insert(tenant_a_expected.clone(), tenant_a_key.pubkey());
+    tenant_pubkeys_g.insert(tenant_b_expected.clone(), tenant_b_key.pubkey());
+    let mut controls_g = HashMap::new();
+    controls_g.insert(tenant_a_expected, control_ga.clone());
+    controls_g.insert(tenant_b_expected, control_gb.clone());
+
+    let service_g = start_test_lsp_service(
+        store_g.clone(),
+        config_g,
+        Arc::new(ConcurrentOpenRuntimeFactory {
+            store: store_g.clone(),
+            public_node_id: lsp_key.pubkey(),
+            tenant_pubkeys: tenant_pubkeys_g,
+            controls: controls_g,
+        }),
+        lsp_key.clone(),
+        Arc::new(AtomicUsize::new(0)),
+        Arc::new(AtomicUsize::new(0)),
+    )
+    .await;
+    let tenant_a_g = register_authenticated_test_tenant(&service_g, &lsp_key, &root_a).await;
+    let tenant_b_g = register_authenticated_test_tenant(&service_g, &lsp_key, &root_b).await;
+    let (public_actor_g, _) = Actor::spawn(None, BusyNetworkActor, ()).await.unwrap();
+    let rpc_g = ChannelRpcServerImpl::new(public_actor_g.clone(), store_g.clone())
+        .with_lsp_actor(Some(service_g.clone()));
+    let mut ext_ga = Extensions::new();
+    ext_ga.insert(AuthenticatedTenant(tenant_a_g));
+    let mut ext_gb = Extensions::new();
+    ext_gb.insert(AuthenticatedTenant(tenant_b_g));
+
+    let (_, signer_ga) = make_signer_material(110);
+    let (_, signer_gb) = make_signer_material(120);
+    let (res_ga, res_gb) = tokio::join!(
+        ChannelRpcServer::open_channel_with_external_funding(
+            &rpc_g,
+            &ext_ga,
+            make_external_params(lsp_key.pubkey(), signer_ga),
+        ),
+        async {
+            let _ = entered_g_rx.wait_for(|&count| count >= 1).await;
+            let res = ChannelRpcServer::open_channel_with_external_funding(
+                &rpc_g,
+                &ext_gb,
+                make_external_params(lsp_key.pubkey(), signer_gb),
+            )
+            .await;
+            let _ = release_g_tx.send(true);
+            res
+        }
+    );
+    assert!(
+        res_ga.is_ok(),
+        "Tenant A must win the global slot: {res_ga:?}"
+    );
+    let err_gb = res_gb.expect_err("Tenant B must be rejected by global quota reservation");
+    assert!(
+        err_gb
+            .to_string()
+            .contains("global watchtower channel quota exceeded"),
+        "{err_gb}"
+    );
+    assert_eq!(control_ga.admitted_external_opens.load(Ordering::SeqCst), 1);
+    assert_eq!(control_gb.admitted_external_opens.load(Ordering::SeqCst), 0);
+
+    public_actor_g.stop(None);
+    service_g.stop_and_wait(None, None).await.unwrap();
+}
+
+#[cfg(feature = "watchtower")]
+#[tokio::test]
+async fn watchtower_rpc_create_and_remove_watch_channel_refresh_lsp_global_quota_cache() {
+    use crate::fiber::channel::{
+        ChannelActorState, ChannelActorStateStore, ChannelOpenRecordStore, TenantChannelOpening,
+    };
+    use crate::fiber::network::OpenChannelWithExternalFundingCommand;
+    use crate::rpc::watchtower::{
+        CreateWatchChannelParams, RemoveWatchChannelParams, RpcContext, WatchtowerRpcServer,
+        WatchtowerRpcServerImpl,
+    };
+    use crate::store::sample::StoreSample;
+    use crate::watchtower::WatchtowerStore;
+
+    let root = tempdir().expect("temporary directory");
+    let mut config = lsp_config(root.path().join("lsp"));
+    config.max_watch_channels_per_tenant = 2;
+    config.max_watch_channels = 2;
+    let store = open_lsp_store(&config);
+    let lsp_key = Privkey::from(&[9; 32]);
+    let tenant_a_key = Privkey::from(&[1; 32]);
+    let tenant_b_root = Privkey::from(&[0x55; 32]);
+    let expected_tenant_b_id = TenantId::from_root_signer_pubkey(&tenant_b_root.pubkey());
+    let tenant_b_key = Privkey::from(&[2; 32]);
+
+    let service = start_test_lsp_service(
+        store.clone(),
+        config.clone(),
+        Arc::new(
+            FakeRuntimeFactory::new(Arc::new(AtomicUsize::new(0)))
+                .with_protocol_secret(expected_tenant_b_id, 2),
+        ),
+        lsp_key.clone(),
+        Arc::new(AtomicUsize::new(0)),
+        Arc::new(AtomicUsize::new(0)),
+    )
+    .await;
+    let tenant_a_id =
+        register_authenticated_test_tenant(&service, &lsp_key, &test_root_signer()).await;
+    let tenant_b_id = register_authenticated_test_tenant(&service, &lsp_key, &tenant_b_root).await;
+
+    // Seed Tenant B with 1 persisted unwatched pending opening ch_b (channels_total = 0,
+    // pending_unwatched_by_tenant[B] = 1, pending_unwatched_total = 1).
+    let ch_b = Hash256::from([0x92; 32]);
+    let tenant_b_store = store.namespaced(NodeNamespace::hosted_tenant(tenant_b_id.as_str()));
+    let mut state_b = ChannelActorState::samples(220).remove(0);
+    state_b.id = ch_b;
+    state_b.remote_pubkey = lsp_key.pubkey();
+    tenant_b_store.insert_channel_actor_state(state_b);
+    tenant_b_store.put_tenant_channel_opening(TenantChannelOpening {
+        command: OpenChannelWithExternalFundingCommand {
+            pubkey: lsp_key.pubkey(),
+            funding_amount: 100_000_000_000,
+            public: false,
+            shutdown_script: Script::default(),
+            funding_lock_script: Script::default(),
+            funding_lock_script_cell_deps: Vec::new(),
+            funding_udt_type_script: None,
+            commitment_fee_rate: None,
+            commitment_delay_epoch: None,
+            funding_fee_rate: None,
+            tlc_expiry_delta: None,
+            tlc_min_value: None,
+            tlc_fee_proportional_millionths: None,
+            max_tlc_value_in_flight: None,
+            max_tlc_number_in_flight: None,
+            external_channel_signer: None,
+        },
+        channel_id: ch_b,
+        result: None,
+        terminated: false,
+    });
+    service
+        .send_message(LspServiceMessage::RefreshTenantWatchtowerChannelQuota(
+            tenant_b_id.clone(),
+        ))
+        .unwrap();
+    ractor::call!(service, LspServiceMessage::GetStatus).unwrap();
+
+    let watchtower_rpc = WatchtowerRpcServerImpl::new(store.clone())
+        .with_quotas(config.watchtower_quotas())
+        .with_lsp_enabled(true)
+        .with_lsp_actor(Some(service.clone()));
+    let node_id_b = crate::lsp::tenant_watchtower_node_id(&tenant_b_key.pubkey());
+    let ctx_b = RpcContext {
+        node_id: node_id_b.to_string(),
+        tenant_scoped: true,
+    };
+
+    // 1. Tenant B creates a watchtower row for ch_b directly via Watchtower RPC.
+    //    `channels_total` becomes 1; LspService must refresh Tenant B's cached pending count
+    //    down to 0 so ch_b is NOT double-counted (`1 + 1 >= 2`) against Tenant A.
+    let key = Privkey::from(&[0x33; 32]);
+    WatchtowerRpcServer::create_watch_channel(
+        &watchtower_rpc,
+        ctx_b.clone(),
+        CreateWatchChannelParams {
+            channel_features: fiber_types::ChannelFeatures::V2.into(),
+            channel_id: ch_b.into(),
+            funding_udt_type_script: None,
+            local_settlement_key: None,
+            local_settlement_key_pubkey: Some(key.pubkey().into()),
+            remote_settlement_key: key.pubkey().into(),
+            local_funding_pubkey: key.pubkey().into(),
+            remote_funding_pubkey: key.pubkey().into(),
+            settlement_data: fiber_json_types::SettlementData {
+                local_amount: 1000,
+                remote_amount: 1000,
+                tlcs: vec![],
+            },
+            payout_lock_script: None,
+        },
+    )
+    .await
+    .expect("tenant create_watch_channel must succeed");
+    assert!(store.get_watch_channel(&node_id_b, &ch_b).is_some());
+    ractor::call!(service, LspServiceMessage::GetStatus).unwrap();
+
+    ractor::call!(service, |reply| {
+        LspServiceMessage::CheckTenantWatchtowerChannelQuota(tenant_a_id.clone(), reply)
+    })
+    .unwrap()
+    .expect(
+        "create_watch_channel must refresh LspService cache so Tenant A is not falsely rejected",
+    );
+
+    // 2. Symmetric case: add 1 watched channel for Tenant A (channels_total = 2), then Tenant B
+    //    removes ch_b's watch row via Watchtower RPC while ch_b's non-closed opening remains
+    //    persisted. `channels_total` drops to 1 and LspService must refresh Tenant B's pending
+    //    count back to 1 so global quota (`1 + 1 >= 2`) still rejects Tenant A.
+    let ch_a = Hash256::from([0x93; 32]);
+    let mut state_a = ChannelActorState::samples(221).remove(0);
+    state_a.id = ch_a;
+    state_a.remote_pubkey = tenant_a_key.pubkey();
+    state_a.remote_channel_public_keys = Some(state_a.local_channel_public_keys.clone());
+    store.insert_channel_actor_state(state_a.clone());
+    store
+        .namespaced(NodeNamespace::hosted_tenant(tenant_a_id.as_str()))
+        .insert_channel_actor_state(state_a);
+    service
+        .send_message(LspServiceMessage::TenantChannelOnline(
+            tenant_a_key.pubkey(),
+            ch_a,
+        ))
+        .unwrap();
+    ractor::call!(service, LspServiceMessage::GetStatus).unwrap();
+
+    WatchtowerRpcServer::remove_watch_channel(
+        &watchtower_rpc,
+        ctx_b,
+        RemoveWatchChannelParams {
+            channel_id: ch_b.into(),
+        },
+    )
+    .await
+    .expect("tenant remove_watch_channel must succeed");
+    assert!(store.get_watch_channel(&node_id_b, &ch_b).is_none());
+    ractor::call!(service, LspServiceMessage::GetStatus).unwrap();
+
+    let err = ractor::call!(service, |reply| {
+        LspServiceMessage::CheckTenantWatchtowerChannelQuota(tenant_a_id, reply)
+    })
+    .unwrap()
+    .expect_err(
+        "remove_watch_channel must refresh LspService cache so unwatched opening is counted",
+    );
+    assert!(
+        err.contains("global watchtower channel quota exceeded"),
+        "{err}"
+    );
+
+    service.stop_and_wait(None, None).await.unwrap();
+}
+
+#[cfg(feature = "watchtower")]
+#[tokio::test]
+async fn cancelled_open_tenant_channel_aborts_before_persisting_and_channel_created_refreshes_global_quota(
+) {
+    use crate::fiber::channel::ChannelOpenRecordStore;
+    use crate::fiber::network::OpenChannelWithExternalFundingCommand;
+    use crate::lsp::FiberTenantRuntimeFactory;
+    use crate::tests::NetworkNode;
+    use biscuit_auth::KeyPair;
+    use ckb_types::prelude::{Builder, Entity, Pack};
+    use fiber_types::{ChannelBasePublicKeys, ChannelOpenSignerMaterial};
+    use musig2::SecNonce;
+
+    let public_t = NetworkNode::new_n_interconnected_nodes_with_config(1, |index| {
+        crate::tests::NetworkNodeConfigBuilder::new()
+            .node_name(Some(format!("quota-cancel-{index}")))
+            .base_dir_prefix(&format!("quota-cancel-{index}-"))
+            .fiber_config_updater(|config| {
+                config.auto_accept_channel_ckb_funding_amount = Some(100_000_000_000);
+            })
+            .build()
+    })
+    .await
+    .pop()
+    .expect("one node");
+
+    let root = tempdir().expect("temporary LSP directory");
+    let mut config = lsp_config(root.path().join("lsp"));
+    config.max_watch_channels_per_tenant = 1;
+    config.max_watch_channels = 1;
+    let root_actor = crate::tests::get_test_root_actor().await;
+    let runtime_factory = Arc::new(FiberTenantRuntimeFactory::new(
+        public_t.signing_events.clone(),
+        config.clone(),
+        public_t.fiber_config.clone(),
+        public_t.chain_client.clone(),
+        public_t.chain_actor.clone(),
+        public_t.network_actor.clone(),
+        public_t.store.clone(),
+        root_actor.get_cell(),
+        Script::default(),
+    ));
+    let biscuit_root = KeyPair::new();
+    let token_issuer = BiscuitTokenIssuer::from_private_key(
+        &biscuit_root.private().to_prefixed_string(),
+        &biscuit_root.public().to_string(),
+    )
+    .expect("configure test Biscuit issuer");
+    let service = Actor::spawn_linked(
+        None,
+        LspService,
+        LspServiceArgs {
+            config,
+            public_node_id: public_t.pubkey,
+            public_network_actor: public_t.network_actor.clone(),
+            store: public_t.store.namespaced(NodeNamespace::lsp_metadata()),
+            runtime_factory,
+            signing_key: public_t.private_key.clone(),
+            token_issuer,
+            watchtower_store: public_t.store.clone(),
+            signing_events: public_t.signing_events.clone(),
+        },
+        root_actor.get_cell(),
+    )
+    .await
+    .expect("start LSP service")
+    .0;
+
+    let root_a = test_root_signer();
+    let root_b = Privkey::from(&[0x77; 32]);
+    let tenant_a_id =
+        register_authenticated_test_tenant(&service, &public_t.private_key, &root_a).await;
+    let tenant_b_id =
+        register_authenticated_test_tenant(&service, &public_t.private_key, &root_b).await;
+
+    let tenant_b_ctx = ractor::call!(service, |reply| {
+        LspServiceMessage::GetTenantRpcContext(tenant_b_id.clone(), reply)
+    })
+    .unwrap()
+    .expect("activate tenant B runtime");
+
+    let make_command = |seed: u8| {
+        let base_keys = ChannelBasePublicKeys {
+            funding_pubkey: Privkey::from(&[seed; 32]).pubkey(),
+            tlc_base_key: Privkey::from(&[seed.wrapping_add(1); 32]).pubkey(),
+        };
+        let nonce = |offset: u8| {
+            SecNonce::build([seed.wrapping_add(offset); 32])
+                .build()
+                .public_nonce()
+        };
+        let signer = ChannelOpenSignerMaterial {
+            base_public_keys: base_keys,
+            v2_nonces: vec![nonce(2), nonce(3)],
+            first_commitment_point: Privkey::from(&[seed.wrapping_add(4); 32]).pubkey(),
+            second_commitment_point: Privkey::from(&[seed.wrapping_add(5); 32]).pubkey(),
+            commitment_nonce: nonce(6),
+            next_commitment_nonce: nonce(7),
+            revocation_nonce: nonce(8),
+            channel_announcement_nonce: None,
+        };
+        OpenChannelWithExternalFundingCommand {
+            pubkey: public_t.pubkey,
+            funding_amount: 100_000_000_000,
+            public: false,
+            shutdown_script: Script::default(),
+            funding_lock_script: Script::new_builder().args([0xaau8; 20].pack()).build(),
+            funding_lock_script_cell_deps: Vec::new(),
+            funding_udt_type_script: None,
+            commitment_fee_rate: None,
+            commitment_delay_epoch: None,
+            funding_fee_rate: None,
+            tlc_expiry_delta: None,
+            tlc_min_value: None,
+            tlc_fee_proportional_millionths: None,
+            max_tlc_value_in_flight: None,
+            max_tlc_number_in_flight: None,
+            external_channel_signer: Some(signer),
+        }
+    };
+
+    // (a) A cancelled queued OpenTenantChannel (`reply.is_closed() == true`) must abort before
+    //     persisting TenantChannelOpening / ChannelOpenRecord or spawning a channel actor.
+    let (closed_tx, closed_rx) = tokio::sync::oneshot::channel();
+    drop(closed_rx);
+    tenant_b_ctx
+        .fiber_actor
+        .send_message(FiberActorMessage::new_command(
+            FiberActorCommand::OpenTenantChannel {
+                command: make_command(130),
+                admission_error: None,
+                reply: closed_tx.into(),
+            },
+        ))
+        .expect("send cancelled OpenTenantChannel");
+    // Synchronize with tenant B's actor mailbox so OpenTenantChannel has finished processing.
+    let activity = ractor::call_t!(
+        tenant_b_ctx.fiber_actor,
+        |reply| FiberActorMessage::new_command(FiberActorCommand::GetHostedTenantActivity(reply)),
+        5_000
+    )
+    .expect("query tenant activity");
+    assert_eq!(activity.pending_channel_operations, 0);
+    assert!(
+        tenant_b_ctx.store.list_tenant_channel_openings().is_empty(),
+        "cancelled OpenTenantChannel must not persist TenantChannelOpening"
+    );
+    assert!(
+        tenant_b_ctx.store.get_channel_open_records().is_empty(),
+        "cancelled OpenTenantChannel must not persist ChannelOpenRecord"
+    );
+
+    // (b) When Tenant B's FiberActor creates a channel (emitting NetworkServiceEvent::ChannelCreated)
+    //     even without an active LspService reservation (e.g. if the HTTP future dropped after
+    //     open_tenant_channel_inner began), FiberTenantRuntimeFactory must refresh LspService on
+    //     ChannelCreated so Tenant A is immediately rejected on global watchtower quota.
+    let (live_tx, _live_rx) = tokio::sync::oneshot::channel();
+    tenant_b_ctx
+        .fiber_actor
+        .send_message(FiberActorMessage::new_command(
+            FiberActorCommand::OpenTenantChannel {
+                command: make_command(140),
+                admission_error: None,
+                reply: live_tx.into(),
+            },
+        ))
+        .expect("send live OpenTenantChannel");
+
+    let mut rejected_global = false;
+    for _ in 0..100 {
+        match ractor::call!(service, |reply| {
+            LspServiceMessage::CheckTenantWatchtowerChannelQuota(tenant_a_id.clone(), reply)
+        })
+        .unwrap()
+        {
+            Err(err) if err.contains("global watchtower channel quota exceeded") => {
+                rejected_global = true;
+                break;
+            }
+            _ => tokio::time::sleep(Duration::from_millis(50)).await,
+        }
+    }
+    assert!(
+        rejected_global,
+        "ChannelCreated from Tenant B's runtime must refresh LspService global pending quota so Tenant A is rejected"
+    );
+    assert!(
+        !tenant_b_ctx.store.get_channel_open_records().is_empty(),
+        "ChannelOpenRecord must be persisted before ChannelCreated"
+    );
+
+    service.stop_and_wait(None, None).await.unwrap();
 }

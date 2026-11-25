@@ -190,6 +190,8 @@ pub struct WatchtowerRpcServerImpl<S> {
     signing_events: crate::signing::SigningEvents,
     quotas: crate::lsp_config::WatchtowerQuotas,
     lsp_enabled: bool,
+    #[cfg(all(not(target_arch = "wasm32"), feature = "lsp"))]
+    lsp_actor: Option<ractor::ActorRef<crate::lsp::LspServiceMessage>>,
 }
 
 #[cfg(feature = "watchtower")]
@@ -200,6 +202,8 @@ impl<S> WatchtowerRpcServerImpl<S> {
             signing_events: Default::default(),
             quotas: Default::default(),
             lsp_enabled: true,
+            #[cfg(all(not(target_arch = "wasm32"), feature = "lsp"))]
+            lsp_actor: None,
         }
     }
 
@@ -216,6 +220,30 @@ impl<S> WatchtowerRpcServerImpl<S> {
     pub(crate) fn with_lsp_enabled(mut self, enabled: bool) -> Self {
         self.lsp_enabled = enabled;
         self
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), feature = "lsp"))]
+    pub(crate) fn with_lsp_actor(
+        mut self,
+        lsp_actor: Option<ractor::ActorRef<crate::lsp::LspServiceMessage>>,
+    ) -> Self {
+        self.lsp_actor = lsp_actor;
+        self
+    }
+
+    fn refresh_lsp_tenant_pending_quota(&self, node_id: &NodeId) {
+        #[cfg(all(not(target_arch = "wasm32"), feature = "lsp"))]
+        if *node_id != NodeId::local() {
+            if let Some(lsp_actor) = &self.lsp_actor {
+                let _ = lsp_actor.send_message(
+                    crate::lsp::LspServiceMessage::RefreshTenantWatchtowerChannelQuotaByNodeId(
+                        node_id.clone(),
+                    ),
+                );
+            }
+        }
+        #[cfg(not(all(not(target_arch = "wasm32"), feature = "lsp")))]
+        let _ = node_id;
     }
 
     fn authorized_node_id(&self, ctx: &RpcContext) -> Result<NodeId, ErrorObjectOwned> {
@@ -359,7 +387,7 @@ where
         let created = if ctx.tenant_scoped || node_id != NodeId::local() {
             self.store
                 .insert_watch_channel_checked(
-                    node_id,
+                    node_id.clone(),
                     channel_id,
                     funding_udt_type_script,
                     keys,
@@ -371,7 +399,7 @@ where
                 .map_err(rpc_error)?
         } else {
             self.store.insert_watch_channel(
-                node_id,
+                node_id.clone(),
                 channel_id,
                 funding_udt_type_script,
                 keys,
@@ -382,6 +410,7 @@ where
         };
         if created {
             signing_update.publish();
+            self.refresh_lsp_tenant_pending_quota(&node_id);
         }
         Ok(())
     }
@@ -395,8 +424,9 @@ where
         let channel_id = params.channel_id.into();
         let signing_scope = self.signing_events.watchtower(&node_id);
         let signing_update = signing_scope.prepare_removed(channel_id);
-        if self.store.remove_watch_channel(node_id, channel_id) {
+        if self.store.remove_watch_channel(node_id.clone(), channel_id) {
             signing_update.publish();
+            self.refresh_lsp_tenant_pending_quota(&node_id);
         }
         Ok(())
     }

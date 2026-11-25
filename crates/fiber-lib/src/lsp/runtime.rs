@@ -1,3 +1,5 @@
+#[cfg(feature = "watchtower")]
+use std::sync::OnceLock;
 use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
@@ -102,6 +104,9 @@ impl HostedTenantRuntime {
 pub trait TenantRuntimeFactory: Send + Sync {
     fn provision(&self, tenant_id: &TenantId) -> Result<HostedTenantRecord, String>;
     async fn start(&self, record: &HostedTenantRecord) -> Result<HostedTenantRuntime, String>;
+    /// Optional hook allowing `LspService` to attach its actor reference once started
+    /// so tenant runtime lifecycle events can trigger incremental per-tenant refreshes.
+    fn set_lsp_service(&self, _lsp_service: ActorRef<super::LspServiceMessage>) {}
 }
 
 /// Starts a tenant-scoped Fiber channel/payment runtime and wires it to Public
@@ -116,6 +121,8 @@ pub struct FiberTenantRuntimeFactory<C = CkbRpcClient> {
     tenant_store: Store,
     root_actor: ActorCell,
     default_shutdown_script: Script,
+    #[cfg(feature = "watchtower")]
+    lsp_service: OnceLock<ActorRef<super::LspServiceMessage>>,
 }
 
 impl<C: CkbChainClient + Clone + Send + Sync + 'static> FiberTenantRuntimeFactory<C> {
@@ -141,6 +148,8 @@ impl<C: CkbChainClient + Clone + Send + Sync + 'static> FiberTenantRuntimeFactor
             tenant_store,
             root_actor,
             default_shutdown_script,
+            #[cfg(feature = "watchtower")]
+            lsp_service: OnceLock::new(),
         }
     }
 
@@ -154,6 +163,13 @@ impl<C: CkbChainClient + Clone + Send + Sync + 'static> FiberTenantRuntimeFactor
 impl<C: CkbChainClient + Clone + Send + Sync + 'static> TenantRuntimeFactory
     for FiberTenantRuntimeFactory<C>
 {
+    fn set_lsp_service(&self, lsp_service: ActorRef<super::LspServiceMessage>) {
+        #[cfg(feature = "watchtower")]
+        let _ = self.lsp_service.set(lsp_service);
+        #[cfg(not(feature = "watchtower"))]
+        let _ = lsp_service;
+    }
+
     fn provision(&self, tenant_id: &TenantId) -> Result<HostedTenantRecord, String> {
         let config = self.tenant_config(tenant_id);
         let tenant_pubkey = pubkey_from_tentacle(config.try_public_key().map_err(|error| {
@@ -222,8 +238,18 @@ impl<C: CkbChainClient + Clone + Send + Sync + 'static> TenantRuntimeFactory
             let watchtower_store = self.tenant_store.clone();
             let tenant_node_id = super::tenant_watchtower_node_id(&tenant_pubkey);
             let watchtower_quotas = self.lsp_config.watchtower_quotas();
+            let lsp_service = self.lsp_service.get().cloned();
+            let tenant_id = record.tenant_id.clone();
             tokio::spawn(async move {
                 while let Some(event) = event_receiver.recv().await {
+                    let should_refresh_quota = matches!(
+                        &event,
+                        crate::NetworkServiceEvent::ChannelCreated(..)
+                            | crate::NetworkServiceEvent::RemoteTxComplete(..)
+                            | crate::NetworkServiceEvent::ChannelClosed(..)
+                            | crate::NetworkServiceEvent::ChannelAbandon(..)
+                            | crate::NetworkServiceEvent::ChannelFundingAborted(..)
+                    );
                     crate::event_handler::forward_event_to_watchtower_store(
                         &events,
                         event,
@@ -231,6 +257,15 @@ impl<C: CkbChainClient + Clone + Send + Sync + 'static> TenantRuntimeFactory
                         tenant_node_id.clone(),
                         &watchtower_quotas,
                     );
+                    if should_refresh_quota {
+                        if let Some(lsp_service) = &lsp_service {
+                            let _ = lsp_service.send_message(
+                                super::LspServiceMessage::RefreshTenantWatchtowerChannelQuota(
+                                    tenant_id.clone(),
+                                ),
+                            );
+                        }
+                    }
                 }
             });
         }

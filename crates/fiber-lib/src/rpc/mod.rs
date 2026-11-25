@@ -526,15 +526,13 @@ pub mod server {
                 };
                 #[cfg(not(feature = "lsp"))]
                 let watchtower_quotas = crate::lsp_config::WatchtowerQuotas::default();
-                modules
-                    .merge(
-                        WatchtowerRpcServerImpl::new(store.clone())
-                            .with_signing_events(signing_events.clone())
-                            .with_quotas(watchtower_quotas)
-                            .with_lsp_enabled(lsp_enabled)
-                            .into_rpc(),
-                    )
-                    .unwrap();
+                let watchtower_server = WatchtowerRpcServerImpl::new(store.clone())
+                    .with_signing_events(signing_events.clone())
+                    .with_quotas(watchtower_quotas)
+                    .with_lsp_enabled(lsp_enabled);
+                #[cfg(all(not(target_arch = "wasm32"), feature = "lsp"))]
+                let watchtower_server = watchtower_server.with_lsp_actor(lsp_actor.clone());
+                modules.merge(watchtower_server.into_rpc()).unwrap();
             }
 
             #[cfg(debug_assertions)]

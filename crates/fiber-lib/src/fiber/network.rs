@@ -4267,6 +4267,7 @@ where
                     state,
                     command,
                     admission_error,
+                    &reply,
                 ))
                 .await;
                 match outcome {
@@ -4382,6 +4383,9 @@ where
         state: &mut FiberActorState<S, C>,
         command: OpenChannelWithExternalFundingCommand,
         admission_error: Option<String>,
+        reply: &RpcReplyPort<
+            Result<fiber_json_types::OpenChannelWithExternalFundingResult, String>,
+        >,
     ) -> Result<
         (
             Option<fiber_json_types::OpenChannelWithExternalFundingResult>,
@@ -4534,6 +4538,13 @@ where
 
         if let Some(error) = admission_error {
             return Err(error);
+        }
+
+        // If the RPC caller disconnected/cancelled while this command was queued, its
+        // watchtower quota reservation guard has already dropped; abort before persisting
+        // a brand-new opening or spawning a channel actor.
+        if reply.is_closed() {
+            return Err("tenant channel opening cancelled by caller".to_string());
         }
 
         state
@@ -8742,11 +8753,11 @@ where
         .map_err(|e| ProcessingChannelError::SpawnErr(e.to_string()))?
         .0;
         let temp_channel_id = rx.await.expect("msg received");
-        self.on_channel_created(temp_channel_id, remote_pubkey, channel.clone());
-
-        // Record the channel opening attempt so it can be queried via RPC.
+        // Record the channel opening attempt before emitting ChannelCreated so listeners
+        // reacting to ChannelCreated observe the persisted open record immediately.
         let record = ChannelOpenRecord::new(temp_channel_id, remote_pubkey, funding_amount);
         self.store.insert_channel_open_record(record);
+        self.on_channel_created(temp_channel_id, remote_pubkey, channel.clone());
 
         Ok((channel, temp_channel_id))
     }
@@ -8897,12 +8908,12 @@ where
         .map_err(|e| ProcessingChannelError::SpawnErr(e.to_string()))?
         .0;
         let temp_channel_id = rx.await.expect("msg received");
-        self.on_channel_created(temp_channel_id, remote_pubkey, channel.clone());
-
-        // Record the external-funding opening attempt under the temporary id.
+        // Record the external-funding opening attempt under the temporary id before emitting
+        // ChannelCreated so listeners reacting to ChannelCreated observe the open record.
         // It will be re-keyed once the peer accepts and the final channel id is known.
         let record = ChannelOpenRecord::new(temp_channel_id, remote_pubkey, funding_amount);
         self.store.insert_channel_open_record(record);
+        self.on_channel_created(temp_channel_id, remote_pubkey, channel.clone());
 
         Ok((channel, temp_channel_id))
     }
