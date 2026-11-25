@@ -4268,7 +4268,7 @@ where
                     );
                     return Ok(());
                 }
-                if reason == StopReason::Abandon {
+                if reason == StopReason::Abandon || reason == StopReason::ForceAbandon {
                     state.update_state(ChannelState::Closed(CloseFlags::ABANDONED));
                 } else if reason.is_abort_funding() {
                     // For timeout-based aborts: re-verify that the channel
@@ -5939,6 +5939,9 @@ pub struct ClosedChannel {}
 #[derive(PartialEq, Eq, Clone, Debug)]
 pub enum StopReason {
     Abandon,
+    /// Force abandon requested through RPC. Removes the channel even when the
+    /// normal abandon state checks would reject it.
+    ForceAbandon,
     AbortFunding,
     AbortFundingWithDetail(String),
     FundingFailed,

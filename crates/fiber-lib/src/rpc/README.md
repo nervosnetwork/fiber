@@ -330,11 +330,31 @@ Accepts a channel opening request from a peer.
 #### Method `abandon_channel`
 
 Abandon a channel, this will remove the channel from the channel manager and DB.
- Only channels not in Ready or Closed state can be abandoned.
+
+ Without `force`, only channels that have not reached a funded/protected state
+ can be abandoned. With `force = true`, `AwaitingChannelReady`, `ChannelReady`,
+ funded and externally funded channels can be abandoned. Channels in
+ `ShuttingDown` or `Closed` still require shutdown.
+
+ ##### Warning
+ Forcing an abandon does not close the funding transaction on chain. It
+ deletes the local channel state and removes watchtower protection, so if
+ the funding transaction later confirms, funds may be permanently lost.
+ Use this only when the funding transaction can no longer confirm, and back
+ up the database first.
 
 ##### Params
 
 * `channel_id` - <em>[Hash256](#type-hash256)</em>, The temporary channel ID or real channel ID of the channel being abandoned
+* `force` - <em>`Option<bool>`</em>, Abandon the channel even if it is in a protected state.
+
+ When true, `AwaitingChannelReady`, `ChannelReady`, funded and externally
+ funded channels can be abandoned. `ShuttingDown` and `Closed` still
+ require shutdown. Abandoning does not close the funding transaction on
+ chain: it deletes the local channel state and removes watchtower
+ protection. If the funding transaction later confirms, funds can be
+ permanently lost. Use this only for channels whose funding transaction can
+ no longer confirm, and back up the database first.
 
 ##### Returns
 

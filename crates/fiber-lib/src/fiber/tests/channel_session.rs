@@ -5860,6 +5860,56 @@ async fn test_v2_rejected_shutdown_leaves_no_stale_remote_info_across_restore() 
 }
 
 #[tokio::test]
+async fn test_force_abandon_bypasses_signed_external_funding_guard() {
+    let (a, b, id) = create_nodes_with_established_channel(100000000000, 11800000000, false).await;
+    let mut state = a.get_channel_actor_state(id);
+    let myself = a.get_channel_actor(id).await.unwrap();
+    state.is_acceptor = false;
+    state.ephemeral_config.external_funding.enabled = true;
+    state.ephemeral_config.external_funding.signed_submitted = true;
+    assert!(state.has_submitted_local_external_funding());
+
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let (network, task) = Actor::spawn(None, CaptureNetwork, captured.clone())
+        .await
+        .unwrap();
+    state.network = Some(network.clone().into());
+    let actor = ChannelActor::new(a.pubkey, b.pubkey, network.clone(), a.store.clone(), None);
+
+    // A normal abandon is ignored while a signed external funding tx may still confirm.
+    let mut regular = state.clone();
+    actor
+        .handle_event(
+            &myself,
+            &mut regular,
+            ChannelEvent::Stop(StopReason::Abandon),
+        )
+        .await
+        .unwrap();
+    assert!(
+        !matches!(regular.state, ChannelState::Closed(CloseFlags::ABANDONED)),
+        "normal abandon must not discard a signed external funding channel"
+    );
+
+    // Force abandon bypasses that guard.
+    actor
+        .handle_event(
+            &myself,
+            &mut state,
+            ChannelEvent::Stop(StopReason::ForceAbandon),
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(state.state, ChannelState::Closed(CloseFlags::ABANDONED)),
+        "force abandon must close the channel even after external funding was submitted"
+    );
+
+    network.stop(None);
+    task.await.unwrap();
+}
+
+#[tokio::test]
 async fn test_v2_recovery_handshake_precedes_replay_and_watchdog_bounds_wait() {
     let (a, b, id) = create_nodes_with_established_channel(100000000000, 11800000000, false).await;
     let mut state = a.get_channel_actor_state(id);

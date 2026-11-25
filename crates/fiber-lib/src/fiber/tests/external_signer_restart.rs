@@ -771,7 +771,7 @@ async fn duplicate_public_external_signer_open_keeps_original_actor_and_reply() 
     ));
 
     call!(opener.network_actor, |reply| {
-        NetworkActorMessage::new_command(FiberActorCommand::AbandonChannel(temp_id, reply))
+        NetworkActorMessage::new_command(FiberActorCommand::AbandonChannel(temp_id, false, reply))
     })
     .expect("public actor is alive")
     .expect("abandon original opening");

@@ -26,6 +26,7 @@ interface OpenChannelResult {
 }
 interface AbandonChannelParams {
     channel_id: HexString;
+    force?: boolean;
 }
 interface AcceptChannelParams {
     temporary_channel_id: HexString;

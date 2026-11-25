@@ -1280,7 +1280,7 @@ pub enum FiberActorCommand {
         RpcReplyPort<Result<OpenChannelResponse, String>>,
     ),
     // Abandon a channel, channel_id maybe temp_channel_id or normal channel_id
-    AbandonChannel(Hash256, RpcReplyPort<Result<(), String>>),
+    AbandonChannel(Hash256, bool, RpcReplyPort<Result<(), String>>),
     // Accept a channel to a peer.
     AcceptChannel(
         AcceptChannelCommand,
@@ -2754,7 +2754,7 @@ where
                 if let Some(mut record) = state.store.get_channel_open_record(&channel_id) {
                     if record.status != ChannelOpeningStatus::ChannelReady {
                         let failure_detail = match &reason {
-                            StopReason::Abandon => {
+                            StopReason::Abandon | StopReason::ForceAbandon => {
                                 format!("[Channel {}] Channel was abandoned", channel_id)
                             }
                             StopReason::AbortFunding => {
@@ -3796,8 +3796,8 @@ where
                     }
                 }
             }
-            FiberActorCommand::AbandonChannel(channel_id, reply) => {
-                match Box::pin(state.abandon_channel(channel_id)).await {
+            FiberActorCommand::AbandonChannel(channel_id, force, reply) => {
+                match Box::pin(state.abandon_channel(channel_id, force)).await {
                     Ok(_) => {
                         let _ = reply.send(Ok(()));
                     }
@@ -9314,62 +9314,104 @@ where
         .await;
     }
 
-    pub async fn abandon_channel(&mut self, channel_id: Hash256) -> ProcessingChannelResult {
-        if let Some(channel_actor_state) = self.store.get_channel_actor_state(&channel_id) {
-            if channel_actor_state.has_submitted_local_external_funding() {
-                return Err(ProcessingChannelError::InvalidParameter(format!(
-                    "Channel {} has released a signed external funding transaction and cannot be abandoned",
-                    channel_id
-                )));
-            }
-            match channel_actor_state.state {
-                ChannelState::ChannelReady
-                | ChannelState::ShuttingDown(_)
-                | ChannelState::Closed(_)
-                | ChannelState::AwaitingChannelReady(_) => {
+    pub async fn abandon_channel(
+        &mut self,
+        channel_id: Hash256,
+        force: bool,
+    ) -> ProcessingChannelResult {
+        let channel = self.channels.get(&channel_id).cloned();
+
+        if !force {
+            // Keep the state-specific errors for a stored channel even when its actor is no
+            // longer live. Only the force path requires the actor before looking at state.
+            if let Some(channel_actor_state) = self.store.get_channel_actor_state(&channel_id) {
+                if channel_actor_state.has_submitted_local_external_funding() {
                     return Err(ProcessingChannelError::InvalidParameter(format!(
-                        "Channel {} is in state {:?}, cannot be abandoned, please shutdown the channel instead",
-                        channel_id, channel_actor_state.state
+                        "Channel {} has released a signed external funding transaction and cannot be abandoned",
+                        channel_id
                     )));
                 }
-                ChannelState::AwaitingTxSignatures(flags)
-                    if flags.contains(AwaitingTxSignaturesFlags::OUR_TX_SIGNATURES_SENT) =>
-                {
-                    return Err(ProcessingChannelError::InvalidParameter(format!(
-                        "Channel {} is in state {:?} and our signature has been sent. It cannot be abandoned. please wait for chain commitment.",
-                        channel_id, channel_actor_state.state
-                    )));
-                }
-                _ => {
-                    if channel_actor_state.funding_tx_confirmed_at.is_some() {
+                match channel_actor_state.state {
+                    ChannelState::ChannelReady
+                    | ChannelState::ShuttingDown(_)
+                    | ChannelState::Closed(_)
+                    | ChannelState::AwaitingChannelReady(_) => {
                         return Err(ProcessingChannelError::InvalidParameter(format!(
-                            "Channel {} funding transaction is already confirmed, please shutdown the channel instead",
-                            channel_id,
+                            "Channel {} is in state {:?}, cannot be abandoned, please shutdown the channel instead",
+                            channel_id, channel_actor_state.state
                         )));
+                    }
+                    ChannelState::AwaitingTxSignatures(flags)
+                        if flags.contains(AwaitingTxSignaturesFlags::OUR_TX_SIGNATURES_SENT) =>
+                    {
+                        return Err(ProcessingChannelError::InvalidParameter(format!(
+                            "Channel {} is in state {:?} and our signature has been sent. It cannot be abandoned. please wait for chain commitment.",
+                            channel_id, channel_actor_state.state
+                        )));
+                    }
+                    _ => {
+                        if channel_actor_state.funding_tx_confirmed_at.is_some() {
+                            return Err(ProcessingChannelError::InvalidParameter(format!(
+                                "Channel {} funding transaction is already confirmed, please shutdown the channel instead",
+                                channel_id,
+                            )));
+                        }
                     }
                 }
             }
-        }
-
-        if let Some(channel) = self.channels.get(&channel_id) {
-            if channel
-                .send_message(ChannelActorMessage::Event(ChannelEvent::Stop(
-                    StopReason::Abandon,
-                )))
-                .is_err()
-            {
-                return Err(ProcessingChannelError::InternalError(format!(
-                    "Failed to stop channel actor {}",
+            let Some(channel) = channel else {
+                return Err(ProcessingChannelError::InvalidParameter(format!(
+                    "Channel {} not found",
                     channel_id
                 )));
-            }
-        } else {
+            };
+            return self.stop_abandoned_channel(channel_id, channel, StopReason::Abandon);
+        }
+
+        let Some(channel) = channel else {
             return Err(ProcessingChannelError::InvalidParameter(format!(
                 "Channel {} not found",
                 channel_id
             )));
+        };
+        if let Some(channel_actor_state) = self.store.get_channel_actor_state(&channel_id) {
+            // Closing and on-chain settlement are already in flight. Force abandon would
+            // overwrite that state and remove the watchtower row; require shutdown instead.
+            if matches!(
+                channel_actor_state.state,
+                ChannelState::ShuttingDown(_) | ChannelState::Closed(_)
+            ) {
+                return Err(ProcessingChannelError::InvalidParameter(format!(
+                    "Channel {} is in state {:?}; force abandon is not allowed while closing or settling, please use shutdown",
+                    channel_id, channel_actor_state.state
+                )));
+            }
+            tracing::warn!(
+                %channel_id,
+                state = ?channel_actor_state.state,
+                funding_confirmed = channel_actor_state.funding_tx_confirmed_at.is_some(),
+                "Force abandoning channel; local state and watchtower protection will be removed"
+            );
         }
-        return Ok(());
+        self.stop_abandoned_channel(channel_id, channel, StopReason::ForceAbandon)
+    }
+
+    fn stop_abandoned_channel(
+        &self,
+        channel_id: Hash256,
+        channel: ActorRef<ChannelActorMessage>,
+        reason: StopReason,
+    ) -> ProcessingChannelResult {
+        if channel
+            .send_message(ChannelActorMessage::Event(ChannelEvent::Stop(reason)))
+            .is_err()
+        {
+            return Err(ProcessingChannelError::InternalError(format!(
+                "Failed to stop channel actor {}",
+                channel_id
+            )));
+        }
+        Ok(())
     }
 
     fn schedule_peer_reconnect_backoff(&self, peer_id: PeerId, attempt: u32) {
