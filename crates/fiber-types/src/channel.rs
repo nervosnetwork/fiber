@@ -1502,6 +1502,9 @@ pub struct IncomingCommitmentV2 {
     pub response: Option<PackedRevokeAndAckV2>,
 }
 
+/// Maximum distinct settlements retained for one commitment number, including the current one.
+pub const MAX_SETTLEMENT_VARIANTS: usize = 33;
+
 /// Persisted V2 sessions with completely independent commitment-owner directions.
 #[serde_as]
 #[derive(Clone, Serialize, Deserialize)]
@@ -1546,6 +1549,8 @@ pub struct ChannelSessionV2 {
     pub remove_effects: Vec<(TlcInfo, Option<u32>)>,
     /// Dedicated cooperative closing session, retained for exact replay.
     pub closing: Option<ClosingSessionV2>,
+    /// Replaced settlements still needed to replay watchtower updates after recovery.
+    pub superseded_settlements: Vec<(u64, SettlementData)>,
 }
 
 /// Immutable cooperative closing intent and exact cached wire responses.

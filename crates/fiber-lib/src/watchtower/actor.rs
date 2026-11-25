@@ -123,7 +123,7 @@ pub enum WatchtowerMessage {
     ),
     RemoveChannel(Hash256),
     UpdateRevocation(Hash256, RevocationData, SettlementData),
-    UpdatePendingRemoteSettlement(Hash256, SettlementData),
+    UpdatePendingRemoteSettlement(Hash256, u64, SettlementData),
     UpdateLocalSettlement(Hash256, SettlementData),
     CreatePreimage(Hash256, Hash256),
     RemovePreimage(Hash256),
@@ -217,12 +217,18 @@ where
             ),
             WatchtowerMessage::UpdatePendingRemoteSettlement(
                 channel_id,
+                number,
                 pending_remote_settlement_data,
-            ) => self.store.update_pending_remote_settlement(
-                NodeId::local(),
-                channel_id,
-                pending_remote_settlement_data,
-            ),
+            ) => {
+                if let Err(error) = self.store.update_pending_remote_settlement(
+                    NodeId::local(),
+                    channel_id,
+                    number,
+                    pending_remote_settlement_data,
+                ) {
+                    error!(%channel_id, %error, "Failed to retain remote settlement");
+                }
+            }
             WatchtowerMessage::UpdateLocalSettlement(channel_id, local_settlement_data) => self
                 .store
                 .update_local_settlement(NodeId::local(), channel_id, local_settlement_data),
@@ -3299,8 +3305,10 @@ mod tests {
             &self,
             _node_id: NodeId,
             _channel_id: Hash256,
+            _number: u64,
             _pending_remote_settlement_data: SettlementData,
-        ) {
+        ) -> Result<(), String> {
+            Ok(())
         }
 
         fn update_local_settlement(

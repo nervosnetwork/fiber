@@ -359,7 +359,7 @@ fn test_preflight_checks_every_page_before_any_writes() {
     }
     keys.sort();
     let key = keys.last().unwrap();
-    let (mut last, _): (OldChannelActorData, Option<(u32, ChannelSessionV2)>) =
+    let (mut last, _): (OldChannelActorData, Option<(u32, super::ReleasedChannelSessionV2Wire)>) =
         decode_exact(&store.get(key).unwrap()).unwrap();
     last.state = OldChannelState::ChannelReady;
     store.put(key, bincode::serialize(&last).unwrap());

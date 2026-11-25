@@ -74,6 +74,7 @@ async fn tenant_watch_channel_rejects_oversized_snapshot_without_writing() {
             .update_pending_remote_settlement(
                 ctx.clone(),
                 UpdatePendingRemoteSettlementParams {
+                    commitment_number: 2,
                     channel_id: channel.into(),
                     settlement_data: snapshot(255).into(),
                 },
@@ -84,7 +85,9 @@ async fn tenant_watch_channel_rejects_oversized_snapshot_without_writing() {
     }
     // Store writers must enforce the same boundary even without the RPC facade.
     store.update_local_settlement(node.clone(), channel, snapshot(255));
-    store.update_pending_remote_settlement(node.clone(), channel, snapshot(255));
+    assert!(store
+        .update_pending_remote_settlement(node.clone(), channel, 2, snapshot(255))
+        .is_err());
     let after = store.get_watch_channel(&node, &channel).unwrap();
     assert_eq!(after.local_settlement_data, before.local_settlement_data);
     assert_eq!(

@@ -105,9 +105,10 @@ pub async fn forward_event_to_client<T: WatchtowerRpcClient + Sync>(
                 .await
                 .map_err(|e| format!("Failed to update local settlement: {e}"))?;
         }
-        NetworkServiceEvent::LocalCommitmentSigned(channel_id, settlement_data) => {
+        NetworkServiceEvent::LocalCommitmentSigned(channel_id, number, settlement_data) => {
             watchtower_client
                 .update_pending_remote_settlement(UpdatePendingRemoteSettlementParams {
+                    commitment_number: number,
                     channel_id: channel_id.into(),
                     settlement_data: settlement_data.into(),
                 })
@@ -237,8 +238,12 @@ pub fn forward_event_to_watchtower_store<S: crate::watchtower::WatchtowerStore>(
         ) => store.update_local_settlement(node_id, channel_id, settlement_data),
         // update_pending_remote_settlement: used until the matching
         // revocation arrives for a remote-initiated close.
-        NetworkServiceEvent::LocalCommitmentSigned(channel_id, settlement_data) => {
-            store.update_pending_remote_settlement(node_id, channel_id, settlement_data);
+        NetworkServiceEvent::LocalCommitmentSigned(channel_id, number, settlement_data) => {
+            if let Err(error) =
+                store.update_pending_remote_settlement(node_id, channel_id, number, settlement_data)
+            {
+                tracing::error!(%channel_id, %error, "Failed to retain remote settlement");
+            }
         }
         // create_preimage: unlock inbound TLCs observed on-chain.
         NetworkServiceEvent::PreimageCreated(payment_hash, preimage)

@@ -60,6 +60,7 @@ mod watchtower {
     pub const WATCHTOWER_NODE_PAYMENTHASH_PREFIX: u8 = 226;
     pub const WATCHTOWER_SUPERSEDED_SETTLEMENT_PREFIX: u8 = 227;
     pub const WATCHTOWER_SIGNER_PREFIX: u8 = 228;
+    pub const WATCHTOWER_NUMBERED_SETTLEMENT_PREFIX: u8 = 229;
 }
 #[cfg(feature = "watchtower")]
 pub use watchtower::*;

@@ -23,12 +23,7 @@ fn gen_store() -> fiber_store::Store {
 
 // This real-channel fixture has no unsettled TLCs in its signed snapshots. The
 // store migration's own tests cover the released wire layout with pending TLCs.
-fn released_v2_without_pending_tlcs(
-    channel: fiber_types::ChannelActorData,
-) -> (
-    OldChannelActorData,
-    Option<(u32, fiber_types::ChannelSessionV2)>,
-) {
+fn released_v2_without_pending_tlcs(channel: fiber_types::ChannelActorData) -> Vec<u8> {
     const RELEASED_SESSION_MARKER: u32 = 0x56320001;
     let session = channel.session.clone();
     assert!(session
@@ -107,7 +102,11 @@ fn released_v2_without_pending_tlcs(
         commitment_contract_features:
             fiber_types_0100::CommitmentContractFeatures::ONCHAIN_FULL_PAYMENT_HASH,
     };
-    (old, Some((RELEASED_SESSION_MARKER, session)))
+    // The released wire ends at closing, before the appended settlement history.
+    assert!(session.superseded_settlements.is_empty());
+    let suffix = bincode::serialize(&session.superseded_settlements).unwrap();
+    let bytes = bincode::serialize(&(old, Some((RELEASED_SESSION_MARKER, session)))).unwrap();
+    bytes.strip_suffix(suffix.as_slice()).unwrap().to_vec()
 }
 
 #[test]
@@ -652,7 +651,7 @@ async fn test_upgrade_retains_real_v2_signed_history_and_remains_valid() {
     {
         let store = fiber_store::Store::open_db(&path).unwrap();
         store.put(MIGRATION_VERSION_KEY, INIT_DB_VERSION);
-        store.put(&key, bincode::serialize(&old).unwrap());
+        store.put(&key, old);
     }
     crate::store::check_validate(&path)
         .expect("read-only validation accepts an upgradeable V2 store");

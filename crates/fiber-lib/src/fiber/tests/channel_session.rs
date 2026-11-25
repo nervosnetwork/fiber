@@ -6724,6 +6724,50 @@ async fn test_v2_recovery_replays_updates_before_regenerated_cs() {
 }
 
 #[tokio::test]
+async fn test_v2_resign_budget_preserves_outgoing() {
+    let (a, _b, id) = create_nodes_with_established_channel(100000000000, 11800000000, false).await;
+    let mut state = a.get_channel_actor_state(id);
+    let (cs, original) = state.prepare_outgoing_v2(false).unwrap();
+    for i in 1..fiber_types::MAX_SETTLEMENT_VARIANTS {
+        let mut snapshot = original.clone();
+        snapshot.local_amount -= i as u128;
+        snapshot.remote_amount += i as u128;
+        state
+            .session
+            .superseded_settlements
+            .push((cs.commitment_number, snapshot));
+    }
+    // A fresh signature for unchanged content still fits a full round.
+    let (same, _) = state.prepare_outgoing_v2_with_replace(false, true).unwrap();
+    let mut tlc = state
+        .create_inbounding_tlc(fiber_types::AddTlc {
+            channel_id: id,
+            tlc_id: 0,
+            amount: 2000,
+            payment_hash: [7; 32].into(),
+            expiry: crate::now_timestamp_as_millis_u64() + 86_400_000,
+            hash_algorithm: fiber_types::HashAlgorithm::CkbHash,
+            onion_packet: None,
+        })
+        .unwrap();
+    tlc.status = TlcStatus::Inbound(InboundTlcStatus::AnnounceWaitPrevAck);
+    state.tlc_state.add_received_tlc(tlc);
+    assert!(matches!(
+        state.prepare_outgoing_v2_with_replace(false, true),
+        Err(ProcessingChannelError::SettlementVariantsExhausted)
+    ));
+    let outgoing = state.session.outgoing.as_ref().unwrap();
+    assert_eq!(outgoing.funding.public_nonce, same.funding_nonce);
+    assert_eq!(outgoing.settlement, original);
+    state.session.superseded_settlements.pop();
+    state.prepare_outgoing_v2_with_replace(false, true).unwrap();
+    assert_eq!(
+        state.session.superseded_settlements.last(),
+        Some(&(cs.commitment_number, original))
+    );
+}
+
+#[tokio::test]
 async fn test_v2_recovery_crash_with_unsent_cs() {
     let (mut a, mut b, id) =
         create_nodes_with_established_channel(100000000000, 11800000000, false).await;

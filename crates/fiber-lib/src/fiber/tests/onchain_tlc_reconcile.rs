@@ -2303,19 +2303,32 @@ fn test_store_pending_settlement_replay_keeps_unrevoked_witness() {
         settlement_2.clone(),
     );
     // Sign #3, then replay the identical pending event.
-    store.update_pending_remote_settlement(node_id.clone(), channel_id, settlement_3.clone());
-    store.update_pending_remote_settlement(node_id.clone(), channel_id, settlement_3.clone());
+    for _ in 0..2 {
+        store
+            .update_pending_remote_settlement(node_id.clone(), channel_id, 3, settlement_3.clone())
+            .unwrap();
+    }
     // A reconnect re-signs #3 with different settlement data.
-    let settlement_3_resigned = SettlementData {
-        local_amount: 800,
-        remote_amount: 2200,
-        tlcs: vec![],
-    };
-    store.update_pending_remote_settlement(
-        node_id.clone(),
-        channel_id,
-        settlement_3_resigned.clone(),
+    let tlc = tlc_info(
+        TLCId::Received(0),
+        TlcStatus::Inbound(InboundTlcStatus::AnnounceWaitPrevAck),
+        gen_rand_sha256_hash(),
+        HashAlgorithm::CkbHash,
     );
+    let amount = tlc.amount;
+    let settlement_3_resigned = SettlementData {
+        local_amount: 900,
+        remote_amount: 2100 - amount,
+        tlcs: vec![settlement_tlc_for(&tlc)],
+    };
+    store
+        .update_pending_remote_settlement(
+            node_id.clone(),
+            channel_id,
+            3,
+            settlement_3_resigned.clone(),
+        )
+        .unwrap();
 
     let channel_data = store
         .get_local_watch_channel(&channel_id)
@@ -2356,6 +2369,27 @@ fn test_store_pending_settlement_replay_keeps_unrevoked_witness() {
     .expect("the superseded same-number witness must remain selectable");
     assert_eq!(number, 3);
     assert_eq!(selected, &settlement_3);
+    store.update_revocation(
+        node_id.clone(),
+        channel_id,
+        RevocationData {
+            commitment_number: 2,
+            aggregated_signature: CompactSignature::from_bytes(&[0u8; 64]).unwrap(),
+            output: CellOutput::default(),
+            output_data: Default::default(),
+        },
+        settlement_3_resigned,
+    );
+    let channel_data = store.get_local_watch_channel(&channel_id).unwrap();
+    let history = store.get_local_superseded_remote_settlements(&channel_id);
+    assert_eq!(
+        verify_and_select_settlement_data_with_superseded(
+            &channel_data,
+            &history,
+            &superseded_lock
+        ),
+        Some((true, 3, &settlement_3))
+    );
 }
 
 #[test]

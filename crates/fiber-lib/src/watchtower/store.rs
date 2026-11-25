@@ -107,8 +107,9 @@ pub trait WatchtowerStore {
         &self,
         node_id: NodeId,
         channel_id: Hash256,
+        commitment_number: u64,
         pending_remote_settlement_data: SettlementData,
-    );
+    ) -> Result<(), String>;
 
     /// Return superseded same-number remote settlement snapshots that remain valid
     /// candidates until their commitment number is revoked.

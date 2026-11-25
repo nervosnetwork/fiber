@@ -801,8 +801,12 @@ fn test_store_external_watch_channel_contains_no_private_keys() {
         remote_amount: 600,
         tlcs: vec![],
     };
-    store.update_pending_remote_settlement(node_id.clone(), channel_id, original.clone());
-    store.update_pending_remote_settlement(node_id.clone(), channel_id, resigned.clone());
+    store
+        .update_pending_remote_settlement(node_id.clone(), channel_id, 2, original.clone())
+        .unwrap();
+    store
+        .update_pending_remote_settlement(node_id.clone(), channel_id, 2, resigned.clone())
+        .unwrap();
     let stored = store.get_watch_channel(&node_id, &channel_id).unwrap();
     assert_eq!(
         stored.remote_settlement_data,
@@ -1167,20 +1171,26 @@ fn test_store_watchtower_superseded_preserved_and_cleared_on_revocation() {
         None,
     );
 
-    let variants: Vec<SettlementData> = (1..=5u128)
+    let variants: Vec<SettlementData> = (1..=fiber_types::MAX_SETTLEMENT_VARIANTS as u128 + 1)
         .map(|i| SettlementData {
-            local_amount: 1000 - i * 10,
-            remote_amount: i * 10,
+            local_amount: 1000 - i,
+            remote_amount: i,
             tlcs: vec![],
         })
         .collect();
-    for v in &variants {
-        store.update_pending_remote_settlement(node_id.clone(), channel_id, v.clone());
+    let (extra, retained) = variants.split_last().unwrap();
+    for v in retained {
+        store
+            .update_pending_remote_settlement(node_id.clone(), channel_id, 2, v.clone())
+            .unwrap();
     }
+    assert!(store
+        .update_pending_remote_settlement(node_id.clone(), channel_id, 2, extra.clone())
+        .is_err());
     let superseded = store.get_superseded_remote_settlements(&node_id, &channel_id);
     assert_eq!(
         superseded,
-        variants[..4].to_vec(),
+        retained[..retained.len() - 1],
         "earliest unrevoked same-number snapshots must not be evicted"
     );
 
@@ -1193,19 +1203,33 @@ fn test_store_watchtower_superseded_preserved_and_cleared_on_revocation() {
             output: CellOutput::default(),
             output_data: Bytes::default(),
         },
-        variants[4].clone(),
+        retained.last().unwrap().clone(),
     );
-    assert!(
+    assert_eq!(
+        store.get_superseded_remote_settlements(&node_id, &channel_id),
+        superseded
+    );
+    for s in [&retained[0], extra] {
         store
-            .get_superseded_remote_settlements(&node_id, &channel_id)
-            .is_empty(),
-        "advancing revocation must clear superseded snapshots"
+            .update_pending_remote_settlement(node_id.clone(), channel_id, 3, s.clone())
+            .unwrap();
+    }
+    let mut revocation = store
+        .get_watch_channel(&node_id, &channel_id)
+        .unwrap()
+        .revocation_data
+        .unwrap();
+    revocation.commitment_number = 2;
+    store.update_revocation(node_id.clone(), channel_id, revocation, extra.clone());
+    assert_eq!(
+        store.get_superseded_remote_settlements(&node_id, &channel_id),
+        vec![retained[0].clone()]
     );
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
-fn test_store_watchtower_v2_registration_round_trip() {
+fn test_store_watchtower_v2_registration_and_legacy_superseded_round_trip() {
     let path = TempDir::new("test-watchtower-v2-store");
     let store = open_store(path).expect("created store failed");
     let node_id = NodeId::from_bytes(PeerId::random().into_bytes());
@@ -1217,7 +1241,7 @@ fn test_store_watchtower_v2_registration_round_trip() {
     };
 
     store.insert_watch_channel(
-        node_id,
+        node_id.clone(),
         channel_id,
         None,
         WatchChannelKeys {
@@ -1239,6 +1263,48 @@ fn test_store_watchtower_v2_registration_round_trip() {
             .expect("stored channel")
             .channel_features,
         ChannelFeatures::V2
+    );
+
+    // Released rows have only the unnumbered sidecar.
+    let key = |prefix: u8| [&[prefix], node_id.as_ref(), channel_id.as_ref()].concat();
+    store.delete(key(
+        fiber_types::schema::WATCHTOWER_NUMBERED_SETTLEMENT_PREFIX,
+    ));
+    let initial = store
+        .get_watch_channel(&node_id, &channel_id)
+        .unwrap()
+        .remote_settlement_data;
+    let legacy = SettlementData {
+        local_amount: 125,
+        remote_amount: 175,
+        tlcs: vec![],
+    };
+    store.put(
+        key(fiber_types::schema::WATCHTOWER_SUPERSEDED_SETTLEMENT_PREFIX),
+        bincode::serialize(&vec![legacy.clone()]).unwrap(),
+    );
+    let acknowledged = SettlementData {
+        local_amount: 150,
+        remote_amount: 150,
+        tlcs: vec![],
+    };
+    store.update_revocation(
+        node_id.clone(),
+        channel_id,
+        RevocationData {
+            commitment_number: 1,
+            aggregated_signature: CompactSignature::from_bytes(&[0u8; 64]).unwrap(),
+            output: CellOutput::default(),
+            output_data: Bytes::default(),
+        },
+        acknowledged.clone(),
+    );
+    store
+        .update_pending_remote_settlement(node_id.clone(), channel_id, 3, acknowledged)
+        .unwrap();
+    assert_eq!(
+        store.get_superseded_remote_settlements(&node_id, &channel_id),
+        vec![legacy, initial]
     );
 }
 
