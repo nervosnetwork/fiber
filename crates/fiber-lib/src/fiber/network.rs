@@ -1011,6 +1011,7 @@ pub struct NodeInfoResponse {
     pub channel_count: u32,
     pub pending_channel_count: u32,
     pub peers_count: u32,
+    pub synced_to_graph: Option<bool>,
     pub udt_cfg_infos: UdtCfgInfos,
 }
 
@@ -1628,6 +1629,8 @@ pub enum PublicNetworkEvent {
     // Some gossip messages have been updated in the gossip message store.
     // Normally we need to propagate these messages to the network graph.
     GossipMessageUpdates(GossipMessageUpdates),
+    /// A peer completed active historical graph sync. This is a process-lifetime milestone.
+    InitialGraphSyncCompleted,
 }
 
 /// Events owned by the Fiber channel and payment data plane.
@@ -1976,6 +1979,8 @@ struct PublicNetworkRuntimeState {
     peer_session_map: HashMap<Pubkey, ConnectedPeer>,
     pending_save_peer_addresses: HashMap<PeerId, Vec<Multiaddr>>,
     gossip_actor: Option<ActorRef<GossipActorMessage>>,
+    /// None if graph sync is disabled; once true, it stays true until this process exits.
+    synced_to_graph: Option<bool>,
     max_inbound_peers: usize,
     min_outbound_peers: usize,
     enable_peer_reconnect_backoff: bool,
@@ -7176,6 +7181,12 @@ where
                 );
                 Ok(())
             }
+            PublicNetworkEvent::InitialGraphSyncCompleted => {
+                if let Some(synced_to_graph) = &mut state.public.synced_to_graph {
+                    *synced_to_graph = true;
+                }
+                Ok(())
+            }
             PublicNetworkEvent::FiberMessage(pubkey, FiberMessage::Init(init), ingress_permit) => {
                 let result = state
                     .on_init_msg(myself, pubkey, init)
@@ -7448,6 +7459,7 @@ where
                     channel_count: state.fiber.channels.len() as u32,
                     pending_channel_count: state.fiber.pending_channels.len() as u32,
                     peers_count: state.public.peer_session_map.len() as u32,
+                    synced_to_graph: state.public.synced_to_graph,
                     udt_cfg_infos: get_udt_whitelist(),
                 };
                 let _ = rpc.send(Ok(response));
@@ -11061,6 +11073,7 @@ where
                 features,
             },
         );
+        let synced_to_graph = gossip_actor.as_ref().map(|_| false);
         let public = PublicNetworkRuntimeState {
             state_to_be_persisted,
             node_name: config.announced_node_name,
@@ -11074,6 +11087,7 @@ where
             peer_session_map: Default::default(),
             pending_save_peer_addresses: Default::default(),
             gossip_actor,
+            synced_to_graph,
             max_inbound_peers: config.max_inbound_peers(),
             min_outbound_peers: config.min_outbound_peers(),
             enable_peer_reconnect_backoff: config.enable_peer_reconnect_backoff(),

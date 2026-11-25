@@ -752,6 +752,8 @@ Get the node information.
 * `channel_count` - <em>`u32`</em>, The number of channels associated with the node, serialized as a hexadecimal string.
 * `pending_channel_count` - <em>`u32`</em>, The number of pending channels associated with the node, serialized as a hexadecimal string.
 * `peers_count` - <em>`u32`</em>, The number of peers connected to the node, serialized as a hexadecimal string.
+* `synced_to_graph` - <em>`Option<bool>`</em>, Whether an active network graph sync has completed since this node started.
+ Null when network graph synchronization is disabled.
 * `udt_cfg_infos` - <em>[UdtCfgInfos](#type-udtcfginfos)</em>, Configuration information for User-Defined Tokens (UDT) associated with the node.
 
 ---

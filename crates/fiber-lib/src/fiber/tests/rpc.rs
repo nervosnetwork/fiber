@@ -614,6 +614,7 @@ async fn test_rpc_node_info() {
     let version = env!("CARGO_PKG_VERSION").to_string();
     assert_eq!(node_info.version, version);
     assert_eq!(node_info.default_funding_lock_script, Default::default());
+    assert!(node_info.synced_to_graph.is_some());
 }
 
 /// Test that pubkey in node_info RPC and payee_public_key in invoice RPC

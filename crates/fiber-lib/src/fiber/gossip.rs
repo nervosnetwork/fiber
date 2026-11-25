@@ -56,7 +56,8 @@ use super::{
     },
     network::{
         check_chain_hash, get_chain_hash, GossipMessageWithTarget, NetworkActorMessage,
-        PeerChannelIndex, PeerDisconnectReason, PublicNetworkCommand, GOSSIP_PROTOCOL_ID,
+        PeerChannelIndex, PeerDisconnectReason, PublicNetworkCommand, PublicNetworkEvent,
+        GOSSIP_PROTOCOL_ID,
     },
     types::{
         BroadcastMessageQuery, BroadcastMessageQueryFlags, BroadcastMessageWithTimestamp,
@@ -4196,6 +4197,13 @@ where
                         cursor,
                     },
                 ));
+                if let Some(network_actor) = &state.network_actor {
+                    if let Err(error) = network_actor.send_message(NetworkActorMessage::new_event(
+                        PublicNetworkEvent::InitialGraphSyncCompleted,
+                    )) {
+                        debug!("Failed to report completed graph sync: {error:?}");
+                    }
+                }
             }
 
             GossipActorMessage::ActiveSyncingAborted {

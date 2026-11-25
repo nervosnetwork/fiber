@@ -78,6 +78,10 @@ pub struct NodeInfoResult {
     #[schemars(schema_with = "schema_as_uint_hex")]
     pub peers_count: u32,
 
+    /// Whether an active network graph sync has completed since this node started.
+    /// Null when network graph synchronization is disabled.
+    pub synced_to_graph: Option<bool>,
+
     /// Configuration information for User-Defined Tokens (UDT) associated with the node.
     pub udt_cfg_infos: UdtCfgInfos,
 }
