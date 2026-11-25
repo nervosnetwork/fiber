@@ -457,15 +457,19 @@ impl<S: SignerStore> HostedSession<S> {
         let channel_id = result.channel_id.into();
         let key = self
             .state
-            .pending
-            .or_else(|| self.state.bindings.get(&channel_id).copied())
+            .bindings
+            .get(&channel_id)
+            .copied()
+            .or(self.state.pending)
             .ok_or(SessionError::NoPendingChannel)?;
         let signer = self.root.open_channel(key).await?;
         signer
             .verify_and_record_opening(&request, result, network, expected_inputs)
             .await?;
         self.state.bindings.insert(channel_id, key);
-        self.state.pending = None;
+        if self.state.pending == Some(key) {
+            self.state.pending = None;
+        }
         Ok(())
     }
 

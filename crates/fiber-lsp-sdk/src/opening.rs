@@ -960,6 +960,104 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn retrying_completed_opening_after_allocating_next_pending_preserves_pending() {
+        let created = RootSigner::in_memory().await.unwrap();
+        let mut session =
+            HostedSession::new(created.root_signer).with_state(crate::HostedSessionState {
+                tenant_token: Some("tenant-token".into()),
+                ..Default::default()
+            });
+
+        // Complete opening for channel 1.
+        session.allocate_pending_channel().await.unwrap();
+        let first_key = session.pending_channel_key_id().unwrap();
+        let first_signer = session.open_channel(first_key).await.unwrap();
+        let (first_request, first_result, network, first_inputs) = proposal(&first_signer).await;
+        let first_adapters = OpeningAdapters {
+            request: first_request.clone(),
+            result: first_result.clone(),
+            inputs: first_inputs,
+            failure: "",
+            events: Default::default(),
+            saved: Default::default(),
+        };
+        session
+            .open_tenant_channel(
+                first_request.clone(),
+                &network,
+                &first_adapters,
+                &first_adapters,
+                &first_adapters,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            session.binding(first_result.channel_id.into()),
+            Some(first_key)
+        );
+        assert!(session.pending_channel_key_id().is_none());
+
+        // Allocate a new pending signer key for channel 2.
+        session.allocate_pending_channel().await.unwrap();
+        let second_key = session.pending_channel_key_id().unwrap();
+        assert_ne!(second_key, first_key);
+
+        // Retrying the completed opening for channel 1 must use channel 1's existing
+        // binding and leave channel 2's pending key intact.
+        session
+            .open_tenant_channel(
+                first_request,
+                &network,
+                &first_adapters,
+                &first_adapters,
+                &first_adapters,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            session.binding(first_result.channel_id.into()),
+            Some(first_key)
+        );
+        assert_eq!(
+            session.pending_channel_key_id(),
+            Some(second_key),
+            "retrying an already-bound channel must preserve the newly allocated pending key"
+        );
+
+        // The preserved pending key can still be used to open channel 2 cleanly.
+        let second_signer = session.open_channel(second_key).await.unwrap();
+        let (second_request, second_result, second_network, second_inputs) =
+            proposal(&second_signer).await;
+        let second_adapters = OpeningAdapters {
+            request: second_request.clone(),
+            result: second_result.clone(),
+            inputs: second_inputs,
+            failure: "",
+            events: Default::default(),
+            saved: Default::default(),
+        };
+        session
+            .open_tenant_channel(
+                second_request,
+                &second_network,
+                &second_adapters,
+                &second_adapters,
+                &second_adapters,
+            )
+            .await
+            .unwrap();
+        assert!(session.pending_channel_key_id().is_none());
+        assert_eq!(
+            session.binding(first_result.channel_id.into()),
+            Some(first_key)
+        );
+        assert_eq!(
+            session.binding(second_result.channel_id.into()),
+            Some(second_key)
+        );
+    }
+
+    #[tokio::test]
     async fn opening_rejects_malicious_proposals_without_binding() {
         let root = RootSigner::create(RootKey::import([31; 32]).unwrap(), MemoryStore::default())
             .await

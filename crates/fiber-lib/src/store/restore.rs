@@ -56,6 +56,20 @@ pub fn restore_node_keys(
     ckb_key_path: &Path,
     tenant_store_root: Option<&Path>,
 ) -> Result<()> {
+    // Validate backed up tenant keys and destination configuration before
+    // overwriting any existing key files so a failed check leaves disk state untouched.
+    let tenant_keys = collect_backup_tenant_keys(restore_path)?;
+    let validated_tenant_store_root = if tenant_keys.is_empty() {
+        None
+    } else {
+        Some(tenant_store_root.ok_or_else(|| {
+            Error::DBInternalError(
+                "Backup contains hosted tenant keys, but LSP tenant_store_root is not configured"
+                    .to_string(),
+            )
+        })?)
+    };
+
     let backup_fiber_key = restore_path.join("sk");
     let backup_ckb_key = restore_path.join("key");
     if backup_fiber_key.is_file() && backup_ckb_key.is_file() {
@@ -67,15 +81,20 @@ pub fn restore_node_keys(
     } else {
         info!("No node keys found in backup, skipping key restoration.");
     }
-    restore_tenant_keys(restore_path, tenant_store_root)?;
+
+    if let Some(tenant_store_root) = validated_tenant_store_root {
+        copy_tenant_keys(&tenant_keys, tenant_store_root)?;
+    }
     Ok(())
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn restore_tenant_keys(restore_path: &Path, tenant_store_root: Option<&Path>) -> Result<()> {
+fn collect_backup_tenant_keys(
+    restore_path: &Path,
+) -> Result<Vec<(std::ffi::OsString, std::path::PathBuf)>> {
     let backup_tenants_dir = restore_path.join("tenants");
     if !backup_tenants_dir.is_dir() {
-        return Ok(());
+        return Ok(Vec::new());
     }
     let mut tenant_keys = Vec::new();
     let entries = std::fs::read_dir(&backup_tenants_dir).map_err(|e| {
@@ -102,22 +121,21 @@ fn restore_tenant_keys(restore_path: &Path, tenant_store_root: Option<&Path>) ->
             tenant_keys.push((entry.file_name(), src_key));
         }
     }
-    if tenant_keys.is_empty() {
-        return Ok(());
-    }
-    let Some(tenant_store_root) = tenant_store_root else {
-        return Err(Error::DBInternalError(
-            "Backup contains hosted tenant keys, but LSP tenant_store_root is not configured"
-                .to_string(),
-        ));
-    };
+    Ok(tenant_keys)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn copy_tenant_keys(
+    tenant_keys: &[(std::ffi::OsString, std::path::PathBuf)],
+    tenant_store_root: &Path,
+) -> Result<()> {
     create_private_dir_all(tenant_store_root).map_err(|e| {
         Error::DBInternalError(format!(
             "Failed to create tenant store root {:?}: {e}",
             tenant_store_root
         ))
     })?;
-    for (tenant_dir_name, src_key) in &tenant_keys {
+    for (tenant_dir_name, src_key) in tenant_keys {
         let dest_dir = tenant_store_root.join(tenant_dir_name);
         create_private_dir_all(&dest_dir).map_err(|e| {
             Error::DBInternalError(format!(
@@ -315,6 +333,47 @@ mod tests {
         assert_eq!(
             restored_old.get(b"restore-marker").as_deref(),
             Some(b"from-backup".as_slice())
+        );
+    }
+
+    #[test]
+    fn test_restore_missing_tenant_store_root_leaves_existing_node_keys_untouched() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let backup = create_test_backup(root.path());
+
+        let base_path = root.path().join("existing_db");
+        {
+            let existing_store = open_store(&base_path).expect("open existing store");
+            existing_store.put(b"restore-marker", b"original-db-value");
+        }
+        let fiber_key_path = root.path().join("existing_sk");
+        let ckb_key_path = root.path().join("existing_key");
+        std::fs::write(&fiber_key_path, b"original-fiber-sk").expect("write original sk");
+        std::fs::write(&ckb_key_path, b"original-ckb-key").expect("write original key");
+
+        let err = restore(&backup, &base_path, &fiber_key_path, &ckb_key_path, None).expect_err(
+            "restore must fail when backup has tenant keys and tenant_store_root is None",
+        );
+        assert!(
+            matches!(&err, Error::DBInternalError(msg) if msg.contains("tenant_store_root")),
+            "expected DBInternalError mentioning tenant_store_root, got {err:?}"
+        );
+
+        assert_eq!(
+            std::fs::read(&fiber_key_path).unwrap(),
+            b"original-fiber-sk",
+            "fiber key must not be overwritten before tenant_store_root validation"
+        );
+        assert_eq!(
+            std::fs::read(&ckb_key_path).unwrap(),
+            b"original-ckb-key",
+            "ckb key must not be overwritten before tenant_store_root validation"
+        );
+        let existing_store = open_store(&base_path).expect("reopen existing store");
+        assert_eq!(
+            existing_store.get(b"restore-marker").as_deref(),
+            Some(b"original-db-value".as_slice()),
+            "existing database must remain untouched when restore fails validation"
         );
     }
 }
