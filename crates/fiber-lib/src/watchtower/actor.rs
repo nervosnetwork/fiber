@@ -538,18 +538,6 @@ fn check_watch_channel<S: WatchtowerStore>(
     }
 }
 
-/// Extract the non-commitment fee inputs (all inputs after index 0) from an on-chain signing request.
-fn fee_inputs(content: &fiber_types::OnchainSigningContent) -> Vec<OutPoint> {
-    content
-        .transaction
-        .raw()
-        .inputs()
-        .into_iter()
-        .skip(1)
-        .map(|input| input.previous_output())
-        .collect()
-}
-
 /// Maximum concurrent fee-holding external signing requests (pending + signed) per channel.
 const MAX_PENDING_FEE_REQUESTS_PER_CHANNEL: usize = 4;
 /// Maximum concurrent fee-holding external signing requests (pending + signed) per node/tenant.
@@ -570,31 +558,53 @@ fn arm_external_retry_backoff(ext: &mut fiber_types::WatchtowerExternalSignerSta
     ext.retry_after_ms = ext.retry_after_ms.max(now_ms.saturating_add(backoff));
 }
 
-fn expire_and_collect_holds<T>(
+trait ExpirableWatchtowerRequest {
+    fn created_at_ms_mut(&mut self) -> &mut u64;
+    fn operator_fee_inputs(&self) -> Vec<OutPoint>;
+}
+
+impl ExpirableWatchtowerRequest for fiber_types::PendingWatchtowerRequest {
+    fn created_at_ms_mut(&mut self) -> &mut u64 {
+        Self::created_at_ms_mut(self)
+    }
+
+    fn operator_fee_inputs(&self) -> Vec<OutPoint> {
+        Self::operator_fee_inputs(self)
+    }
+}
+
+impl ExpirableWatchtowerRequest for fiber_types::SignedWatchtowerRequest {
+    fn created_at_ms_mut(&mut self) -> &mut u64 {
+        Self::created_at_ms_mut(self)
+    }
+
+    fn operator_fee_inputs(&self) -> Vec<OutPoint> {
+        Self::operator_fee_inputs(self)
+    }
+}
+
+fn expire_and_collect_holds<T: ExpirableWatchtowerRequest>(
     requests: &mut std::collections::BTreeMap<Hash256, T>,
-    content_of: impl Fn(&T) -> &fiber_types::OnchainSigningContent,
-    created_at_of: impl Fn(&mut T) -> &mut u64,
-    is_self_funded: impl Fn(&T) -> bool,
     now_ms: u64,
     active_holds: &mut Vec<(Vec<OutPoint>, u64)>,
 ) -> Vec<Hash256> {
     let mut expired = Vec::new();
     requests.retain(|id, entry| {
-        let created_at_slot = created_at_of(entry);
+        let created_at_slot = entry.created_at_ms_mut();
         if *created_at_slot == 0 {
             *created_at_slot = now_ms;
         }
         let created_at_ms = *created_at_slot;
-        let self_funded = is_self_funded(entry);
+        let operator_inputs = entry.operator_fee_inputs();
         if now_ms >= created_at_ms.saturating_add(crate::ckb::held_cells::WATCHTOWER_HOLD_MS) {
-            if !self_funded {
-                crate::ckb::held_cells::release_for_watchtower(fee_inputs(content_of(entry)));
+            if !operator_inputs.is_empty() {
+                crate::ckb::held_cells::release_for_watchtower(operator_inputs);
             }
             expired.push(*id);
             false
         } else {
-            if !self_funded {
-                active_holds.push((fee_inputs(content_of(entry)), created_at_ms));
+            if !operator_inputs.is_empty() {
+                active_holds.push((operator_inputs, created_at_ms));
             }
             true
         }
@@ -624,22 +634,10 @@ pub(crate) fn sync_external_fee_holds<S: WatchtowerStore>(
             .update_watchtower_signer(node, &channel.channel_id, |state| {
                 let mut holds = Vec::new();
                 if let fiber_types::WatchtowerSignerState::External(ext) = state {
-                    let expired_pending = expire_and_collect_holds(
-                        &mut ext.pending_requests,
-                        |req| &req.content,
-                        |req| &mut req.created_at_ms,
-                        |req| req.self_funded,
-                        now_ms,
-                        &mut holds,
-                    );
-                    let expired_signed = expire_and_collect_holds(
-                        &mut ext.signed_signatures,
-                        |req| &req.content,
-                        |req| &mut req.created_at_ms,
-                        |req| req.self_funded,
-                        now_ms,
-                        &mut holds,
-                    );
+                    let expired_pending =
+                        expire_and_collect_holds(&mut ext.pending_requests, now_ms, &mut holds);
+                    let expired_signed =
+                        expire_and_collect_holds(&mut ext.signed_signatures, now_ms, &mut holds);
                     if !expired_signed.is_empty()
                         && ext
                             .last_applied
@@ -823,13 +821,6 @@ fn try_settle_commitment_tx<S: WatchtowerStore>(
         );
         return;
     }
-    prune_dead_fee_signing_requests(
-        events,
-        ckb_client,
-        store,
-        &self_node_id,
-        &channel_data.channel_id,
-    );
     let lock_args = commitment_lock.args().raw_data();
     let initial_tlcs =
         tracked_settlement_tlcs(settlement_data, for_remote, channel_data.channel_features);
@@ -896,6 +887,16 @@ fn try_settle_commitment_tx<S: WatchtowerStore>(
         &self_node_id,
         &channel_data.channel_id,
         &settlement_scan.spent_inputs,
+    );
+    // Run dead fee-input eviction AFTER pruning confirmed watched settlements so that a
+    // confirmed multi-input settlement preserves `last_applied` for idempotent client retries,
+    // while unconfirmed requests whose wallet/fee inputs died elsewhere clear `last_applied`.
+    prune_dead_fee_signing_requests(
+        events,
+        ckb_client,
+        store,
+        &self_node_id,
+        &channel_data.channel_id,
     );
 
     // the live cells number should be 1 or 0 for normal case.
@@ -1022,11 +1023,15 @@ fn try_settle_commitment_tx<S: WatchtowerStore>(
                         cell_collector,
                         store,
                     ) {
-                        Ok(Some((tx, self_funded))) => {
+                        Ok(Some(built)) => {
+                            let (tx, is_operator_sponsored) = match built {
+                                BuiltSettlementTx::OperatorSponsored(tx) => (tx, true),
+                                BuiltSettlementTx::ExternalFunding(tx) => (tx, false),
+                            };
                             match ckb_client.send_transaction(tx.data().into(), None) {
                                 Ok(tx_hash) => {
                                     info!("Settlement tx: {:?} sent, tx_hash: {:#x}", tx, tx_hash);
-                                    if !self_funded {
+                                    if is_operator_sponsored {
                                         hold_sent(&tx, cell_collector);
                                     }
                                     if channel_data.local_settlement_key.is_none() {
@@ -1055,7 +1060,7 @@ fn try_settle_commitment_tx<S: WatchtowerStore>(
                                 Err(err) => {
                                     // Never touch operator held_cells for client-supplied self-funded
                                     // inputs; otherwise a tenant could unlock an operator's held cell.
-                                    if !self_funded {
+                                    if is_operator_sponsored {
                                         crate::ckb::held_cells::release_for_watchtower(
                                             tx.input_pts_iter(),
                                         );
@@ -1297,7 +1302,7 @@ fn evict_failed_signed_settlement_tx<S: WatchtowerStore>(
         if let fiber_types::WatchtowerSignerState::External(ext) = state {
             let mut evicted_ids = Vec::new();
             ext.signed_signatures.retain(|id, signed| {
-                if signed.content.transaction.raw().as_slice() == failed_raw {
+                if signed.content().transaction.raw().as_slice() == failed_raw {
                     evicted_ids.push(*id);
                     false
                 } else {
@@ -1340,8 +1345,9 @@ fn evict_dead_fee_signing_requests<S: WatchtowerStore>(
                     if !dead.contains(id) {
                         return true;
                     }
-                    if !req.self_funded {
-                        crate::ckb::held_cells::release_for_watchtower(fee_inputs(&req.content));
+                    let operator_inputs = req.operator_fee_inputs();
+                    if !operator_inputs.is_empty() {
+                        crate::ckb::held_cells::release_for_watchtower(operator_inputs);
                     }
                     false
                 });
@@ -1350,8 +1356,9 @@ fn evict_dead_fee_signing_requests<S: WatchtowerStore>(
                     if !dead.contains(id) {
                         return true;
                     }
-                    if !req.self_funded {
-                        crate::ckb::held_cells::release_for_watchtower(fee_inputs(&req.content));
+                    let operator_inputs = req.operator_fee_inputs();
+                    if !operator_inputs.is_empty() {
+                        crate::ckb::held_cells::release_for_watchtower(operator_inputs);
                     }
                     evicted_signed = true;
                     false
@@ -1388,12 +1395,12 @@ fn prune_dead_fee_signing_requests<S: WatchtowerStore>(
     let dead: HashSet<Hash256> = external
         .pending_requests
         .iter()
-        .map(|(id, req)| (id, &req.content))
+        .map(|(id, req)| (id, req.content()))
         .chain(
             external
                 .signed_signatures
                 .iter()
-                .map(|(id, req)| (id, &req.content)),
+                .map(|(id, req)| (id, req.content())),
         )
         .filter_map(|(id, content)| {
             content
@@ -1430,24 +1437,24 @@ fn prune_spent_signing_requests<S: WatchtowerStore>(
             if let fiber_types::WatchtowerSignerState::External(external) = state {
                 let count = external.pending_requests.len() + external.signed_signatures.len();
                 let is_unspent = |content: &fiber_types::OnchainSigningContent,
-                                  self_funded: bool| {
+                                  operator_inputs: Vec<OutPoint>| {
                     let unspent = content
                         .transaction
                         .raw()
                         .inputs()
                         .into_iter()
                         .all(|input| !spent_inputs.contains(&input.previous_output()));
-                    if !unspent && !self_funded {
-                        crate::ckb::held_cells::release_for_watchtower(fee_inputs(content));
+                    if !unspent && !operator_inputs.is_empty() {
+                        crate::ckb::held_cells::release_for_watchtower(operator_inputs);
                     }
                     unspent
                 };
                 external
                     .pending_requests
-                    .retain(|_, req| is_unspent(&req.content, req.self_funded));
+                    .retain(|_, req| is_unspent(req.content(), req.operator_fee_inputs()));
                 external
                     .signed_signatures
-                    .retain(|_, req| is_unspent(&req.content, req.self_funded));
+                    .retain(|_, req| is_unspent(req.content(), req.operator_fee_inputs()));
                 // Preserve last_applied as an idempotent submission receipt.
                 if count != external.pending_requests.len() + external.signed_signatures.len() {
                     signing_update.watchtower_state(*channel_id, state);
@@ -1684,6 +1691,20 @@ fn verified_watch_preimage<S: WatchtowerStore>(
     }
 }
 
+enum BuiltSettlementTx {
+    OperatorSponsored(TransactionView),
+    ExternalFunding(TransactionView),
+}
+
+#[cfg(test)]
+impl BuiltSettlementTx {
+    fn into_transaction(self) -> TransactionView {
+        match self {
+            Self::OperatorSponsored(tx) | Self::ExternalFunding(tx) => tx,
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn build_settlement_tx<S: WatchtowerStore>(
@@ -1718,7 +1739,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
         cell_collector,
         store,
     )
-    .map(|opt| opt.map(|(tx, _)| tx))
+    .map(|opt| opt.map(BuiltSettlementTx::into_transaction))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1737,7 +1758,7 @@ fn build_settlement_tx_inner<S: WatchtowerStore>(
     signer: &LocalSigner,
     cell_collector: &mut dyn CellCollector,
     store: &S,
-) -> Result<Option<(TransactionView, bool)>, Box<dyn std::error::Error>> {
+) -> Result<Option<BuiltSettlementTx>, Box<dyn std::error::Error>> {
     let cell_output: CellOutput = commitment_cell.output.clone().into();
     let lock_script_args = cell_output.lock().args().raw_data();
     if !valid_v2_commitment_args(&lock_script_args) {
@@ -1786,27 +1807,35 @@ fn build_settlement_tx_inner<S: WatchtowerStore>(
         .clone()
         .unwrap_or_else(|| fee_provider_lock_script.clone());
     let separate_fee_sponsor = payout_lock_script != fee_provider_lock_script;
+    let external_signer = channel_data.local_settlement_key.is_none();
+    // Every hosted tenant channel (`self_node_id != NodeId::local()`) or external-signer channel
+    // with a separate payout lock must fund its own transaction fees (and any CKB capacity
+    // shortfall) via an unfunded template transaction so the LSP operator never spends fees or
+    // locks operator fee cells on behalf of tenants.
+    let external_funding_required =
+        external_signer && (separate_fee_sponsor || *self_node_id != NodeId::local());
     let change_output = CellOutput::new_builder()
         .lock(fee_provider_lock_script.clone())
         .build();
     let cell_capacity: u64 = cell_output.capacity().unpack();
-    let ckb_min_payout_capacity = if separate_fee_sponsor && cell_output.type_().is_none() {
-        Some(
-            CellOutput::new_builder()
-                .lock(payout_lock_script.clone())
-                .build()
-                .occupied_capacity(Capacity::shannons(0))
-                .map_err(|err| {
-                    ArithmeticError::new(format!(
-                        "settlement output occupied capacity calculation failed: {}",
-                        err
-                    ))
-                })?
-                .as_u64(),
-        )
-    } else {
-        None
-    };
+    let ckb_min_payout_capacity =
+        if separate_fee_sponsor && !external_funding_required && cell_output.type_().is_none() {
+            Some(
+                CellOutput::new_builder()
+                    .lock(payout_lock_script.clone())
+                    .build()
+                    .occupied_capacity(Capacity::shannons(0))
+                    .map_err(|err| {
+                        ArithmeticError::new(format!(
+                            "settlement output occupied capacity calculation failed: {}",
+                            err
+                        ))
+                    })?
+                    .as_u64(),
+            )
+        } else {
+            None
+        };
     let ckb_tlc_payout_shortfall =
         |unlock_amount: u128| -> Result<Option<(u64, u64)>, ArithmeticError> {
             let Some(min_payout_capacity) = ckb_min_payout_capacity else {
@@ -2304,16 +2333,27 @@ fn build_settlement_tx_inner<S: WatchtowerStore>(
             let previous = external
                 .signed_signatures
                 .iter()
-                .map(|(id, req)| (*id, &req.content, req.self_funded, None))
-                .chain(external.pending_requests.iter().map(|(id, req)| {
-                    (
-                        *id,
-                        &req.content,
-                        req.self_funded,
-                        req.required_expiry_since,
-                    )
-                }))
-                .find(|(_, content, self_funded, _)| {
+                .map(|(id, req)| {
+                    let funding = match req {
+                        fiber_types::SignedWatchtowerRequest::OperatorSponsored { .. } => {
+                            fiber_types::WatchtowerFunding::OperatorSponsored
+                        }
+                        fiber_types::SignedWatchtowerRequest::ExternalFunding { .. } => {
+                            fiber_types::WatchtowerFunding::ExternalFunding {
+                                required_expiry_since: (fee_input_since != 0)
+                                    .then_some(fee_input_since),
+                            }
+                        }
+                    };
+                    (*id, req.content(), funding)
+                })
+                .chain(
+                    external
+                        .pending_requests
+                        .iter()
+                        .map(|(id, req)| (*id, req.content(), req.funding())),
+                )
+                .find(|(_, content, funding)| {
                     content.key_purpose == key_purpose
                         && content
                             .transaction
@@ -2331,14 +2371,18 @@ fn build_settlement_tx_inner<S: WatchtowerStore>(
                             .is_some_and(|witness| {
                                 witness.raw_data().as_ref() == expected_witness.as_slice()
                             })
-                        && (*self_funded
-                            || content.transaction.raw().inputs().into_iter().skip(1).all(
-                                |input| Unpack::<u64>::unpack(&input.since()) == fee_input_since,
-                            ))
+                        && match funding {
+                            fiber_types::WatchtowerFunding::ExternalFunding { .. } => true,
+                            fiber_types::WatchtowerFunding::OperatorSponsored => {
+                                content.transaction.raw().inputs().into_iter().skip(1).all(
+                                    |input| {
+                                        Unpack::<u64>::unpack(&input.since()) == fee_input_since
+                                    },
+                                )
+                            }
+                        }
                 });
-            if let Some((previous_id, content, previous_self_funded, previous_required_expiry)) =
-                previous
-            {
+            if let Some((previous_id, content, previous_funding)) = previous {
                 return build_signed_settlement_tx(
                     events,
                     store,
@@ -2350,10 +2394,8 @@ fn build_settlement_tx_inner<S: WatchtowerStore>(
                     None,
                     signer,
                     Some(previous_id),
-                    previous_self_funded,
-                    previous_required_expiry,
-                )
-                .map(|opt| opt.map(|tx| (tx, previous_self_funded)));
+                    previous_funding,
+                );
             }
             let now_ms = crate::now_timestamp_as_millis_u64();
             let channel_active = external.pending_requests.len() + external.signed_signatures.len();
@@ -2448,6 +2490,59 @@ fn build_settlement_tx_inner<S: WatchtowerStore>(
                 .build()
         };
 
+        let settlement_output_occupied_capacity = settlement_output
+            .occupied_capacity(Capacity::shannons(0))
+            .map_err(|err| {
+                ArithmeticError::new(format!(
+                    "settlement output occupied capacity calculation failed: {}",
+                    err
+                ))
+            })?
+            .as_u64();
+        if separate_fee_sponsor
+            && !external_funding_required
+            && payout_capacity < settlement_output_occupied_capacity
+        {
+            return Err(Box::new(RpcError::Other(anyhow!(
+                "settlement payout capacity {} is smaller than occupied capacity {}",
+                payout_capacity,
+                settlement_output_occupied_capacity
+            ))));
+        }
+
+        if external_funding_required {
+            let required_expiry_since = (fee_input_since != 0).then_some(fee_input_since);
+            let mut template_builder = Transaction::default()
+                .as_advanced_builder()
+                .cell_deps(get_cell_deps_sync(vec![Contract::CommitmentLock], &None)?)
+                .input(input);
+            if !two_parties_all_settled {
+                template_builder = template_builder
+                    .output(new_commitment_output)
+                    .output_data(Bytes::default());
+            }
+            let template_tx = template_builder
+                .output(settlement_output)
+                .output_data(Bytes::default())
+                .witness(witness_for_commitment_cell.pack())
+                .build();
+            return build_signed_settlement_tx(
+                events,
+                store,
+                self_node_id,
+                channel_data.channel_id,
+                template_tx,
+                key_purpose,
+                unlock.with_preimage,
+                unlock_key,
+                signer,
+                None,
+                fiber_types::WatchtowerFunding::ExternalFunding {
+                    required_expiry_since,
+                },
+            );
+        }
+
         let mut tx_builder = Transaction::default()
             .as_advanced_builder()
             .cell_deps(get_cell_deps_sync(
@@ -2478,22 +2573,6 @@ fn build_settlement_tx_inner<S: WatchtowerStore>(
         let fee_calculator = FeeCalculator::new(1000);
         // use two inputs as the maximum fee provider cell inputs
         let fee = fee_calculator.fee(tx_size_with_extra_inputs(&tx_builder, 2)?);
-        let settlement_output_occupied_capacity = settlement_output
-            .occupied_capacity(Capacity::shannons(0))
-            .map_err(|err| {
-                ArithmeticError::new(format!(
-                    "settlement output occupied capacity calculation failed: {}",
-                    err
-                ))
-            })?
-            .as_u64();
-        if separate_fee_sponsor && payout_capacity < settlement_output_occupied_capacity {
-            return Err(Box::new(RpcError::Other(anyhow!(
-                "settlement payout capacity {} is smaller than occupied capacity {}",
-                payout_capacity,
-                settlement_output_occupied_capacity
-            ))));
-        }
         let change_output_occupied_capacity = change_output
             .occupied_capacity(Capacity::shannons(0))
             .map_err(|err| {
@@ -2599,10 +2678,8 @@ fn build_settlement_tx_inner<S: WatchtowerStore>(
                     unlock_key,
                     signer,
                     None,
-                    false,
-                    None,
-                )
-                .map(|opt| opt.map(|tx| (tx, false)));
+                    fiber_types::WatchtowerFunding::OperatorSponsored,
+                );
             }
         }
 
@@ -2675,22 +2752,23 @@ fn build_settlement_tx_inner<S: WatchtowerStore>(
 
         let udt_type_script: Option<Script> =
             commitment_cell.output.type_.map(|script| script.into());
-        let external_signer = channel_data.local_settlement_key.is_none();
-        let mut self_funded = false;
 
         let outputs_capacity: u64 = if unlock.unlock_type >= 0xFE {
             if two_parties_all_settled {
                 let commitment_capacity = commitment_cell.output.capacity.value();
-                if commitment_capacity < settlement_output_occupied_capacity {
+                if commitment_capacity < settlement_output_occupied_capacity
+                    && !external_funding_required
+                {
                     return Err(Box::new(RpcError::Other(anyhow!(
                         "Commitment cell capacity ({commitment_capacity}) is smaller than UDT settlement output occupied capacity ({settlement_output_occupied_capacity})"
                     ))));
                 }
+                let final_capacity = commitment_capacity.max(settlement_output_occupied_capacity);
                 settlement_output = settlement_output
                     .as_builder()
-                    .capacity(new_commitment_output.capacity())
+                    .capacity(final_capacity)
                     .build();
-                settlement_output.capacity().unpack()
+                final_capacity
             } else {
                 let new_commitment_output_capacity = new_commitment_output
                     .occupied_capacity(Capacity::bytes(16).unwrap())
@@ -2706,22 +2784,20 @@ fn build_settlement_tx_inner<S: WatchtowerStore>(
                     .capacity(new_commitment_output_capacity)
                     .build();
 
-                let new_settlement_output_capacity = if separate_fee_sponsor {
-                    // Never subsidize tenant UDT cell capacity from the operator's fee sponsor:
-                    // fund from excess commitment cell CKB when sufficient, otherwise emit a
-                    // self-funded template transaction for the client's wallet to fund and sign.
+                let new_settlement_output_capacity = if separate_fee_sponsor
+                    || external_funding_required
+                {
                     let excess_capacity = checked_sub_u64(
                         commitment_cell.output.capacity.value(),
                         new_commitment_output_capacity,
                         "settlement output capacity",
                     )?;
                     if excess_capacity < settlement_output_occupied_capacity {
-                        if !external_signer {
+                        if !external_funding_required {
                             return Err(Box::new(RpcError::Other(anyhow!(
                                 "Insufficient commitment cell excess capacity ({excess_capacity}) for UDT settlement output ({settlement_output_occupied_capacity}) without subsidizing from separate fee sponsor"
                             ))));
                         }
-                        self_funded = true;
                         settlement_output_occupied_capacity
                     } else {
                         excess_capacity
@@ -2753,18 +2829,10 @@ fn build_settlement_tx_inner<S: WatchtowerStore>(
                 )?
             }
         } else {
-            if separate_fee_sponsor {
-                // CommitmentLock requires UDT TLC unlocks to preserve the full commitment cell
-                // capacity, so creating a new UDT output cannot be subsidized by the operator's
-                // separate fee sponsor. For external hosted channels, emit an unfunded template
-                // transaction so the client wallet can attach its own cell_deps, funding inputs,
-                // change output, and witnesses (supporting any wallet lock script and address).
-                if !external_signer {
-                    return Err(Box::new(RpcError::Other(anyhow!(
-                        "Cannot subsidize UDT TLC settlement output capacity from separate fee sponsor"
-                    ))));
-                }
-                self_funded = true;
+            if separate_fee_sponsor && !external_funding_required {
+                return Err(Box::new(RpcError::Other(anyhow!(
+                    "Cannot subsidize UDT TLC settlement output capacity from separate fee sponsor"
+                ))));
             }
             checked_add_u64(
                 settlement_output_occupied_capacity,
@@ -2773,17 +2841,21 @@ fn build_settlement_tx_inner<S: WatchtowerStore>(
             )?
         };
 
-        if self_funded {
+        if external_funding_required {
             let required_expiry_since = (fee_input_since != 0).then_some(fee_input_since);
-            let template_tx = Transaction::default()
+            let mut template_builder = Transaction::default()
                 .as_advanced_builder()
                 .cell_deps(get_cell_deps_sync(
                     vec![Contract::CommitmentLock],
                     &udt_type_script,
                 )?)
-                .input(input)
-                .output(new_commitment_output)
-                .output_data(new_commitment_output_data)
+                .input(input);
+            if !two_parties_all_settled {
+                template_builder = template_builder
+                    .output(new_commitment_output)
+                    .output_data(new_commitment_output_data);
+            }
+            let template_tx = template_builder
                 .output(settlement_output)
                 .output_data(settlement_output_data)
                 .witness(witness_for_commitment_cell.pack())
@@ -2799,10 +2871,10 @@ fn build_settlement_tx_inner<S: WatchtowerStore>(
                 unlock_key,
                 signer,
                 None,
-                true,
-                required_expiry_since,
-            )
-            .map(|opt| opt.map(|tx| (tx, true)));
+                fiber_types::WatchtowerFunding::ExternalFunding {
+                    required_expiry_since,
+                },
+            );
         }
 
         if separate_fee_sponsor && outputs_capacity > commitment_cell.output.capacity.value() {
@@ -2930,10 +3002,8 @@ fn build_settlement_tx_inner<S: WatchtowerStore>(
                     unlock_key,
                     signer,
                     None,
-                    false,
-                    None,
-                )
-                .map(|opt| opt.map(|tx| (tx, false)));
+                    fiber_types::WatchtowerFunding::OperatorSponsored,
+                );
             }
         }
 
@@ -2953,10 +3023,11 @@ fn build_signed_settlement_tx<S: WatchtowerStore>(
     unlock_key: Option<Privkey>,
     change_signer: &LocalSigner,
     existing_request_id: Option<Hash256>,
-    self_funded: bool,
-    required_expiry_since: Option<u64>,
-) -> Result<Option<TransactionView>, Box<dyn std::error::Error>> {
-    use fiber_types::OnchainSigningContent;
+    funding: fiber_types::WatchtowerFunding,
+) -> Result<Option<BuiltSettlementTx>, Box<dyn std::error::Error>> {
+    use fiber_types::{
+        OnchainSigningContent, PendingWatchtowerRequest, SignedWatchtowerRequest, WatchtowerFunding,
+    };
 
     let content = OnchainSigningContent {
         key_purpose,
@@ -2972,55 +3043,101 @@ fn build_signed_settlement_tx<S: WatchtowerStore>(
         .map_err(|e| Box::new(std::io::Error::other(e)) as Box<dyn std::error::Error>)?;
     match outcome {
         WatchtowerSignOutcome::Ready(signature) => Ok(Some(apply_settlement_signature(
-            tx,
+            BuiltSettlementTx::OperatorSponsored(tx),
             change_signer,
             signature,
-            false,
             with_preimage,
         )?)),
         WatchtowerSignOutcome::AwaitingExternal {
             request_id: derived_request_id,
             content: awaiting,
         } => {
+            enum AppliedExternalSig {
+                OperatorSponsored {
+                    tx: TransactionView,
+                    signature: [u8; 65],
+                },
+                ExternalFunding {
+                    tx: TransactionView,
+                    signature: [u8; 65],
+                },
+            }
+
             let request_id = existing_request_id.unwrap_or(derived_request_id);
             let now_ms = crate::now_timestamp_as_millis_u64();
-            let fee_inputs = fee_inputs(&awaiting);
             let signing_scope = events.watchtower(node_id);
             let mut signing_update = signing_scope.prepare_update();
-            type AppliedExternalSig = (TransactionView, [u8; 65], bool);
-            let (applied, newly_inserted) = store.update_watchtower_signer(
+            let (applied, hold_inputs) = store.update_watchtower_signer(
                 node_id,
                 &channel_id,
-                |state| -> Result<(Option<AppliedExternalSig>, bool), std::convert::Infallible> {
+                |state| -> Result<(Option<AppliedExternalSig>, Vec<OutPoint>), std::convert::Infallible> {
                     let fiber_types::WatchtowerSignerState::External(external) = state else {
                         warn!(
                             channel_id = %channel_id,
                             "watchtower settlement has no local key and no external signer state"
                         );
-                        return Ok((None, false));
+                        return Ok((None, Vec::new()));
                     };
 
                     if let Some(signed) = external.signed_signatures.get(&request_id) {
-                        let matches_content = signed.content == awaiting
-                            || (self_funded
-                                && signed.self_funded
-                                && signed.content.key_purpose == awaiting.key_purpose
-                                && fiber_types::validate_and_normalize_self_funded_watchtower_tx(
-                                    &awaiting.transaction,
-                                    &signed.content.transaction,
+                        let matched = match (signed, funding) {
+                            (
+                                SignedWatchtowerRequest::OperatorSponsored {
+                                    content,
+                                    signature,
+                                    ..
+                                },
+                                WatchtowerFunding::OperatorSponsored,
+                            ) if *content == awaiting => {
+                                Some((
+                                    AppliedExternalSig::OperatorSponsored {
+                                        tx: content.transaction.clone().into_view(),
+                                        signature: *signature,
+                                    },
+                                    signed.operator_fee_inputs(),
+                                ))
+                            }
+                            (
+                                SignedWatchtowerRequest::ExternalFunding {
+                                    content,
+                                    signature,
+                                    ..
+                                },
+                                WatchtowerFunding::ExternalFunding {
                                     required_expiry_since,
-                                    None,
-                                )
-                                .is_ok());
-                        if matches_content {
-                            let signature = signed.signature;
-                            let is_self_funded = self_funded || signed.self_funded;
-                            let tx_to_sign = signed.content.transaction.clone().into_view();
-                            let signed_tx_hash = is_self_funded.then(|| {
-                                fiber_types::self_funded_watchtower_tx_hash(
-                                    &signed.content.transaction,
-                                )
-                            });
+                                },
+                            ) if *content == awaiting
+                                || (content.key_purpose == awaiting.key_purpose
+                                    && fiber_types::validate_and_normalize_external_funding_watchtower_tx(
+                                        &awaiting.transaction,
+                                        &content.transaction,
+                                        required_expiry_since,
+                                        None,
+                                    )
+                                    .is_ok()) =>
+                            {
+                                Some((
+                                    AppliedExternalSig::ExternalFunding {
+                                        tx: content.transaction.clone().into_view(),
+                                        signature: *signature,
+                                    },
+                                    Vec::new(),
+                                ))
+                            }
+                            _ => None,
+                        };
+                        if let Some((applied_sig, hold_inputs)) = matched {
+                            let (signature, signed_tx_hash) = match &applied_sig {
+                                AppliedExternalSig::OperatorSponsored { signature, .. } => {
+                                    (*signature, None)
+                                }
+                                AppliedExternalSig::ExternalFunding { tx, signature } => (
+                                    *signature,
+                                    Some(fiber_types::external_funding_watchtower_tx_hash(
+                                        &tx.data(),
+                                    )),
+                                ),
+                            };
                             external.last_applied =
                                 Some(fiber_types::LastAppliedWatchtowerSignature {
                                     request_id,
@@ -3028,7 +3145,7 @@ fn build_signed_settlement_tx<S: WatchtowerStore>(
                                     signed_transaction_hash: signed_tx_hash,
                                 });
                             signing_update.watchtower_state(channel_id, state);
-                            return Ok((Some((tx_to_sign, signature, is_self_funded)), false));
+                            return Ok((Some(applied_sig), hold_inputs));
                         }
                         external.signed_signatures.remove(&request_id);
                         if external
@@ -3041,29 +3158,32 @@ fn build_signed_settlement_tx<S: WatchtowerStore>(
                     }
 
                     if let Some(pending) = external.pending_requests.get_mut(&request_id) {
-                        if pending.content == awaiting {
-                            if pending.created_at_ms == 0 {
-                                pending.created_at_ms = now_ms;
+                        if pending.content() == &awaiting && pending.funding() == funding {
+                            let created_at = pending.created_at_ms_mut();
+                            if *created_at == 0 {
+                                *created_at = now_ms;
                             }
-                            if self_funded {
-                                pending.self_funded = true;
-                            }
-                            if pending.required_expiry_since.is_none() {
-                                pending.required_expiry_since = required_expiry_since;
-                            }
-                            return Ok((None, false));
+                            return Ok((None, Vec::new()));
                         }
                     }
 
-                    external.pending_requests.insert(
-                        request_id,
-                        fiber_types::PendingWatchtowerRequest {
+                    let pending_entry = match funding {
+                        WatchtowerFunding::OperatorSponsored => {
+                            PendingWatchtowerRequest::OperatorSponsored {
+                                content: awaiting,
+                                created_at_ms: now_ms,
+                            }
+                        }
+                        WatchtowerFunding::ExternalFunding {
+                            required_expiry_since,
+                        } => PendingWatchtowerRequest::ExternalFunding {
                             content: awaiting,
                             created_at_ms: now_ms,
-                            self_funded,
                             required_expiry_since,
                         },
-                    );
+                    };
+                    let hold_inputs = pending_entry.operator_fee_inputs();
+                    external.pending_requests.insert(request_id, pending_entry);
                     if external
                         .last_applied
                         .as_ref()
@@ -3072,25 +3192,26 @@ fn build_signed_settlement_tx<S: WatchtowerStore>(
                         external.last_applied = None;
                     }
                     signing_update.watchtower_state(channel_id, state);
-                    Ok((None, true))
+                    Ok((None, hold_inputs))
                 },
             )?;
-            let is_self_funded = self_funded || applied.as_ref().is_some_and(|(_, _, sf)| *sf);
-            if !is_self_funded && (newly_inserted || applied.is_some()) {
-                crate::ckb::held_cells::hold_for_watchtower(fee_inputs, now_ms);
+            if !hold_inputs.is_empty() {
+                crate::ckb::held_cells::hold_for_watchtower(hold_inputs, now_ms);
             }
             signing_update.publish();
             // Only signer-state mutation holds the lock; transaction construction
             // and broadcasting must not block other signer submissions.
             applied
-                .map(|(tx_to_sign, signature, is_self_funded)| {
-                    apply_settlement_signature(
-                        tx_to_sign,
-                        change_signer,
-                        signature,
-                        is_self_funded,
-                        with_preimage,
-                    )
+                .map(|applied_sig| {
+                    let (built_tx, signature) = match applied_sig {
+                        AppliedExternalSig::OperatorSponsored { tx, signature } => {
+                            (BuiltSettlementTx::OperatorSponsored(tx), signature)
+                        }
+                        AppliedExternalSig::ExternalFunding { tx, signature } => {
+                            (BuiltSettlementTx::ExternalFunding(tx), signature)
+                        }
+                    };
+                    apply_settlement_signature(built_tx, change_signer, signature, with_preimage)
                 })
                 .transpose()
         }
@@ -3098,13 +3219,15 @@ fn build_signed_settlement_tx<S: WatchtowerStore>(
 }
 
 fn apply_settlement_signature(
-    tx: TransactionView,
+    built_tx: BuiltSettlementTx,
     change_signer: &LocalSigner,
     signature_bytes: [u8; 65],
-    self_funded: bool,
     with_preimage: bool,
-) -> Result<TransactionView, Box<dyn std::error::Error>> {
-    let tx = tx.data().into_view();
+) -> Result<BuiltSettlementTx, Box<dyn std::error::Error>> {
+    let (tx, is_external_funding) = match built_tx {
+        BuiltSettlementTx::OperatorSponsored(tx) => (tx.data().into_view(), false),
+        BuiltSettlementTx::ExternalFunding(tx) => (tx.data().into_view(), true),
+    };
     let mut settlement_witness = tx
         .witnesses()
         .get(0)
@@ -3120,12 +3243,14 @@ fn apply_settlement_signature(
         settlement_witness.splice(start.., signature_bytes);
     }
 
-    if self_funded {
-        // Client already funded and signed witness[1..]; never sign with operator change_signer.
+    if is_external_funding {
+        // Client already funded and signed any witness[1..]; never sign with operator change_signer.
         let mut witnesses = Vec::with_capacity(tx.witnesses().len());
         witnesses.push(settlement_witness.pack());
         witnesses.extend(tx.witnesses().into_iter().skip(1));
-        return Ok(tx.as_advanced_builder().set_witnesses(witnesses).build());
+        return Ok(BuiltSettlementTx::ExternalFunding(
+            tx.as_advanced_builder().set_witnesses(witnesses).build(),
+        ));
     }
 
     let witness = tx.witnesses().get(1).expect("get witness at index 1");
@@ -3141,7 +3266,9 @@ fn apply_settlement_signature(
         .build()
         .as_bytes();
     let witnesses = vec![settlement_witness.pack(), change_witness.pack()];
-    Ok(tx.as_advanced_builder().set_witnesses(witnesses).build())
+    Ok(BuiltSettlementTx::OperatorSponsored(
+        tx.as_advanced_builder().set_witnesses(witnesses).build(),
+    ))
 }
 
 fn sign_tx(

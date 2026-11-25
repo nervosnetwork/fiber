@@ -215,3 +215,91 @@ async fn watchtower_visibility_and_removal_use_only_memory_events() {
         matches!(stream.try_next().await.unwrap().unwrap(), SubscriptionEvent::Removed {channel_id} if channel_id == id.into())
     );
 }
+
+#[cfg(feature = "watchtower")]
+#[tokio::test]
+async fn watchtower_subscription_replays_pending_external_funding_request() {
+    use crate::watchtower::WatchtowerStore;
+    use ckb_types::{
+        core::TransactionBuilder,
+        packed::{CellInput, OutPoint},
+        prelude::Pack,
+    };
+    use fiber_json_types::WatchtowerSigningStatus;
+    use fiber_types::{
+        ChannelFeatures, OnchainKeyPurpose, OnchainSigningContent, PendingWatchtowerRequest,
+        Privkey, SettlementData, SettlementKey, WatchChannelKeys, WatchtowerSignerState,
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = open_store(dir.path()).unwrap();
+    let events = SigningEvents::default();
+    let node = NodeId::from_bytes(vec![3; 33]);
+    let id = Hash256::from([7; 32]);
+    store.insert_watch_channel(
+        node.clone(),
+        id,
+        None,
+        WatchChannelKeys {
+            local_settlement: SettlementKey::external(Privkey::from([1; 32]).pubkey()),
+            remote_settlement: Privkey::from([2; 32]).pubkey(),
+            local_funding: Privkey::from([3; 32]).pubkey(),
+            remote_funding: Privkey::from([4; 32]).pubkey(),
+        },
+        SettlementData {
+            local_amount: 100,
+            remote_amount: 100,
+            tlcs: vec![],
+        },
+        ChannelFeatures::V2,
+        None,
+    );
+    let request_id = Hash256::from([0xaa; 32]);
+    let expiry_since = 0x4000_0000_0000_0064u64;
+    let tx = TransactionBuilder::default()
+        .input(CellInput::new(OutPoint::new([0x11; 32].pack(), 0), 0))
+        .build()
+        .data();
+    store
+        .update_watchtower_signer(&node, &id, |state| {
+            if let WatchtowerSignerState::External(ext) = state {
+                ext.pending_requests.insert(
+                    request_id,
+                    PendingWatchtowerRequest::ExternalFunding {
+                        content: OnchainSigningContent {
+                            key_purpose: OnchainKeyPurpose::Settlement,
+                            transaction: tx.clone(),
+                        },
+                        created_at_ms: crate::now_timestamp_as_millis_u64(),
+                        required_expiry_since: Some(expiry_since),
+                    },
+                );
+            }
+            Ok::<_, std::convert::Infallible>(())
+        })
+        .unwrap();
+
+    let mut stream = SubscriptionService::new(false, true)
+        .subscribe(
+            source(&store, &events, node),
+            SubscriptionTopic::WatchtowerSigning,
+            SubscriptionOptions::default(),
+        )
+        .unwrap();
+    let SubscriptionEvent::WatchtowerSigning(result) = stream.try_next().await.unwrap().unwrap()
+    else {
+        panic!("expected initial WatchtowerSigning replay event");
+    };
+    assert_eq!(result.channel_id, id.into());
+    match result.status {
+        WatchtowerSigningStatus::ExternalFundingRequired {
+            request_id: got_id,
+            required_expiry_since,
+            ..
+        } => {
+            assert_eq!(got_id, request_id.into());
+            assert_eq!(required_expiry_since, Some(expiry_since));
+        }
+        other => panic!("expected ExternalFundingRequired, got {other:?}"),
+    }
+}

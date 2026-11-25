@@ -1648,8 +1648,6 @@ async fn onchain_claim_checks_live_input_witness_destination_fee_and_maturity() 
                     transaction: content.transaction.clone().into(),
                 },
                 expires_at_ms: 0,
-                self_funded: false,
-                required_expiry_since: None,
             };
             let wire = serde_json::to_vec(&status).unwrap();
             let ProcessOutcome::NeedConfirmation(pending) = session
@@ -2629,8 +2627,6 @@ async fn assert_onchain_rpc_rejected(
                 transaction: content.transaction.clone().into(),
             },
             expires_at_ms: 0,
-            self_funded: false,
-            required_expiry_since: None,
         };
         let wire = serde_json::to_vec(&status).unwrap();
         let before = f.store.snapshot().unwrap();
@@ -3547,7 +3543,7 @@ async fn next_material_limits_commitment_points_to_local_lane_lookahead() {
 
 #[cfg(feature = "json")]
 #[tokio::test]
-async fn self_funded_udt_tlc_watchtower_session_flow() {
+async fn external_funding_udt_tlc_watchtower_session_flow() {
     use ckb_types::core::DepType;
     use ckb_types::packed::CellDep;
 
@@ -3696,7 +3692,7 @@ async fn self_funded_udt_tlc_watchtower_session_flow() {
             .unwrap();
         let session = HostedSession::new(root).with_state(directory);
 
-        let status = fiber_json_types::WatchtowerSigningStatus::SignatureRequired {
+        let status = fiber_json_types::WatchtowerSigningStatus::ExternalFundingRequired {
             request_id: request_id.into(),
             content: fiber_json_types::OnchainSigningContent {
                 key_purpose: fiber_json_types::OnchainKeyPurpose::Tlc {
@@ -3705,7 +3701,6 @@ async fn self_funded_udt_tlc_watchtower_session_flow() {
                 transaction: template_tx.clone().into(),
             },
             expires_at_ms: 1_800_000,
-            self_funded: true,
             required_expiry_since: None,
         };
         let authorization = OnchainSpendAuthorization {
@@ -3717,7 +3712,7 @@ async fn self_funded_udt_tlc_watchtower_session_flow() {
             cell_deps: vec![wallet_dep.clone()],
         };
 
-        // 1. Operator-funded route must reject self_funded=true.
+        // 1. Operator-sponsored route must reject ExternalFundingRequired.
         assert!(session
             .handle_watchtower_status_verified(
                 channel_id,
@@ -3728,18 +3723,21 @@ async fn self_funded_udt_tlc_watchtower_session_flow() {
             .await
             .is_err());
 
-        // 2. Self-funded route rejects non-self_funded status.
-        let mut non_self_funded_status = status.clone();
-        if let fiber_json_types::WatchtowerSigningStatus::SignatureRequired {
-            self_funded, ..
-        } = &mut non_self_funded_status
-        {
-            *self_funded = false;
-        }
+        // 2. External-funding route rejects SignatureRequired.
+        let sig_only_status = fiber_json_types::WatchtowerSigningStatus::SignatureRequired {
+            request_id: request_id.into(),
+            content: fiber_json_types::OnchainSigningContent {
+                key_purpose: fiber_json_types::OnchainKeyPurpose::Tlc {
+                    commitment_number: 1,
+                },
+                transaction: template_tx.clone().into(),
+            },
+            expires_at_ms: 1_800_000,
+        };
         assert!(session
-            .handle_self_funded_watchtower_status(
+            .handle_external_funding_watchtower_status(
                 channel_id,
-                non_self_funded_status,
+                sig_only_status,
                 funded_tx.clone().into(),
                 authorization.clone(),
                 &chain,
@@ -3747,7 +3745,7 @@ async fn self_funded_udt_tlc_watchtower_session_flow() {
             .await
             .is_err());
 
-        // 3. Self-funded route rejects tampered funded tx (e.g. unexpected absolute timestamp since).
+        // 3. External-funding route rejects tampered funded tx (e.g. unexpected absolute timestamp since).
         let tampered_since_tx = funded_tx
             .clone()
             .into_view()
@@ -3762,7 +3760,7 @@ async fn self_funded_udt_tlc_watchtower_session_flow() {
             .build()
             .data();
         assert!(session
-            .handle_self_funded_watchtower_status(
+            .handle_external_funding_watchtower_status(
                 channel_id,
                 status.clone(),
                 tampered_since_tx.into(),
@@ -3772,10 +3770,10 @@ async fn self_funded_udt_tlc_watchtower_session_flow() {
             .await
             .is_err());
 
-        // 4. Valid self-funded flow prepares PendingRequest -> confirm_self_funded_onchain returns
+        // 4. Valid external-funding flow prepares PendingRequest -> confirm_external_funding_onchain returns
         //    SubmitWatchtowerSignatureParams with signed_transaction preserving client witnesses.
         let ProcessOutcome::NeedConfirmation(pending) = session
-            .handle_self_funded_watchtower_status(
+            .handle_external_funding_watchtower_status(
                 channel_id,
                 status,
                 funded_tx.clone().into(),
@@ -3783,22 +3781,22 @@ async fn self_funded_udt_tlc_watchtower_session_flow() {
                 &chain,
             )
             .await
-            .expect("prepare self-funded watchtower request")
+            .expect("prepare external-funding watchtower request")
         else {
             panic!("onchain request must require confirmation");
         };
-        assert!(pending.self_funded());
+        assert!(pending.is_external_funding());
         assert_eq!(pending.required_expiry_since(), None);
 
-        // Operator-funded confirm_onchain must reject a self-funded PendingRequest.
+        // Operator-sponsored confirm_onchain must reject an externally funded PendingRequest.
         let err = session
             .confirm_onchain(pending, &chain)
             .await
-            .expect_err("confirm_onchain must reject self-funded pending request");
-        assert!(err.to_string().contains("confirm_self_funded_onchain"));
+            .expect_err("confirm_onchain must reject external-funding pending request");
+        assert!(err.to_string().contains("confirm_external_funding_onchain"));
 
-        // Re-prepare and confirm via confirm_self_funded_onchain.
-        let status_again = fiber_json_types::WatchtowerSigningStatus::SignatureRequired {
+        // Re-prepare and confirm via confirm_external_funding_onchain.
+        let status_again = fiber_json_types::WatchtowerSigningStatus::ExternalFundingRequired {
             request_id: request_id.into(),
             content: fiber_json_types::OnchainSigningContent {
                 key_purpose: fiber_json_types::OnchainKeyPurpose::Tlc {
@@ -3807,7 +3805,6 @@ async fn self_funded_udt_tlc_watchtower_session_flow() {
                 transaction: template_tx.into(),
             },
             expires_at_ms: 1_800_000,
-            self_funded: true,
             required_expiry_since: None,
         };
         let auth_again = OnchainSpendAuthorization {
@@ -3819,7 +3816,7 @@ async fn self_funded_udt_tlc_watchtower_session_flow() {
             cell_deps: vec![wallet_dep.clone()],
         };
         let ProcessOutcome::NeedConfirmation(pending) = session
-            .handle_self_funded_watchtower_status(
+            .handle_external_funding_watchtower_status(
                 channel_id,
                 status_again,
                 funded_tx.clone().into(),
@@ -3832,9 +3829,9 @@ async fn self_funded_udt_tlc_watchtower_session_flow() {
             panic!("need confirmation");
         };
         let SubmitParams::Watchtower(params) = session
-            .confirm_self_funded_onchain(pending, &chain)
+            .confirm_external_funding_onchain(pending, &chain)
             .await
-            .expect("confirm self-funded watchtower request")
+            .expect("confirm external-funding watchtower request")
         else {
             panic!("expected watchtower submit params");
         };
@@ -3843,7 +3840,7 @@ async fn self_funded_udt_tlc_watchtower_session_flow() {
         assert_eq!(params.signature.len(), 65);
         let submitted_tx: ckb_types::packed::Transaction = params
             .signed_transaction
-            .expect("self-funded submission must carry signed_transaction")
+            .expect("external-funding submission must carry signed_transaction")
             .into();
         assert_eq!(submitted_tx.as_slice(), funded_tx.as_slice());
         assert_eq!(

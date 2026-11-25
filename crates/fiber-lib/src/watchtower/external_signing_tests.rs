@@ -279,7 +279,7 @@ impl Fixture {
 
     fn pending(&self) -> (Hash256, OnchainSigningContent) {
         let (request_id, req) = self.pending_request();
-        (request_id, req.content)
+        (request_id, req.content().clone())
     }
 
     fn pending_request(&self) -> (Hash256, fiber_types::PendingWatchtowerRequest) {
@@ -558,11 +558,9 @@ fn external_tlc_rpc_rejects_unknown_derivation_index_without_settlement_key_fall
     let mut state = fiber_types::WatchtowerExternalSignerState::default();
     state.pending_requests.insert(
         request_id,
-        fiber_types::PendingWatchtowerRequest {
+        fiber_types::PendingWatchtowerRequest::OperatorSponsored {
             content,
             created_at_ms: crate::now_timestamp_as_millis_u64(),
-            self_funded: false,
-            required_expiry_since: None,
         },
     );
     fixture.store.put_watchtower_signer(
@@ -642,11 +640,10 @@ fn spent_inputs_prune_watchtower_requests_and_publish_successor() {
                     .map(|(id, content)| {
                         (
                             *id,
-                            fiber_types::SignedWatchtowerRequest {
+                            fiber_types::SignedWatchtowerRequest::OperatorSponsored {
                                 content: content.clone(),
                                 signature: sign_onchain_request(base_key, content).unwrap(),
                                 created_at_ms: now_ms,
-                                self_funded: false,
                             },
                         )
                     })
@@ -657,11 +654,9 @@ fn spent_inputs_prune_watchtower_requests_and_publish_successor() {
                     .map(|(id, content)| {
                         (
                             *id,
-                            fiber_types::PendingWatchtowerRequest {
+                            fiber_types::PendingWatchtowerRequest::OperatorSponsored {
                                 content: content.clone(),
                                 created_at_ms: now_ms,
-                                self_funded: false,
-                                required_expiry_since: None,
                             },
                         )
                     })
@@ -690,10 +685,10 @@ fn spent_inputs_prune_watchtower_requests_and_publish_successor() {
             assert!(!state.signed_signatures.contains_key(stale_id));
             if already_signed {
                 assert_eq!(state.signed_signatures.len(), 1);
-                assert_eq!(&state.signed_signatures[live_id].content, live);
+                assert_eq!(state.signed_signatures[live_id].content(), live);
             } else {
                 assert_eq!(state.pending_requests.len(), 1);
-                assert_eq!(&state.pending_requests[live_id].content, live);
+                assert_eq!(state.pending_requests[live_id].content(), live);
             }
             let expected = crate::rpc::watchtower::to_rpc_watchtower_signing_status(
                 WatchtowerSignerState::External(state),
@@ -701,6 +696,9 @@ fn spent_inputs_prune_watchtower_requests_and_publish_successor() {
             match &expected {
                 WatchtowerSigningStatus::SignatureRequired { request_id, .. } => {
                     assert_eq!(*request_id, (*live_id).into())
+                }
+                WatchtowerSigningStatus::ExternalFundingRequired { .. } => {
+                    panic!("unexpected ExternalFundingRequired for operator-sponsored test")
                 }
                 WatchtowerSigningStatus::NoSignatureRequired => assert!(already_signed),
                 WatchtowerSigningStatus::Backoff { .. } => {
@@ -865,11 +863,10 @@ fn external_tlc_signing_replaces_stale_request_purpose_for_same_transaction() {
         if already_signed {
             state.signed_signatures.insert(
                 request_id,
-                fiber_types::SignedWatchtowerRequest {
+                fiber_types::SignedWatchtowerRequest::OperatorSponsored {
                     content: stale,
                     signature: wrong_signature,
                     created_at_ms: now_ms,
-                    self_funded: false,
                 },
             );
             state.last_applied = Some(fiber_types::LastAppliedWatchtowerSignature {
@@ -880,11 +877,9 @@ fn external_tlc_signing_replaces_stale_request_purpose_for_same_transaction() {
         } else {
             state.pending_requests.insert(
                 request_id,
-                fiber_types::PendingWatchtowerRequest {
+                fiber_types::PendingWatchtowerRequest::OperatorSponsored {
                     content: stale,
                     created_at_ms: now_ms,
-                    self_funded: false,
-                    required_expiry_since: None,
                 },
             );
         }
@@ -942,7 +937,7 @@ fn concurrent_watchtower_rpc_submissions_preserve_both_signatures() {
         .pending_requests
         .iter()
         .find(|(id, _)| **id != first_id)
-        .map(|(id, req)| (*id, req.content.clone()))
+        .map(|(id, req)| (*id, req.content().clone()))
         .expect("second request");
     let first_sig =
         sign_onchain_request(&fixture.tlc_key, &first_content).expect("first signature");
@@ -1021,7 +1016,7 @@ fn test_watchtower_signature_request_overwrite_repro() {
         .pending_requests
         .iter()
         .find(|(k, _)| **k != req_1)
-        .map(|(k, v)| (*k, v.content.clone()))
+        .map(|(k, v)| (*k, v.content().clone()))
         .expect("second pending request");
     assert_ne!(
         req_1, req_2,
@@ -1180,8 +1175,36 @@ fn external_ckb_and_udt_settlement_uses_separate_payout_and_fee_sponsor_locks() 
             fixture.tracked.clear();
         }
 
-        assert!(fixture.build_at(200_000).unwrap().is_none());
-        let (_id, content) = fixture.pending();
+        // Watchtower emits an unfunded ExternalFunding template tx for both CKB and UDT
+        // settlements under a separate payout lock (zero operator fee inputs or cell_collector calls).
+        #[derive(Clone)]
+        struct PanicCollector;
+        #[async_trait::async_trait]
+        impl CellCollector for PanicCollector {
+            async fn collect_live_cells_async(
+                &mut self,
+                _: &CellQueryOptions,
+                _: bool,
+            ) -> Result<(Vec<LiveCell>, u64), CellCollectorError> {
+                panic!("external-funding template must never query operator cell_collector");
+            }
+            fn lock_cell(&mut self, _: OutPoint, _: u64) -> Result<(), CellCollectorError> {
+                unreachable!()
+            }
+            fn apply_tx(&mut self, _: Transaction, _: u64) -> Result<(), CellCollectorError> {
+                unreachable!()
+            }
+            fn reset(&mut self) {}
+        }
+
+        assert!(fixture
+            .build_with_collector(200_000, &mut PanicCollector)
+            .unwrap()
+            .is_none());
+        let (req_id, pending) = fixture.pending_request();
+        assert!(pending.is_external_funding(), "is_udt={is_udt}");
+        let content = pending.content();
+        assert_eq!(content.transaction.raw().inputs().len(), 1);
         let outputs: Vec<_> = content.transaction.raw().outputs().into_iter().collect();
         let outputs_data: Vec<_> = content
             .transaction
@@ -1189,7 +1212,7 @@ fn external_ckb_and_udt_settlement_uses_separate_payout_and_fee_sponsor_locks() 
             .outputs_data()
             .into_iter()
             .collect();
-        assert_eq!(outputs.len(), 3, "is_udt={is_udt}");
+        assert_eq!(outputs.len(), 2, "is_udt={is_udt}");
         // Output 0: remaining commitment output.
         // Output 1: tenant settlement payout locked to payout_lock_script.
         assert_eq!(outputs[1].lock(), tenant_payout_lock);
@@ -1199,22 +1222,92 @@ fn external_ckb_and_udt_settlement_uses_separate_payout_and_fee_sponsor_locks() 
                 outputs_data[1].raw_data().as_ref(),
                 100_000_000_000u128.to_le_bytes()
             );
+            // High-excess UDT partial balance: wallet can deduct fee directly from outputs[1]
+            // (1 input, 0 external wallet CKB needed!).
+            let payout_cap: u64 = outputs[1].capacity().unpack();
+            let funded_tx = content
+                .transaction
+                .clone()
+                .into_view()
+                .as_advanced_builder()
+                .set_outputs(vec![
+                    outputs[0].clone(),
+                    outputs[1]
+                        .clone()
+                        .as_builder()
+                        .capacity(payout_cap - 1_000)
+                        .build(),
+                ])
+                .build()
+                .data();
+            let funded_content = OnchainSigningContent {
+                key_purpose: content.key_purpose,
+                transaction: funded_tx.clone(),
+            };
+            let sig = sign_onchain_request(&fixture.base_key, &funded_content).unwrap();
+            assert_eq!(
+                fixture
+                    .submit_with_tx(req_id, sig, Some(funded_tx))
+                    .unwrap(),
+                SubmitWatchtowerSignatureResult::Applied
+            );
+            let final_tx = fixture
+                .build_with_collector(200_000, &mut PanicCollector)
+                .unwrap()
+                .expect("signed 1-input UDT settlement tx");
+            assert_eq!(final_tx.inputs().len(), 1);
+            assert_eq!(final_tx.witnesses().len(), 1);
+            assert_applied_signature(&final_tx, &funded_content, &fixture.base_key);
         } else {
             let cap: u64 = outputs[1].capacity().unpack();
             assert_eq!(cap, 20_000_000_000u64);
             assert!(outputs[1].type_().to_opt().is_none());
+            // CKB timeout TLC: wallet attaches its own input with `since >= required_expiry_since`.
+            let expiry_since = pending
+                .required_expiry_since()
+                .expect("CKB timeout TLC requires expiry since");
+            let funded_tx = content
+                .transaction
+                .clone()
+                .into_view()
+                .as_advanced_builder()
+                .input(CellInput::new(
+                    OutPoint::new(Byte32::from([0xaa; 32]), 0),
+                    expiry_since,
+                ))
+                .output(
+                    CellOutput::new_builder()
+                        .capacity(9_999_999_000u64)
+                        .lock(tenant_payout_lock.clone())
+                        .build(),
+                )
+                .output_data(ckb_types::packed::Bytes::default())
+                .witness([0xdeu8, 0xad].pack())
+                .build()
+                .data();
+            let funded_content = OnchainSigningContent {
+                key_purpose: content.key_purpose,
+                transaction: funded_tx.clone(),
+            };
+            let sig = sign_onchain_request(&fixture.tlc_key, &funded_content).unwrap();
+            assert_eq!(
+                fixture
+                    .submit_with_tx(req_id, sig, Some(funded_tx))
+                    .unwrap(),
+                SubmitWatchtowerSignatureResult::Applied
+            );
+            let final_tx = fixture
+                .build_with_collector(200_000, &mut PanicCollector)
+                .unwrap()
+                .expect("signed CKB timeout TLC tx");
+            assert_eq!(final_tx.inputs().len(), 2);
+            assert_eq!(
+                final_tx.outputs().get(2).unwrap().lock(),
+                tenant_payout_lock
+            );
+            assert_ne!(final_tx.outputs().get(2).unwrap().lock(), sponsor_lock);
+            assert_applied_signature(&final_tx, &funded_content, &fixture.tlc_key);
         }
-        // Output 2: plain CKB fee sponsor change locked to fee_provider_lock_script.
-        // The operator only pays the transaction fee and never subsidizes tenant UDT outputs.
-        assert_eq!(outputs[2].lock(), sponsor_lock);
-        assert!(outputs[2].type_().to_opt().is_none());
-        assert!(outputs_data[2].raw_data().is_empty());
-        let sponsor_change: u64 = outputs[2].capacity().unpack();
-        assert!(sponsor_change < 100_000_000_000u64);
-        assert!(
-            sponsor_change > 99_900_000_000u64,
-            "fee sponsor must only pay tx fee, got change={sponsor_change} (is_udt={is_udt})"
-        );
     }
 }
 
@@ -1352,9 +1445,9 @@ fn external_pending_request_expires_after_ttl_releases_fee_cell_and_enforces_bac
         fiber_types::WatchtowerSignerState::External(ext) => {
             assert_eq!(ext.pending_requests.len(), 1);
             let (&id, req) = ext.pending_requests.iter().next().expect("pending request");
-            let created_at = req.created_at_ms;
+            let created_at = req.created_at_ms();
             let fee_input = req
-                .content
+                .content()
                 .transaction
                 .raw()
                 .inputs()
@@ -1382,7 +1475,7 @@ fn external_pending_request_expires_after_ttl_releases_fee_cell_and_enforces_bac
             assert_eq!(
                 ext.pending_requests
                     .get(&request_id)
-                    .map(|r| r.created_at_ms),
+                    .map(|r| r.created_at_ms()),
                 Some(created_at_ms)
             );
             assert_eq!(ext.consecutive_expired_requests, 0);
@@ -1458,14 +1551,13 @@ fn external_pending_request_expires_after_ttl_releases_fee_cell_and_enforces_bac
             if let fiber_types::WatchtowerSignerState::External(ext) = state {
                 ext.signed_signatures.insert(
                     signed_id,
-                    fiber_types::SignedWatchtowerRequest {
+                    fiber_types::SignedWatchtowerRequest::OperatorSponsored {
                         content: fiber_types::OnchainSigningContent {
                             key_purpose: fiber_types::OnchainKeyPurpose::Settlement,
                             transaction: signed_tx,
                         },
                         signature: [0u8; 65],
                         created_at_ms: signed_created_at,
-                        self_funded: false,
                     },
                 );
             }
@@ -1562,11 +1654,9 @@ fn external_fee_hold_caps_and_cross_channel_per_node_backoff() {
                     let id = Hash256::from([10 + i; 32]);
                     ext.pending_requests.insert(
                         id,
-                        fiber_types::PendingWatchtowerRequest {
+                        fiber_types::PendingWatchtowerRequest::OperatorSponsored {
                             content: dummy_content(10 + i),
                             created_at_ms: now_ms,
-                            self_funded: false,
-                            required_expiry_since: None,
                         },
                     );
                 }
@@ -1574,11 +1664,10 @@ fn external_fee_hold_caps_and_cross_channel_per_node_backoff() {
                     let id = Hash256::from([20 + i; 32]);
                     ext.signed_signatures.insert(
                         id,
-                        fiber_types::SignedWatchtowerRequest {
+                        fiber_types::SignedWatchtowerRequest::OperatorSponsored {
                             content: dummy_content(20 + i),
                             signature: [0u8; 65],
                             created_at_ms: now_ms,
-                            self_funded: false,
                         },
                     );
                 }
@@ -1666,11 +1755,9 @@ fn external_fee_hold_caps_and_cross_channel_per_node_backoff() {
                     let id = Hash256::from([40 + i; 32]);
                     ext.pending_requests.insert(
                         id,
-                        fiber_types::PendingWatchtowerRequest {
+                        fiber_types::PendingWatchtowerRequest::OperatorSponsored {
                             content: dummy_content(40 + i),
                             created_at_ms: now_ms,
-                            self_funded: false,
-                            required_expiry_since: None,
                         },
                     );
                 }
@@ -1678,11 +1765,10 @@ fn external_fee_hold_caps_and_cross_channel_per_node_backoff() {
                     let id = Hash256::from([50 + i; 32]);
                     ext.signed_signatures.insert(
                         id,
-                        fiber_types::SignedWatchtowerRequest {
+                        fiber_types::SignedWatchtowerRequest::OperatorSponsored {
                             content: dummy_content(50 + i),
                             signature: [0u8; 65],
                             created_at_ms: now_ms,
-                            self_funded: false,
                         },
                     );
                 }
@@ -1722,11 +1808,9 @@ fn external_fee_hold_caps_and_cross_channel_per_node_backoff() {
                     let id = Hash256::from([100 + i; 32]);
                     ext.pending_requests.insert(
                         id,
-                        fiber_types::PendingWatchtowerRequest {
+                        fiber_types::PendingWatchtowerRequest::OperatorSponsored {
                             content: dummy_content(100 + i),
                             created_at_ms: now_ms,
-                            self_funded: false,
-                            required_expiry_since: None,
                         },
                     );
                 }
@@ -1778,6 +1862,7 @@ fn build_separate_payout_ckb_fixture(
     tlcs: Vec<SettlementTlc>,
     preimages: Vec<(Hash256, Hash256)>,
     payout_lock: Script,
+    local_keys: bool,
 ) -> Fixture {
     let dir = tempfile::tempdir().expect("temp dir");
     let store = open_store(dir.path()).expect("open store");
@@ -1797,9 +1882,9 @@ fn build_separate_payout_ckb_fixture(
             payment_amount: 10_000_000_000,
             payment_hash: Hash256::from([99; 32]),
             expiry: 50_000,
-            local_key: None,
+            local_key: local_keys.then(|| unlocked_key.clone()),
             local_key_pubkey: Some(unlocked_key.pubkey()),
-            local_key_commitment_number: Some(5),
+            local_key_commitment_number: (!local_keys).then_some(5),
             remote_key: Privkey::from([12; 32]).pubkey(),
         });
     }
@@ -1816,7 +1901,11 @@ fn build_separate_payout_ckb_fixture(
         channel_id,
         None,
         WatchChannelKeys {
-            local_settlement: SettlementKey::external(base_key.pubkey()),
+            local_settlement: if local_keys {
+                SettlementKey::local(base_key.clone())
+            } else {
+                SettlementKey::external(base_key.pubkey())
+            },
             remote_settlement: Privkey::from([10; 32]).pubkey(),
             local_funding: Privkey::from([11; 32]).pubkey(),
             remote_funding: Privkey::from([12; 32]).pubkey(),
@@ -1906,7 +1995,7 @@ fn build_separate_payout_ckb_fixture(
 }
 
 #[test]
-fn external_ckb_settlement_skips_small_tlc_and_claims_larger_tlc() {
+fn separate_sponsor_ckb_settlement_skips_small_tlc_and_claims_larger_tlc() {
     let tenant_payout_lock = get_script_by_contract(Contract::Secp256k1Lock, &[0xaa; 20]);
     let fee_signer = LocalSigner::new(secp256k1::SecretKey::from_slice(&[21; 32]).expect("key"));
     let sponsor_lock = get_script_by_contract(Contract::Secp256k1Lock, fee_signer.pubkey_hash());
@@ -1931,6 +2020,8 @@ fn external_ckb_settlement_skips_small_tlc_and_claims_larger_tlc() {
     let small_hash: Hash256 = HashAlgorithm::Sha256.hash(small_preimage.as_ref()).into();
     let large_hash: Hash256 = HashAlgorithm::Sha256.hash(large_preimage.as_ref()).into();
 
+    // Operator-sponsored (`local_keys = true`, `separate_fee_sponsor = true`) must skip under-capacity
+    // CKB TLCs instead of subsidizing them from the operator fee wallet.
     for for_remote in [false, true] {
         for subsequent in [false, true] {
             for with_preimage in [false, true] {
@@ -1945,9 +2036,9 @@ fn external_ckb_settlement_skips_small_tlc_and_claims_larger_tlc() {
                     payment_amount: small_amount,
                     payment_hash: small_hash,
                     expiry: 100_000,
-                    local_key: None,
+                    local_key: Some(small_tlc_key.clone()),
                     local_key_pubkey: Some(small_tlc_key.pubkey()),
-                    local_key_commitment_number: Some(6),
+                    local_key_commitment_number: None,
                     remote_key: Privkey::from([12; 32]).pubkey(),
                 };
                 let large_tlc = SettlementTlc {
@@ -1960,9 +2051,9 @@ fn external_ckb_settlement_skips_small_tlc_and_claims_larger_tlc() {
                     payment_amount: large_amount,
                     payment_hash: large_hash,
                     expiry: 100_000,
-                    local_key: None,
+                    local_key: Some(large_tlc_key.clone()),
                     local_key_pubkey: Some(large_tlc_key.pubkey()),
-                    local_key_commitment_number: Some(7),
+                    local_key_commitment_number: None,
                     remote_key: Privkey::from([12; 32]).pubkey(),
                 };
                 let preimages = if with_preimage {
@@ -1978,24 +2069,16 @@ fn external_ckb_settlement_skips_small_tlc_and_claims_larger_tlc() {
                     vec![small_tlc, large_tlc],
                     preimages,
                     tenant_payout_lock.clone(),
+                    true,
                 );
 
-                // Must skip the first under-capacity TLC and queue a signing request for the second TLC.
-                assert!(fixture
+                // Must skip the first under-capacity TLC and claim the second TLC directly.
+                let tx = fixture
                     .build_at(200_000)
                     .expect("small TLC must not block larger TLC")
-                    .is_none());
-                let (request_id, content) = fixture.pending();
-                assert_eq!(
-                    content.key_purpose,
-                    OnchainKeyPurpose::Tlc {
-                        commitment_number: 7
-                    },
-                    "for_remote={for_remote} subsequent={subsequent} with_preimage={with_preimage}"
-                );
+                    .expect("signed tx");
 
-                let witness_bytes = content
-                    .transaction
+                let witness_bytes = tx
                     .witnesses()
                     .get(0)
                     .expect("settlement witness")
@@ -2008,7 +2091,7 @@ fn external_ckb_settlement_skips_small_tlc_and_claims_larger_tlc() {
                 assert_eq!(unlock.unlock_type, 1);
                 assert_eq!(unlock.with_preimage, with_preimage);
 
-                let outputs: Vec<_> = content.transaction.raw().outputs().into_iter().collect();
+                let outputs: Vec<_> = tx.outputs().into_iter().collect();
                 assert_eq!(outputs.len(), 3);
                 assert_eq!(outputs[1].lock(), tenant_payout_lock);
                 assert_eq!(
@@ -2016,17 +2099,6 @@ fn external_ckb_settlement_skips_small_tlc_and_claims_larger_tlc() {
                     large_amount as u64
                 );
                 assert_eq!(outputs[2].lock(), sponsor_lock);
-
-                let sig = sign_onchain_request(&large_tlc_key, &content).expect("TLC signature");
-                assert_eq!(
-                    fixture.submit(request_id, sig).expect("submit"),
-                    SubmitWatchtowerSignatureResult::Applied
-                );
-                let tx = fixture
-                    .build_at(200_000)
-                    .expect("build signed tx")
-                    .expect("signed tx");
-                assert_applied_signature(&tx, &content, &large_tlc_key);
             }
         }
     }
@@ -2044,9 +2116,9 @@ fn external_ckb_settlement_skips_small_tlc_and_claims_larger_tlc() {
             payment_amount: small_amount,
             payment_hash: small_hash,
             expiry: 100_000,
-            local_key: None,
+            local_key: Some(small_tlc_key.clone()),
             local_key_pubkey: Some(small_tlc_key.pubkey()),
-            local_key_commitment_number: Some(6),
+            local_key_commitment_number: None,
             remote_key: Privkey::from([12; 32]).pubkey(),
         };
         let large_preimage_tlc = SettlementTlc {
@@ -2059,9 +2131,9 @@ fn external_ckb_settlement_skips_small_tlc_and_claims_larger_tlc() {
             payment_amount: large_amount,
             payment_hash: large_hash,
             expiry: 500_000,
-            local_key: None,
+            local_key: Some(large_tlc_key.clone()),
             local_key_pubkey: Some(large_tlc_key.pubkey()),
-            local_key_commitment_number: Some(7),
+            local_key_commitment_number: None,
             remote_key: Privkey::from([12; 32]).pubkey(),
         };
         let fixture = build_separate_payout_ckb_fixture(
@@ -2072,22 +2144,14 @@ fn external_ckb_settlement_skips_small_tlc_and_claims_larger_tlc() {
             vec![small_timeout_tlc, large_preimage_tlc],
             vec![(large_hash, large_preimage)],
             tenant_payout_lock.clone(),
+            true,
         );
-        assert!(fixture
+        let tx = fixture
             .build_at(200_000)
             .expect("mixed claim build")
-            .is_none());
-        let (_id, content) = fixture.pending();
-        assert_eq!(
-            content.key_purpose,
-            OnchainKeyPurpose::Tlc {
-                commitment_number: 7
-            }
-        );
+            .expect("signed tx");
         // Commitment delay_epoch is 3 epochs; preimage unlock must use 1/3 * 3 = 1 epoch.
-        let commitment_since: u64 = content
-            .transaction
-            .raw()
+        let commitment_since: u64 = tx
             .inputs()
             .get(0)
             .expect("commitment input")
@@ -2105,7 +2169,7 @@ fn external_ckb_settlement_skips_small_tlc_and_claims_larger_tlc() {
 }
 
 #[test]
-fn external_ckb_settlement_prevents_under_capacity_output_when_only_small_claim_eligible() {
+fn separate_sponsor_ckb_settlement_prevents_under_capacity_output_when_only_small_claim_eligible() {
     let tenant_payout_lock = get_script_by_contract(Contract::Secp256k1Lock, &[0xaa; 20]);
     let min_payout_capacity = CellOutput::new_builder()
         .lock(tenant_payout_lock.clone())
@@ -2121,11 +2185,10 @@ fn external_ckb_settlement_prevents_under_capacity_output_when_only_small_claim_
     let small_preimage = Hash256::from([11; 32]);
     let small_hash: Hash256 = HashAlgorithm::Sha256.hash(small_preimage.as_ref()).into();
 
-    // 1. Only a small timeout TLC exists:
-    //    - Before expiry (current_time <= expiry): returns Ok(None), no pending request queued.
+    // 1. Only a small timeout TLC exists under operator fee sponsorship (`local_keys = true`):
+    //    - Before expiry (current_time <= expiry): returns Ok(None).
     //    - After expiry (current_time > expiry): skipping the under-capacity timeout TLC
-    //      decrements pending_tlcs_count so the watchtower falls through to the 0xFF / 0xFE
-    //      final party balance sweep instead of locking the main channel balance.
+    //      decrements pending_tlcs_count so watchtower falls through to 0xFF / 0xFE balance sweep.
     for for_remote in [false, true] {
         for subsequent in [false, true] {
             let small_tlc = SettlementTlc {
@@ -2138,9 +2201,9 @@ fn external_ckb_settlement_prevents_under_capacity_output_when_only_small_claim_
                 payment_amount: small_amount,
                 payment_hash: small_hash,
                 expiry: 100_000,
-                local_key: None,
+                local_key: Some(small_tlc_key.clone()),
                 local_key_pubkey: Some(small_tlc_key.pubkey()),
-                local_key_commitment_number: Some(6),
+                local_key_commitment_number: None,
                 remote_key: Privkey::from([12; 32]).pubkey(),
             };
             let fixture = build_separate_payout_ckb_fixture(
@@ -2151,37 +2214,25 @@ fn external_ckb_settlement_prevents_under_capacity_output_when_only_small_claim_
                 vec![small_tlc],
                 vec![],
                 tenant_payout_lock.clone(),
+                true,
             );
             assert!(fixture
                 .build_at(50_000)
                 .expect("unexpired small-only timeout TLC must not error")
                 .is_none());
-            let WatchtowerSignerState::External(state) = fixture
-                .store
-                .get_watchtower_signer(&fixture.node_id, &fixture.channel.channel_id)
-            else {
-                panic!("expected external signer state");
-            };
-            assert!(
-                state.pending_requests.is_empty(),
-                "must not queue an under-capacity TLC or premature balance signing request"
-            );
 
             // After expiry, skipping the small timeout TLC falls through to 0xFF / 0xFE balance sweep.
-            assert!(fixture
+            let tx = fixture
                 .build_at(200_000)
                 .expect("expired small timeout TLC falls through to balance settlement")
-                .is_none());
-            let (req_id, content) = fixture.pending();
-            assert_eq!(content.key_purpose, OnchainKeyPurpose::Settlement);
-            let outputs: Vec<_> = content.transaction.raw().outputs().into_iter().collect();
+                .expect("signed balance sweep tx");
+            let outputs: Vec<_> = tx.outputs().into_iter().collect();
             assert_eq!(outputs[1].lock(), tenant_payout_lock);
             assert_eq!(
                 Unpack::<u64>::unpack(&outputs[1].capacity()),
                 100_000_000_000
             );
-            let witness_bytes = content
-                .transaction
+            let witness_bytes = tx
                 .witnesses()
                 .get(0)
                 .expect("settlement witness")
@@ -2199,19 +2250,11 @@ fn external_ckb_settlement_prevents_under_capacity_output_when_only_small_claim_
                     .unlock_type,
                 expected_unlock_type
             );
-            let sig = sign_onchain_request(&base_key, &content).expect("sign settlement");
-            fixture.submit(req_id, sig).expect("submit settlement sig");
-            let signed_tx = fixture
-                .build_at(200_000)
-                .expect("build signed balance sweep")
-                .expect("signed final balance sweep tx");
-            assert_applied_signature(&signed_tx, &content, &base_key);
         }
     }
 
-    // 2. Only a small preimage TLC is eligible BEFORE expiry -> returns Ok(None), no request queued.
-    //    Once it expires (current_time > expiry), it falls through to local balance settlement
-    //    instead of permanently blocking the main channel balance.
+    // 2. Only a small preimage TLC is eligible BEFORE expiry -> returns Ok(None).
+    //    Once it expires (current_time > expiry), it falls through to local balance settlement.
     for for_remote in [false, true] {
         for subsequent in [false, true] {
             let small_tlc = SettlementTlc {
@@ -2224,9 +2267,9 @@ fn external_ckb_settlement_prevents_under_capacity_output_when_only_small_claim_
                 payment_amount: small_amount,
                 payment_hash: small_hash,
                 expiry: 150_000,
-                local_key: None,
+                local_key: Some(small_tlc_key.clone()),
                 local_key_pubkey: Some(small_tlc_key.pubkey()),
-                local_key_commitment_number: Some(6),
+                local_key_commitment_number: None,
                 remote_key: Privkey::from([12; 32]).pubkey(),
             };
             let fixture = build_separate_payout_ckb_fixture(
@@ -2237,30 +2280,18 @@ fn external_ckb_settlement_prevents_under_capacity_output_when_only_small_claim_
                 vec![small_tlc],
                 vec![(small_hash, small_preimage)],
                 tenant_payout_lock.clone(),
+                true,
             );
             assert!(fixture
                 .build_at(100_000)
                 .expect("unexpired small preimage TLC must not error")
                 .is_none());
-            let WatchtowerSignerState::External(state) = fixture
-                .store
-                .get_watchtower_signer(&fixture.node_id, &fixture.channel.channel_id)
-            else {
-                panic!("expected external signer state");
-            };
-            assert!(
-                state.pending_requests.is_empty(),
-                "must not queue an under-capacity preimage TLC signing request"
-            );
 
-            // After expiry, the unclaimable peer TLC no longer blocks local balance settlement.
-            assert!(fixture
+            let tx = fixture
                 .build_at(200_000)
                 .expect("expired small preimage TLC falls through to balance settlement")
-                .is_none());
-            let (_id, content) = fixture.pending();
-            assert_eq!(content.key_purpose, OnchainKeyPurpose::Settlement);
-            let outputs: Vec<_> = content.transaction.raw().outputs().into_iter().collect();
+                .expect("signed balance sweep tx");
+            let outputs: Vec<_> = tx.outputs().into_iter().collect();
             assert_eq!(outputs[1].lock(), tenant_payout_lock);
             assert_eq!(
                 Unpack::<u64>::unpack(&outputs[1].capacity()),
@@ -2269,7 +2300,8 @@ fn external_ckb_settlement_prevents_under_capacity_output_when_only_small_claim_
         }
     }
 
-    // 3. Safety capacity check remains intact when local balance itself is below occupied capacity.
+    // 3. Safety capacity check remains intact when local balance itself is below occupied capacity
+    // under operator fee sponsorship (`local_keys = true`).
     let fixture = build_separate_payout_ckb_fixture(
         false,
         false,
@@ -2278,6 +2310,7 @@ fn external_ckb_settlement_prevents_under_capacity_output_when_only_small_claim_
         vec![],
         vec![],
         tenant_payout_lock,
+        true,
     );
     let err = fixture
         .build_at(200_000)
@@ -2289,34 +2322,282 @@ fn external_ckb_settlement_prevents_under_capacity_output_when_only_small_claim_
     );
 }
 
+#[derive(Clone)]
+struct PanicCollector;
+
+#[async_trait::async_trait]
+impl CellCollector for PanicCollector {
+    async fn collect_live_cells_async(
+        &mut self,
+        _: &CellQueryOptions,
+        _: bool,
+    ) -> Result<(Vec<LiveCell>, u64), CellCollectorError> {
+        panic!("external-funding watchtower template tx must never query cell_collector");
+    }
+    fn lock_cell(&mut self, _: OutPoint, _: u64) -> Result<(), CellCollectorError> {
+        unreachable!()
+    }
+    fn apply_tx(&mut self, _: Transaction, _: u64) -> Result<(), CellCollectorError> {
+        unreachable!()
+    }
+    fn reset(&mut self) {}
+}
+
+#[derive(Clone, Default)]
+struct LockTracker {
+    locked: HashSet<OutPoint>,
+}
+
+#[async_trait::async_trait]
+impl CellCollector for LockTracker {
+    async fn collect_live_cells_async(
+        &mut self,
+        _: &CellQueryOptions,
+        _: bool,
+    ) -> Result<(Vec<LiveCell>, u64), CellCollectorError> {
+        Ok((vec![], 0))
+    }
+    fn lock_cell(&mut self, out_point: OutPoint, _: u64) -> Result<(), CellCollectorError> {
+        self.locked.insert(out_point);
+        Ok(())
+    }
+    fn apply_tx(&mut self, _: Transaction, _: u64) -> Result<(), CellCollectorError> {
+        Ok(())
+    }
+    fn reset(&mut self) {}
+}
+
+fn test_udt_script() -> Script {
+    Script::new_builder()
+        .code_hash(Byte32::from([0x77; 32]))
+        .args([0x01u8; 32].as_slice().pack())
+        .build()
+}
+
+fn test_custom_payout_lock() -> Script {
+    Script::new_builder()
+        .code_hash(Byte32::from([0x99; 32]))
+        .args([0xabu8; 20].as_slice().pack())
+        .build()
+}
+
+fn udt_external_funding_fixture(
+    with_preimage: bool,
+    clear_tlcs: bool,
+    payout_lock: Script,
+) -> Fixture {
+    let udt_script = test_udt_script();
+    let mut fixture =
+        Fixture::with_features(false, false, with_preimage, false, ChannelFeatures::V2);
+    let mut settlement_data = fixture.channel.local_settlement_data.clone();
+    if clear_tlcs {
+        settlement_data.tlcs.clear();
+    }
+    fixture
+        .store
+        .remove_watch_channel(fixture.node_id.clone(), fixture.channel.channel_id);
+    fixture.store.insert_watch_channel(
+        fixture.node_id.clone(),
+        fixture.channel.channel_id,
+        Some(udt_script.clone()),
+        WatchChannelKeys {
+            local_settlement: SettlementKey::external(fixture.base_key.pubkey()),
+            remote_settlement: fixture.channel.remote_settlement_key,
+            local_funding: fixture.channel.local_funding_pubkey,
+            remote_funding: fixture.channel.remote_funding_pubkey,
+        },
+        settlement_data,
+        ChannelFeatures::V2,
+        Some(payout_lock),
+    );
+    if with_preimage {
+        let preimage = Hash256::from([13; 32]);
+        fixture.store.insert_watch_preimage(
+            fixture.node_id.clone(),
+            HashAlgorithm::Sha256.hash(preimage.as_ref()).into(),
+            preimage,
+        );
+    }
+    fixture.channel = fixture
+        .store
+        .get_watch_channel(&fixture.node_id, &fixture.channel.channel_id)
+        .expect("channel");
+    let witness_bytes = settlement_data_to_witness(
+        &fixture.channel.local_settlement_data,
+        fixture.for_remote,
+        fixture.base_key.pubkey(),
+        fixture.channel.remote_settlement_key,
+    );
+    let output: CellOutput = fixture.cell.output.clone().into();
+    let mut args = output.lock().args().raw_data().to_vec();
+    args[36..56].copy_from_slice(blake160(&witness_bytes).as_ref());
+    let lock = output.lock().as_builder().args(args.pack()).build();
+    let output = output
+        .as_builder()
+        .lock(lock)
+        .type_(Some(udt_script).pack())
+        .capacity(25_000_000_000u64) // < 180 + 142 CKB so partial balance also needs external funding
+        .build();
+    fixture.cell.output = output.into();
+    fixture.cell.output_data = Some(ckb_jsonrpc_types::JsonBytes::from_vec(
+        240_000_000_000u128.to_le_bytes().to_vec(),
+    ));
+    if clear_tlcs {
+        fixture.tracked.clear();
+    }
+    fixture
+}
+
+fn fund_wallet_tx(
+    template: &Transaction,
+    outpoint: OutPoint,
+    since: u64,
+    change_lock: Script,
+    witness: &[u8],
+) -> Transaction {
+    template
+        .clone()
+        .into_view()
+        .as_advanced_builder()
+        .input(CellInput::new(outpoint, since))
+        .output(
+            CellOutput::new_builder()
+                .capacity(6_000_000_000u64)
+                .lock(change_lock)
+                .build(),
+        )
+        .output_data(ckb_types::packed::Bytes::default())
+        .witness(witness.pack())
+        .build()
+        .data()
+}
+
+fn sign_and_submit_funded(
+    fixture: &Fixture,
+    req_id: Hash256,
+    key: &Privkey,
+    key_purpose: OnchainKeyPurpose,
+    funded_tx: &Transaction,
+) -> [u8; 65] {
+    let sig = sign_onchain_request(
+        key,
+        &OnchainSigningContent {
+            key_purpose,
+            transaction: funded_tx.clone(),
+        },
+    )
+    .expect("sign funded tx");
+    assert_eq!(
+        fixture
+            .submit_with_tx(req_id, sig, Some(funded_tx.clone()))
+            .expect("submit funded tx"),
+        SubmitWatchtowerSignatureResult::Applied
+    );
+    sig
+}
+
+#[test]
+fn external_funding_ckb_allows_small_tlc_and_small_partial_balance_via_wallet_topup() {
+    let tenant_payout_lock = get_script_by_contract(Contract::Secp256k1Lock, &[0xaa; 20]);
+    let min_payout_capacity = CellOutput::new_builder()
+        .lock(tenant_payout_lock.clone())
+        .build()
+        .occupied_capacity(Capacity::shannons(0))
+        .expect("occupied capacity")
+        .as_u64();
+    let small_amount = (min_payout_capacity - 1_000_000_000) as u128; // 51 CKB (< 61 CKB)
+    let base_key = Privkey::from([42; 32]);
+    let small_tlc_key =
+        fiber_types::channel::derive_private_key(&base_key, &Privkey::from([6; 32]).pubkey());
+    let small_preimage = Hash256::from([11; 32]);
+    let small_hash: Hash256 = HashAlgorithm::Sha256.hash(small_preimage.as_ref()).into();
+
+    // Case 0: < 61 CKB inbound preimage TLC; Case 1: < 61 CKB partial local balance.
+    for is_balance in [false, true] {
+        let (local_amount, tlcs, preimages, at_time, expected_purpose, signing_key, tag) =
+            if is_balance {
+                (
+                    small_amount,
+                    vec![],
+                    vec![],
+                    200_000,
+                    OnchainKeyPurpose::Settlement,
+                    &base_key,
+                    0xc2u8,
+                )
+            } else {
+                (
+                    100_000_000_000,
+                    vec![SettlementTlc {
+                        tlc_id: TLCId::Offered(0),
+                        hash_algorithm: HashAlgorithm::Sha256,
+                        payment_amount: small_amount,
+                        payment_hash: small_hash,
+                        expiry: 150_000,
+                        local_key: None,
+                        local_key_pubkey: Some(small_tlc_key.pubkey()),
+                        local_key_commitment_number: Some(6),
+                        remote_key: Privkey::from([12; 32]).pubkey(),
+                    }],
+                    vec![(small_hash, small_preimage)],
+                    100_000,
+                    OnchainKeyPurpose::Tlc {
+                        commitment_number: 6,
+                    },
+                    &small_tlc_key,
+                    0xc1u8,
+                )
+            };
+        let fixture = build_separate_payout_ckb_fixture(
+            false,
+            false,
+            local_amount,
+            100_000_000_000,
+            tlcs,
+            preimages,
+            tenant_payout_lock.clone(),
+            false,
+        );
+        assert!(fixture
+            .build_with_collector(at_time, &mut PanicCollector)
+            .expect("small CKB claim must emit ExternalFundingRequired")
+            .is_none());
+        let (req_id, pending) = fixture.pending_request();
+        assert!(pending.is_external_funding());
+        assert_eq!(pending.content().key_purpose, expected_purpose);
+        let tmpl = &pending.content().transaction;
+        let outs: Vec<_> = tmpl.raw().outputs().into_iter().collect();
+        assert_eq!(outs.len(), 2);
+        assert_eq!(
+            Unpack::<u64>::unpack(&outs[1].capacity()),
+            small_amount as u64
+        );
+        let funded_tx = tmpl
+            .clone()
+            .into_view()
+            .as_advanced_builder()
+            .input(CellInput::new(OutPoint::new(Byte32::from([tag; 32]), 0), 0))
+            .set_outputs(vec![
+                outs[0].clone(),
+                outs[1]
+                    .clone()
+                    .as_builder()
+                    .capacity(small_amount as u64 + 10_000_000_000 - 1_000)
+                    .build(),
+            ])
+            .witness([tag].pack())
+            .build()
+            .data();
+        sign_and_submit_funded(&fixture, req_id, signing_key, expected_purpose, &funded_tx);
+        let signed = fixture.build_at(at_time).unwrap().expect("signed tx");
+        assert_eq!(signed.data().raw().as_slice(), funded_tx.raw().as_slice());
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[tokio::test]
 async fn watchtower_actor_pre_start_restores_external_fee_holds_before_periodic_check() {
     let _serial = crate::ckb::held_cells::TEST_SERIAL.lock().await;
-    #[derive(Clone, Default)]
-    struct LockTracker {
-        locked: HashSet<OutPoint>,
-    }
-
-    #[async_trait::async_trait]
-    impl CellCollector for LockTracker {
-        async fn collect_live_cells_async(
-            &mut self,
-            _query: &CellQueryOptions,
-            _apply_changes: bool,
-        ) -> Result<(Vec<LiveCell>, u64), CellCollectorError> {
-            Ok((vec![], 0))
-        }
-        fn lock_cell(&mut self, out_point: OutPoint, _: u64) -> Result<(), CellCollectorError> {
-            self.locked.insert(out_point);
-            Ok(())
-        }
-        fn apply_tx(&mut self, _: Transaction, _: u64) -> Result<(), CellCollectorError> {
-            Ok(())
-        }
-        fn reset(&mut self) {}
-    }
-
     let fixture = Fixture::with_features(false, false, false, false, ChannelFeatures::V2);
     let now_ms = crate::now_timestamp_as_millis_u64();
 
@@ -2354,20 +2635,17 @@ async fn watchtower_actor_pre_start_restores_external_fee_holds_before_periodic_
             if let WatchtowerSignerState::External(ext) = state {
                 ext.pending_requests.insert(
                     pending_id,
-                    fiber_types::PendingWatchtowerRequest {
+                    fiber_types::PendingWatchtowerRequest::OperatorSponsored {
                         content: pending_content,
                         created_at_ms: now_ms,
-                        self_funded: false,
-                        required_expiry_since: None,
                     },
                 );
                 ext.signed_signatures.insert(
                     signed_id,
-                    fiber_types::SignedWatchtowerRequest {
+                    fiber_types::SignedWatchtowerRequest::OperatorSponsored {
                         content: signed_content,
                         signature: [0u8; 65],
                         created_at_ms: now_ms,
-                        self_funded: false,
                     },
                 );
             }
@@ -2428,33 +2706,9 @@ async fn watchtower_actor_pre_start_restores_external_fee_holds_before_periodic_
 }
 
 #[test]
-fn external_udt_self_funded_template_tx_tlc_and_low_excess_balance_flow() {
-    use ckb_types::core::DepType;
-    use ckb_types::packed::CellDep;
+fn external_udt_external_funding_template_tx_tlc_and_low_excess_balance_flow() {
+    use ckb_types::{core::DepType, packed::CellDep};
 
-    // Proves watchtower makes ZERO cell_collector queries for self-funded UDT template txs
-    // (works even when the tenant currently holds 0 CKB or uses a non-secp256k1 custom lock).
-    #[derive(Clone)]
-    struct PanicCollector;
-    #[async_trait::async_trait]
-    impl CellCollector for PanicCollector {
-        async fn collect_live_cells_async(
-            &mut self,
-            _: &CellQueryOptions,
-            _: bool,
-        ) -> Result<(Vec<LiveCell>, u64), CellCollectorError> {
-            panic!("self-funded watchtower template tx must never query cell_collector");
-        }
-        fn lock_cell(&mut self, _: OutPoint, _: u64) -> Result<(), CellCollectorError> {
-            unreachable!()
-        }
-        fn apply_tx(&mut self, _: Transaction, _: u64) -> Result<(), CellCollectorError> {
-            unreachable!()
-        }
-        fn reset(&mut self) {}
-    }
-
-    // Custom non-secp256k1 lock (e.g., JoyID/Omnilock/Multisig) for both payout and wallet funding.
     let custom_payout_lock = Script::new_builder()
         .code_hash(Byte32::from([0x99; 32]))
         .args([0xabu8; 32].as_slice().pack())
@@ -2463,10 +2717,6 @@ fn external_udt_self_funded_template_tx_tlc_and_low_excess_balance_flow() {
         .code_hash(Byte32::from([0x88; 32]))
         .args([0xcdu8; 28].as_slice().pack())
         .build();
-    let udt_script = Script::new_builder()
-        .code_hash(Byte32::from([0x77; 32]))
-        .args([0x01u8; 32].as_slice().pack())
-        .build();
     let wallet_lock_dep = CellDep::new_builder()
         .out_point(OutPoint::new(Byte32::from([0xee; 32]), 0))
         .dep_type(DepType::Code)
@@ -2474,90 +2724,31 @@ fn external_udt_self_funded_template_tx_tlc_and_low_excess_balance_flow() {
     let wallet_witness_1 = vec![0x11u8, 0x22, 0x33, 0x44, 0x55];
     let wallet_witness_2 = vec![0xaau8, 0xbb, 0xcc];
 
-    // Cover all 3 self-funded scenarios:
+    // Cover all 3 external-funding UDT scenarios:
     //   0: UDT TLC timeout (`required_expiry_since = Some(...)`)
     //   1: UDT TLC preimage (`required_expiry_since = None`)
     //   2: low-excess partial UDT balance unlock (`required_expiry_since = None`)
     for scenario in 0..3 {
         let with_preimage = scenario == 1;
         let is_balance = scenario == 2;
-        let mut fixture =
-            Fixture::with_features(false, false, with_preimage, false, ChannelFeatures::V2);
-        let mut settlement_data = fixture.channel.local_settlement_data.clone();
-        if is_balance {
-            settlement_data.tlcs.clear();
-        }
-        fixture
-            .store
-            .remove_watch_channel(fixture.node_id.clone(), fixture.channel.channel_id);
-        fixture.store.insert_watch_channel(
-            fixture.node_id.clone(),
-            fixture.channel.channel_id,
-            Some(udt_script.clone()),
-            WatchChannelKeys {
-                local_settlement: SettlementKey::external(fixture.base_key.pubkey()),
-                remote_settlement: fixture.channel.remote_settlement_key,
-                local_funding: fixture.channel.local_funding_pubkey,
-                remote_funding: fixture.channel.remote_funding_pubkey,
-            },
-            settlement_data,
-            ChannelFeatures::V2,
-            Some(custom_payout_lock.clone()),
-        );
-        if with_preimage {
-            let preimage = Hash256::from([13; 32]);
-            fixture.store.insert_watch_preimage(
-                fixture.node_id.clone(),
-                HashAlgorithm::Sha256.hash(preimage.as_ref()).into(),
-                preimage,
-            );
-        }
-        fixture.channel = fixture
-            .store
-            .get_watch_channel(&fixture.node_id, &fixture.channel.channel_id)
-            .expect("updated watch channel");
-        let witness_bytes = settlement_data_to_witness(
-            &fixture.channel.local_settlement_data,
-            fixture.for_remote,
-            fixture.base_key.pubkey(),
-            fixture.channel.remote_settlement_key,
-        );
-        let mut output: CellOutput = fixture.cell.output.clone().into();
-        let mut args = output.lock().args().raw_data().to_vec();
-        args[36..56].copy_from_slice(blake160(&witness_bytes).as_ref());
-        let lock = output.lock().as_builder().args(args.pack()).build();
-        output = output
-            .as_builder()
-            .lock(lock)
-            .type_(Some(udt_script.clone()).pack())
-            .capacity(25_000_000_000u64) // < 180 + 142 CKB so partial balance also needs self-funding
-            .build();
-        fixture.cell.output = output.into();
-        fixture.cell.output_data = Some(ckb_jsonrpc_types::JsonBytes::from_vec(
-            240_000_000_000u128.to_le_bytes().to_vec(),
-        ));
-        if is_balance {
-            fixture.tracked.clear();
-        }
+        let fixture =
+            udt_external_funding_fixture(with_preimage, is_balance, custom_payout_lock.clone());
 
-        // 1. Watchtower emits an unfunded self_funded template tx with ZERO cell_collector queries.
+        // 1. Watchtower emits unfunded ExternalFundingRequired template with ZERO cell_collector calls.
         assert!(fixture
             .build_with_collector(200_000, &mut PanicCollector)
             .expect("template build must succeed without cell_collector")
             .is_none());
         let (request_id, pending) = fixture.pending_request();
-        assert!(
-            pending.self_funded,
-            "scenario {scenario} must be self_funded"
-        );
+        assert!(pending.is_external_funding());
         let expected_expiry =
             (scenario == 0).then(|| fiber_types::watchtower::settlement_timestamp_since(100_000));
-        assert_eq!(pending.required_expiry_since, expected_expiry);
-        assert_eq!(pending.content.transaction.raw().inputs().len(), 1);
-        assert_eq!(pending.content.transaction.raw().outputs().len(), 2);
+        assert_eq!(pending.required_expiry_since(), expected_expiry);
+        assert_eq!(pending.content().transaction.raw().inputs().len(), 1);
+        assert_eq!(pending.content().transaction.raw().outputs().len(), 2);
         assert_eq!(
             pending
-                .content
+                .content()
                 .transaction
                 .raw()
                 .outputs()
@@ -2567,11 +2758,11 @@ fn external_udt_self_funded_template_tx_tlc_and_low_excess_balance_flow() {
             custom_payout_lock
         );
 
-        // RPC status exposes self_funded=true and required_expiry_since.
+        // RPC status exposes ExternalFundingRequired with required_expiry_since.
         let rpc = WatchtowerRpcServerImpl::new(fixture.store.clone())
             .with_signing_events(fixture.events.clone());
-        let rt = tokio::runtime::Runtime::new().expect("rt");
-        let status = rt
+        let status = tokio::runtime::Runtime::new()
+            .unwrap()
             .block_on(rpc.get_watchtower_signing_status(
                 RpcContext {
                     node_id: fixture.node_id.to_string(),
@@ -2582,82 +2773,59 @@ fn external_udt_self_funded_template_tx_tlc_and_low_excess_balance_flow() {
                 },
             ))
             .expect("status");
-        match status.status {
-            fiber_json_types::WatchtowerSigningStatus::SignatureRequired {
+        assert!(matches!(
+            status.status,
+            fiber_json_types::WatchtowerSigningStatus::ExternalFundingRequired {
                 request_id: rpc_id,
-                self_funded,
                 required_expiry_since,
                 ..
-            } => {
-                assert_eq!(rpc_id, request_id.into());
-                assert!(self_funded);
-                assert_eq!(required_expiry_since, expected_expiry);
-            }
-            other => panic!("expected SignatureRequired, got {other:?}"),
-        }
+            } if rpc_id == request_id.into() && required_expiry_since == expected_expiry
+        ));
 
-        // Re-scanning while pending reuses the exact same template without querying cell_collector.
+        // Re-scanning while pending reuses the same template without querying cell_collector.
         assert!(fixture
             .build_with_collector(210_000, &mut PanicCollector)
-            .expect("rescan while pending")
+            .unwrap()
             .is_none());
         assert_eq!(fixture.pending_request().0, request_id);
 
-        // 2. Wallet builds the funded tx from the template (custom lock cell_dep + funding input +
-        //    change output + multi-witnesses).
-        let signing_key = if is_balance {
-            &fixture.base_key
+        // 2. Wallet builds the funded tx (custom lock cell_dep + funding input + change + 2 witnesses).
+        let (signing_key, wrong_key) = if is_balance {
+            (&fixture.base_key, &fixture.tlc_key)
         } else {
-            &fixture.tlc_key
-        };
-        let wrong_key = if is_balance {
-            &fixture.tlc_key
-        } else {
-            &fixture.base_key
+            (&fixture.tlc_key, &fixture.base_key)
         };
         let wallet_funding_outpoint = OutPoint::new(Byte32::from([0x71 + scenario as u8; 32]), 0);
-        let funding_since = expected_expiry.unwrap_or(0);
-        let template_tx = pending.content.transaction.clone();
-        let funded_tx = template_tx
-            .clone()
-            .into_view()
-            .as_advanced_builder()
-            .cell_dep(wallet_lock_dep.clone())
-            .input(CellInput::new(
-                wallet_funding_outpoint.clone(),
-                funding_since,
-            ))
-            .output(
-                CellOutput::new_builder()
-                    .capacity(6_000_000_000u64)
-                    .lock(custom_wallet_funding_lock.clone())
-                    .build(),
-            )
-            .output_data(ckb_types::packed::Bytes::default())
-            .witness(wallet_witness_1.clone().pack())
-            .witness(wallet_witness_2.clone().pack())
-            .build()
-            .data();
+        let funded_tx = fund_wallet_tx(
+            &pending.content().transaction,
+            wallet_funding_outpoint.clone(),
+            expected_expiry.unwrap_or(0),
+            custom_wallet_funding_lock.clone(),
+            &wallet_witness_1,
+        )
+        .into_view()
+        .as_advanced_builder()
+        .cell_dep(wallet_lock_dep.clone())
+        .witness(wallet_witness_2.clone().pack())
+        .build()
+        .data();
         let funded_content = OnchainSigningContent {
-            key_purpose: pending.content.key_purpose,
+            key_purpose: pending.content().key_purpose,
             transaction: funded_tx.clone(),
         };
         let valid_sig = sign_onchain_request(signing_key, &funded_content).expect("sign funded");
 
-        // 3. Negative checks:
-        // (a) Missing signed_transaction is rejected.
-        let err = fixture
+        // 3. Negative checks: missing tx, wrong key, tampered outputs[0], wrong since.
+        assert!(fixture
             .submit_with_tx(request_id, valid_sig, None)
-            .expect_err("missing signed_transaction must be rejected");
-        assert!(err.message().contains("signed_transaction"), "{err}");
-
-        // (b) Wrong signature is rejected.
-        let wrong_sig = sign_onchain_request(wrong_key, &funded_content).expect("wrong sig");
+            .expect_err("missing signed_transaction")
+            .message()
+            .contains("signed_transaction"));
+        let wrong_sig = sign_onchain_request(wrong_key, &funded_content).unwrap();
         assert!(fixture
             .submit_with_tx(request_id, wrong_sig, Some(funded_tx.clone()))
             .is_err());
 
-        // (c) Tampered outputs[0] is rejected.
         let tampered_out0 = funded_tx
             .clone()
             .into_view()
@@ -2669,19 +2837,6 @@ fn external_udt_self_funded_template_tx_tlc_and_low_excess_balance_flow() {
             ])
             .build()
             .data();
-        let tampered_sig = sign_onchain_request(
-            signing_key,
-            &OnchainSigningContent {
-                key_purpose: pending.content.key_purpose,
-                transaction: tampered_out0.clone(),
-            },
-        )
-        .unwrap();
-        assert!(fixture
-            .submit_with_tx(request_id, tampered_sig, Some(tampered_out0))
-            .is_err());
-
-        // (d) Wrong since (missing on timeout TLC, or unexpected absolute timestamp on non-timeout).
         let bad_since = if expected_expiry.is_some() {
             0
         } else {
@@ -2697,49 +2852,44 @@ fn external_udt_self_funded_template_tx_tlc_and_low_excess_balance_flow() {
             ])
             .build()
             .data();
-        let bad_since_sig = sign_onchain_request(
-            signing_key,
-            &OnchainSigningContent {
-                key_purpose: pending.content.key_purpose,
-                transaction: bad_since_tx.clone(),
-            },
-        )
-        .unwrap();
-        assert!(fixture
-            .submit_with_tx(request_id, bad_since_sig, Some(bad_since_tx))
-            .is_err());
+        for invalid_tx in [tampered_out0, bad_since_tx] {
+            let sig = sign_onchain_request(
+                signing_key,
+                &OnchainSigningContent {
+                    key_purpose: pending.content().key_purpose,
+                    transaction: invalid_tx.clone(),
+                },
+            )
+            .unwrap();
+            assert!(fixture
+                .submit_with_tx(request_id, sig, Some(invalid_tx))
+                .is_err());
+        }
 
-        // 4. Valid submission succeeds.
+        // 4. Valid submit + idempotency (zero placeholder & pre-filled witness[0]) + diff witness rejection.
         assert_eq!(
             fixture
                 .submit_with_tx(request_id, valid_sig, Some(funded_tx.clone()))
-                .expect("valid self-funded submission"),
+                .unwrap(),
             SubmitWatchtowerSignatureResult::Applied
         );
-
-        // 5. Idempotency: exact retry returns AlreadyApplied (both with zero placeholder and with
-        //    signature pre-injected in witness[0]), while a different client witness is rejected.
-        assert_eq!(
-            fixture
-                .submit_with_tx(request_id, valid_sig, Some(funded_tx.clone()))
-                .expect("idempotent retry"),
-            SubmitWatchtowerSignatureResult::AlreadyApplied
-        );
         let filled_w0_tx = apply_settlement_signature(
-            funded_tx.clone().into_view(),
+            BuiltSettlementTx::ExternalFunding(funded_tx.clone().into_view()),
             &LocalSigner::new(secp256k1::SecretKey::from_slice(&[21; 32]).unwrap()),
             valid_sig,
-            true,
             with_preimage,
         )
         .unwrap()
+        .into_transaction()
         .data();
-        assert_eq!(
-            fixture
-                .submit_with_tx(request_id, valid_sig, Some(filled_w0_tx))
-                .expect("idempotent retry with filled witness[0]"),
-            SubmitWatchtowerSignatureResult::AlreadyApplied
-        );
+        for retry_tx in [funded_tx.clone(), filled_w0_tx] {
+            assert_eq!(
+                fixture
+                    .submit_with_tx(request_id, valid_sig, Some(retry_tx))
+                    .unwrap(),
+                SubmitWatchtowerSignatureResult::AlreadyApplied
+            );
+        }
         let diff_witness_tx = funded_tx
             .clone()
             .into_view()
@@ -2755,12 +2905,11 @@ fn external_udt_self_funded_template_tx_tlc_and_low_excess_balance_flow() {
             .submit_with_tx(request_id, valid_sig, Some(diff_witness_tx.clone()))
             .is_err());
 
-        // 6. Watchtower builds final signed tx without querying cell_collector and preserves ALL
-        //    client witnesses (`witness[1..]`) untouched (never signed by operator LocalSigner).
+        // 5. Final tx preserves all client cell_deps & witness[1..] without calling cell_collector.
         let final_tx = fixture
             .build_with_collector(220_000, &mut PanicCollector)
-            .expect("build final self-funded tx")
-            .expect("signed self-funded tx");
+            .unwrap()
+            .expect("signed external-funding tx");
         assert_applied_signature(&final_tx, &funded_content, signing_key);
         assert_eq!(final_tx.witnesses().len(), 3);
         assert_eq!(
@@ -2779,8 +2928,7 @@ fn external_udt_self_funded_template_tx_tlc_and_low_excess_balance_flow() {
             wallet_lock_dep
         );
 
-        // 7. After pruning signed_signatures (leaving only last_applied), exact retry still returns
-        //    AlreadyApplied and a different client witness is still rejected.
+        // 6. After confirmed spend pruning, last_applied still serves exact AlreadyApplied & rejects diffs.
         let spent = HashSet::from([funded_tx.raw().inputs().get(0).unwrap().previous_output()]);
         prune_spent_signing_requests(
             &fixture.events,
@@ -2792,7 +2940,7 @@ fn external_udt_self_funded_template_tx_tlc_and_low_excess_balance_flow() {
         assert_eq!(
             fixture
                 .submit_with_tx(request_id, valid_sig, Some(funded_tx))
-                .expect("idempotent retry via last_applied"),
+                .unwrap(),
             SubmitWatchtowerSignatureResult::AlreadyApplied
         );
         assert!(fixture
@@ -2800,138 +2948,85 @@ fn external_udt_self_funded_template_tx_tlc_and_low_excess_balance_flow() {
             .is_err());
     }
 
-    // 8. Operator-funded (non-self_funded) request must reject a spurious signed_transaction.
+    // 7. Operator-sponsored request rejects a spurious signed_transaction.
     let operator_fixture = Fixture::with_features(false, false, false, false, ChannelFeatures::V2);
     assert!(operator_fixture.build().unwrap().is_none());
     let (op_req_id, op_content) = operator_fixture.pending();
     let op_sig = sign_onchain_request(&operator_fixture.tlc_key, &op_content).unwrap();
-    let err = operator_fixture
+    assert!(operator_fixture
         .submit_with_tx(op_req_id, op_sig, Some(op_content.transaction.clone()))
-        .expect_err("operator-funded request must reject signed_transaction");
-    assert!(
-        err.message().contains("only accepted for self-funded"),
-        "{err}"
+        .expect_err("operator-sponsored request must reject signed_transaction")
+        .message()
+        .contains("only accepted for external-funding"));
+
+    // 8. Hosted tenant (`node_id != NodeId::local()`) even with `payout_lock_script: None`
+    //    must emit ExternalFundingRequired for plain CKB settlements.
+    let mut tenant_fixture =
+        Fixture::with_features(false, false, false, false, ChannelFeatures::V2);
+    let hosted_tenant = NodeId::from_bytes(Privkey::from([0x7b; 32]).pubkey().serialize().to_vec());
+    tenant_fixture.node_id = hosted_tenant.clone();
+    tenant_fixture.store.insert_watch_channel(
+        hosted_tenant,
+        tenant_fixture.channel.channel_id,
+        None,
+        WatchChannelKeys {
+            local_settlement: SettlementKey::external(tenant_fixture.base_key.pubkey()),
+            remote_settlement: tenant_fixture.channel.remote_settlement_key,
+            local_funding: tenant_fixture.channel.local_funding_pubkey,
+            remote_funding: tenant_fixture.channel.remote_funding_pubkey,
+        },
+        tenant_fixture.channel.local_settlement_data.clone(),
+        ChannelFeatures::V2,
+        None,
     );
+    tenant_fixture.channel = tenant_fixture
+        .store
+        .get_watch_channel(&tenant_fixture.node_id, &tenant_fixture.channel.channel_id)
+        .expect("hosted tenant watch channel");
+    assert!(tenant_fixture
+        .build_with_collector(200_000, &mut PanicCollector)
+        .unwrap()
+        .is_none());
+    let (_, tenant_pending) = tenant_fixture.pending_request();
+    assert!(tenant_pending.is_external_funding());
+    assert_eq!(tenant_pending.content().transaction.raw().inputs().len(), 1);
 }
 
 #[test]
-fn self_funded_watchtower_request_never_touches_operator_held_cells() {
+fn external_funding_watchtower_request_never_touches_operator_held_cells() {
     let _serial = crate::ckb::held_cells::TEST_SERIAL.blocking_lock();
-
-    #[derive(Clone, Default)]
-    struct LockTracker {
-        locked: HashSet<OutPoint>,
-    }
-    #[async_trait::async_trait]
-    impl CellCollector for LockTracker {
-        async fn collect_live_cells_async(
-            &mut self,
-            _: &CellQueryOptions,
-            _: bool,
-        ) -> Result<(Vec<LiveCell>, u64), CellCollectorError> {
-            Ok((vec![], 0))
-        }
-        fn lock_cell(&mut self, out_point: OutPoint, _: u64) -> Result<(), CellCollectorError> {
-            self.locked.insert(out_point);
-            Ok(())
-        }
-        fn apply_tx(&mut self, _: Transaction, _: u64) -> Result<(), CellCollectorError> {
-            Ok(())
-        }
-        fn reset(&mut self) {}
-    }
-
-    let udt_script = Script::new_builder()
-        .code_hash(Byte32::from([0x77; 32]))
-        .args([0x01u8; 32].as_slice().pack())
-        .build();
-    let custom_payout_lock = Script::new_builder()
-        .code_hash(Byte32::from([0x99; 32]))
-        .args([0xabu8; 20].as_slice().pack())
-        .build();
-    let mut fixture = Fixture::with_features(false, false, true, false, ChannelFeatures::V2);
-    fixture
-        .store
-        .remove_watch_channel(fixture.node_id.clone(), fixture.channel.channel_id);
-    fixture.store.insert_watch_channel(
-        fixture.node_id.clone(),
-        fixture.channel.channel_id,
-        Some(udt_script.clone()),
-        WatchChannelKeys {
-            local_settlement: SettlementKey::external(fixture.base_key.pubkey()),
-            remote_settlement: fixture.channel.remote_settlement_key,
-            local_funding: fixture.channel.local_funding_pubkey,
-            remote_funding: fixture.channel.remote_funding_pubkey,
-        },
-        fixture.channel.local_settlement_data.clone(),
-        ChannelFeatures::V2,
-        Some(custom_payout_lock.clone()),
-    );
-    let preimage = Hash256::from([13; 32]);
-    fixture.store.insert_watch_preimage(
-        fixture.node_id.clone(),
-        HashAlgorithm::Sha256.hash(preimage.as_ref()).into(),
-        preimage,
-    );
-    fixture.channel = fixture
-        .store
-        .get_watch_channel(&fixture.node_id, &fixture.channel.channel_id)
-        .expect("channel");
-    let mut output: CellOutput = fixture.cell.output.clone().into();
-    output = output
-        .as_builder()
-        .type_(Some(udt_script).pack())
-        .capacity(25_000_000_000u64)
-        .build();
-    fixture.cell.output = output.into();
-    fixture.cell.output_data = Some(ckb_jsonrpc_types::JsonBytes::from_vec(
-        240_000_000_000u128.to_le_bytes().to_vec(),
-    ));
+    let payout_lock = test_custom_payout_lock();
+    let fixture = udt_external_funding_fixture(true, false, payout_lock.clone());
 
     assert!(fixture.build_at(200_000).unwrap().is_none());
     let (request_id, pending) = fixture.pending_request();
-    assert!(pending.self_funded);
+    assert!(pending.is_external_funding());
 
     let now_ms = crate::now_timestamp_as_millis_u64();
-    // Pre-hold an operator UTXO and leave a second UTXO unheld; put BOTH into inputs[1..] of a
-    // self-funded submission. Watchtower must NEITHER unlock the operator UTXO NOR lock the unheld UTXO.
     let operator_utxo = OutPoint::new(Byte32::from([0xd1; 32]), 0);
     let unheld_utxo = OutPoint::new(Byte32::from([0xd2; 32]), 0);
     crate::ckb::held_cells::release_for_watchtower([operator_utxo.clone(), unheld_utxo.clone()]);
     crate::ckb::held_cells::hold_for_watchtower([operator_utxo.clone()], now_ms);
 
-    let funded_tx = pending
-        .content
-        .transaction
-        .clone()
-        .into_view()
-        .as_advanced_builder()
-        .input(CellInput::new(operator_utxo.clone(), 0))
-        .input(CellInput::new(unheld_utxo.clone(), 0))
-        .output(
-            CellOutput::new_builder()
-                .capacity(6_000_000_000u64)
-                .lock(custom_payout_lock)
-                .build(),
-        )
-        .output_data(ckb_types::packed::Bytes::default())
-        .witness([0x01u8].pack())
-        .witness([0x02u8].pack())
-        .build()
-        .data();
-    let sig = sign_onchain_request(
-        &fixture.tlc_key,
-        &OnchainSigningContent {
-            key_purpose: pending.content.key_purpose,
-            transaction: funded_tx.clone(),
-        },
+    let funded_tx = fund_wallet_tx(
+        &pending.content().transaction,
+        operator_utxo.clone(),
+        0,
+        payout_lock,
+        &[0x01],
     )
-    .unwrap();
-    assert_eq!(
-        fixture
-            .submit_with_tx(request_id, sig, Some(funded_tx))
-            .unwrap(),
-        SubmitWatchtowerSignatureResult::Applied
+    .into_view()
+    .as_advanced_builder()
+    .input(CellInput::new(unheld_utxo.clone(), 0))
+    .witness([0x02u8].pack())
+    .build()
+    .data();
+    let sig = sign_and_submit_funded(
+        &fixture,
+        request_id,
+        &fixture.tlc_key,
+        pending.content().key_purpose,
+        &funded_tx,
     );
 
     let is_held = |outpoint: &OutPoint, at_ms: u64| {
@@ -2940,13 +3035,9 @@ fn self_funded_watchtower_request_never_touches_operator_held_cells() {
         tracker.locked.contains(outpoint)
     };
     assert!(is_held(&operator_utxo, now_ms));
-    assert!(
-        !is_held(&unheld_utxo, now_ms),
-        "self_funded submit must never lock client-supplied inputs into operator held_cells"
-    );
+    assert!(!is_held(&unheld_utxo, now_ms));
 
-    // Syncing holds (both before and after expiry of the self_funded request) must neither lock
-    // unheld_utxo nor release operator_utxo.
+    // Syncing holds before and after TTL expiry must neither lock unheld_utxo nor release operator_utxo.
     let channels = fixture.store.get_watch_channels_with_nodes();
     crate::watchtower::actor::sync_external_fee_holds(
         &fixture.events,
@@ -2957,13 +3048,12 @@ fn self_funded_watchtower_request_never_touches_operator_held_cells() {
     assert!(is_held(&operator_utxo, now_ms + 1_000));
     assert!(!is_held(&unheld_utxo, now_ms + 1_000));
 
-    // Expire only the self_funded request (backdate its created_at_ms so operator_utxo stays live).
     fixture
         .store
         .update_watchtower_signer(&fixture.node_id, &fixture.channel.channel_id, |state| {
             if let WatchtowerSignerState::External(ext) = state {
                 for req in ext.signed_signatures.values_mut() {
-                    req.created_at_ms = 1;
+                    *req.created_at_ms_mut() = 1;
                 }
             }
             Ok::<_, std::convert::Infallible>(())
@@ -2975,21 +3065,18 @@ fn self_funded_watchtower_request_never_touches_operator_held_cells() {
         &channels,
         now_ms + 2_000,
     );
-    assert!(
-        is_held(&operator_utxo, now_ms + 2_000),
-        "expiring a self_funded request must never release an operator UTXO from held_cells"
-    );
+    assert!(is_held(&operator_utxo, now_ms + 2_000));
 
-    // Removing the watch channel with a self_funded signed entry must also never release operator_utxo.
+    // Removing the watch channel with an ExternalFunding signed entry must not release operator_utxo.
     fixture
         .store
         .update_watchtower_signer(&fixture.node_id, &fixture.channel.channel_id, |state| {
             if let WatchtowerSignerState::External(ext) = state {
                 ext.signed_signatures.insert(
                     request_id,
-                    fiber_types::SignedWatchtowerRequest {
+                    fiber_types::SignedWatchtowerRequest::ExternalFunding {
                         content: OnchainSigningContent {
-                            key_purpose: pending.content.key_purpose,
+                            key_purpose: pending.content().key_purpose,
                             transaction: TransactionBuilder::default()
                                 .input(CellInput::new(OutPoint::new(Byte32::from([1; 32]), 0), 0))
                                 .input(CellInput::new(operator_utxo.clone(), 0))
@@ -2998,7 +3085,6 @@ fn self_funded_watchtower_request_never_touches_operator_held_cells() {
                         },
                         signature: sig,
                         created_at_ms: now_ms,
-                        self_funded: true,
                     },
                 );
             }
@@ -3008,100 +3094,41 @@ fn self_funded_watchtower_request_never_touches_operator_held_cells() {
     fixture
         .store
         .remove_watch_channel(fixture.node_id.clone(), fixture.channel.channel_id);
-    assert!(
-        is_held(&operator_utxo, now_ms + 2_000),
-        "remove_watch_channel on self_funded entry must never release an operator UTXO from held_cells"
-    );
+    assert!(is_held(&operator_utxo, now_ms + 2_000));
 
     crate::ckb::held_cells::release_for_watchtower([operator_utxo, unheld_utxo]);
 }
 
 #[test]
-fn self_funded_scan_race_with_submit_preserves_accepted_funded_tx() {
-    let udt_script = Script::new_builder()
-        .code_hash(Byte32::from([0x77; 32]))
-        .args([0x01u8; 32].as_slice().pack())
-        .build();
-    let custom_payout_lock = Script::new_builder()
-        .code_hash(Byte32::from([0x99; 32]))
-        .args([0xabu8; 20].as_slice().pack())
-        .build();
-    let mut fixture = Fixture::with_features(false, false, false, false, ChannelFeatures::V2);
-    fixture
-        .store
-        .remove_watch_channel(fixture.node_id.clone(), fixture.channel.channel_id);
-    fixture.store.insert_watch_channel(
-        fixture.node_id.clone(),
-        fixture.channel.channel_id,
-        Some(udt_script.clone()),
-        WatchChannelKeys {
-            local_settlement: SettlementKey::external(fixture.base_key.pubkey()),
-            remote_settlement: fixture.channel.remote_settlement_key,
-            local_funding: fixture.channel.local_funding_pubkey,
-            remote_funding: fixture.channel.remote_funding_pubkey,
-        },
-        fixture.channel.local_settlement_data.clone(),
-        ChannelFeatures::V2,
-        Some(custom_payout_lock.clone()),
-    );
-    fixture.channel = fixture
-        .store
-        .get_watch_channel(&fixture.node_id, &fixture.channel.channel_id)
-        .expect("channel");
-    let mut output: CellOutput = fixture.cell.output.clone().into();
-    output = output
-        .as_builder()
-        .type_(Some(udt_script).pack())
-        .capacity(25_000_000_000u64)
-        .build();
-    fixture.cell.output = output.into();
-    fixture.cell.output_data = Some(ckb_jsonrpc_types::JsonBytes::from_vec(
-        240_000_000_000u128.to_le_bytes().to_vec(),
-    ));
+fn external_funding_scan_race_with_submit_preserves_accepted_funded_tx() {
+    let payout_lock = test_custom_payout_lock();
+    let fixture = udt_external_funding_fixture(false, false, payout_lock.clone());
 
-    // Tick 1 queues the unfunded self_funded template tx.
     assert!(fixture.build_at(200_000).unwrap().is_none());
     let (request_id, pending) = fixture.pending_request();
-    assert!(pending.self_funded);
-    let required_expiry = pending.required_expiry_since.expect("timeout expiry");
+    let required_expiry = pending.required_expiry_since().expect("timeout expiry");
 
-    // Client funds and submits via RPC -> moves into signed_signatures[request_id].
     let wallet_witness_1 = [0xdeu8, 0xad, 0xbe, 0xef];
-    let funded_tx = pending
-        .content
-        .transaction
-        .clone()
-        .into_view()
-        .as_advanced_builder()
-        .input(CellInput::new(
-            OutPoint::new(Byte32::from([0xe3; 32]), 0),
-            required_expiry,
-        ))
-        .output(
-            CellOutput::new_builder()
-                .capacity(6_000_000_000u64)
-                .lock(custom_payout_lock)
-                .build(),
-        )
-        .output_data(ckb_types::packed::Bytes::default())
-        .witness(wallet_witness_1.pack())
-        .build()
-        .data();
+    let funded_tx = fund_wallet_tx(
+        &pending.content().transaction,
+        OutPoint::new(Byte32::from([0xe3; 32]), 0),
+        required_expiry,
+        payout_lock,
+        &wallet_witness_1,
+    );
     let funded_content = OnchainSigningContent {
-        key_purpose: pending.content.key_purpose,
+        key_purpose: pending.content().key_purpose,
         transaction: funded_tx.clone(),
     };
-    let sig = sign_onchain_request(&fixture.tlc_key, &funded_content).unwrap();
-    assert_eq!(
-        fixture
-            .submit_with_tx(request_id, sig, Some(funded_tx.clone()))
-            .unwrap(),
-        SubmitWatchtowerSignatureResult::Applied
+    sign_and_submit_funded(
+        &fixture,
+        request_id,
+        &fixture.tlc_key,
+        pending.content().key_purpose,
+        &funded_tx,
     );
 
-    // Simulate the race where Tick 2 read `pending_requests[request_id]` (unfunded template)
-    // before the RPC submit acquired the write lock, and now calls `build_signed_settlement_tx`
-    // with the unfunded template (both with `Some(request_id)` and `None`).
+    // Racing scan calls build_signed_settlement_tx with the unfunded template (with Some(id) and None).
     let fee_signer = LocalSigner::new(secp256k1::SecretKey::from_slice(&[21; 32]).unwrap());
     for existing_id in [Some(request_id), None] {
         let final_tx = build_signed_settlement_tx(
@@ -3109,20 +3136,20 @@ fn self_funded_scan_race_with_submit_preserves_accepted_funded_tx() {
             &fixture.store,
             &fixture.node_id,
             fixture.channel.channel_id,
-            pending.content.transaction.clone().into_view(),
-            pending.content.key_purpose,
+            pending.content().transaction.clone().into_view(),
+            pending.content().key_purpose,
             false,
             None,
             &fee_signer,
             existing_id,
-            true,
-            Some(required_expiry),
+            fiber_types::WatchtowerFunding::ExternalFunding {
+                required_expiry_since: Some(required_expiry),
+            },
         )
-        .expect("racing scan must not fail")
-        .expect("racing scan must apply accepted funded tx instead of wiping it");
-
+        .unwrap()
+        .expect("racing scan must apply accepted funded tx")
+        .into_transaction();
         assert_applied_signature(&final_tx, &funded_content, &fixture.tlc_key);
-        assert_eq!(final_tx.witnesses().len(), 2);
         assert_eq!(
             final_tx.witnesses().get(1).unwrap().raw_data().as_ref(),
             &wallet_witness_1
@@ -3143,90 +3170,31 @@ fn self_funded_scan_race_with_submit_preserves_accepted_funded_tx() {
 }
 
 #[test]
-fn evicted_self_funded_signed_signature_clears_last_applied_so_retry_fails() {
-    let udt_script = Script::new_builder()
-        .code_hash(Byte32::from([0x77; 32]))
-        .args([0x01u8; 32].as_slice().pack())
-        .build();
-    let custom_payout_lock = Script::new_builder()
-        .code_hash(Byte32::from([0x99; 32]))
-        .args([0xabu8; 20].as_slice().pack())
-        .build();
-
-    // Cover all 3 eviction paths:
-    //   0: TTL expiration (`sync_external_fee_holds`)
-    //   1: dead-input pruning (`evict_dead_fee_signing_requests`)
-    //   2: broadcast failure (`evict_failed_signed_settlement_tx`)
-    for mode in 0..3 {
-        let mut fixture = Fixture::with_features(false, false, false, false, ChannelFeatures::V2);
-        fixture
-            .store
-            .remove_watch_channel(fixture.node_id.clone(), fixture.channel.channel_id);
-        fixture.store.insert_watch_channel(
-            fixture.node_id.clone(),
-            fixture.channel.channel_id,
-            Some(udt_script.clone()),
-            WatchChannelKeys {
-                local_settlement: SettlementKey::external(fixture.base_key.pubkey()),
-                remote_settlement: fixture.channel.remote_settlement_key,
-                local_funding: fixture.channel.local_funding_pubkey,
-                remote_funding: fixture.channel.remote_funding_pubkey,
-            },
-            fixture.channel.local_settlement_data.clone(),
-            ChannelFeatures::V2,
-            Some(custom_payout_lock.clone()),
-        );
-        fixture.channel = fixture
-            .store
-            .get_watch_channel(&fixture.node_id, &fixture.channel.channel_id)
-            .expect("channel");
-        let mut output: CellOutput = fixture.cell.output.clone().into();
-        output = output
-            .as_builder()
-            .type_(Some(udt_script.clone()).pack())
-            .capacity(25_000_000_000u64)
-            .build();
-        fixture.cell.output = output.into();
-        fixture.cell.output_data = Some(ckb_jsonrpc_types::JsonBytes::from_vec(
-            240_000_000_000u128.to_le_bytes().to_vec(),
-        ));
-
+fn external_funding_eviction_clears_last_applied_while_confirmed_spend_preserves_it() {
+    let payout_lock = test_custom_payout_lock();
+    // Modes:
+    //   0: TTL expiration (`sync_external_fee_holds`) -> clears last_applied
+    //   1: unconfirmed dead-input pruning (`evict_dead_fee_signing_requests`) -> clears last_applied
+    //   2: broadcast failure (`evict_failed_signed_settlement_tx`) -> clears last_applied
+    //   3: confirmed spend (`prune_spent_signing_requests`) then dead-input check -> preserves last_applied
+    for mode in 0..4 {
+        let fixture = udt_external_funding_fixture(false, false, payout_lock.clone());
         assert!(fixture.build_at(200_000).unwrap().is_none());
         let (request_id, pending) = fixture.pending_request();
-        let required_expiry = pending.required_expiry_since.expect("timeout expiry");
-        let funded_tx = pending
-            .content
-            .transaction
-            .clone()
-            .into_view()
-            .as_advanced_builder()
-            .input(CellInput::new(
-                OutPoint::new(Byte32::from([0xe4; 32]), 0),
-                required_expiry,
-            ))
-            .output(
-                CellOutput::new_builder()
-                    .capacity(6_000_000_000u64)
-                    .lock(custom_payout_lock.clone())
-                    .build(),
-            )
-            .output_data(ckb_types::packed::Bytes::default())
-            .witness([0x55u8].pack())
-            .build()
-            .data();
-        let sig = sign_onchain_request(
+        let required_expiry = pending.required_expiry_since().expect("timeout expiry");
+        let funded_tx = fund_wallet_tx(
+            &pending.content().transaction,
+            OutPoint::new(Byte32::from([0xe4; 32]), 0),
+            required_expiry,
+            payout_lock.clone(),
+            &[0x55],
+        );
+        let sig = sign_and_submit_funded(
+            &fixture,
+            request_id,
             &fixture.tlc_key,
-            &OnchainSigningContent {
-                key_purpose: pending.content.key_purpose,
-                transaction: funded_tx.clone(),
-            },
-        )
-        .unwrap();
-        assert_eq!(
-            fixture
-                .submit_with_tx(request_id, sig, Some(funded_tx.clone()))
-                .unwrap(),
-            SubmitWatchtowerSignatureResult::Applied
+            pending.content().key_purpose,
+            &funded_tx,
         );
 
         match mode {
@@ -3242,24 +3210,36 @@ fn evicted_self_funded_signed_signature_clears_last_applied_so_retry_fails() {
                     expired_at,
                 );
             }
-            1 => {
-                let dead = HashSet::from([request_id]);
+            1 => evict_dead_fee_signing_requests(
+                &fixture.events,
+                &fixture.store,
+                &fixture.node_id,
+                &fixture.channel.channel_id,
+                &HashSet::from([request_id]),
+            ),
+            2 => evict_failed_signed_settlement_tx(
+                &fixture.events,
+                &fixture.store,
+                &fixture.node_id,
+                &fixture.channel.channel_id,
+                funded_tx.raw().as_slice(),
+                crate::now_timestamp_as_millis_u64(),
+            ),
+            _ => {
+                let spent = HashSet::from([OutPoint::from(fixture.cell.out_point.clone())]);
+                prune_spent_signing_requests(
+                    &fixture.events,
+                    &fixture.store,
+                    &fixture.node_id,
+                    &fixture.channel.channel_id,
+                    &spent,
+                );
                 evict_dead_fee_signing_requests(
                     &fixture.events,
                     &fixture.store,
                     &fixture.node_id,
                     &fixture.channel.channel_id,
-                    &dead,
-                );
-            }
-            _ => {
-                evict_failed_signed_settlement_tx(
-                    &fixture.events,
-                    &fixture.store,
-                    &fixture.node_id,
-                    &fixture.channel.channel_id,
-                    funded_tx.raw().as_slice(),
-                    crate::now_timestamp_as_millis_u64(),
+                    &HashSet::from([request_id]),
                 );
             }
         }
@@ -3271,18 +3251,133 @@ fn evicted_self_funded_signed_signature_clears_last_applied_so_retry_fails() {
             panic!("external signer");
         };
         assert!(ext.signed_signatures.is_empty());
-        assert!(
-            ext.last_applied.is_none(),
-            "evicted signed_signature must clear last_applied (mode={mode})"
+        if mode == 3 {
+            assert!(ext.last_applied.is_some());
+            assert_eq!(
+                fixture
+                    .submit_with_tx(request_id, sig, Some(funded_tx))
+                    .expect("idempotent retry after confirmed spend"),
+                SubmitWatchtowerSignatureResult::AlreadyApplied
+            );
+        } else {
+            assert!(ext.last_applied.is_none(), "mode={mode}");
+            assert!(fixture
+                .submit_with_tx(request_id, sig, Some(funded_tx))
+                .expect_err("retry after eviction must fail")
+                .message()
+                .contains("not found in pending requests"));
+        }
+    }
+}
+
+#[test]
+fn external_funding_two_parties_all_settled_single_output_ckb_and_udt() {
+    let payout_lock = test_custom_payout_lock();
+    let udt_script = test_udt_script();
+
+    for is_udt in [false, true] {
+        let mut fixture = Fixture::with_features(false, false, false, false, ChannelFeatures::V2);
+        fixture
+            .store
+            .remove_watch_channel(fixture.node_id.clone(), fixture.channel.channel_id);
+        fixture.node_id = NodeId::from_bytes(b"hosted-tenant-two-parties".to_vec());
+        let settlement = SettlementData {
+            local_amount: 100_000_000_000,
+            remote_amount: 100_000_000_000,
+            tlcs: vec![],
+        };
+        fixture.store.insert_watch_channel(
+            fixture.node_id.clone(),
+            fixture.channel.channel_id,
+            is_udt.then(|| udt_script.clone()),
+            WatchChannelKeys {
+                local_settlement: SettlementKey::external(fixture.base_key.pubkey()),
+                remote_settlement: fixture.channel.remote_settlement_key,
+                local_funding: fixture.channel.local_funding_pubkey,
+                remote_funding: fixture.channel.remote_funding_pubkey,
+            },
+            settlement.clone(),
+            ChannelFeatures::V2,
+            Some(payout_lock.clone()),
+        );
+        fixture.channel = fixture
+            .store
+            .get_watch_channel(&fixture.node_id, &fixture.channel.channel_id)
+            .expect("channel");
+
+        // Remote already settled (`unlock_type = 0xFF`), leaving `two_parties_all_settled = true`.
+        let witness_bytes = settlement_data_to_witness(
+            &settlement,
+            false,
+            fixture.base_key.pubkey(),
+            fixture.channel.remote_settlement_key,
+        );
+        let mut previous =
+            SettlementWitness::build_from_witness(&[&[0], witness_bytes.as_slice()].concat())
+                .unwrap();
+        previous.unlocks.push(Unlock {
+            unlock_type: 0xFF,
+            with_preimage: false,
+            signature: [0; 65],
+            preimage: None,
+        });
+        let mut remaining = previous.clone();
+        assert!(remaining.update());
+        assert_eq!(remaining.settlement_local_pubkey_hash, [0u8; 20]);
+        fixture.witness = Some(previous);
+        fixture.tracked.clear();
+
+        let output: CellOutput = fixture.cell.output.clone().into();
+        let mut lock_args = output.lock().args().raw_data()[..36].to_vec();
+        lock_args.extend_from_slice(blake160(&remaining.to_witness()).as_ref());
+        lock_args.extend_from_slice(&[1, ChannelFeatures::V2.bits()]);
+        let lock = output.lock().as_builder().args(lock_args.pack()).build();
+        let output = output
+            .as_builder()
+            .lock(lock)
+            .type_(is_udt.then(|| udt_script.clone()).pack())
+            .capacity(100_000_000_000u64)
+            .build();
+        fixture.cell.output = output.into();
+        fixture.cell.output_data = is_udt.then(|| {
+            ckb_jsonrpc_types::JsonBytes::from_vec(100_000_000_000u128.to_le_bytes().to_vec())
+        });
+
+        assert!(fixture.build_at(200_000).unwrap().is_none());
+        let (request_id, pending) = fixture.pending_request();
+        assert!(pending.is_external_funding());
+        assert_eq!(pending.required_expiry_since(), None);
+        let template = &pending.content().transaction;
+        assert_eq!(template.raw().inputs().len(), 1);
+        assert_eq!(template.raw().outputs().len(), 1);
+
+        // Pay fee directly from the single payout output (1 input, 1 output).
+        let payout = template.raw().outputs().get(0).unwrap();
+        let payout_cap: u64 = payout.capacity().unpack();
+        let funded_tx = template
+            .clone()
+            .into_view()
+            .as_advanced_builder()
+            .set_outputs(vec![payout
+                .as_builder()
+                .capacity(payout_cap - 1_000)
+                .build()])
+            .build()
+            .data();
+        sign_and_submit_funded(
+            &fixture,
+            request_id,
+            &fixture.base_key,
+            pending.content().key_purpose,
+            &funded_tx,
         );
 
-        // Retrying submission after eviction must fail rather than falsely returning AlreadyApplied.
-        let err = fixture
-            .submit_with_tx(request_id, sig, Some(funded_tx))
-            .expect_err("retry after eviction must fail, not return AlreadyApplied");
-        assert!(
-            err.message().contains("not found in pending requests"),
-            "{err}"
+        let built = fixture.build_at(200_000).unwrap().expect("signed tx");
+        assert_eq!(built.data().raw().as_slice(), funded_tx.raw().as_slice());
+        assert_eq!(built.outputs().len(), 1);
+        assert_eq!(
+            Unpack::<u64>::unpack(&built.outputs().get(0).unwrap().capacity()),
+            payout_cap - 1_000
         );
     }
 }

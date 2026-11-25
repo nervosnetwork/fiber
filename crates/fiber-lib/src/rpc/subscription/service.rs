@@ -302,6 +302,7 @@ fn is_pending(event: &SubscriptionEvent) -> bool {
         SubscriptionEvent::WatchtowerSigning(result) => matches!(
             result.status,
             fiber_json_types::WatchtowerSigningStatus::SignatureRequired { .. }
+                | fiber_json_types::WatchtowerSigningStatus::ExternalFundingRequired { .. }
         ),
         _ => false,
     }

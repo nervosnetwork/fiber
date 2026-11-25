@@ -518,11 +518,9 @@ async fn tenant_watchtower_rpc_rejects_secrets_and_cross_tenant_signatures() {
     let mut external = WatchtowerExternalSignerState::default();
     external.pending_requests.insert(
         request_id,
-        fiber_types::PendingWatchtowerRequest {
+        fiber_types::PendingWatchtowerRequest::OperatorSponsored {
             content: content.clone(),
             created_at_ms: crate::now_timestamp_as_millis_u64(),
-            self_funded: false,
-            required_expiry_since: None,
         },
     );
     let node = crate::lsp::tenant_watchtower_node_id(&owner_pubkey);

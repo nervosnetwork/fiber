@@ -1038,7 +1038,7 @@ pub struct GetWatchtowerSigningStatusResult {
 pub enum WatchtowerSigningStatus {
     /// No external signature is currently required and no retry backoff is active.
     NoSignatureRequired,
-    /// Settlement or TLC spend is paused until this signature is submitted.
+    /// Operator-sponsored settlement or TLC spend is paused until this signature is submitted.
     SignatureRequired {
         /// Identifier of the outstanding signature request.
         request_id: Hash256,
@@ -1048,10 +1048,20 @@ pub enum WatchtowerSigningStatus {
         #[serde_as(as = "U64Hex")]
         #[schemars(schema_with = "schema_as_uint_hex")]
         expires_at_ms: u64,
-        /// Whether the client must fund `inputs[1..]` (adding its own `cell_deps`, funding inputs, change output, and funding witnesses) and supply `signed_transaction` on submit.
-        #[serde(default)]
-        self_funded: bool,
-        /// Optional absolute timestamp `since` required on a funding input for a self-funded timeout TLC unlock.
+    },
+    /// Watchtower issued an unfunded template transaction; the client's external wallet must fund
+    /// transaction fees (and any CKB capacity shortfall), sign `inputs[0]`, and submit both
+    /// `signature` and `signed_transaction`.
+    ExternalFundingRequired {
+        /// Identifier of the outstanding signature request.
+        request_id: Hash256,
+        /// Unfunded template on-chain plaintext (`inputs[0]`, settlement outputs, `witness[0]`).
+        content: OnchainSigningContent,
+        /// Unix millisecond timestamp when this request's TTL expires.
+        #[serde_as(as = "U64Hex")]
+        #[schemars(schema_with = "schema_as_uint_hex")]
+        expires_at_ms: u64,
+        /// Optional absolute timestamp `since` required on a funding input for a timeout TLC unlock.
         #[serde_as(as = "Option<U64Hex>")]
         #[schemars(schema_with = "schema_as_uint_hex_optional")]
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1082,7 +1092,8 @@ pub struct SubmitWatchtowerSignatureParams {
     #[serde_as(as = "SliceHex")]
     #[schemars(schema_with = "schema_as_hex_bytes")]
     pub signature: Vec<u8>,
-    /// Optional client-funded transaction (carrying client `cell_deps`, `inputs[1..]`, change outputs, and `witness[1..]`) required when `self_funded` is true.
+    /// Optional client-funded transaction (carrying client `cell_deps`, optional `inputs[1..]`,
+    /// outputs, and `witness[1..]`) required when responding to `ExternalFundingRequired`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signed_transaction: Option<Transaction>,
 }

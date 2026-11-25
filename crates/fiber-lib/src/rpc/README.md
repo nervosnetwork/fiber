@@ -1752,7 +1752,7 @@ Submit an external watchtower settlement or TLC signature.
 * `channel_id` - <em>[Hash256](#type-hash256)</em>, The watched channel that produced the outstanding signature request.
 * `request_id` - <em>[Hash256](#type-hash256)</em>, Identifier of the outstanding signature request.
 * `signature` - <em>`Vec<u8>`</em>, Recoverable ECDSA signature (64 bytes + recovery id), `0x`-prefixed hex.
-* `signed_transaction` - <em>`Option<Transaction>`</em>, Optional client-funded transaction (carrying client `cell_deps`, `inputs[1..]`, change outputs, and `witness[1..]`) required when `self_funded` is true.
+* `signed_transaction` - <em>`Option<Transaction>`</em>, Optional client-funded transaction (carrying client `cell_deps`, optional `inputs[1..]`, outputs, and `witness[1..]`) required when responding to `ExternalFundingRequired`.
 
 ##### Returns
 
@@ -2560,7 +2560,8 @@ Read-only projection of a watchtower's external signing requests.
 #### Enum with values of
 
 * `NoSignatureRequired` - No external signature is currently required and no retry backoff is active.
-* `SignatureRequired` - Settlement or TLC spend is paused until this signature is submitted.
+* `SignatureRequired` - Operator-sponsored settlement or TLC spend is paused until this signature is submitted.
+* `ExternalFundingRequired` - Watchtower issued an unfunded template transaction; the client's external wallet must fund transaction fees (and any CKB capacity shortfall), sign `inputs[0]`, and submit both `signature` and `signed_transaction`.
 * `Backoff` - New fee-holding signing requests are paused due to channel or tenant retry backoff.
 ---
 

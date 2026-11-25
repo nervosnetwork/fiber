@@ -2961,21 +2961,12 @@ impl WatchtowerStore for Store {
                 let fee_inputs: Vec<OutPoint> = ext
                     .pending_requests
                     .values()
-                    .filter(|req| !req.self_funded)
-                    .map(|req| &req.content.transaction)
+                    .flat_map(fiber_types::PendingWatchtowerRequest::operator_fee_inputs)
                     .chain(
                         ext.signed_signatures
                             .values()
-                            .filter(|req| !req.self_funded)
-                            .map(|req| &req.content.transaction),
+                            .flat_map(fiber_types::SignedWatchtowerRequest::operator_fee_inputs),
                     )
-                    .flat_map(|tx| {
-                        tx.raw()
-                            .inputs()
-                            .into_iter()
-                            .skip(1)
-                            .map(|input| input.previous_output())
-                    })
                     .collect();
                 if !fee_inputs.is_empty() {
                     crate::ckb::held_cells::release_for_watchtower(fee_inputs);

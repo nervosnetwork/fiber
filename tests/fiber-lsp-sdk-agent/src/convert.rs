@@ -375,8 +375,6 @@ pub(crate) mod tests {
                     transaction: tx.into(),
                 },
                 expires_at_ms: 0,
-                self_funded: false,
-                required_expiry_since: None,
             },
             fiber_lsp_sdk::OnchainSpendAuthorization {
                 source: record.reference.clone(),

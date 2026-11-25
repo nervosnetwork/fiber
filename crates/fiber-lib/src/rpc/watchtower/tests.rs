@@ -397,14 +397,12 @@ async fn watchtower_signing_status_exposes_backoff_and_pending_ttl() {
                     .data();
                 ext.pending_requests.insert(
                     req_id,
-                    fiber_types::PendingWatchtowerRequest {
+                    fiber_types::PendingWatchtowerRequest::OperatorSponsored {
                         content: OnchainSigningContent {
                             key_purpose: OnchainKeyPurpose::Settlement,
                             transaction: tx,
                         },
                         created_at_ms,
-                        self_funded: false,
-                        required_expiry_since: None,
                     },
                 );
                 ext.consecutive_expired_requests = 2;
@@ -626,14 +624,12 @@ async fn create_watch_channel_retry_does_not_publish_no_signature_required_while
                         .data();
                     ext.pending_requests.insert(
                         req_id,
-                        fiber_types::PendingWatchtowerRequest {
+                        fiber_types::PendingWatchtowerRequest::OperatorSponsored {
                             content: OnchainSigningContent {
                                 key_purpose: OnchainKeyPurpose::Settlement,
                                 transaction: tx,
                             },
                             created_at_ms: now_ms,
-                            self_funded: false,
-                            required_expiry_since: None,
                         },
                     );
                 }
@@ -777,11 +773,9 @@ async fn submit_watchtower_signature_rejects_expired_and_refreshes_hold_on_accep
             if let WatchtowerSignerState::External(ext) = state {
                 ext.pending_requests.insert(
                     expired_req_id,
-                    fiber_types::PendingWatchtowerRequest {
+                    fiber_types::PendingWatchtowerRequest::OperatorSponsored {
                         content: expired_content.clone(),
                         created_at_ms: expired_created_at,
-                        self_funded: false,
-                        required_expiry_since: None,
                     },
                 );
             }
@@ -848,11 +842,9 @@ async fn submit_watchtower_signature_rejects_expired_and_refreshes_hold_on_accep
             if let WatchtowerSignerState::External(ext) = state {
                 ext.pending_requests.insert(
                     fresh_req_id,
-                    fiber_types::PendingWatchtowerRequest {
+                    fiber_types::PendingWatchtowerRequest::OperatorSponsored {
                         content: fresh_content.clone(),
                         created_at_ms: old_created_at,
-                        self_funded: false,
-                        required_expiry_since: None,
                     },
                 );
             }
@@ -880,7 +872,7 @@ async fn submit_watchtower_signature_rejects_expired_and_refreshes_hold_on_accep
             ext.signed_signatures
                 .get(&fresh_req_id)
                 .expect("signed signature must be recorded")
-                .created_at_ms
+                .created_at_ms()
         }
         other => panic!("expected external signer state, got {other:?}"),
     };

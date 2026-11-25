@@ -1697,21 +1697,19 @@ fn test_store_watchtower_signer_roundtrip() {
     let mut pending = BTreeMap::new();
     pending.insert(
         req_id_1,
-        PendingWatchtowerRequest {
+        PendingWatchtowerRequest::ExternalFunding {
             content: content_1,
             created_at_ms: 100,
-            self_funded: true,
             required_expiry_since: Some(0x4000_0000_0000_0064),
         },
     );
     let mut signed = BTreeMap::new();
     signed.insert(
         req_id_2,
-        SignedWatchtowerRequest {
+        SignedWatchtowerRequest::OperatorSponsored {
             content: content_2,
             signature: sig_2,
             created_at_ms: 200,
-            self_funded: false,
         },
     );
     let last_applied = Some(LastAppliedWatchtowerSignature {
@@ -1757,11 +1755,9 @@ fn test_watchtower_atomic_update_preserves_concurrent_signature() {
         key_purpose: OnchainKeyPurpose::Settlement,
         transaction: Transaction::default(),
     };
-    let pending_req = PendingWatchtowerRequest {
+    let pending_req = PendingWatchtowerRequest::OperatorSponsored {
         content: content.clone(),
         created_at_ms: 100,
-        self_funded: false,
-        required_expiry_since: None,
     };
     let signature = [42; 65];
     let mut initial = WatchtowerExternalSignerState::default();
@@ -1812,15 +1808,26 @@ fn test_watchtower_atomic_update_preserves_concurrent_signature() {
                         .pending_requests
                         .remove(&signed_id)
                         .expect("pending signature");
-                    external.signed_signatures.insert(
-                        signed_id,
-                        SignedWatchtowerRequest {
-                            content: pending.content,
+                    let signed_entry = match pending {
+                        PendingWatchtowerRequest::OperatorSponsored {
+                            content,
+                            created_at_ms,
+                        } => SignedWatchtowerRequest::OperatorSponsored {
+                            content,
                             signature,
-                            created_at_ms: pending.created_at_ms,
-                            self_funded: pending.self_funded,
+                            created_at_ms,
                         },
-                    );
+                        PendingWatchtowerRequest::ExternalFunding {
+                            content,
+                            created_at_ms,
+                            ..
+                        } => SignedWatchtowerRequest::ExternalFunding {
+                            content,
+                            signature,
+                            created_at_ms,
+                        },
+                    };
+                    external.signed_signatures.insert(signed_id, signed_entry);
                     external.last_applied = Some(LastAppliedWatchtowerSignature {
                         request_id: signed_id,
                         signature,
@@ -1851,11 +1858,10 @@ fn test_watchtower_atomic_update_preserves_concurrent_signature() {
     };
     assert_eq!(
         state.signed_signatures.get(&signed_id),
-        Some(&SignedWatchtowerRequest {
+        Some(&SignedWatchtowerRequest::OperatorSponsored {
             content,
             signature,
             created_at_ms: 100,
-            self_funded: false,
         }),
         "scan must not overwrite an accepted signature"
     );
