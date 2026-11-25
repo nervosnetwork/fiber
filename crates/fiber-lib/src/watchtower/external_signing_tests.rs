@@ -2176,9 +2176,29 @@ fn external_udt_external_funding_template_tx_tlc_and_low_excess_balance_flow() {
             ])
             .build()
             .data();
-        assert!(fixture
-            .submit_with_tx(request_id, valid_sig, diff_witness_tx.clone())
-            .is_err());
+        let bad_w0_sig_tx = apply_external_settlement_signature(
+            funded_tx.clone().into_view(),
+            [0x55u8; 65],
+            with_preimage,
+        )
+        .unwrap()
+        .data();
+        let empty_witnesses_tx = funded_tx
+            .clone()
+            .into_view()
+            .as_advanced_builder()
+            .set_witnesses(vec![])
+            .build()
+            .data();
+        for bad_retry in [
+            diff_witness_tx.clone(),
+            bad_w0_sig_tx.clone(),
+            empty_witnesses_tx.clone(),
+        ] {
+            assert!(fixture
+                .submit_with_tx(request_id, valid_sig, bad_retry)
+                .is_err());
+        }
 
         // 5. Final tx preserves client payout lock, cell_deps & witness[1..] without calling cell_collector.
         let final_tx = fixture
@@ -2207,7 +2227,7 @@ fn external_udt_external_funding_template_tx_tlc_and_low_excess_balance_flow() {
             wallet_lock_dep
         );
 
-        // 6. After confirmed spend pruning, last_applied still serves exact AlreadyApplied & rejects diffs.
+        // 6. After confirmed spend pruning, last_applied still serves exact AlreadyApplied & rejects diffs/corrupted witness[0].
         let spent = HashSet::from([funded_tx.raw().inputs().get(0).unwrap().previous_output()]);
         prune_spent_signing_requests(
             &fixture.events,
@@ -2222,9 +2242,11 @@ fn external_udt_external_funding_template_tx_tlc_and_low_excess_balance_flow() {
                 .unwrap(),
             SubmitWatchtowerSignatureResult::AlreadyApplied
         );
-        assert!(fixture
-            .submit_with_tx(request_id, valid_sig, diff_witness_tx)
-            .is_err());
+        for bad_retry in [diff_witness_tx, bad_w0_sig_tx, empty_witnesses_tx] {
+            assert!(fixture
+                .submit_with_tx(request_id, valid_sig, bad_retry)
+                .is_err());
+        }
     }
 }
 
@@ -2399,6 +2421,45 @@ fn external_funding_scan_race_with_submit_preserves_accepted_funded_tx() {
             Some(request_id)
         );
     }
+
+    // Concurrent remove + recreate mid-scan must NEVER insert a 3-output funded tx into pending_requests.
+    fixture
+        .store
+        .remove_watch_channel(fixture.node_id.clone(), fixture.channel.channel_id);
+    fixture.store.insert_watch_channel(
+        fixture.node_id.clone(),
+        fixture.channel.channel_id,
+        fixture.channel.funding_udt_type_script.clone(),
+        WatchChannelKeys {
+            local_settlement: SettlementKey::external(fixture.base_key.pubkey()),
+            remote_settlement: fixture.channel.remote_settlement_key,
+            local_funding: fixture.channel.local_funding_pubkey,
+            remote_funding: fixture.channel.remote_funding_pubkey,
+        },
+        fixture.channel.local_settlement_data.clone(),
+        ChannelFeatures::V2,
+    );
+    assert!(apply_existing_signed_settlement_tx(
+        &fixture.events,
+        &fixture.store,
+        &fixture.node_id,
+        fixture.channel.channel_id,
+        request_id,
+        &funded_content,
+        false,
+    )
+    .unwrap()
+    .is_none());
+    let WatchtowerSignerState::External(ext) = fixture
+        .store
+        .get_watchtower_signer(&fixture.node_id, &fixture.channel.channel_id)
+    else {
+        panic!("external signer");
+    };
+    assert!(
+        ext.pending_requests.is_empty(),
+        "applying a vanished signed_signatures entry must not seed pending_requests with a 3-output tx"
+    );
 }
 
 #[test]

@@ -842,27 +842,44 @@ impl<R: FiberRpc, S: SignerStore> Agent<R, S> {
         max_fee: u64,
     ) -> Result<ckb_types::packed::Transaction> {
         let mut outputs: Vec<_> = template.raw().outputs().into_iter().collect();
-        let payout = outputs
-            .last_mut()
+        let payout_idx = outputs
+            .len()
+            .checked_sub(1)
             .context("external-funding template missing payout output")?;
-        let payout_capacity: u64 = payout.capacity().unpack();
-        *payout = payout.clone().as_builder().lock(destination).build();
+        let payout_capacity: u64 = outputs[payout_idx].capacity().unpack();
+        outputs[payout_idx] = outputs[payout_idx]
+            .clone()
+            .as_builder()
+            .lock(destination)
+            .build();
         let with_destination = template
             .clone()
             .into_view()
             .as_advanced_builder()
             .set_outputs(outputs.clone())
             .build();
-        let fee = (with_destination.data().serialized_size_in_block() as u64)
-            .max(1_000)
-            .min(max_fee);
+        let fee = (with_destination.data().serialized_size_in_block() as u64).max(1_000);
+        anyhow::ensure!(
+            fee <= max_fee,
+            "required watchtower fee ({fee}) exceeds local max_fee ({max_fee})"
+        );
         let adjusted_capacity = payout_capacity
             .checked_sub(fee)
             .context("payout output capacity smaller than fee")?;
-        let payout = outputs
-            .last_mut()
-            .context("external-funding template missing payout output")?;
-        *payout = payout
+        let payout_data_len = template
+            .raw()
+            .outputs_data()
+            .get(payout_idx)
+            .map(|d| d.raw_data().len())
+            .unwrap_or(0);
+        let min_capacity = outputs[payout_idx]
+            .occupied_capacity(ckb_types::core::Capacity::bytes(payout_data_len)?)?
+            .as_u64();
+        anyhow::ensure!(
+            adjusted_capacity >= min_capacity,
+            "payout output capacity ({adjusted_capacity}) is below occupied capacity ({min_capacity})"
+        );
+        outputs[payout_idx] = outputs[payout_idx]
             .clone()
             .as_builder()
             .capacity(adjusted_capacity)
@@ -977,7 +994,36 @@ impl<R: FiberRpc, S: SignerStore> Agent<R, S> {
         let WatchtowerSigningStatus::ExternalFundingRequired { content, .. } = &status else {
             return Ok(());
         };
-        let funded_tx = content.transaction.clone();
+        let template: ckb_types::packed::Transaction = content.transaction.clone().into();
+        let funded_tx: ckb_jsonrpc_types::Transaction = if template
+            .raw()
+            .outputs()
+            .into_iter()
+            .last()
+            .is_some_and(|out| out.lock() == ckb_types::packed::Script::default())
+        {
+            let mut outputs: Vec<_> = template.raw().outputs().into_iter().collect();
+            let payout_idx = outputs.len() - 1;
+            let payout_cap: u64 = outputs[payout_idx].capacity().unpack();
+            let adjusted = payout_cap
+                .checked_sub(authorization.fee)
+                .context("payout output capacity smaller than authorized fee")?;
+            outputs[payout_idx] = outputs[payout_idx]
+                .clone()
+                .as_builder()
+                .lock(authorization.destination.clone())
+                .capacity(adjusted)
+                .build();
+            template
+                .into_view()
+                .as_advanced_builder()
+                .set_outputs(outputs)
+                .build()
+                .data()
+                .into()
+        } else {
+            content.transaction.clone()
+        };
         self.sign_external_funding_watchtower_status(
             channel_id,
             status,
@@ -2427,10 +2473,42 @@ mod tests {
             required_expiry_since: None,
         };
 
+        // Rejects max_fee below the minimum required fee instead of silently underpaying.
+        assert!(
+            Agent::<FakeNode, fiber_lsp_sdk::MemoryStore>::fund_external_funding_template(
+                &template_tx,
+                authorization.destination.clone(),
+                5,
+            )
+            .is_err()
+        );
+        // Rejects payout outputs that would drop below occupied capacity after fee deduction.
+        let mut tiny_outputs: Vec<_> = template_tx.raw().outputs().into_iter().collect();
+        tiny_outputs[1] = tiny_outputs[1]
+            .clone()
+            .as_builder()
+            .capacity(2_000u64)
+            .build();
+        let tiny_template = template_tx
+            .clone()
+            .into_view()
+            .as_advanced_builder()
+            .set_outputs(tiny_outputs)
+            .build()
+            .data();
+        assert!(
+            Agent::<FakeNode, fiber_lsp_sdk::MemoryStore>::fund_external_funding_template(
+                &tiny_template,
+                authorization.destination.clone(),
+                10_000,
+            )
+            .is_err()
+        );
+
         let approval = WatchtowerApproval {
             destination: authorization.destination.clone().into(),
             fee_sponsor_lock: None,
-            max_fee: 5,
+            max_fee: 10_000,
         };
         let funded_tx =
             Agent::<FakeNode, fiber_lsp_sdk::MemoryStore>::fund_external_funding_template(
@@ -2455,7 +2533,7 @@ mod tests {
             )
             .await
             .expect("verify external-funding authorization");
-        assert_eq!(checked.fee, 5);
+        assert!(checked.fee >= 1_000 && checked.fee <= 10_000);
         agent
             .sign_external_funding_watchtower_status(
                 id,

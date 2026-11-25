@@ -3648,7 +3648,8 @@ async fn external_funding_udt_tlc_watchtower_session_flow() {
         witness.extend_from_slice(&[0; 65]);
         witness.extend_from_slice(&[9; 32]);
 
-        // Unfunded template emitted by watchtower: only commitment input[0], outputs[0..2], witness[0].
+        // Unfunded template emitted by watchtower: only commitment input[0], outputs[0..2]
+        // (with Script::default() placeholder lock on payout output[1]), and witness[0].
         let template_tx = TransactionBuilder::default()
             .input(CellInput::new(
                 outpoint.clone(),
@@ -3660,7 +3661,7 @@ async fn external_funding_udt_tlc_watchtower_session_flow() {
                 CellOutput::new_builder()
                     .capacity(142u64)
                     .type_(source.type_())
-                    .lock(destination.clone())
+                    .lock(Script::default())
                     .build(),
             )
             .output_data(50u128.to_le_bytes().to_vec().pack())
@@ -3668,7 +3669,7 @@ async fn external_funding_udt_tlc_watchtower_session_flow() {
             .build()
             .data();
 
-        // Wallet funds the template with its own cell_dep, funding input, change output, and witnesses.
+        // Wallet replaces placeholder payout lock with destination and adds cell_dep, funding input, change output, and witnesses.
         let wallet_witness_1 = vec![0xdeu8, 0xad, 0xbe, 0xef];
         let wallet_witness_2 = vec![0xcau8, 0xfe];
         let funded_tx = template_tx
@@ -3677,12 +3678,18 @@ async fn external_funding_udt_tlc_watchtower_session_flow() {
             .as_advanced_builder()
             .cell_dep(wallet_dep.clone())
             .input(CellInput::new(wallet_cell_outpoint.clone(), 0))
-            .output(
+            .set_outputs(vec![
+                remainder.clone(),
+                CellOutput::new_builder()
+                    .capacity(142u64)
+                    .type_(source.type_())
+                    .lock(destination.clone())
+                    .build(),
                 CellOutput::new_builder()
                     .capacity(153u64) // 300 - 142 (UDT cell) - 5 (fee)
                     .lock(wallet_funding_lock.clone())
                     .build(),
-            )
+            ])
             .output_data(ckb_types::packed::Bytes::default())
             .witness(wallet_witness_1.clone().pack())
             .witness(wallet_witness_2.clone().pack())
@@ -3784,4 +3791,393 @@ async fn external_funding_udt_tlc_watchtower_session_flow() {
         );
         assert_eq!(submitted_tx.raw().cell_deps().get(0).unwrap(), wallet_dep);
     }
+}
+
+#[cfg(feature = "json")]
+#[tokio::test]
+async fn external_funding_status_result_handler_timeout_tlc_and_single_output_settlement() {
+    use crate::{
+        HostedSession, HostedSessionState, ProcessOutcome, SubmitParams, WatchtowerEventHandler,
+        WatchtowerHealthStatus,
+    };
+
+    #[derive(Default)]
+    struct RecordingHandler {
+        updates: Vec<WatchtowerHealthStatus>,
+    }
+
+    impl WatchtowerEventHandler for RecordingHandler {
+        fn on_status_update(&mut self, status: &WatchtowerHealthStatus) {
+            self.updates.push(status.clone());
+        }
+    }
+
+    // 1. Verify `handle_watchtower_status_result` + `WatchtowerEventHandler` notifications for
+    //    Healthy, InBackoff, and PendingExternalFunding (1-output `two_parties_all_settled`),
+    //    then test timeout TLC (`required_expiry_since = Some(...)`) end-to-end.
+    let f = Fixture::new(false).await;
+    f.sign(false, 0, f.opening()).await;
+    f.sign(true, 0, f.opening()).await;
+    let record = f
+        .signer
+        .recovery_records()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|r| !r.reference.for_remote)
+        .expect("local opening recovery record");
+    let source = record.transaction.raw().outputs().get(0).unwrap();
+    let outpoint = OutPoint::new(record.transaction.calc_tx_hash(), 0);
+    let destination = Script::new_builder()
+        .args([0x42u8; 20].as_slice().pack())
+        .build();
+    let channel_id = fiber_types::Hash256::from([0x51; 32]);
+    let request_id = fiber_types::Hash256::from([0x61; 32]);
+
+    let mut directory = HostedSessionState::default();
+    directory
+        .bindings
+        .insert(channel_id, f.signer.channel_key_id());
+    let root = RootSigner::open(RootKey::import([42; 32]).unwrap(), f.store.clone())
+        .await
+        .unwrap();
+    let session = HostedSession::new(root).with_state(directory);
+
+    // 1a. NoSignatureRequired and Backoff emit Healthy / InBackoff to WatchtowerEventHandler -> Idle.
+    let mut handler = RecordingHandler::default();
+    let chain = TestChain {
+        outpoint: outpoint.clone(),
+        cell: VerifiedCell {
+            output: source.clone(),
+            data: vec![],
+        },
+        now: 100,
+        mature: true,
+        extras: vec![],
+    };
+    let (health_healthy, idle_healthy) = session
+        .handle_watchtower_status_result(
+            fiber_json_types::GetWatchtowerSigningStatusResult {
+                channel_id: channel_id.into(),
+                status: fiber_json_types::WatchtowerSigningStatus::NoSignatureRequired,
+            },
+            1_000,
+            None,
+            &chain,
+            &mut handler,
+        )
+        .await
+        .expect("healthy status");
+    assert!(matches!(idle_healthy, ProcessOutcome::Idle));
+    assert_eq!(
+        health_healthy,
+        WatchtowerHealthStatus::Healthy { channel_id }
+    );
+    let (health_backoff, idle_backoff) = session
+        .handle_watchtower_status_result(
+            fiber_json_types::GetWatchtowerSigningStatusResult {
+                channel_id: channel_id.into(),
+                status: fiber_json_types::WatchtowerSigningStatus::Backoff {
+                    retry_after_ms: 60_000,
+                    consecutive_expired_requests: 2,
+                },
+            },
+            1_000,
+            None,
+            &chain,
+            &mut handler,
+        )
+        .await
+        .expect("backoff status");
+    assert!(matches!(idle_backoff, ProcessOutcome::Idle));
+    assert_eq!(
+        health_backoff,
+        WatchtowerHealthStatus::InBackoff {
+            channel_id,
+            retry_after_ms: 60_000,
+            remaining_backoff_ms: 59_000,
+            consecutive_expired_requests: 2,
+        }
+    );
+    assert_eq!(handler.updates, vec![health_healthy, health_backoff]);
+
+    // 1b. Single-output `two_parties_all_settled` CKB settlement via `handle_watchtower_status_result`:
+    //     simulate a successor commitment cell where the remote party already settled (`0xFF`),
+    //     leaving only local balance (`400`) in a 1-output template with `Script::default()` lock.
+    let body = fiber_types::settlement_data_to_witness(
+        &record.settlement.data,
+        false,
+        record.settlement.local_settlement_key,
+        record.settlement.remote_settlement_key,
+    );
+    let mut after_remote = body.clone();
+    // Zero remote balance slot (bytes 37..73) so only local remains.
+    after_remote[37..73].fill(0);
+    let mut prev_args = source.lock().args().raw_data()[..36].to_vec();
+    prev_args.extend_from_slice(&fiber_types::blake2b_hash_with_salt(&after_remote, &[])[..20]);
+    prev_args.push(1);
+    prev_args.push(fiber_types::ChannelFeatures::V2.bits());
+    let single_party_cell = source
+        .clone()
+        .as_builder()
+        .capacity(400u64)
+        .lock(source.lock().as_builder().args(prev_args.pack()).build())
+        .build();
+    let single_outpoint = outpoint;
+    let single_chain = TestChain {
+        outpoint: single_outpoint.clone(),
+        cell: VerifiedCell {
+            output: single_party_cell,
+            data: vec![],
+        },
+        now: 100,
+        mature: true,
+        extras: vec![],
+    };
+    let mut single_witness = vec![16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0, 1];
+    single_witness.extend_from_slice(&after_remote);
+    single_witness.extend_from_slice(&[0xfe, 0]);
+    single_witness.extend_from_slice(&[0; 65]);
+    let single_template = TransactionBuilder::default()
+        .input(CellInput::new(single_outpoint, 0))
+        .output(
+            CellOutput::new_builder()
+                .capacity(400u64)
+                .lock(Script::default())
+                .build(),
+        )
+        .output_data(ckb_types::packed::Bytes::default())
+        .witness(single_witness.pack())
+        .build()
+        .data();
+    let single_funded = single_template
+        .clone()
+        .into_view()
+        .as_advanced_builder()
+        .set_outputs(vec![CellOutput::new_builder()
+            .capacity(395u64)
+            .lock(destination.clone())
+            .build()])
+        .build()
+        .data();
+    let single_auth = OnchainSpendAuthorization {
+        source: record.reference.clone(),
+        destination: destination.clone(),
+        fee_sponsor_lock: None,
+        fee: 5,
+        additional_inputs: vec![],
+        cell_deps: vec![],
+    };
+    let (_, ProcessOutcome::NeedConfirmation(pending_single)) = session
+        .handle_watchtower_status_result(
+            fiber_json_types::GetWatchtowerSigningStatusResult {
+                channel_id: channel_id.into(),
+                status: fiber_json_types::WatchtowerSigningStatus::ExternalFundingRequired {
+                    request_id: request_id.into(),
+                    content: fiber_json_types::OnchainSigningContent {
+                        key_purpose: fiber_json_types::OnchainKeyPurpose::Settlement,
+                        transaction: single_template.into(),
+                    },
+                    expires_at_ms: 1_800_000,
+                    required_expiry_since: None,
+                },
+            },
+            1_000,
+            Some((single_funded.clone().into(), single_auth)),
+            &single_chain,
+            &mut handler,
+        )
+        .await
+        .expect("single-output two_parties_all_settled flow")
+    else {
+        panic!("expected NeedConfirmation");
+    };
+    assert!(matches!(
+        handler.updates.last(),
+        Some(WatchtowerHealthStatus::PendingExternalFunding {
+            channel_id: ch,
+            request_id: req,
+            required_expiry_since: None,
+            ..
+        }) if *ch == channel_id && *req == request_id
+    ));
+    let SubmitParams::Watchtower(single_params) = session
+        .confirm_external_funding_onchain(pending_single, &single_chain)
+        .await
+        .expect("confirm single-output watchtower tx")
+    else {
+        panic!("expected watchtower submit params");
+    };
+    assert_eq!(
+        ckb_types::packed::Transaction::from(single_params.signed_transaction).as_slice(),
+        single_funded.as_slice()
+    );
+
+    // 2. Timeout TLC (`required_expiry_since = Some(...)`): build a verified commitment with an
+    //    offered TLC, verify `required_expiry_since` is propagated and enforced.
+    let f2 = Fixture::new(false).await;
+    f2.signer.authorize_payment(f2.terms(false)).await.unwrap();
+    f2.sign(false, 0, f2.opening()).await;
+    f2.sign(true, 0, f2.opening()).await;
+    let outgoing_local = SettlementData {
+        local_amount: 350,
+        remote_amount: 600,
+        tlcs: vec![f2.tlc(false, false)],
+    };
+    let outgoing_remote = SettlementData {
+        local_amount: 350,
+        remote_amount: 600,
+        tlcs: vec![f2.tlc(false, true)],
+    };
+    f2.sign(false, 1, outgoing_local).await;
+    f2.sign(true, 1, outgoing_remote).await;
+
+    let tlc_record = f2
+        .signer
+        .recovery_records()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|r| !r.reference.for_remote && r.reference.version == 2)
+        .expect("local commitment with offered TLC");
+    let tlc_source = tlc_record.transaction.raw().outputs().get(0).unwrap();
+    let tlc_outpoint = OutPoint::new(tlc_record.transaction.calc_tx_hash(), 0);
+    let wallet_outpoint = OutPoint::new([0x91u8; 32].pack(), 0);
+    let expiry = tlc_record.settlement.data.tlcs[0].expiry;
+    let tlc_chain = TestChain {
+        outpoint: tlc_outpoint.clone(),
+        cell: VerifiedCell {
+            output: tlc_source.clone(),
+            data: vec![],
+        },
+        now: expiry + 10_000,
+        mature: true,
+        extras: vec![(
+            wallet_outpoint.clone(),
+            VerifiedCell {
+                output: CellOutput::new_builder()
+                    .capacity(100u64)
+                    .lock(destination.clone())
+                    .build(),
+                data: vec![],
+            },
+        )],
+    };
+    let tlc_body = fiber_types::settlement_data_to_witness(
+        &tlc_record.settlement.data,
+        false,
+        tlc_record.settlement.local_settlement_key,
+        tlc_record.settlement.remote_settlement_key,
+    );
+    let mut tlc_next = tlc_body.clone();
+    tlc_next.drain(1..98);
+    tlc_next[0] = 0;
+    let mut tlc_args = tlc_source.lock().args().raw_data()[..36].to_vec();
+    tlc_args.extend_from_slice(&fiber_types::blake2b_hash_with_salt(&tlc_next, &[])[..20]);
+    tlc_args.push(1);
+    tlc_args.push(fiber_types::ChannelFeatures::V2.bits());
+    let tlc_remainder = tlc_source
+        .clone()
+        .as_builder()
+        .capacity(940u64)
+        .lock(tlc_source.lock().as_builder().args(tlc_args.pack()).build())
+        .build();
+    let mut tlc_witness = vec![16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0, 1];
+    tlc_witness.extend_from_slice(&tlc_body);
+    tlc_witness.extend_from_slice(&[0, 0]);
+    tlc_witness.extend_from_slice(&[0; 65]);
+    let required_since = fiber_types::watchtower::settlement_timestamp_since(expiry);
+    let tlc_template = TransactionBuilder::default()
+        .input(CellInput::new(
+            tlc_outpoint,
+            u64::from_le_bytes(f2.parameters.delay_epoch),
+        ))
+        .output(tlc_remainder.clone())
+        .output_data(ckb_types::packed::Bytes::default())
+        .output(
+            CellOutput::new_builder()
+                .capacity(50u64)
+                .lock(Script::default())
+                .build(),
+        )
+        .output_data(ckb_types::packed::Bytes::default())
+        .witness(tlc_witness.pack())
+        .build()
+        .data();
+    let tlc_funded = tlc_template
+        .clone()
+        .into_view()
+        .as_advanced_builder()
+        .input(CellInput::new(wallet_outpoint.clone(), required_since))
+        .set_outputs(vec![
+            tlc_remainder,
+            CellOutput::new_builder()
+                .capacity(145u64) // 50 TLC + 100 wallet - 5 fee
+                .lock(destination.clone())
+                .build(),
+        ])
+        .witness([0xdeu8, 0xad].pack())
+        .build()
+        .data();
+    let mut dir2 = HostedSessionState::default();
+    dir2.bindings.insert(channel_id, f2.signer.channel_key_id());
+    let root2 = RootSigner::open(RootKey::import([42; 32]).unwrap(), f2.store.clone())
+        .await
+        .unwrap();
+    let session2 = HostedSession::new(root2).with_state(dir2);
+    let tlc_auth = OnchainSpendAuthorization {
+        source: tlc_record.reference.clone(),
+        destination,
+        fee_sponsor_lock: None,
+        fee: 5,
+        additional_inputs: vec![wallet_outpoint],
+        cell_deps: vec![],
+    };
+    let tlc_status = fiber_json_types::WatchtowerSigningStatus::ExternalFundingRequired {
+        request_id: request_id.into(),
+        content: fiber_json_types::OnchainSigningContent {
+            key_purpose: fiber_json_types::OnchainKeyPurpose::Tlc {
+                commitment_number: 1,
+            },
+            transaction: tlc_template.into(),
+        },
+        expires_at_ms: 1_800_000,
+        required_expiry_since: Some(required_since),
+    };
+    let mut handler2 = RecordingHandler::default();
+    let (_, ProcessOutcome::NeedConfirmation(pending_tlc)) = session2
+        .handle_watchtower_status_result(
+            fiber_json_types::GetWatchtowerSigningStatusResult {
+                channel_id: channel_id.into(),
+                status: tlc_status,
+            },
+            1_000,
+            Some((tlc_funded.clone().into(), tlc_auth)),
+            &tlc_chain,
+            &mut handler2,
+        )
+        .await
+        .expect("timeout TLC external-funding status")
+    else {
+        panic!("expected NeedConfirmation for timeout TLC");
+    };
+    assert_eq!(pending_tlc.required_expiry_since(), Some(required_since));
+    assert!(matches!(
+        handler2.updates.as_slice(),
+        [WatchtowerHealthStatus::PendingExternalFunding {
+            required_expiry_since: Some(since),
+            ..
+        }] if *since == required_since
+    ));
+    let SubmitParams::Watchtower(tlc_params) = session2
+        .confirm_external_funding_onchain(pending_tlc, &tlc_chain)
+        .await
+        .expect("confirm timeout TLC watchtower tx")
+    else {
+        panic!("expected watchtower submit params");
+    };
+    assert_eq!(
+        ckb_types::packed::Transaction::from(tlc_params.signed_transaction).as_slice(),
+        tlc_funded.as_slice()
+    );
 }

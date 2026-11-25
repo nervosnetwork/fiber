@@ -583,6 +583,11 @@ where
                             == fiber_types::external_funding_watchtower_tx_hash(
                                 &existing.content.transaction,
                             )
+                        && fiber_types::validate_external_funding_retry_witness_zero(
+                            &submitted_tx,
+                            &signature,
+                        )
+                        .is_ok()
                     {
                         return Ok(SubmitWatchtowerSignatureResult::AlreadyApplied);
                     }
@@ -597,6 +602,11 @@ where
                 {
                     if applied.signature == signature
                         && applied.signed_transaction_hash == submitted_tx_hash
+                        && fiber_types::validate_external_funding_retry_witness_zero(
+                            &submitted_tx,
+                            &signature,
+                        )
+                        .is_ok()
                     {
                         return Ok(SubmitWatchtowerSignatureResult::AlreadyApplied);
                     }

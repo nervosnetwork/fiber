@@ -468,14 +468,50 @@ fn is_absolute_timestamp_since(raw_since: u64) -> bool {
     (raw_since >> 56) == 0x40
 }
 
-/// Deterministic digest binding an externally funded watchtower transaction's raw body and all
-/// client funding witnesses (`witness[1..]`), independent of whether `witness[0]` carries
-/// the placeholder or applied signature.
+/// Validate `witness[0]` of a retried externally funded watchtower transaction submission.
+///
+/// Requires `witness[0]` to be present, parse as a single-unlock V2 settlement witness, and carry
+/// either the all-zero placeholder or `signature` in its 65-byte signature slot.
+pub fn validate_external_funding_retry_witness_zero(
+    tx: &Transaction,
+    signature: &[u8; 65],
+) -> Result<(), String> {
+    let w0 = tx
+        .witnesses()
+        .get(0)
+        .ok_or_else(|| "externally funded transaction is missing witness[0]".to_string())?;
+    let w0_bytes = w0.raw_data();
+    let (sig_start, sig_end) = settlement_witness_signature_range(&w0_bytes)?;
+    let sig_slot = &w0_bytes[sig_start..sig_end];
+    if sig_slot != [0u8; 65].as_slice() && sig_slot != signature.as_slice() {
+        return Err(
+            "externally funded watchtower transaction witness[0] signature slot must be zero placeholder or match submitted signature"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// Deterministic digest binding an externally funded watchtower transaction's raw body,
+/// normalized `witness[0]` (with its 65-byte signature slot zeroed), and all client funding
+/// witnesses (`witness[1..]`), independent of whether `witness[0]` carries the placeholder or
+/// applied signature.
 pub fn external_funding_watchtower_tx_hash(tx: &Transaction) -> Hash256 {
     use ckb_types::prelude::*;
 
     let mut blake2b = ckb_hash::new_blake2b();
     blake2b.update(tx.raw().as_slice());
+    if let Some(w0) = tx.witnesses().get(0) {
+        blake2b.update(&[1u8]);
+        let mut w0_bytes = w0.raw_data().to_vec();
+        if let Ok((sig_start, sig_end)) = settlement_witness_signature_range(&w0_bytes) {
+            w0_bytes[sig_start..sig_end].fill(0);
+        }
+        blake2b.update(&(w0_bytes.len() as u64).to_le_bytes());
+        blake2b.update(&w0_bytes);
+    } else {
+        blake2b.update(&[0u8]);
+    }
     let funding_witnesses: Vec<_> = tx.witnesses().into_iter().skip(1).collect();
     blake2b.update(&(funding_witnesses.len() as u64).to_le_bytes());
     for witness in funding_witnesses {
@@ -581,16 +617,14 @@ pub fn validate_and_normalize_external_funding_watchtower_tx(
                 .to_string(),
         );
     }
-    let commitment_outpoint = template_input0.previous_output();
-    if submitted_raw
-        .inputs()
-        .into_iter()
-        .skip(1)
-        .any(|input| input.previous_output() == commitment_outpoint)
-    {
-        return Err(
-            "externally funded watchtower transaction duplicates commitment input[0]".to_string(),
-        );
+    let mut seen_outpoints = std::collections::HashSet::with_capacity(inputs_len);
+    for input in submitted_raw.inputs() {
+        if !seen_outpoints.insert(input.previous_output()) {
+            return Err(
+                "externally funded watchtower transaction contains duplicate input outpoints"
+                    .to_string(),
+            );
+        }
     }
 
     // When the template carries a residual commitment output (`outputs.len() == 2`),
@@ -662,6 +696,9 @@ pub fn validate_and_normalize_external_funding_watchtower_tx(
     let template_w0_bytes = template_w0.raw_data();
     let submitted_w0_bytes = submitted_w0.raw_data();
     let (sig_start, sig_end) = settlement_witness_signature_range(&template_w0_bytes)?;
+    if template_w0_bytes[sig_start..sig_end] != [0u8; 65] {
+        return Err("template witness[0] signature slot must be all-zero placeholder".to_string());
+    }
     if submitted_w0_bytes.len() != template_w0_bytes.len()
         || submitted_w0_bytes[..sig_start] != template_w0_bytes[..sig_start]
         || submitted_w0_bytes[sig_end..] != template_w0_bytes[sig_end..]
@@ -1566,7 +1603,7 @@ mod key_material_tests {
         )
         .is_ok());
 
-        // 6. Duplicate inputs[0] rejected.
+        // 6. Duplicate inputs (both duplicating inputs[0] and duplicates among inputs[1..]) rejected.
         let dup_input = funded
             .clone()
             .into_view()
@@ -1587,6 +1624,80 @@ mod key_material_tests {
             Some(&sig),
         )
         .is_err());
+
+        let dup_funding_input = funded
+            .clone()
+            .into_view()
+            .as_advanced_builder()
+            .input(funded.raw().inputs().get(1).unwrap())
+            .build()
+            .data();
+        assert!(validate_and_normalize_external_funding_watchtower_tx(
+            &template,
+            &dup_funding_input,
+            Some(expiry_since),
+            Some(&sig),
+        )
+        .is_err());
+
+        // 6b. Template with non-zero signature slot is rejected.
+        let nonzero_template = template
+            .clone()
+            .into_view()
+            .as_advanced_builder()
+            .set_witnesses(vec![build_template_witness(1, false, sig).pack()])
+            .build()
+            .data();
+        assert!(validate_and_normalize_external_funding_watchtower_tx(
+            &nonzero_template,
+            &funded,
+            Some(expiry_since),
+            Some(&sig),
+        )
+        .is_err());
+
+        // 6c. Retry witness[0] validation and hash binding reject missing or tampered witness[0].
+        let funded_with_sig = funded
+            .clone()
+            .into_view()
+            .as_advanced_builder()
+            .set_witnesses(vec![
+                build_template_witness(1, false, sig).pack(),
+                funded.witnesses().get(1).unwrap(),
+                funded.witnesses().get(2).unwrap(),
+            ])
+            .build()
+            .data();
+        assert!(validate_external_funding_retry_witness_zero(&funded, &sig).is_ok());
+        assert!(validate_external_funding_retry_witness_zero(&funded_with_sig, &sig).is_ok());
+        assert_eq!(
+            external_funding_watchtower_tx_hash(&funded),
+            external_funding_watchtower_tx_hash(&funded_with_sig)
+        );
+        let missing_w0 = funded
+            .clone()
+            .into_view()
+            .as_advanced_builder()
+            .set_witnesses(vec![])
+            .build()
+            .data();
+        assert!(validate_external_funding_retry_witness_zero(&missing_w0, &sig).is_err());
+        assert_ne!(
+            external_funding_watchtower_tx_hash(&funded),
+            external_funding_watchtower_tx_hash(&missing_w0)
+        );
+        let wrong_sig_w0 = funded
+            .clone()
+            .into_view()
+            .as_advanced_builder()
+            .set_witnesses(vec![
+                build_template_witness(1, false, [0x99u8; 65]).pack(),
+                funded.witnesses().get(1).unwrap(),
+                funded.witnesses().get(2).unwrap(),
+            ])
+            .build()
+            .data();
+        assert!(validate_external_funding_retry_witness_zero(&wrong_sig_w0, &sig).is_err());
 
         // 7. Tampered inputs[0], outputs[0] (when template has 2 outputs), outputs_data[0], or witness[0] rejected.
         let bad_out0 = funded

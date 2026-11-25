@@ -53,10 +53,11 @@ pub use watchtower::{
     commitment_lock_settlement_hash, external_funding_watchtower_tx_hash,
     settlement_data_to_witness, settlement_matches_commitment_lock_args,
     settlement_matches_commitment_tx, settlement_tlc_local_pubkey_hash, settlement_tlc_to_witness,
-    settlement_witness_hash, validate_and_normalize_external_funding_watchtower_tx, ChannelData,
-    LastAppliedWatchtowerSignature, PendingWatchtowerRequest, RevocationData, SettlementData,
-    SettlementKey, SettlementTlc, SignedWatchtowerRequest, WatchChannelKeys,
-    WatchtowerExternalSignerState, WatchtowerSignerState, MAX_EXTERNAL_FUNDING_WATCHTOWER_TX_BYTES,
+    settlement_witness_hash, validate_and_normalize_external_funding_watchtower_tx,
+    validate_external_funding_retry_witness_zero, ChannelData, LastAppliedWatchtowerSignature,
+    PendingWatchtowerRequest, RevocationData, SettlementData, SettlementKey, SettlementTlc,
+    SignedWatchtowerRequest, WatchChannelKeys, WatchtowerExternalSignerState,
+    WatchtowerSignerState, MAX_EXTERNAL_FUNDING_WATCHTOWER_TX_BYTES,
     MAX_EXTERNAL_FUNDING_WATCHTOWER_TX_ITEMS, MAX_WITNESS_TLC_COUNT,
 };
 

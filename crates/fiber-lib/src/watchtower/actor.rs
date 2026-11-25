@@ -1360,32 +1360,49 @@ fn prune_dead_fee_signing_requests<S: WatchtowerStore>(
         return;
     };
     // Do not perform RPC calls while holding the signer-state write lock.
-    let dead: HashSet<Hash256> = external
+    // Distinguish requests whose funding input died while `inputs[0]` is still live
+    // (evict + clear `last_applied`) from multi-input settlements that just confirmed on-chain
+    // between `tip_block_number` and this check (`inputs[0]` is also dead -> preserve `last_applied`).
+    let mut confirmed_spent_inputs = HashSet::new();
+    let mut dead_fee_only = HashSet::new();
+    for (id, content) in external
         .pending_requests
         .iter()
-        .map(|(id, req)| (id, &req.content))
+        .map(|(id, req)| (*id, &req.content))
         .chain(
             external
                 .signed_signatures
                 .iter()
-                .map(|(id, req)| (id, &req.content)),
+                .map(|(id, req)| (*id, &req.content)),
         )
-        .filter_map(|(id, content)| {
-            content
-                .transaction
-                .raw()
-                .inputs()
-                .into_iter()
-                .skip(1)
-                .any(|input| {
-                    client
-                        .get_live_cell(input.previous_output().into(), false)
-                        .is_ok_and(|cell| cell.status != "live")
-                })
-                .then_some(*id)
-        })
-        .collect();
-    evict_dead_fee_signing_requests(events, store, node_id, channel_id, &dead);
+    {
+        let mut inputs = content.transaction.raw().inputs().into_iter();
+        let Some(commitment_input) = inputs.next() else {
+            continue;
+        };
+        let fee_input_dead = inputs.any(|input| {
+            client
+                .get_live_cell(input.previous_output().into(), false)
+                .is_ok_and(|cell| cell.status != "live")
+        });
+        if !fee_input_dead {
+            continue;
+        }
+        let commitment_outpoint = commitment_input.previous_output();
+        match client.get_live_cell(commitment_outpoint.clone().into(), false) {
+            Ok(cell) if cell.status != "live" => {
+                confirmed_spent_inputs.insert(commitment_outpoint);
+            }
+            Ok(_) => {
+                dead_fee_only.insert(id);
+            }
+            Err(_) => {
+                // Skip eviction on transient RPC failure so we never falsely clear `last_applied`.
+            }
+        }
+    }
+    prune_spent_signing_requests(events, store, node_id, channel_id, &confirmed_spent_inputs);
+    evict_dead_fee_signing_requests(events, store, node_id, channel_id, &dead_fee_only);
 }
 
 fn prune_spent_signing_requests<S: WatchtowerStore>(
@@ -2088,14 +2105,14 @@ fn build_settlement_tx<S: WatchtowerStore>(
             let previous = external
                 .signed_signatures
                 .iter()
-                .map(|(id, req)| (*id, &req.content))
+                .map(|(id, req)| (*id, &req.content, true))
                 .chain(
                     external
                         .pending_requests
                         .iter()
-                        .map(|(id, req)| (*id, &req.content)),
+                        .map(|(id, req)| (*id, &req.content, false)),
                 )
-                .find(|(_, content)| {
+                .find(|(_, content, _)| {
                     content.key_purpose == key_purpose
                         && content
                             .transaction
@@ -2114,7 +2131,18 @@ fn build_settlement_tx<S: WatchtowerStore>(
                                 witness.raw_data().as_ref() == expected_witness.as_slice()
                             })
                 });
-            if let Some((previous_id, content)) = previous {
+            if let Some((previous_id, content, from_signed)) = previous {
+                if from_signed {
+                    return apply_existing_signed_settlement_tx(
+                        events,
+                        store,
+                        self_node_id,
+                        channel_data.channel_id,
+                        previous_id,
+                        content,
+                        unlock.with_preimage,
+                    );
+                }
                 return build_signed_settlement_tx(
                     events,
                     store,
@@ -2800,6 +2828,54 @@ fn build_signed_settlement_tx<S: WatchtowerStore>(
                 .transpose()
         }
     }
+}
+
+/// Apply an already-accepted entry from `signed_signatures` without ever falling back to
+/// inserting a client-funded (potentially >2-output) transaction into `pending_requests` if
+/// the channel was concurrently removed and recreated.
+fn apply_existing_signed_settlement_tx<S: WatchtowerStore>(
+    events: &crate::signing::SigningEvents,
+    store: &S,
+    node_id: &NodeId,
+    channel_id: Hash256,
+    request_id: Hash256,
+    expected_content: &fiber_types::OnchainSigningContent,
+    with_preimage: bool,
+) -> Result<Option<TransactionView>, Box<dyn std::error::Error>> {
+    let signing_scope = events.watchtower(node_id);
+    let mut signing_update = signing_scope.prepare_update();
+    let applied = store.update_watchtower_signer(
+        node_id,
+        &channel_id,
+        |state| -> Result<Option<(TransactionView, [u8; 65])>, std::convert::Infallible> {
+            let fiber_types::WatchtowerSignerState::External(external) = state else {
+                return Ok(None);
+            };
+            let Some(signed) = external.signed_signatures.get(&request_id) else {
+                return Ok(None);
+            };
+            if &signed.content != expected_content {
+                return Ok(None);
+            }
+            let signed_tx = signed.content.transaction.clone().into_view();
+            let signature = signed.signature;
+            let signed_transaction_hash =
+                fiber_types::external_funding_watchtower_tx_hash(&signed.content.transaction);
+            external.last_applied = Some(fiber_types::LastAppliedWatchtowerSignature {
+                request_id,
+                signature,
+                signed_transaction_hash,
+            });
+            signing_update.watchtower_state(channel_id, state);
+            Ok(Some((signed_tx, signature)))
+        },
+    )?;
+    signing_update.publish();
+    applied
+        .map(|(signed_tx, signature)| {
+            apply_external_settlement_signature(signed_tx, signature, with_preimage)
+        })
+        .transpose()
 }
 
 fn splice_commitment_witness_signature(
