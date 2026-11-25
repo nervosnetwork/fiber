@@ -21,7 +21,7 @@ use crate::fiber_types::{
     Hash256, HashAlgorithm, PaymentStatus, PrevTlcInfo, Privkey, SettlementKey,
     TenantRegistryPayload, TenantRegistrySignature, TlcErrorCode, WatchChannelKeys,
 };
-use crate::invoice::{Currency, InvoiceBuilder};
+use crate::invoice::{CkbInvoiceStatus, Currency, InvoiceBuilder, InvoiceStore};
 
 use crate::fiber::delivery::{
     DeliveryDecision, DeliveryDispatchError, PaymentOutcomeDecision, PaymentOutcomeRequest,
@@ -2381,6 +2381,7 @@ struct BufferedDeliveryTest {
     tenant: HostedTenantRecord,
     request: TrampolineForwardingRequest,
     dispatches: Arc<AtomicUsize>,
+    failures: Arc<AtomicUsize>,
 }
 
 impl BufferedDeliveryTest {
@@ -2398,6 +2399,7 @@ impl BufferedDeliveryTest {
         let store = open_lsp_store(&config);
         let manager = LspPaymentDeliveryManager::new(store.clone());
         let dispatches = Arc::new(AtomicUsize::new(0));
+        let failures = Arc::new(AtomicUsize::new(0));
         let lsp_key = Privkey::from(&[9; 32]);
         let tenant_key = Privkey::from(&[1; 32]);
         let service = start_test_lsp_service(
@@ -2406,7 +2408,7 @@ impl BufferedDeliveryTest {
             Arc::new(FakeRuntimeFactory::new(Arc::new(AtomicUsize::new(0)))),
             lsp_key.clone(),
             dispatches.clone(),
-            Arc::new(AtomicUsize::new(0)),
+            failures.clone(),
         )
         .await;
         let tenant_id =
@@ -2431,6 +2433,7 @@ impl BufferedDeliveryTest {
             tenant,
             request,
             dispatches,
+            failures,
         };
         test.bind_channel(Self::channel_a(), None);
         test
@@ -2452,6 +2455,21 @@ impl BufferedDeliveryTest {
         self.store
             .namespaced(NodeNamespace::hosted_tenant(self.tenant.tenant_id.as_str()))
             .insert_channel_actor_state(channel);
+    }
+
+    fn cancel_invoice(&self) {
+        let tenant_store = self
+            .store
+            .namespaced(NodeNamespace::hosted_tenant(self.tenant.tenant_id.as_str()));
+        let invoice = LspInvoiceRegistry::new(self.store.clone())
+            .get(&self.tenant.tenant_pubkey, &self.request.payment_hash)
+            .unwrap()
+            .unwrap()
+            .invoice;
+        tenant_store.insert_invoice(invoice, None).unwrap();
+        tenant_store
+            .update_invoice_status(&self.request.payment_hash, CkbInvoiceStatus::Cancelled)
+            .unwrap();
     }
 
     fn set_channel_state(&self, channel_id: Hash256, status: crate::fiber_types::ChannelState) {
@@ -2508,6 +2526,107 @@ impl BufferedDeliveryTest {
         .await;
         ractor::call!(self.service, LspServiceMessage::GetStatus).unwrap();
     }
+}
+
+#[tokio::test]
+async fn cancelled_hosted_invoice_fails_new_delivery_without_dispatch() {
+    let test = BufferedDeliveryTest::new().await;
+    test.cancel_invoice();
+    let accepted = test.accept().await;
+
+    wait_for_delivery_status(
+        &test.manager,
+        accepted.payment_hash,
+        LspPaymentDeliveryStatus::Failed {
+            reason: "hosted invoice was cancelled".to_string(),
+        },
+    )
+    .await;
+    let delivery = test.manager.get(&accepted.key()).unwrap().unwrap();
+    assert_eq!(
+        delivery.last_error_code,
+        Some(TlcErrorCode::InvoiceCancelled)
+    );
+    assert_eq!(test.dispatches.load(Ordering::Relaxed), 0);
+    assert_eq!(test.failures.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn cancelling_buffered_hosted_invoice_fails_upstream_without_waiting_for_deadline() {
+    let test = BufferedDeliveryTest::new().await;
+    let accepted = test.accept().await;
+    assert_eq!(accepted.status, LspPaymentDeliveryStatus::Deferred);
+    test.cancel_invoice();
+    test.service
+        .send_message(LspServiceMessage::InvoiceCancelled {
+            tenant_id: test.tenant.tenant_id.clone(),
+            payment_hash: accepted.payment_hash,
+        })
+        .unwrap();
+    // The first barrier follows the cancellation notice; the second follows
+    // the ResumeDelivery message it enqueues. No retry timer needs to fire.
+    ractor::call!(test.service, LspServiceMessage::GetStatus).unwrap();
+    ractor::call!(test.service, LspServiceMessage::GetStatus).unwrap();
+
+    let delivery = test.manager.get(&accepted.key()).unwrap().unwrap();
+    assert_eq!(
+        delivery.status,
+        LspPaymentDeliveryStatus::Failed {
+            reason: "hosted invoice was cancelled".to_string(),
+        }
+    );
+    assert_eq!(
+        delivery.last_error_code,
+        Some(TlcErrorCode::InvoiceCancelled)
+    );
+    assert_eq!(test.dispatches.load(Ordering::Relaxed), 0);
+    assert_eq!(test.failures.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn cancellation_notice_cannot_wake_another_tenants_delivery() {
+    let test = BufferedDeliveryTest::new().await;
+    let accepted = test.accept().await;
+    test.service
+        .send_message(LspServiceMessage::InvoiceCancelled {
+            tenant_id: TenantId::new("other-tenant").unwrap(),
+            payment_hash: accepted.payment_hash,
+        })
+        .unwrap();
+    ractor::call!(test.service, LspServiceMessage::GetStatus).unwrap();
+
+    let delivery = test.manager.get(&accepted.key()).unwrap().unwrap();
+    assert_eq!(delivery.status, LspPaymentDeliveryStatus::Deferred);
+    assert_eq!(test.dispatches.load(Ordering::Relaxed), 0);
+    assert_eq!(test.failures.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn restart_fails_buffered_delivery_for_cancelled_hosted_invoice() {
+    let mut test = BufferedDeliveryTest::new().await;
+    let accepted = test.accept().await;
+    test.service.stop_and_wait(None, None).await.unwrap();
+    test.cancel_invoice();
+    test.service = start_test_lsp_service(
+        test.store.clone(),
+        test.config.clone(),
+        Arc::new(FakeRuntimeFactory::new(Arc::new(AtomicUsize::new(0)))),
+        Privkey::from(&[9; 32]),
+        test.dispatches.clone(),
+        test.failures.clone(),
+    )
+    .await;
+
+    wait_for_delivery_status(
+        &test.manager,
+        accepted.payment_hash,
+        LspPaymentDeliveryStatus::Failed {
+            reason: "hosted invoice was cancelled".to_string(),
+        },
+    )
+    .await;
+    assert_eq!(test.dispatches.load(Ordering::Relaxed), 0);
+    assert_eq!(test.failures.load(Ordering::Relaxed), 1);
 }
 
 #[tokio::test]

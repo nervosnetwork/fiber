@@ -324,10 +324,26 @@ where
         extensions: &Extensions,
         payment_hash: InvoiceParams,
     ) -> Result<GetInvoiceResult, ErrorObjectOwned> {
-        self.backend_for(extensions)
-            .await?
-            .cancel_invoice(payment_hash)
-            .await
+        let scope = self.backend.resolve(extensions).await?;
+        #[cfg(feature = "lsp")]
+        let tenant_id = scope.tenant().map(|tenant| tenant.tenant_id.clone());
+        #[cfg(feature = "lsp")]
+        let hash = payment_hash.payment_hash.into();
+        let result = self.for_scope(&scope).cancel_invoice(payment_hash).await?;
+        #[cfg(feature = "lsp")]
+        if let (Some(tenant_id), Some(lsp_actor)) = (tenant_id, self.backend.lsp().as_ref()) {
+            // Cancellation is already durable; recovery also checks the tenant store
+            // if this best-effort wakeup cannot reach the LSP actor.
+            if let Err(error) =
+                lsp_actor.send_message(crate::lsp::LspServiceMessage::InvoiceCancelled {
+                    tenant_id,
+                    payment_hash: hash,
+                })
+            {
+                tracing::warn!(%error, "Failed to notify LSP about a cancelled hosted invoice");
+            }
+        }
+        Ok(result)
     }
 
     /// Settles an invoice by saving the preimage to this invoice.

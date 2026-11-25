@@ -19,7 +19,7 @@ use crate::fiber_types::{
     ChannelState, Hash256, PaymentStatus, Privkey, Pubkey, TenantRegistryPayload,
     TenantRegistrySignature, TlcErrorCode,
 };
-use crate::invoice::CkbInvoice;
+use crate::invoice::{CkbInvoice, CkbInvoiceStatus, InvoiceStore};
 use crate::store::{NodeNamespace, Store};
 
 use super::{
@@ -116,6 +116,10 @@ pub enum LspServiceMessage {
         buffer_duration_ms: Option<u64>,
         reply: RpcReplyPort<Result<LspInvoiceRegistration, String>>,
     },
+    InvoiceCancelled {
+        tenant_id: TenantId,
+        payment_hash: Hash256,
+    },
     GetPaymentDelivery(
         Hash256,
         RpcReplyPort<Result<Option<LspPaymentDelivery>, String>>,
@@ -201,6 +205,14 @@ impl LspServiceState {
                 })
         });
         Ok(channels)
+    }
+
+    fn invoice_cancelled(&self, delivery: &LspPaymentDelivery) -> bool {
+        // Registration records do not track lifecycle changes; the tenant's invoice store does.
+        self.store
+            .namespaced(NodeNamespace::hosted_tenant(delivery.tenant_id.as_str()))
+            .get_invoice_status(&delivery.payment_hash)
+            == Some(CkbInvoiceStatus::Cancelled)
     }
 
     fn tenant_status(&self, record: crate::lsp::HostedTenantRecord) -> HostedTenantStatus {
@@ -735,6 +747,22 @@ impl Actor for LspService {
                 };
                 let _ = reply.send(result);
             }
+            LspServiceMessage::InvoiceCancelled {
+                tenant_id,
+                payment_hash,
+            } => {
+                // The tenant RPC has persisted the cancellation. Wake only its active
+                // delivery; ResumeDelivery fails the upstream TLC if it is still buffered.
+                if let Some(delivery) = state
+                    .delivery_manager
+                    .get_active_by_payment_hash(&payment_hash)?
+                {
+                    if delivery.tenant_id == tenant_id {
+                        let _ =
+                            myself.send_message(LspServiceMessage::ResumeDelivery(delivery.key()));
+                    }
+                }
+            }
             LspServiceMessage::GetPaymentDelivery(payment_hash, reply) => {
                 let _ = reply.send(state.delivery_manager.get_by_payment_hash(&payment_hash));
             }
@@ -959,6 +987,30 @@ impl LspService {
     const EXPIRATION_REASON: &'static str =
         "hosted tenant was unavailable before the buffer deadline";
 
+    async fn fail_cancelled_invoice(
+        myself: &ActorRef<LspServiceMessage>,
+        state: &mut LspServiceState,
+        delivery: &LspPaymentDelivery,
+    ) -> Result<bool, String> {
+        if !state.invoice_cancelled(delivery) {
+            return Ok(false);
+        }
+        // Keep settlement recoverable across restarts. The final Failed state is
+        // recorded only after Public T confirms upstream settlement was persisted.
+        let reason = "hosted invoice was cancelled".to_string();
+        let delivery = state.delivery_manager.transition_with_error(
+            &delivery.key(),
+            LspPaymentDeliveryStatus::SettlingUpstream {
+                payment_status: PaymentStatus::Failed,
+                failure: Some(reason.clone()),
+            },
+            Some((reason, Some(TlcErrorCode::InvoiceCancelled))),
+            crate::now_timestamp_as_millis_u64(),
+        )?;
+        Self::finish_failed_delivery(myself, state, delivery).await?;
+        Ok(true)
+    }
+
     async fn inspect_upstream(
         state: &LspServiceState,
         delivery: &LspPaymentDelivery,
@@ -1173,6 +1225,11 @@ impl LspService {
             }
         }
 
+        // Check before waiting for the tenant channel or the buffer deadline.
+        if Self::fail_cancelled_invoice(&myself, state, &delivery).await? {
+            return Ok(());
+        }
+
         let now = crate::now_timestamp_as_millis_u64();
         if now >= delivery.buffer_deadline {
             let _ = myself.send_message(LspServiceMessage::ExpireDelivery(key));
@@ -1211,6 +1268,11 @@ impl LspService {
                 error
             );
             state.schedule_delivery_retry(&myself, key, delivery.buffer_deadline);
+            return Ok(());
+        }
+
+        // Cancellation may have been persisted while cold tenant activation was awaited.
+        if Self::fail_cancelled_invoice(&myself, state, &delivery).await? {
             return Ok(());
         }
 
