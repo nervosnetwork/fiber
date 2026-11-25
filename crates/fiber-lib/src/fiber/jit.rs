@@ -14,6 +14,21 @@ const FUNDING_SETUP_SLACK_MS: u64 = 3 * 60 * 1000;
 /// Time after the funding transaction is confirmed for the payment to be forwarded and settled.
 const POST_READY_SLACK_MS: u64 = 2 * 60 * 1000;
 
+pub(crate) fn jit_channel_funding_amount(
+    payment: u128,
+    reserved: u128,
+    cushion: u128,
+    max_funding: u128,
+) -> Result<u128, &'static str> {
+    let base = payment
+        .checked_add(reserved)
+        .ok_or("JIT funding amount overflows")?;
+    if base > max_funding {
+        return Err("JIT funding amount exceeds maximum");
+    }
+    Ok(base.saturating_add(cushion).min(max_funding))
+}
+
 pub(crate) fn channel_confirmation_slack_ms(confirmations: u64) -> u64 {
     FUNDING_SETUP_SLACK_MS
         .saturating_add(confirmations.saturating_mul(ASSUMED_BLOCK_INTERVAL_MS))
@@ -481,6 +496,21 @@ mod tests {
             max_open_fee: Some(u128::MAX),
             ..JitChannelConfig::default()
         })
+    }
+
+    #[test]
+    fn funding_keeps_spare_inbound_inside_the_cap() {
+        assert_eq!(jit_channel_funding_amount(100, 99, 0, 1_000), Ok(199));
+        assert_eq!(jit_channel_funding_amount(100, 99, 500, 1_000), Ok(699));
+        assert_eq!(jit_channel_funding_amount(100, 99, 5_000, 1_000), Ok(1_000));
+        assert_eq!(
+            jit_channel_funding_amount(900, 200, 500, 1_000),
+            Err("JIT funding amount exceeds maximum")
+        );
+        assert_eq!(
+            jit_channel_funding_amount(u128::MAX, 1, 0, u128::MAX),
+            Err("JIT funding amount overflows")
+        );
     }
 
     #[test]

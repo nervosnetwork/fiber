@@ -249,6 +249,15 @@ pub struct FiberConfig {
     )]
     pub jit_max_funding: Option<u128>,
 
+    /// Extra CKB, in shannons, locked beyond a JIT payment. 0 leaves no spare inbound.
+    #[arg(
+        name = "FIBER_JIT_INBOUND_CUSHION",
+        long = "fiber-jit-inbound-cushion",
+        env,
+        help = "Extra CKB, in shannons, locked beyond the payment so the receiver can accept another payment on the same channel. 0 leaves no spare inbound. The total is capped by jit_max_funding [default: 0]"
+    )]
+    pub jit_inbound_cushion: Option<u128>,
+
     /// Largest payment amount this receiver will request on a JIT channel. Unset refuses JIT opens.
     #[arg(
         name = "FIBER_JIT_MAX_AMOUNT",
@@ -701,6 +710,10 @@ impl FiberConfig {
         self.jit_max_funding.unwrap_or(0)
     }
 
+    pub fn jit_inbound_cushion(&self) -> u128 {
+        self.jit_inbound_cushion.unwrap_or(0)
+    }
+
     pub fn jit_max_inflight_opens(&self) -> usize {
         self.jit_max_inflight_opens
             .unwrap_or(DEFAULT_JIT_MAX_INFLIGHT_OPENS)
@@ -728,6 +741,7 @@ impl FiberConfig {
             open_fee: self.jit_open_fee,
             min_amount: self.jit_min_amount(),
             max_funding: self.jit_max_funding(),
+            inbound_cushion: self.jit_inbound_cushion(),
             max_amount: self.jit_max_amount(),
             max_open_fee: self.jit_max_open_fee(),
             max_inflight_opens: self.jit_max_inflight_opens(),
@@ -823,6 +837,7 @@ pub struct JitChannelConfig {
     pub open_fee: Option<u128>,
     pub min_amount: u128,
     pub max_funding: u128,
+    pub inbound_cushion: u128,
     /// `None` refuses inbound JIT opens.
     pub max_amount: Option<u128>,
     /// `None` accepts an acknowledged open fee of 0 only.

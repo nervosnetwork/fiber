@@ -38,6 +38,7 @@ fn test_jit_config_defaults_do_not_advertise() {
     assert!(!config.jit_channel_config().open_fee_required());
     assert_eq!(config.jit_min_amount(), 0);
     assert_eq!(config.jit_max_funding(), 0);
+    assert_eq!(config.jit_inbound_cushion(), 0);
     assert!(config.jit_max_amount().is_none());
     assert!(config.jit_max_open_fee().is_none());
     assert_eq!(config.jit_max_inflight_opens(), 8);
@@ -76,6 +77,7 @@ jit_service_enabled: true
 jit_open_fee: 1000
 jit_min_amount: 50
 jit_max_funding: 25000000000
+jit_inbound_cushion: 900
 jit_max_amount: 500
 jit_max_open_fee: 40
 jit_max_inflight_opens: 3
@@ -87,6 +89,7 @@ jit_max_inflight_opens: 3
     assert_eq!(config.jit_open_fee(), Some(1000));
     assert_eq!(config.jit_min_amount(), 50);
     assert_eq!(config.jit_max_funding(), 25_000_000_000);
+    assert_eq!(config.jit_inbound_cushion(), 900);
     assert_eq!(config.jit_max_amount(), Some(500));
     assert_eq!(config.jit_max_open_fee(), Some(40));
     assert_eq!(config.jit_max_inflight_opens(), 3);

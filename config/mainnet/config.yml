@@ -37,6 +37,8 @@ fiber:
   # jit_open_fee: 1000
   # jit_min_amount: 100000000
   # jit_max_funding: 100000000000
+  ## Extra CKB locked beyond the payment. 0 leaves no spare inbound. Capped by jit_max_funding.
+  # jit_inbound_cushion: 0
   ## How many JIT channels may be unconfirmed at once. 0 opens none. [default: 8]
   # jit_max_inflight_opens: 8
   ##

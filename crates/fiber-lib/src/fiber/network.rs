@@ -67,7 +67,9 @@ use super::gossip::{
     GossipMessageUpdates,
 };
 use super::graph::{ChannelInfo, NetworkGraph, NetworkGraphStateStore, OwnedChannelUpdateEvent};
-use super::jit::{channel_confirmation_slack_ms, JitInboundOpen, JitSession};
+use super::jit::{
+    channel_confirmation_slack_ms, jit_channel_funding_amount, JitInboundOpen, JitSession,
+};
 use super::types::{
     BroadcastMessageWithTimestamp, FiberMessage, ForwardTlcResult, GossipMessage, Init,
     JitChannelRegister, OpenChannelV2,
@@ -7162,19 +7164,18 @@ where
                 return None;
             }
         };
-        let funding_amount = match amount.checked_add(reserved) {
-            Some(total) => total,
-            None => {
-                self.fail_jit_payment(payment_hash, "JIT funding amount overflows")
-                    .await;
+        let funding_amount = match jit_channel_funding_amount(
+            amount,
+            reserved,
+            self.jit.config().inbound_cushion,
+            self.jit.config().max_funding,
+        ) {
+            Ok(total) => total,
+            Err(reason) => {
+                self.fail_jit_payment(payment_hash, reason).await;
                 return None;
             }
         };
-        if funding_amount > self.jit.config().max_funding {
-            self.fail_jit_payment(payment_hash, "JIT funding amount exceeds maximum")
-                .await;
-            return None;
-        }
         if self.jit.opens_in_flight_count() >= self.jit.config().max_inflight_opens {
             self.fail_jit_payment(payment_hash, "JIT pending channel limit reached")
                 .await;
