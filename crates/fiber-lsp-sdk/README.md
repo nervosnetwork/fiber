@@ -55,6 +55,9 @@ A session can bind multiple channels. Allocate a fresh pending channel signer
 with `allocate_pending_channel` for each additional opening and supply that
 signer's public material. Retry an interrupted opening with its original intent;
 changing amount or asset while reusing the same signer is rejected before RPC.
+If the LSP definitively rejects an opening and you need to retry with modified
+parameters, call `abandon_pending_channel_opening` to retire the pending signer
+and clear the rejected intent before allocating a fresh signer.
 
 For registration, call `HostedSession::begin_registration` with the trusted LSP
 node ID, a fresh random 32-byte request ID and the current Unix time in

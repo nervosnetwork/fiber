@@ -282,6 +282,54 @@ impl<S: SignerStore> HostedSession<S> {
         Ok(signer.channel_open_material(false).await?)
     }
 
+    /// Abandon an unbound pending channel opening and retire its pending signer.
+    ///
+    /// Call this only after the LSP has definitively rejected an opening attempt
+    /// and the caller needs to retry with modified parameters. Dropping the pending
+    /// key ensures the next [`Self::allocate_pending_channel`] call creates a fresh
+    /// channel signer instead of reusing the retired signer's keys or nonces.
+    /// Already-bound channels in [`HostedSessionState::bindings`] are untouched,
+    /// and a signer that already recorded an opening binding cannot be abandoned.
+    /// The caller persists `state()` using its existing storage adapter after this
+    /// call succeeds.
+    pub async fn abandon_pending_channel_opening(&mut self) -> Result<ChannelKeyId, SessionError> {
+        let key_id = self.state.pending.ok_or(SessionError::NoPendingChannel)?;
+        if self.state.bindings.values().any(|bound| *bound == key_id) {
+            return Err(SessionError::Invalid(
+                "cannot abandon a channel signer that is already bound".into(),
+            ));
+        }
+        let signer = self.root.open_channel(key_id).await?;
+        if signer.load_binding().await?.is_some() {
+            return Err(SessionError::Invalid(
+                "cannot abandon a pending signer that already has a recorded channel binding"
+                    .into(),
+            ));
+        }
+        let pending_tlc_base_key: fiber_json_types::Pubkey = signer
+            .public_material()
+            .base_public_keys
+            .tlc_base_key
+            .into();
+        let matches_pending_intent = self
+            .state
+            .opening_request
+            .as_deref()
+            .and_then(|bytes| {
+                serde_json::from_slice::<fiber_json_types::OpenChannelWithExternalFundingParams>(
+                    bytes,
+                )
+                .ok()
+            })
+            .and_then(|request| request.external_channel_signer)
+            .is_some_and(|material| material.base_public_keys.tlc_base_key == pending_tlc_base_key);
+        self.state.pending = None;
+        if matches_pending_intent {
+            self.state.opening_request = None;
+        }
+        Ok(key_id)
+    }
+
     /// Open a tenant channel and return only after wallet/context verification and persistence.
     /// The transport call is the generic `open_channel_with_external_funding` RPC, and the
     /// response must include `opening_context`. The original intent is persisted before the

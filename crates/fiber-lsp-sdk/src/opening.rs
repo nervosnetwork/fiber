@@ -499,6 +499,216 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn abandoning_rejected_opening_retires_pending_signer_and_allows_fresh_retry() {
+        let store = MemoryStore::default();
+        let created = RootSigner::create_random(store.clone()).await.unwrap();
+        let mut session =
+            HostedSession::new(created.root_signer).with_state(crate::HostedSessionState {
+                tenant_token: Some("tenant-token".into()),
+                ..Default::default()
+            });
+
+        // 1. Allocate first pending signer and fail on a rejected RPC.
+        session.allocate_pending_channel().await.unwrap();
+        let retired_key = session.pending_channel_key_id().unwrap();
+        let first_signer = session.open_channel(retired_key).await.unwrap();
+        let (first_request, first_result, network, first_inputs) = proposal(&first_signer).await;
+        let adapters = OpeningAdapters {
+            request: first_request.clone(),
+            result: first_result,
+            inputs: first_inputs,
+            failure: "rpc",
+            events: Default::default(),
+            saved: Default::default(),
+        };
+        assert!(session
+            .open_tenant_channel(
+                first_request.clone(),
+                &network,
+                &adapters,
+                &adapters,
+                &adapters
+            )
+            .await
+            .is_err());
+        assert_eq!(session.pending_channel_key_id(), Some(retired_key));
+        assert!(session.state().opening_request.is_some());
+
+        // 2. Retrying with corrected params before abandoning fails with the same-signer error.
+        let mut corrected_same_signer = first_request.clone();
+        corrected_same_signer.funding_amount += 1_000_000_000;
+        let err = session
+            .open_tenant_channel(
+                corrected_same_signer,
+                &network,
+                &adapters,
+                &adapters,
+                &adapters,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("cannot replace opening intent for the same signer"),
+            "unexpected error: {err}"
+        );
+
+        // 3. Abandoning retires the pending signer and clears the rejected opening intent.
+        let abandoned = session.abandon_pending_channel_opening().await.unwrap();
+        assert_eq!(abandoned, retired_key);
+        assert!(session.pending_channel_key_id().is_none());
+        assert!(session.state().opening_request.is_none());
+        assert_eq!(
+            session.abandon_pending_channel_opening().await.unwrap_err(),
+            crate::SessionError::NoPendingChannel
+        );
+
+        // 4. Allocating again yields a fresh signer and binds cleanly with corrected params.
+        session.allocate_pending_channel().await.unwrap();
+        let fresh_key = session.pending_channel_key_id().unwrap();
+        assert_ne!(fresh_key, retired_key);
+        let fresh_signer = session.open_channel(fresh_key).await.unwrap();
+        let (mut second_request, mut second_result, second_network, second_inputs) =
+            proposal(&fresh_signer).await;
+        second_request.funding_amount += 1_000_000_000;
+        let second_context = second_result.opening_context.as_mut().unwrap();
+        second_context.local_amount = second_request.funding_amount;
+        second_result.unsigned_funding_tx.outputs[0].capacity =
+            u64::try_from(second_context.local_amount + second_context.remote_amount)
+                .unwrap()
+                .into();
+        let second_adapters = OpeningAdapters {
+            request: second_request.clone(),
+            result: second_result.clone(),
+            inputs: second_inputs,
+            failure: "",
+            events: Default::default(),
+            saved: Default::default(),
+        };
+        session
+            .open_tenant_channel(
+                second_request,
+                &second_network,
+                &second_adapters,
+                &second_adapters,
+                &second_adapters,
+            )
+            .await
+            .unwrap();
+        assert!(session.pending_channel_key_id().is_none());
+        assert_eq!(session.state().bindings.len(), 1);
+        assert_eq!(
+            session.binding(second_result.channel_id.into()),
+            Some(fresh_key)
+        );
+    }
+
+    #[tokio::test]
+    async fn abandoning_pending_opening_preserves_bound_channels_and_rejects_bound_pending() {
+        let store = MemoryStore::default();
+        let created = RootSigner::create_random(store).await.unwrap();
+        let mut session =
+            HostedSession::new(created.root_signer).with_state(crate::HostedSessionState {
+                tenant_token: Some("tenant-token".into()),
+                ..Default::default()
+            });
+
+        // Bind a first channel.
+        session.allocate_pending_channel().await.unwrap();
+        let bound_key = session.pending_channel_key_id().unwrap();
+        let first_signer = session.open_channel(bound_key).await.unwrap();
+        let (first_request, first_result, network, first_inputs) = proposal(&first_signer).await;
+        let adapters = OpeningAdapters {
+            request: first_request.clone(),
+            result: first_result.clone(),
+            inputs: first_inputs,
+            failure: "",
+            events: Default::default(),
+            saved: Default::default(),
+        };
+        session
+            .open_tenant_channel(first_request, &network, &adapters, &adapters, &adapters)
+            .await
+            .unwrap();
+        let retained_first_intent = session.state().opening_request.clone();
+        assert!(retained_first_intent.is_some());
+
+        // Abandoning with no pending channel fails and leaves bound state intact.
+        assert_eq!(
+            session.abandon_pending_channel_opening().await.unwrap_err(),
+            crate::SessionError::NoPendingChannel
+        );
+        assert_eq!(
+            session.binding(first_result.channel_id.into()),
+            Some(bound_key)
+        );
+        assert_eq!(session.state().opening_request, retained_first_intent);
+
+        // Allocate a second pending signer and abandon before sending: keeps first channel's intent.
+        session.allocate_pending_channel().await.unwrap();
+        let unused_pending = session.pending_channel_key_id().unwrap();
+        assert_ne!(unused_pending, bound_key);
+        assert_eq!(
+            session.abandon_pending_channel_opening().await.unwrap(),
+            unused_pending
+        );
+        assert_eq!(
+            session.binding(first_result.channel_id.into()),
+            Some(bound_key)
+        );
+        assert_eq!(session.state().opening_request, retained_first_intent);
+
+        // If persistence fails after signer binding is recorded, abandoning that pending signer is rejected.
+        let store2 = MemoryStore::default();
+        let created2 = RootSigner::create_random(store2.clone()).await.unwrap();
+        let root_key2 = created2.root_key_backup.expose_secret();
+        let mut session2 =
+            HostedSession::new(created2.root_signer).with_state(crate::HostedSessionState {
+                tenant_token: Some("tenant-token".into()),
+                ..Default::default()
+            });
+        session2.allocate_pending_channel().await.unwrap();
+        let third_key = session2.pending_channel_key_id().unwrap();
+        let third_signer = session2.open_channel(third_key).await.unwrap();
+        let (third_request, third_result, third_network, third_inputs) =
+            proposal(&third_signer).await;
+        let save_binding_fail = OpeningAdapters {
+            request: third_request.clone(),
+            result: third_result,
+            inputs: third_inputs,
+            failure: "save binding",
+            events: Default::default(),
+            saved: Default::default(),
+        };
+        assert!(session2
+            .open_tenant_channel(
+                third_request,
+                &third_network,
+                &save_binding_fail,
+                &save_binding_fail,
+                &save_binding_fail,
+            )
+            .await
+            .is_err());
+        let saved_before_binding = save_binding_fail.saved.lock().unwrap().clone().unwrap();
+        let reopened_root = RootSigner::open(RootKey::import(root_key2).unwrap(), store2)
+            .await
+            .unwrap();
+        let mut recovered = HostedSession::new(reopened_root).with_state(saved_before_binding);
+        assert_eq!(recovered.pending_channel_key_id(), Some(third_key));
+        let err = recovered
+            .abandon_pending_channel_opening()
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("already has a recorded channel binding"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(recovered.pending_channel_key_id(), Some(third_key));
+    }
+
+    #[tokio::test]
     async fn tenant_opening_rejects_public_or_missing_signer_without_binding() {
         let created = RootSigner::in_memory().await.unwrap();
         let mut session = HostedSession::new(created.root_signer);

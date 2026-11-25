@@ -195,7 +195,7 @@ pub(crate) async fn validate<C: ChainVerifier>(
                 .unwrap(),
         );
         next[1 + count * tlc_len + local_offset..1 + count * tlc_len + local_offset + 36].fill(0);
-        (amount, 3u128)
+        (amount, 3u64)
     } else {
         let index = usize::from(unlock[0]);
         let entry = remaining
@@ -233,7 +233,7 @@ pub(crate) async fn validate<C: ChainVerifier>(
         }
         next.drain(1 + index * tlc_len..1 + (index + 1) * tlc_len);
         next[0] -= 1;
-        (tlc.payment_amount, if inbound { 1u128 } else { 2u128 })
+        (tlc.payment_amount, if inbound { 1u64 } else { 2u64 })
     };
     if args[56] == 0 {
         let required = u64::from_le_bytes(args[20..28].try_into().unwrap());
@@ -397,25 +397,255 @@ pub(crate) async fn validate<C: ChainVerifier>(
     Ok(())
 }
 
-fn epoch_at_least(actual: u64, required: u64, numerator: u128, denominator: u128) -> bool {
-    if actual >> 56 != 0xa0 || required >> 56 != 0xa0 {
+fn parse_relative_epoch(value: u64) -> Option<ckb_types::core::EpochNumberWithFraction> {
+    if value >> 56 != 0xa0 {
+        return None;
+    }
+    let epoch = ckb_types::core::EpochNumberWithFraction::from_full_value_unchecked(
+        value & 0x00ff_ffff_ffff_ffff,
+    );
+    if epoch.length() == 0 || epoch.index() >= epoch.length() {
+        return None;
+    }
+    Some(epoch)
+}
+
+/// Mirror watchtower's fractional delay calculation (`mul` in `watchtower/actor.rs`),
+/// which scales denominators above 1800 down using integer floor division.
+fn mul_watchtower_delay(
+    delay: ckb_types::core::EpochNumberWithFraction,
+    numerator: u64,
+    denominator: u64,
+) -> Option<ckb_types::core::EpochNumberWithFraction> {
+    let delay_units = delay
+        .number()
+        .checked_mul(delay.length())?
+        .checked_add(delay.index())?;
+    let full_numerator = numerator.checked_mul(delay_units)?;
+    let new_denominator = denominator.checked_mul(delay.length())?;
+    if new_denominator == 0 {
+        return None;
+    }
+    let new_integer = full_numerator / new_denominator;
+    let new_numerator = full_numerator % new_denominator;
+
+    // Normalize the fraction (max epoch length is 1800), matching watchtower.
+    let scale_factor = if new_denominator > 1800 {
+        (new_denominator / 1800).checked_add(1)?
+    } else {
+        1
+    };
+    let scaled_index = new_numerator / scale_factor;
+    let scaled_length = new_denominator / scale_factor;
+    if new_integer >= ckb_types::core::EpochNumberWithFraction::NUMBER_MAXIMUM_VALUE
+        || scaled_index >= ckb_types::core::EpochNumberWithFraction::INDEX_MAXIMUM_VALUE
+        || scaled_length == 0
+        || scaled_length >= ckb_types::core::EpochNumberWithFraction::LENGTH_MAXIMUM_VALUE
+    {
+        return None;
+    }
+    Some(ckb_types::core::EpochNumberWithFraction::new(
+        new_integer,
+        scaled_index,
+        scaled_length,
+    ))
+}
+
+fn epoch_at_least(actual: u64, required: u64, numerator: u64, denominator: u64) -> bool {
+    if denominator == 0 {
         return false;
     }
-    let parts = |value| {
-        let e = ckb_types::core::EpochNumberWithFraction::from_full_value(
-            value & 0x00ff_ffff_ffff_ffff,
-        );
-        if e.length() == 0 || e.index() >= e.length() {
-            None
-        } else {
-            Some((
-                u128::from(e.number()) * u128::from(e.length()) + u128::from(e.index()),
-                u128::from(e.length()),
-            ))
-        }
+    let (Some(actual_epoch), Some(required_epoch)) =
+        (parse_relative_epoch(actual), parse_relative_epoch(required))
+    else {
+        return false;
     };
-    match (parts(actual), parts(required)) {
-        (Some((a, b)), Some((c, d))) => a * d * denominator >= c * b * numerator,
+    let expected_epoch = if numerator == denominator {
+        required_epoch
+    } else {
+        let Some(scaled) = mul_watchtower_delay(required_epoch, numerator, denominator) else {
+            return false;
+        };
+        scaled
+    };
+    let actual_len = u128::from(actual_epoch.length());
+    let expected_len = u128::from(expected_epoch.length());
+    if actual_len == 0 || expected_len == 0 {
+        return false;
+    }
+    let Some(actual_units) = u128::from(actual_epoch.number())
+        .checked_mul(actual_len)
+        .and_then(|v| v.checked_add(u128::from(actual_epoch.index())))
+    else {
+        return false;
+    };
+    let Some(expected_units) = u128::from(expected_epoch.number())
+        .checked_mul(expected_len)
+        .and_then(|v| v.checked_add(u128::from(expected_epoch.index())))
+    else {
+        return false;
+    };
+    match (
+        actual_units.checked_mul(expected_len),
+        expected_units.checked_mul(actual_len),
+    ) {
+        (Some(lhs), Some(rhs)) => lhs >= rhs,
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ckb_types::core::EpochNumberWithFraction;
+
+    use super::*;
+
+    fn relative_epoch_since(epoch: EpochNumberWithFraction) -> u64 {
+        0xa000_0000_0000_0000 | epoch.full_value()
+    }
+
+    #[test]
+    fn epoch_at_least_matches_watchtower_rounding_for_1_3_and_2_3_and_exact_3_3() {
+        let delay = EpochNumberWithFraction::new(1, 1, 1800);
+        let required = relative_epoch_since(delay);
+
+        // 1/3 TLC preimage claim: watchtower normalizes (1, 1, 1800) * 1/3 -> (0, 450, 1350).
+        let expected_1_3 = mul_watchtower_delay(delay, 1, 3).unwrap();
+        assert_eq!(expected_1_3, EpochNumberWithFraction::new(0, 450, 1350));
+        assert!(epoch_at_least(
+            relative_epoch_since(EpochNumberWithFraction::new(0, 450, 1350)),
+            required,
+            1,
+            3,
+        ));
+        assert!(epoch_at_least(
+            relative_epoch_since(EpochNumberWithFraction::new(0, 600, 1800)),
+            required,
+            1,
+            3,
+        ));
+        assert!(!epoch_at_least(
+            relative_epoch_since(EpochNumberWithFraction::new(0, 449, 1350)),
+            required,
+            1,
+            3,
+        ));
+        assert!(!epoch_at_least(
+            relative_epoch_since(EpochNumberWithFraction::new(0, 599, 1800)),
+            required,
+            1,
+            3,
+        ));
+
+        // 2/3 TLC timeout claim: watchtower normalizes (1, 1, 1800) * 2/3 -> (0, 900, 1350).
+        let expected_2_3 = mul_watchtower_delay(delay, 2, 3).unwrap();
+        assert_eq!(expected_2_3, EpochNumberWithFraction::new(0, 900, 1350));
+        assert!(epoch_at_least(
+            relative_epoch_since(EpochNumberWithFraction::new(0, 900, 1350)),
+            required,
+            2,
+            3,
+        ));
+        assert!(epoch_at_least(
+            relative_epoch_since(EpochNumberWithFraction::new(0, 1200, 1800)),
+            required,
+            2,
+            3,
+        ));
+        assert!(!epoch_at_least(
+            relative_epoch_since(EpochNumberWithFraction::new(0, 899, 1350)),
+            required,
+            2,
+            3,
+        ));
+        assert!(!epoch_at_least(
+            relative_epoch_since(EpochNumberWithFraction::new(0, 1199, 1800)),
+            required,
+            2,
+            3,
+        ));
+
+        // 3/3 final party unlock: watchtower uses delay_epoch directly without scaling.
+        assert!(epoch_at_least(
+            relative_epoch_since(EpochNumberWithFraction::new(1, 1, 1800)),
+            required,
+            3,
+            3,
+        ));
+        assert!(!epoch_at_least(
+            relative_epoch_since(EpochNumberWithFraction::new(1, 0, 1350)),
+            required,
+            3,
+            3,
+        ));
+        assert!(!epoch_at_least(
+            relative_epoch_since(EpochNumberWithFraction::new(1, 0, 1800)),
+            required,
+            3,
+            3,
+        ));
+    }
+
+    #[test]
+    fn epoch_at_least_handles_unscaled_fractions_and_invalid_inputs() {
+        let delay = EpochNumberWithFraction::new(1, 3, 600);
+        let required = relative_epoch_since(delay);
+        // 3 * 600 = 1800 (no scale_factor needed): (1, 3, 600) * 1/3 = (0, 603, 1800).
+        assert_eq!(
+            mul_watchtower_delay(delay, 1, 3).unwrap(),
+            EpochNumberWithFraction::new(0, 603, 1800)
+        );
+        assert!(epoch_at_least(
+            relative_epoch_since(EpochNumberWithFraction::new(0, 603, 1800)),
+            required,
+            1,
+            3,
+        ));
+        assert!(!epoch_at_least(
+            relative_epoch_since(EpochNumberWithFraction::new(0, 602, 1800)),
+            required,
+            1,
+            3,
+        ));
+
+        // Invalid flags, zero length, index >= length, or zero denominator are rejected.
+        let valid = relative_epoch_since(EpochNumberWithFraction::new(1, 0, 1));
+        assert!(!epoch_at_least(
+            valid & 0x00ff_ffff_ffff_ffff,
+            required,
+            1,
+            3
+        ));
+        assert!(!epoch_at_least(
+            valid,
+            required & 0x00ff_ffff_ffff_ffff,
+            1,
+            3
+        ));
+        assert!(!epoch_at_least(
+            0xa000_0000_0000_0000 | EpochNumberWithFraction::new_unchecked(1, 0, 0).full_value(),
+            required,
+            1,
+            3,
+        ));
+        assert!(!epoch_at_least(
+            valid,
+            0xa000_0000_0000_0000 | EpochNumberWithFraction::new_unchecked(1, 0, 0).full_value(),
+            1,
+            3,
+        ));
+        assert!(!epoch_at_least(
+            0xa000_0000_0000_0000 | EpochNumberWithFraction::new_unchecked(0, 10, 10).full_value(),
+            required,
+            1,
+            3,
+        ));
+        assert!(!epoch_at_least(
+            valid,
+            0xa000_0000_0000_0000 | EpochNumberWithFraction::new_unchecked(0, 10, 10).full_value(),
+            1,
+            3,
+        ));
+        assert!(!epoch_at_least(valid, required, 1, 0));
     }
 }
