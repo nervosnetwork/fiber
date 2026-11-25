@@ -301,8 +301,7 @@ fn is_pending(event: &SubscriptionEvent) -> bool {
         #[cfg(feature = "watchtower")]
         SubscriptionEvent::WatchtowerSigning(result) => matches!(
             result.status,
-            fiber_json_types::WatchtowerSigningStatus::SignatureRequired { .. }
-                | fiber_json_types::WatchtowerSigningStatus::ExternalFundingRequired { .. }
+            fiber_json_types::WatchtowerSigningStatus::ExternalFundingRequired { .. }
         ),
         _ => false,
     }

@@ -1641,19 +1641,21 @@ async fn onchain_claim_checks_live_input_witness_destination_fee_and_maturity() 
             let session = HostedSession::new(root)
                 .with_state(directory)
                 .with_policy(policy);
-            let status = fiber_json_types::WatchtowerSigningStatus::SignatureRequired {
+            let status = fiber_json_types::WatchtowerSigningStatus::ExternalFundingRequired {
                 request_id: fiber_types::Hash256::from([6; 32]).into(),
                 content: fiber_json_types::OnchainSigningContent {
                     key_purpose: fiber_json_types::OnchainKeyPurpose::Settlement,
                     transaction: content.transaction.clone().into(),
                 },
                 expires_at_ms: 0,
+                required_expiry_since: None,
             };
             let wire = serde_json::to_vec(&status).unwrap();
             let ProcessOutcome::NeedConfirmation(pending) = session
-                .handle_watchtower_status_verified(
+                .handle_external_funding_watchtower_status(
                     channel_id,
                     serde_json::from_slice(&wire).unwrap(),
+                    content.transaction.clone().into(),
                     terms.clone(),
                     &chain,
                 )
@@ -1679,11 +1681,15 @@ async fn onchain_claim_checks_live_input_witness_destination_fee_and_maturity() 
                 _ => chain.cell.data = vec![1],
             }
             let before = f.store.snapshot().unwrap();
-            assert!(session.confirm_onchain(pending, &chain).await.is_err());
             assert!(session
-                .handle_watchtower_status_verified(
+                .confirm_external_funding_onchain(pending, &chain)
+                .await
+                .is_err());
+            assert!(session
+                .handle_external_funding_watchtower_status(
                     channel_id,
                     serde_json::from_slice(&wire).unwrap(),
+                    content.transaction.clone().into(),
                     terms.clone(),
                     &chain
                 )
@@ -2620,20 +2626,22 @@ async fn assert_onchain_rpc_rejected(
         let session = HostedSession::new(root)
             .with_state(directory)
             .with_policy(policy);
-        let status = fiber_json_types::WatchtowerSigningStatus::SignatureRequired {
+        let status = fiber_json_types::WatchtowerSigningStatus::ExternalFundingRequired {
             request_id: fiber_types::Hash256::from([6; 32]).into(),
             content: fiber_json_types::OnchainSigningContent {
                 key_purpose: fiber_json_types::OnchainKeyPurpose::Settlement,
                 transaction: content.transaction.clone().into(),
             },
             expires_at_ms: 0,
+            required_expiry_since: None,
         };
         let wire = serde_json::to_vec(&status).unwrap();
         let before = f.store.snapshot().unwrap();
         assert!(session
-            .handle_watchtower_status_verified(
+            .handle_external_funding_watchtower_status(
                 channel_id,
                 serde_json::from_slice(&wire).unwrap(),
+                content.transaction.clone().into(),
                 terms.clone(),
                 chain
             )
@@ -3712,40 +3720,7 @@ async fn external_funding_udt_tlc_watchtower_session_flow() {
             cell_deps: vec![wallet_dep.clone()],
         };
 
-        // 1. Operator-sponsored route must reject ExternalFundingRequired.
-        assert!(session
-            .handle_watchtower_status_verified(
-                channel_id,
-                status.clone(),
-                authorization.clone(),
-                &chain,
-            )
-            .await
-            .is_err());
-
-        // 2. External-funding route rejects SignatureRequired.
-        let sig_only_status = fiber_json_types::WatchtowerSigningStatus::SignatureRequired {
-            request_id: request_id.into(),
-            content: fiber_json_types::OnchainSigningContent {
-                key_purpose: fiber_json_types::OnchainKeyPurpose::Tlc {
-                    commitment_number: 1,
-                },
-                transaction: template_tx.clone().into(),
-            },
-            expires_at_ms: 1_800_000,
-        };
-        assert!(session
-            .handle_external_funding_watchtower_status(
-                channel_id,
-                sig_only_status,
-                funded_tx.clone().into(),
-                authorization.clone(),
-                &chain,
-            )
-            .await
-            .is_err());
-
-        // 3. External-funding route rejects tampered funded tx (e.g. unexpected absolute timestamp since).
+        // 1. External-funding route rejects tampered funded tx (e.g. unexpected absolute timestamp since).
         let tampered_since_tx = funded_tx
             .clone()
             .into_view()
@@ -3770,7 +3745,7 @@ async fn external_funding_udt_tlc_watchtower_session_flow() {
             .await
             .is_err());
 
-        // 4. Valid external-funding flow prepares PendingRequest -> confirm_external_funding_onchain returns
+        // 2. Valid external-funding flow prepares PendingRequest -> confirm_external_funding_onchain returns
         //    SubmitWatchtowerSignatureParams with signed_transaction preserving client witnesses.
         let ProcessOutcome::NeedConfirmation(pending) = session
             .handle_external_funding_watchtower_status(
@@ -3787,47 +3762,6 @@ async fn external_funding_udt_tlc_watchtower_session_flow() {
         };
         assert!(pending.is_external_funding());
         assert_eq!(pending.required_expiry_since(), None);
-
-        // Operator-sponsored confirm_onchain must reject an externally funded PendingRequest.
-        let err = session
-            .confirm_onchain(pending, &chain)
-            .await
-            .expect_err("confirm_onchain must reject external-funding pending request");
-        assert!(err.to_string().contains("confirm_external_funding_onchain"));
-
-        // Re-prepare and confirm via confirm_external_funding_onchain.
-        let status_again = fiber_json_types::WatchtowerSigningStatus::ExternalFundingRequired {
-            request_id: request_id.into(),
-            content: fiber_json_types::OnchainSigningContent {
-                key_purpose: fiber_json_types::OnchainKeyPurpose::Tlc {
-                    commitment_number: 1,
-                },
-                transaction: template_tx.into(),
-            },
-            expires_at_ms: 1_800_000,
-            required_expiry_since: None,
-        };
-        let auth_again = OnchainSpendAuthorization {
-            source: record.reference,
-            destination,
-            fee_sponsor_lock: separate_wallet_lock.then_some(wallet_funding_lock),
-            fee: 5,
-            additional_inputs: vec![wallet_cell_outpoint],
-            cell_deps: vec![wallet_dep.clone()],
-        };
-        let ProcessOutcome::NeedConfirmation(pending) = session
-            .handle_external_funding_watchtower_status(
-                channel_id,
-                status_again,
-                funded_tx.clone().into(),
-                auth_again,
-                &chain,
-            )
-            .await
-            .unwrap()
-        else {
-            panic!("need confirmation");
-        };
         let SubmitParams::Watchtower(params) = session
             .confirm_external_funding_onchain(pending, &chain)
             .await
@@ -3838,10 +3772,7 @@ async fn external_funding_udt_tlc_watchtower_session_flow() {
         assert_eq!(params.channel_id, channel_id.into());
         assert_eq!(params.request_id, request_id.into());
         assert_eq!(params.signature.len(), 65);
-        let submitted_tx: ckb_types::packed::Transaction = params
-            .signed_transaction
-            .expect("external-funding submission must carry signed_transaction")
-            .into();
+        let submitted_tx: ckb_types::packed::Transaction = params.signed_transaction.into();
         assert_eq!(submitted_tx.as_slice(), funded_tx.as_slice());
         assert_eq!(
             submitted_tx.witnesses().get(1).unwrap().raw_data().as_ref(),

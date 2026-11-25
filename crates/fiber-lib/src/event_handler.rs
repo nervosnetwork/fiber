@@ -61,7 +61,6 @@ pub async fn forward_event_to_client<T: WatchtowerRpcClient + Sync>(
                     remote_funding_pubkey: keys.remote_funding.into(),
                     settlement_data: settlement_data.into(),
                     channel_features: channel_features.into(),
-                    payout_lock_script: None,
                 })
                 .await
                 .map_err(|e| format!("Failed to create watch channel: {e}"))?;
@@ -170,7 +169,7 @@ pub fn forward_event_to_watchtower_store<S: crate::watchtower::WatchtowerStore>(
             keys,
             settlement_data,
             commitment_contract_features,
-            local_shutdown_script,
+            _local_shutdown_script,
         ) => {
             let signing_scope = events.watchtower(&node_id);
             let signing_update = signing_scope.prepare_created(channel_id);
@@ -182,7 +181,6 @@ pub fn forward_event_to_watchtower_store<S: crate::watchtower::WatchtowerStore>(
                     keys,
                     settlement_data,
                     commitment_contract_features,
-                    None,
                 )
             } else {
                 match store.insert_watch_channel_checked(
@@ -192,7 +190,6 @@ pub fn forward_event_to_watchtower_store<S: crate::watchtower::WatchtowerStore>(
                     keys,
                     settlement_data,
                     commitment_contract_features,
-                    Some(local_shutdown_script),
                     quotas,
                 ) {
                     Ok(created) => created,
@@ -328,7 +325,6 @@ mod tests {
             channel.local_settlement_key_pubkey,
             Some(local_settlement_pubkey)
         );
-        assert_eq!(channel.payout_lock_script, Some(payout_lock_script));
         assert_eq!(
             store.get_watchtower_signer(&node_id, &channel_id),
             fiber_types::WatchtowerSignerState::External(
@@ -338,105 +334,6 @@ mod tests {
         assert!(store
             .get_watch_channel(&NodeId::local(), &channel_id)
             .is_none());
-    }
-
-    #[test]
-    fn remote_tx_complete_sets_hosted_payout_lock_and_keeps_local_none() {
-        use ckb_types::{
-            packed::{Byte32, Script},
-            prelude::{Builder, Entity, Pack},
-        };
-
-        let (store, _dir) = crate::generate_store();
-        let tenant_pubkey = Privkey::from(&[7; 32]).pubkey();
-        let hosted_node_id = NodeId::from_bytes(tenant_pubkey.serialize().to_vec());
-        let hosted_channel_id = Hash256::from([0x21; 32]);
-        let local_channel_id = Hash256::from([0x22; 32]);
-        let udt_type_script = Script::new_builder()
-            .code_hash(Byte32::from([0x77; 32]))
-            .args([0x01u8; 32].as_slice().pack())
-            .build();
-        let hosted_payout = Script::new_builder().args([0xcd_u8; 20].pack()).build();
-        let local_payout = Script::new_builder().args([0xef_u8; 20].pack()).build();
-        let keys = fiber_types::WatchChannelKeys {
-            local_settlement: fiber_types::SettlementKey::external(
-                Privkey::from(&[1; 32]).pubkey(),
-            ),
-            remote_settlement: Privkey::from(&[2; 32]).pubkey(),
-            local_funding: Privkey::from(&[3; 32]).pubkey(),
-            remote_funding: Privkey::from(&[4; 32]).pubkey(),
-        };
-        let settlement = SettlementData {
-            local_amount: 100,
-            remote_amount: 200,
-            tlcs: Vec::new(),
-        };
-
-        forward_event_to_watchtower_store(
-            &Default::default(),
-            NetworkServiceEvent::RemoteTxComplete(
-                Privkey::from(&[9; 32]).pubkey(),
-                hosted_channel_id,
-                Some(udt_type_script),
-                keys.clone(),
-                settlement.clone(),
-                fiber_types::ChannelFeatures::V2,
-                hosted_payout.clone(),
-            ),
-            &store,
-            hosted_node_id.clone(),
-            &Default::default(),
-        );
-        forward_event_to_watchtower_store(
-            &Default::default(),
-            NetworkServiceEvent::RemoteTxComplete(
-                Privkey::from(&[9; 32]).pubkey(),
-                local_channel_id,
-                None,
-                keys,
-                settlement,
-                fiber_types::ChannelFeatures::V2,
-                local_payout,
-            ),
-            &store,
-            NodeId::local(),
-            &Default::default(),
-        );
-
-        let hosted = store
-            .get_watch_channel(&hosted_node_id, &hosted_channel_id)
-            .expect("hosted watch row");
-        assert_eq!(hosted.payout_lock_script, Some(hosted_payout.clone()));
-
-        let local = store
-            .get_watch_channel(&NodeId::local(), &local_channel_id)
-            .expect("local watch row");
-        assert_eq!(local.payout_lock_script, None);
-
-        #[cfg(feature = "lsp")]
-        {
-            let record = crate::lsp::HostedTenantRecord {
-                tenant_id: crate::lsp::TenantId::new("hosted-udt-tenant").unwrap(),
-                root_signer_pubkey: None,
-                tenant_pubkey,
-                created_at: 1,
-                token_epoch: 0,
-            };
-            let watch_node_id = crate::lsp::tenant_watchtower_node_id(&record.tenant_pubkey);
-            assert_eq!(watch_node_id, hosted_node_id);
-            crate::lsp::watch::ensure_hosted_watch_channel(
-                &Default::default(),
-                &store,
-                &record,
-                hosted_channel_id,
-                &Default::default(),
-            )
-            .unwrap();
-            let refreshed = store
-                .get_watch_channel(&watch_node_id, &hosted_channel_id)
-                .expect("hosted watch row persists");
-            assert_eq!(refreshed.payout_lock_script, Some(hosted_payout));
-        }
     }
 
     #[test]

@@ -2709,7 +2709,6 @@ impl Store {
         keys: WatchChannelKeys,
         settlement_data: SettlementData,
         channel_features: ChannelFeatures,
-        payout_lock_script: Option<Script>,
         quotas: Option<&crate::lsp_config::WatchtowerQuotas>,
     ) -> Result<bool, String> {
         let lock = self.watchtower_write_lock(&node_id);
@@ -2742,7 +2741,6 @@ impl Store {
                 local_settlement_data: settlement_data.clone(),
                 revocation_data: None,
                 channel_features,
-                payout_lock_script,
             },
             "ChannelData",
         );
@@ -2854,7 +2852,6 @@ impl WatchtowerStore for Store {
         keys: WatchChannelKeys,
         settlement_data: SettlementData,
         channel_features: ChannelFeatures,
-        payout_lock_script: Option<Script>,
     ) -> bool {
         match self.insert_watch_channel_inner(
             node_id,
@@ -2863,7 +2860,6 @@ impl WatchtowerStore for Store {
             keys,
             settlement_data,
             channel_features,
-            payout_lock_script,
             None,
         ) {
             Ok(created) => created,
@@ -2882,7 +2878,6 @@ impl WatchtowerStore for Store {
         keys: WatchChannelKeys,
         settlement_data: SettlementData,
         channel_features: ChannelFeatures,
-        payout_lock_script: Option<Script>,
         quotas: &crate::lsp_config::WatchtowerQuotas,
     ) -> Result<bool, String> {
         self.insert_watch_channel_inner(
@@ -2892,7 +2887,6 @@ impl WatchtowerStore for Store {
             keys,
             settlement_data,
             channel_features,
-            payout_lock_script,
             Some(quotas),
         )
     }
@@ -2955,22 +2949,7 @@ impl WatchtowerStore for Store {
             let signer_state: WatchtowerSignerState =
                 deserialize_from(raw_signer.as_ref(), "WatchtowerSignerState");
             if let WatchtowerSignerState::External(ext) = signer_state {
-                // Release any fee-sponsor UTXOs held by this channel's pending or signed
-                // requests so deleting the channel cannot leak 30-minute held-cell locks,
-                // and preserve any active per-node backoff floor across deletion.
-                let fee_inputs: Vec<OutPoint> = ext
-                    .pending_requests
-                    .values()
-                    .flat_map(fiber_types::PendingWatchtowerRequest::operator_fee_inputs)
-                    .chain(
-                        ext.signed_signatures
-                            .values()
-                            .flat_map(fiber_types::SignedWatchtowerRequest::operator_fee_inputs),
-                    )
-                    .collect();
-                if !fee_inputs.is_empty() {
-                    crate::ckb::held_cells::release_for_watchtower(fee_inputs);
-                }
+                // Preserve any active per-node backoff floor across channel deletion.
                 if ext.retry_after_ms > 0 {
                     retry_after_ms = Some(ext.retry_after_ms);
                 }

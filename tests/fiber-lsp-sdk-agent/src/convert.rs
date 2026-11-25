@@ -368,13 +368,14 @@ pub(crate) mod tests {
             .build()
             .data();
         (
-            fiber_json_types::WatchtowerSigningStatus::SignatureRequired {
+            fiber_json_types::WatchtowerSigningStatus::ExternalFundingRequired {
                 request_id: fiber_json_types::Hash256([0x33; 32]),
                 content: fiber_json_types::OnchainSigningContent {
                     key_purpose: fiber_json_types::OnchainKeyPurpose::Settlement,
                     transaction: tx.into(),
                 },
                 expires_at_ms: 0,
+                required_expiry_since: None,
             },
             fiber_lsp_sdk::OnchainSpendAuthorization {
                 source: record.reference.clone(),

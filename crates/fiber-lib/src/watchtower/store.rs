@@ -43,7 +43,6 @@ pub trait WatchtowerStore {
         keys: WatchChannelKeys,
         settlement_data: SettlementData,
         channel_features: ChannelFeatures,
-        payout_lock_script: Option<Script>,
     ) -> bool;
     /// Insert a watched channel while atomically enforcing per-node and global quotas.
     ///
@@ -57,7 +56,6 @@ pub trait WatchtowerStore {
         keys: WatchChannelKeys,
         settlement_data: SettlementData,
         channel_features: ChannelFeatures,
-        payout_lock_script: Option<Script>,
         _quotas: &crate::lsp_config::WatchtowerQuotas,
     ) -> Result<bool, String> {
         Ok(self.insert_watch_channel(
@@ -67,7 +65,6 @@ pub trait WatchtowerStore {
             keys,
             settlement_data,
             channel_features,
-            payout_lock_script,
         ))
     }
     /// Check whether inserting one additional watched channel for `node_id` (given

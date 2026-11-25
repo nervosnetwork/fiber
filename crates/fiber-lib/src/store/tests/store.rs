@@ -211,7 +211,6 @@ fn test_local_watch_channel_resolves_hosted_tenant_namespace() {
                 tlcs: vec![],
             },
             fiber_types::ChannelFeatures::V2,
-            None,
         );
     };
     // Watchtower rows live in the host's physical keyspace. The channel id alone
@@ -625,7 +624,6 @@ fn test_store_watchtower() {
         },
         settlement_data.clone(),
         fiber_types::ChannelFeatures::V2,
-        None,
     );
     assert_eq!(
         store.get_watch_channels(),
@@ -642,7 +640,6 @@ fn test_store_watchtower() {
             pending_remote_settlement_data: settlement_data.clone(),
             remote_settlement_data: settlement_data.clone(),
             channel_features: Default::default(),
-            payout_lock_script: None,
         }]
     );
 
@@ -674,7 +671,6 @@ fn test_store_watchtower() {
             pending_remote_settlement_data: settlement_data.clone(),
             remote_settlement_data: settlement_data,
             channel_features: Default::default(),
-            payout_lock_script: None,
         }]
     );
 
@@ -727,7 +723,6 @@ fn test_store_watchtower() {
             tlcs: vec![],
         },
         fiber_types::ChannelFeatures::V2,
-        None,
     );
     assert_eq!(store.get_watch_channels().pop().unwrap(), stored);
 
@@ -771,7 +766,6 @@ fn test_store_external_watch_channel_contains_no_private_keys() {
         },
         settlement_data,
         fiber_types::ChannelFeatures::V2,
-        None,
     );
 
     let channel = store
@@ -887,7 +881,6 @@ fn test_store_watchtower_quotas_enforced_per_node_and_globally() {
             keys(),
             settlement.clone(),
             fiber_types::ChannelFeatures::V2,
-            None,
             &quotas,
         )
         .expect("a1");
@@ -899,7 +892,6 @@ fn test_store_watchtower_quotas_enforced_per_node_and_globally() {
             keys(),
             settlement.clone(),
             fiber_types::ChannelFeatures::V2,
-            None,
             &quotas,
         )
         .expect("a2");
@@ -912,7 +904,6 @@ fn test_store_watchtower_quotas_enforced_per_node_and_globally() {
             keys(),
             settlement.clone(),
             fiber_types::ChannelFeatures::V2,
-            None,
             &quotas,
         )
         .expect("a1 idempotent");
@@ -924,7 +915,6 @@ fn test_store_watchtower_quotas_enforced_per_node_and_globally() {
             keys(),
             settlement.clone(),
             fiber_types::ChannelFeatures::V2,
-            None,
             &quotas,
         )
         .unwrap_err();
@@ -938,7 +928,6 @@ fn test_store_watchtower_quotas_enforced_per_node_and_globally() {
             keys(),
             settlement.clone(),
             fiber_types::ChannelFeatures::V2,
-            None,
             &quotas,
         )
         .expect("b1");
@@ -950,7 +939,6 @@ fn test_store_watchtower_quotas_enforced_per_node_and_globally() {
             keys(),
             settlement,
             fiber_types::ChannelFeatures::V2,
-            None,
             &quotas,
         )
         .unwrap_err();
@@ -1000,7 +988,6 @@ fn test_store_watchtower_quotas_enforced_per_node_and_globally() {
                 tlcs: vec![],
             },
             fiber_types::ChannelFeatures::V2,
-            None,
             &quotas,
         )
         .expect("b2 succeeds after removing b1");
@@ -1059,7 +1046,6 @@ fn test_store_watchtower_host_rows_excluded_from_tenant_global_quotas() {
             local_keys(),
             settlement.clone(),
             fiber_types::ChannelFeatures::V2,
-            None,
         ));
     }
     for h in [host_h1, host_h2] {
@@ -1083,7 +1069,6 @@ fn test_store_watchtower_host_rows_excluded_from_tenant_global_quotas() {
             tenant_keys(),
             settlement.clone(),
             fiber_types::ChannelFeatures::V2,
-            None,
             &quotas,
         )
         .expect("tenant_a ch1 must succeed despite host channels");
@@ -1096,7 +1081,6 @@ fn test_store_watchtower_host_rows_excluded_from_tenant_global_quotas() {
         local_keys(),
         settlement.clone(),
         fiber_types::ChannelFeatures::V2,
-        None,
     ));
     assert!(store.remove_watch_channel(NodeId::local(), host_ch1));
 
@@ -1108,7 +1092,6 @@ fn test_store_watchtower_host_rows_excluded_from_tenant_global_quotas() {
             tenant_keys(),
             settlement.clone(),
             fiber_types::ChannelFeatures::V2,
-            None,
             &quotas,
         )
         .expect("tenant_b ch1 must succeed (total tenant channels = 2)");
@@ -1120,7 +1103,6 @@ fn test_store_watchtower_host_rows_excluded_from_tenant_global_quotas() {
             tenant_keys(),
             settlement,
             fiber_types::ChannelFeatures::V2,
-            None,
             &quotas,
         )
         .unwrap_err();
@@ -1168,7 +1150,6 @@ fn test_store_watchtower_superseded_preserved_and_cleared_on_revocation() {
         },
         initial,
         fiber_types::ChannelFeatures::V2,
-        None,
     );
 
     let variants: Vec<SettlementData> = (1..=fiber_types::MAX_SETTLEMENT_VARIANTS as u128 + 1)
@@ -1256,7 +1237,6 @@ fn test_store_watchtower_v2_registration_and_legacy_superseded_round_trip() {
         },
         settlement_data,
         fiber_types::ChannelFeatures::V2,
-        None,
     );
 
     assert_eq!(
@@ -1425,7 +1405,6 @@ fn test_store_watchtower_preimage_gc_waits_for_watched_tlc() {
         },
         settlement_data,
         fiber_types::ChannelFeatures::V2,
-        None,
     );
     store.insert_watch_preimage(node_id.clone(), payment_hash, preimage);
 
@@ -1502,7 +1481,6 @@ fn test_store_watchtower_preimage_gc_waits_for_same_hash_sibling_tlc() {
         },
         settlement_data,
         fiber_types::ChannelFeatures::V2,
-        None,
     );
     store.insert_watch_preimage(node_id.clone(), payment_hash, preimage);
 
@@ -1567,7 +1545,6 @@ fn test_store_watchtower_preimage_gc_isolated_between_tenants() {
             },
             settlement_data.clone(),
             fiber_types::ChannelFeatures::V2,
-            None,
         );
         store.insert_watch_preimage(node_id.clone(), payment_hash, preimage);
     }
@@ -1634,7 +1611,6 @@ fn test_store_watchtower_preimage_gc_ignores_ambiguous_legacy_settlement() {
         },
         settlement_data,
         fiber_types::ChannelFeatures::V2,
-        None,
     );
     store.insert_watch_preimage(node_id.clone(), payment_hash, preimage);
 
@@ -1697,7 +1673,7 @@ fn test_store_watchtower_signer_roundtrip() {
     let mut pending = BTreeMap::new();
     pending.insert(
         req_id_1,
-        PendingWatchtowerRequest::ExternalFunding {
+        PendingWatchtowerRequest {
             content: content_1,
             created_at_ms: 100,
             required_expiry_since: Some(0x4000_0000_0000_0064),
@@ -1706,7 +1682,7 @@ fn test_store_watchtower_signer_roundtrip() {
     let mut signed = BTreeMap::new();
     signed.insert(
         req_id_2,
-        SignedWatchtowerRequest::OperatorSponsored {
+        SignedWatchtowerRequest {
             content: content_2,
             signature: sig_2,
             created_at_ms: 200,
@@ -1715,7 +1691,7 @@ fn test_store_watchtower_signer_roundtrip() {
     let last_applied = Some(LastAppliedWatchtowerSignature {
         request_id: req_id_2,
         signature: sig_2,
-        signed_transaction_hash: Some(Hash256::from([9u8; 32])),
+        signed_transaction_hash: Hash256::from([9u8; 32]),
     });
 
     let new_state = WatchtowerSignerState::External(WatchtowerExternalSignerState {
@@ -1755,11 +1731,13 @@ fn test_watchtower_atomic_update_preserves_concurrent_signature() {
         key_purpose: OnchainKeyPurpose::Settlement,
         transaction: Transaction::default(),
     };
-    let pending_req = PendingWatchtowerRequest::OperatorSponsored {
+    let pending_req = PendingWatchtowerRequest {
         content: content.clone(),
         created_at_ms: 100,
+        required_expiry_since: None,
     };
     let signature = [42; 65];
+    let signed_tx_hash = Hash256::from([7u8; 32]);
     let mut initial = WatchtowerExternalSignerState::default();
     initial
         .pending_requests
@@ -1808,30 +1786,16 @@ fn test_watchtower_atomic_update_preserves_concurrent_signature() {
                         .pending_requests
                         .remove(&signed_id)
                         .expect("pending signature");
-                    let signed_entry = match pending {
-                        PendingWatchtowerRequest::OperatorSponsored {
-                            content,
-                            created_at_ms,
-                        } => SignedWatchtowerRequest::OperatorSponsored {
-                            content,
-                            signature,
-                            created_at_ms,
-                        },
-                        PendingWatchtowerRequest::ExternalFunding {
-                            content,
-                            created_at_ms,
-                            ..
-                        } => SignedWatchtowerRequest::ExternalFunding {
-                            content,
-                            signature,
-                            created_at_ms,
-                        },
+                    let signed_entry = SignedWatchtowerRequest {
+                        content: pending.content,
+                        signature,
+                        created_at_ms: pending.created_at_ms,
                     };
                     external.signed_signatures.insert(signed_id, signed_entry);
                     external.last_applied = Some(LastAppliedWatchtowerSignature {
                         request_id: signed_id,
                         signature,
-                        signed_transaction_hash: None,
+                        signed_transaction_hash: signed_tx_hash,
                     });
                     Ok::<_, ()>(())
                 })
@@ -1858,7 +1822,7 @@ fn test_watchtower_atomic_update_preserves_concurrent_signature() {
     };
     assert_eq!(
         state.signed_signatures.get(&signed_id),
-        Some(&SignedWatchtowerRequest::OperatorSponsored {
+        Some(&SignedWatchtowerRequest {
             content,
             signature,
             created_at_ms: 100,
@@ -1872,7 +1836,7 @@ fn test_watchtower_atomic_update_preserves_concurrent_signature() {
         Some(LastAppliedWatchtowerSignature {
             request_id: signed_id,
             signature,
-            signed_transaction_hash: None,
+            signed_transaction_hash: signed_tx_hash,
         })
     );
 }
@@ -2289,7 +2253,6 @@ fn test_store_watchtower_with_wrong_node_id() {
         },
         settlement_data.clone(),
         fiber_types::ChannelFeatures::V2,
-        None,
     );
     let expected_value = vec![ChannelData {
         channel_id,
@@ -2304,7 +2267,6 @@ fn test_store_watchtower_with_wrong_node_id() {
         pending_remote_settlement_data: settlement_data.clone(),
         remote_settlement_data: settlement_data.clone(),
         channel_features: Default::default(),
-        payout_lock_script: None,
     }];
     assert_eq!(store.get_watch_channels(), expected_value);
 

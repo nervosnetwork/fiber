@@ -330,7 +330,6 @@ fn ensure_hosted_watch_skips_an_existing_row() {
             tlcs: Vec::new(),
         },
         fiber_types::ChannelFeatures::V2,
-        None,
     );
 
     super::watch::ensure_hosted_watch_channel(
@@ -5887,7 +5886,6 @@ async fn watchtower_rpc_create_and_remove_watch_channel_refresh_lsp_global_quota
                 remote_amount: 1000,
                 tlcs: vec![],
             },
-            payout_lock_script: None,
         },
     )
     .await

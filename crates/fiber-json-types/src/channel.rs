@@ -1038,17 +1038,6 @@ pub struct GetWatchtowerSigningStatusResult {
 pub enum WatchtowerSigningStatus {
     /// No external signature is currently required and no retry backoff is active.
     NoSignatureRequired,
-    /// Operator-sponsored settlement or TLC spend is paused until this signature is submitted.
-    SignatureRequired {
-        /// Identifier of the outstanding signature request.
-        request_id: Hash256,
-        /// Structured on-chain plaintext independently hashed by the signer.
-        content: OnchainSigningContent,
-        /// Unix millisecond timestamp when this request's 30-minute fee-cell hold expires.
-        #[serde_as(as = "U64Hex")]
-        #[schemars(schema_with = "schema_as_uint_hex")]
-        expires_at_ms: u64,
-    },
     /// Watchtower issued an unfunded template transaction; the client's external wallet must fund
     /// transaction fees (and any CKB capacity shortfall), sign `inputs[0]`, and submit both
     /// `signature` and `signed_transaction`.
@@ -1067,7 +1056,7 @@ pub enum WatchtowerSigningStatus {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         required_expiry_since: Option<u64>,
     },
-    /// New fee-holding signing requests are paused due to channel or tenant retry backoff.
+    /// New signing requests are paused due to channel or tenant retry backoff.
     Backoff {
         /// Effective Unix millisecond timestamp when retry backoff ends.
         #[serde_as(as = "U64Hex")]
@@ -1092,10 +1081,9 @@ pub struct SubmitWatchtowerSignatureParams {
     #[serde_as(as = "SliceHex")]
     #[schemars(schema_with = "schema_as_hex_bytes")]
     pub signature: Vec<u8>,
-    /// Optional client-funded transaction (carrying client `cell_deps`, optional `inputs[1..]`,
-    /// outputs, and `witness[1..]`) required when responding to `ExternalFundingRequired`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub signed_transaction: Option<Transaction>,
+    /// Client-funded transaction carrying client `cell_deps`, optional `inputs[1..]`,
+    /// payout/change outputs, and `witness[1..]`.
+    pub signed_transaction: Transaction,
 }
 
 /// Result of submitting an external watchtower signature.

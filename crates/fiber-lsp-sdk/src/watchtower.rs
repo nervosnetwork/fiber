@@ -113,17 +113,6 @@ pub enum WatchtowerHealthStatus {
         /// Watched channel identifier.
         channel_id: Hash256,
     },
-    /// An operator-sponsored external watchtower signature is waiting for client verification and submission.
-    PendingSignature {
-        /// Watched channel identifier.
-        channel_id: Hash256,
-        /// Outstanding signature request identifier.
-        request_id: Hash256,
-        /// Unix millisecond timestamp when the 30-minute fee-cell hold / TTL expires.
-        expires_at_ms: u64,
-        /// Remaining milliseconds before the request expires (`0` if already elapsed).
-        remaining_ms: u64,
-    },
     /// Watchtower issued an unfunded template transaction that the client's external wallet must
     /// fund (covering fees and any CKB shortfall) and sign before submitting `signed_transaction`.
     PendingExternalFunding {
@@ -138,13 +127,13 @@ pub enum WatchtowerHealthStatus {
         /// Optional absolute timestamp `since` required on a funding input for a timeout TLC unlock.
         required_expiry_since: Option<u64>,
     },
-    /// No signature is currently pending, and new fee-holding requests are paused due to backoff.
+    /// No signature is currently pending, and new signing requests are paused due to backoff.
     InBackoff {
         /// Watched channel identifier.
         channel_id: Hash256,
         /// Effective Unix millisecond timestamp when backoff expires (channel or tenant-wide).
         retry_after_ms: u64,
-        /// Remaining milliseconds until the watchtower can create a new fee-holding request.
+        /// Remaining milliseconds until the watchtower can create a new signing request.
         remaining_backoff_ms: u64,
         /// Consecutive expired or failed-broadcast requests recorded on this channel.
         consecutive_expired_requests: u32,
@@ -156,7 +145,6 @@ impl WatchtowerHealthStatus {
     pub fn channel_id(&self) -> Hash256 {
         match self {
             Self::Healthy { channel_id }
-            | Self::PendingSignature { channel_id, .. }
             | Self::PendingExternalFunding { channel_id, .. }
             | Self::InBackoff { channel_id, .. } => *channel_id,
         }
@@ -177,9 +165,8 @@ impl WatchtowerHealthStatus {
             return true;
         }
         match self {
-            Self::Healthy { .. } => false,
+            Self::Healthy { .. } | Self::PendingExternalFunding { .. } => false,
             Self::InBackoff { retry_after_ms, .. } => *retry_after_ms >= safe_cutoff,
-            Self::PendingSignature { .. } | Self::PendingExternalFunding { .. } => false,
         }
     }
 }
@@ -231,16 +218,6 @@ pub fn evaluate_watchtower_status(
 ) -> WatchtowerHealthStatus {
     let channel_id: Hash256 = result.channel_id.into();
     match &result.status {
-        fiber_json_types::WatchtowerSigningStatus::SignatureRequired {
-            request_id,
-            expires_at_ms,
-            ..
-        } => WatchtowerHealthStatus::PendingSignature {
-            channel_id,
-            request_id: (*request_id).into(),
-            expires_at_ms: *expires_at_ms,
-            remaining_ms: expires_at_ms.saturating_sub(now_ms),
-        },
         fiber_json_types::WatchtowerSigningStatus::ExternalFundingRequired {
             request_id,
             expires_at_ms,
@@ -393,34 +370,7 @@ mod tests {
         // Dispute deadline far in the future -> no self-broadcast needed yet.
         assert!(!backoff.needs_self_broadcast(10_000, 400, 600));
 
-        // SignatureRequired with TTL deadline.
-        let pending_rpc = fiber_json_types::GetWatchtowerSigningStatusResult {
-            channel_id: channel_id.into(),
-            status: fiber_json_types::WatchtowerSigningStatus::SignatureRequired {
-                request_id: request_id.into(),
-                content: fiber_json_types::OnchainSigningContent {
-                    key_purpose: fiber_json_types::OnchainKeyPurpose::Settlement,
-                    transaction: ckb_types::core::TransactionBuilder::default()
-                        .build()
-                        .data()
-                        .into(),
-                },
-                expires_at_ms: 2_000,
-            },
-        };
-        let pending = evaluate_watchtower_status(&pending_rpc, 1_200);
-        assert_eq!(
-            pending,
-            WatchtowerHealthStatus::PendingSignature {
-                channel_id,
-                request_id,
-                expires_at_ms: 2_000,
-                remaining_ms: 800,
-            }
-        );
-        assert!(!pending.needs_self_broadcast(2_500, 1_200, 500));
-
-        // ExternalFundingRequired maps to PendingExternalFunding with required_expiry_since.
+        // ExternalFundingRequired maps to PendingExternalFunding with TTL and optional required_expiry_since.
         let external_funding_rpc = fiber_json_types::GetWatchtowerSigningStatusResult {
             channel_id: channel_id.into(),
             status: fiber_json_types::WatchtowerSigningStatus::ExternalFundingRequired {
@@ -453,14 +403,14 @@ mod tests {
         assert!(ext_funding.needs_self_broadcast(3_500, 3_000, 500));
 
         // Expired pending request near dispute deadline -> trigger self-broadcast.
-        let expired_pending = evaluate_watchtower_status(&pending_rpc, 2_100);
-        assert!(expired_pending.needs_self_broadcast(2_500, 2_100, 500));
+        let expired_pending = evaluate_watchtower_status(&external_funding_rpc, 3_100);
+        assert!(expired_pending.needs_self_broadcast(3_500, 3_100, 500));
 
-        // Even if an untrusted LSP reports Healthy or a future-TTL PendingSignature,
+        // Even if an untrusted LSP reports Healthy or a future-TTL PendingExternalFunding,
         // reaching the dispute safety cutoff MUST still trigger self-broadcast.
         let healthy = WatchtowerHealthStatus::Healthy { channel_id };
         assert!(!healthy.needs_self_broadcast(2_500, 1_200, 500));
         assert!(healthy.needs_self_broadcast(2_500, 2_000, 500));
-        assert!(pending.needs_self_broadcast(2_500, 2_000, 500));
+        assert!(ext_funding.needs_self_broadcast(2_500, 2_000, 500));
     }
 }

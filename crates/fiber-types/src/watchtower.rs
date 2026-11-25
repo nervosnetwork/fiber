@@ -311,11 +311,6 @@ pub struct ChannelData {
     /// The commitment-lock features used by this channel.
     #[serde(default)]
     pub channel_features: ChannelFeatures,
-    /// Optional lock script that receives settled funds for this channel.
-    /// Falls back to the watchtower fee provider lock script when omitted.
-    #[serde(default)]
-    #[serde_as(as = "Option<EntityHex>")]
-    pub payout_lock_script: Option<Script>,
 }
 
 /// Persistable watchtower signer sub-state for one watched channel.
@@ -334,213 +329,40 @@ pub const MAX_EXTERNAL_FUNDING_WATCHTOWER_TX_BYTES: usize = 64 * 1024;
 /// watchtower transaction.
 pub const MAX_EXTERNAL_FUNDING_WATCHTOWER_TX_ITEMS: usize = 64;
 
-/// Who funds `inputs[1..]` and fees of a watchtower settlement transaction.
-#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub enum WatchtowerFunding {
-    /// Operator's fee sponsor provides `inputs[1..]` (tracked in `held_cells` and signed by `LocalSigner`).
-    #[default]
-    OperatorSponsored,
-    /// Client's external wallet funds fees and any required CKB shortfall via `signed_transaction`
-    /// (never touches operator `held_cells` or `LocalSigner`).
-    ExternalFunding {
-        /// Optional absolute timestamp `since` required on a funding input for a timeout TLC unlock
-        /// (matching `CommitmentLock`'s `load_expiry_raw_since_value`).
-        #[serde(default)]
-        required_expiry_since: Option<u64>,
-    },
-}
-
-/// Outstanding external watchtower signing request awaiting a client signature.
+/// Outstanding external watchtower signing request awaiting a client-funded transaction and signature.
+///
+/// The watchtower issues an unfunded template transaction containing only the commitment input
+/// (`inputs[0]`), settlement outputs (`[residual_commitment_output, payout_output]` or
+/// `[payout_output]` when both parties are settled), and the `CommitmentLock` witness placeholder
+/// (`witness[0]`). The client wallet funds fees (either from the payout output when permitted or
+/// by attaching its own `cell_deps`, `inputs[1..]`, change output, and `witness[1..]`) and submits
+/// both `signature` and `signed_transaction`.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub enum PendingWatchtowerRequest {
-    /// Operator's fee sponsor provides `inputs[1..]` (tracked in `held_cells`).
-    OperatorSponsored {
-        /// Structured on-chain plaintext to be hashed and signed.
-        content: OnchainSigningContent,
-        /// Creation timestamp (Unix ms), used to bound request TTL and fee-cell holds.
-        #[serde(default)]
-        created_at_ms: u64,
-    },
-    /// Unfunded template transaction containing only the commitment input (`inputs[0]`),
-    /// settlement outputs (`[residual_commitment_output, payout_output]` or `[payout_output]`
-    /// when both parties are settled), and the `CommitmentLock` witness placeholder (`witness[0]`).
-    /// The client wallet funds fees (either from the payout output when permitted or by attaching
-    /// its own `cell_deps`, `inputs[1..]`, change output, and `witness[1..]`) and submits
-    /// `signed_transaction`.
-    ExternalFunding {
-        /// Unfunded template on-chain plaintext.
-        content: OnchainSigningContent,
-        /// Creation timestamp (Unix ms), used to bound request TTL.
-        #[serde(default)]
-        created_at_ms: u64,
-        /// Optional absolute timestamp `since` required on a funding input for a timeout TLC unlock
-        /// (matching `CommitmentLock`'s `load_expiry_raw_since_value`).
-        #[serde(default)]
-        required_expiry_since: Option<u64>,
-    },
-}
-
-impl PendingWatchtowerRequest {
-    /// Structured on-chain plaintext carried by this request.
-    pub fn content(&self) -> &OnchainSigningContent {
-        match self {
-            Self::OperatorSponsored { content, .. } | Self::ExternalFunding { content, .. } => {
-                content
-            }
-        }
-    }
-
-    /// Creation timestamp (Unix ms).
-    pub fn created_at_ms(&self) -> u64 {
-        match self {
-            Self::OperatorSponsored { created_at_ms, .. }
-            | Self::ExternalFunding { created_at_ms, .. } => *created_at_ms,
-        }
-    }
-
-    /// Mutable access to creation timestamp (Unix ms).
-    pub fn created_at_ms_mut(&mut self) -> &mut u64 {
-        match self {
-            Self::OperatorSponsored { created_at_ms, .. }
-            | Self::ExternalFunding { created_at_ms, .. } => created_at_ms,
-        }
-    }
-
-    /// Funding mode for this request.
-    pub fn funding(&self) -> WatchtowerFunding {
-        match self {
-            Self::OperatorSponsored { .. } => WatchtowerFunding::OperatorSponsored,
-            Self::ExternalFunding {
-                required_expiry_since,
-                ..
-            } => WatchtowerFunding::ExternalFunding {
-                required_expiry_since: *required_expiry_since,
-            },
-        }
-    }
-
-    /// Whether the client wallet funds fees/inputs externally via `signed_transaction`.
-    pub fn is_external_funding(&self) -> bool {
-        matches!(self, Self::ExternalFunding { .. })
-    }
-
-    /// Optional absolute timestamp `since` required for an externally funded timeout TLC unlock.
-    pub fn required_expiry_since(&self) -> Option<u64> {
-        match self {
-            Self::OperatorSponsored { .. } => None,
-            Self::ExternalFunding {
-                required_expiry_since,
-                ..
-            } => *required_expiry_since,
-        }
-    }
-
-    /// Operator fee-sponsor outpoints (`inputs[1..]`) owned by this request.
-    ///
-    /// Always empty for [`Self::ExternalFunding`] so client-supplied inputs can never
-    /// be locked or released in operator `held_cells`.
-    pub fn operator_fee_inputs(&self) -> Vec<ckb_types::packed::OutPoint> {
-        match self {
-            Self::OperatorSponsored { content, .. } => content
-                .transaction
-                .raw()
-                .inputs()
-                .into_iter()
-                .skip(1)
-                .map(|input| input.previous_output())
-                .collect(),
-            Self::ExternalFunding { .. } => Vec::new(),
-        }
-    }
+pub struct PendingWatchtowerRequest {
+    /// Unfunded template on-chain plaintext.
+    pub content: OnchainSigningContent,
+    /// Creation timestamp (Unix ms), used to bound request TTL.
+    #[serde(default)]
+    pub created_at_ms: u64,
+    /// Optional absolute timestamp `since` required on a funding input for a timeout TLC unlock
+    /// (matching `CommitmentLock`'s `load_expiry_raw_since_value`).
+    #[serde(default)]
+    pub required_expiry_since: Option<u64>,
 }
 
 /// Verified external watchtower signature awaiting transaction assembly and broadcast.
 #[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub enum SignedWatchtowerRequest {
-    /// Operator's fee sponsor provides `inputs[1..]` (tracked in `held_cells` and signed by `LocalSigner`).
-    OperatorSponsored {
-        /// Exact watchtower-built transaction that was signed.
-        content: OnchainSigningContent,
-        /// Recoverable ECDSA signature for `inputs[0]`.
-        #[serde_as(as = "SliceHex")]
-        signature: [u8; 65],
-        /// Acceptance timestamp (Unix ms), used to bound holds/TTL if broadcast fails.
-        #[serde(default)]
-        created_at_ms: u64,
-    },
-    /// Client's external wallet provided fees/funding via `signed_transaction` (never touches
-    /// operator `held_cells` or `LocalSigner`).
-    ExternalFunding {
-        /// Client-funded transaction carrying client `cell_deps`, optional `inputs[1..]`,
-        /// outputs, and `witness[1..]`, with `witness[0]` normalized to the template placeholder.
-        content: OnchainSigningContent,
-        /// Recoverable ECDSA signature for `inputs[0]`.
-        #[serde_as(as = "SliceHex")]
-        signature: [u8; 65],
-        /// Acceptance timestamp (Unix ms), used to bound TTL if broadcast fails.
-        #[serde(default)]
-        created_at_ms: u64,
-    },
-}
-
-impl SignedWatchtowerRequest {
-    /// Structured on-chain plaintext that was signed.
-    pub fn content(&self) -> &OnchainSigningContent {
-        match self {
-            Self::OperatorSponsored { content, .. } | Self::ExternalFunding { content, .. } => {
-                content
-            }
-        }
-    }
-
+pub struct SignedWatchtowerRequest {
+    /// Client-funded transaction carrying client `cell_deps`, optional `inputs[1..]`,
+    /// outputs, and `witness[1..]`, with `witness[0]` normalized to the template placeholder.
+    pub content: OnchainSigningContent,
     /// Recoverable ECDSA signature for `inputs[0]`.
-    pub fn signature(&self) -> [u8; 65] {
-        match self {
-            Self::OperatorSponsored { signature, .. } | Self::ExternalFunding { signature, .. } => {
-                *signature
-            }
-        }
-    }
-
-    /// Acceptance timestamp (Unix ms).
-    pub fn created_at_ms(&self) -> u64 {
-        match self {
-            Self::OperatorSponsored { created_at_ms, .. }
-            | Self::ExternalFunding { created_at_ms, .. } => *created_at_ms,
-        }
-    }
-
-    /// Mutable access to acceptance timestamp (Unix ms).
-    pub fn created_at_ms_mut(&mut self) -> &mut u64 {
-        match self {
-            Self::OperatorSponsored { created_at_ms, .. }
-            | Self::ExternalFunding { created_at_ms, .. } => created_at_ms,
-        }
-    }
-
-    /// Whether the client wallet funded fees/inputs externally.
-    pub fn is_external_funding(&self) -> bool {
-        matches!(self, Self::ExternalFunding { .. })
-    }
-
-    /// Operator fee-sponsor outpoints (`inputs[1..]`) owned by this request.
-    ///
-    /// Always empty for [`Self::ExternalFunding`] so client-supplied inputs can never
-    /// be locked or released in operator `held_cells`.
-    pub fn operator_fee_inputs(&self) -> Vec<ckb_types::packed::OutPoint> {
-        match self {
-            Self::OperatorSponsored { content, .. } => content
-                .transaction
-                .raw()
-                .inputs()
-                .into_iter()
-                .skip(1)
-                .map(|input| input.previous_output())
-                .collect(),
-            Self::ExternalFunding { .. } => Vec::new(),
-        }
-    }
+    #[serde_as(as = "SliceHex")]
+    pub signature: [u8; 65],
+    /// Acceptance timestamp (Unix ms), used to bound TTL if broadcast fails.
+    #[serde(default)]
+    pub created_at_ms: u64,
 }
 
 /// External watchtower signer state machine.
@@ -559,7 +381,7 @@ pub struct WatchtowerExternalSignerState {
     /// Consecutive expired or failed external requests for retry backoff.
     #[serde(default)]
     pub consecutive_expired_requests: u32,
-    /// Earliest Unix ms timestamp before which this channel will not create new fee-holding requests.
+    /// Earliest Unix ms timestamp before which this channel will not create new signing requests.
     #[serde(default)]
     pub retry_after_ms: u64,
 }
@@ -586,10 +408,9 @@ pub struct LastAppliedWatchtowerSignature {
     /// Signature that resumed the spend.
     #[serde_as(as = "SliceHex")]
     pub signature: [u8; 65],
-    /// For `ExternalFunding` submissions, blake2b-256 digest of `tx.raw()` and client funding
-    /// witnesses (`witness[1..]`) for exact idempotency checking.
-    #[serde(default)]
-    pub signed_transaction_hash: Option<Hash256>,
+    /// Blake2b-256 digest of `tx.raw()` and client funding witnesses (`witness[1..]`)
+    /// for exact idempotency checking.
+    pub signed_transaction_hash: Hash256,
 }
 
 /// Locate the 65-byte signature slice `(start, end)` inside a V2 single-unlock
@@ -1270,7 +1091,6 @@ mod key_material_tests {
             local_settlement_data: settlement_data(),
             revocation_data: None,
             channel_features: ChannelFeatures::V2,
-            payout_lock_script: None,
         }
     }
 

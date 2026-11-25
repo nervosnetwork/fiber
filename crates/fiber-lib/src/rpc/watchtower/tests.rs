@@ -42,7 +42,6 @@ async fn tenant_watch_channel_rejects_oversized_snapshot_without_writing() {
         remote_funding_pubkey: Privkey::from([6; 32]).pubkey().into(),
         settlement_data: snapshot(count).into(),
         channel_features: Default::default(),
-        payout_lock_script: None,
     };
     // Exercise JSON decoding/conversion as well as the tenant RPC handler.
     let wire = serde_json::to_string(&params(255)).unwrap();
@@ -95,25 +94,6 @@ async fn tenant_watch_channel_rejects_oversized_snapshot_without_writing() {
         before.pending_remote_settlement_data
     );
     assert_eq!(after.remote_settlement_data, before.remote_settlement_data);
-
-    // Oversized payout_lock_script args must be rejected.
-    use ckb_types::prelude::{Builder, Entity, Pack};
-    let mut huge_payout_params = params(1);
-    huge_payout_params.channel_id = Hash256::from([9; 32]).into();
-    huge_payout_params.payout_lock_script = Some(
-        ckb_types::packed::Script::new_builder()
-            .args([0u8; 2048].as_slice().pack())
-            .build()
-            .into(),
-    );
-    let err = server
-        .create_watch_channel(ctx.clone(), huge_payout_params)
-        .await
-        .unwrap_err();
-    assert!(
-        err.message().contains("payout_lock_script args exceeds"),
-        "{err}"
-    );
 }
 
 #[tokio::test]
@@ -201,7 +181,6 @@ async fn tenant_watch_channel_and_preimage_quotas_enforced_and_host_exempt() {
         remote_funding_pubkey: Privkey::from([6; 32]).pubkey().into(),
         settlement_data: snapshot(1).into(),
         channel_features: Default::default(),
-        payout_lock_script: None,
     };
 
     // Tenant A fills per-node channel quota (2).
@@ -364,7 +343,6 @@ async fn watchtower_signing_status_exposes_backoff_and_pending_ttl() {
                     remote_funding_pubkey: Privkey::from([6; 32]).pubkey().into(),
                     settlement_data: snapshot(1).into(),
                     channel_features: Default::default(),
-                    payout_lock_script: None,
                 },
             )
             .await
@@ -397,12 +375,13 @@ async fn watchtower_signing_status_exposes_backoff_and_pending_ttl() {
                     .data();
                 ext.pending_requests.insert(
                     req_id,
-                    fiber_types::PendingWatchtowerRequest::OperatorSponsored {
+                    fiber_types::PendingWatchtowerRequest {
                         content: OnchainSigningContent {
                             key_purpose: OnchainKeyPurpose::Settlement,
                             transaction: tx,
                         },
                         created_at_ms,
+                        required_expiry_since: None,
                     },
                 );
                 ext.consecutive_expired_requests = 2;
@@ -412,7 +391,7 @@ async fn watchtower_signing_status_exposes_backoff_and_pending_ttl() {
         })
         .unwrap();
 
-    // ch1 has a pending request -> SignatureRequired with exact expires_at_ms.
+    // ch1 has a pending request -> ExternalFundingRequired with exact expires_at_ms.
     let status_ch1 = server
         .get_watchtower_signing_status(
             ctx.clone(),
@@ -423,7 +402,7 @@ async fn watchtower_signing_status_exposes_backoff_and_pending_ttl() {
         .await
         .unwrap();
     match status_ch1.status {
-        WatchtowerSigningStatus::SignatureRequired {
+        WatchtowerSigningStatus::ExternalFundingRequired {
             request_id,
             expires_at_ms,
             ..
@@ -434,7 +413,7 @@ async fn watchtower_signing_status_exposes_backoff_and_pending_ttl() {
                 created_at_ms + crate::ckb::held_cells::WATCHTOWER_HOLD_MS
             );
         }
-        other => panic!("expected SignatureRequired, got {other:?}"),
+        other => panic!("expected ExternalFundingRequired, got {other:?}"),
     }
 
     // Sibling channel ch2 has no pending request -> Backoff with effective per-node retry_after_ms.
@@ -510,7 +489,6 @@ async fn watchtower_rejects_tenant_calls_when_lsp_disabled() {
                 remote_funding_pubkey: Privkey::from([6; 32]).pubkey().into(),
                 settlement_data: snapshot(1).into(),
                 channel_features: Default::default(),
-                payout_lock_script: None,
             },
         )
         .await
@@ -535,7 +513,6 @@ async fn watchtower_rejects_tenant_calls_when_lsp_disabled() {
                 remote_funding_pubkey: Privkey::from([6; 32]).pubkey().into(),
                 settlement_data: snapshot(1).into(),
                 channel_features: Default::default(),
-                payout_lock_script: None,
             },
         )
         .await
@@ -581,7 +558,6 @@ async fn create_watch_channel_retry_does_not_publish_no_signature_required_while
             remote_funding_pubkey: Privkey::from([6; 32]).pubkey().into(),
             settlement_data: snapshot(1).into(),
             channel_features: Default::default(),
-            payout_lock_script: None,
         };
 
         let mut changes = signing_events
@@ -610,7 +586,7 @@ async fn create_watch_channel_retry_does_not_publish_no_signature_required_while
         );
         assert!(changes.recv().now_or_never().is_none());
 
-        // Transition signer state to a pending external signature request (SignatureRequired).
+        // Transition signer state to a pending external funding request.
         let req_id = Hash256::from([req_byte; 32]);
         let now_ms = crate::now_timestamp_as_millis_u64();
         let signing_scope = signing_events.watchtower(&node_id);
@@ -624,12 +600,13 @@ async fn create_watch_channel_retry_does_not_publish_no_signature_required_while
                         .data();
                     ext.pending_requests.insert(
                         req_id,
-                        fiber_types::PendingWatchtowerRequest::OperatorSponsored {
+                        fiber_types::PendingWatchtowerRequest {
                             content: OnchainSigningContent {
                                 key_purpose: OnchainKeyPurpose::Settlement,
                                 transaction: tx,
                             },
                             created_at_ms: now_ms,
+                            required_expiry_since: None,
                         },
                     );
                 }
@@ -647,16 +624,16 @@ async fn create_watch_channel_retry_does_not_publish_no_signature_required_while
         match pending_event.as_ref() {
             SigningChange::WatchtowerUpdated {
                 channel_id: id,
-                status: WatchtowerSigningStatus::SignatureRequired { request_id, .. },
+                status: WatchtowerSigningStatus::ExternalFundingRequired { request_id, .. },
             } => {
                 assert_eq!(*id, channel_id);
                 assert_eq!(*request_id, req_id.into());
             }
-            other => panic!("expected WatchtowerUpdated(SignatureRequired), got {other:?}"),
+            other => panic!("expected WatchtowerUpdated(ExternalFundingRequired), got {other:?}"),
         }
 
         // Retrying create_watch_channel on the already-monitored channel must succeed,
-        // emit NO spurious NoSignatureRequired event, and keep SignatureRequired intact.
+        // emit NO spurious NoSignatureRequired event, and keep ExternalFundingRequired intact.
         server
             .create_watch_channel(ctx.clone(), make_params())
             .await
@@ -676,46 +653,36 @@ async fn create_watch_channel_retry_does_not_publish_no_signature_required_while
             .await
             .unwrap();
         match status.status {
-            WatchtowerSigningStatus::SignatureRequired { request_id, .. } => {
+            WatchtowerSigningStatus::ExternalFundingRequired { request_id, .. } => {
                 assert_eq!(request_id, req_id.into());
             }
-            other => panic!("expected SignatureRequired to survive retry, got {other:?}"),
+            other => panic!("expected ExternalFundingRequired to survive retry, got {other:?}"),
         }
     }
 }
 
 #[tokio::test]
-async fn submit_watchtower_signature_rejects_expired_and_refreshes_hold_on_accept() {
-    let _serial = crate::ckb::held_cells::TEST_SERIAL.lock().await;
-    use ckb_sdk::traits::{CellCollector, CellCollectorError, CellQueryOptions, LiveCell};
+async fn submit_watchtower_signature_rejects_expired_and_accepts_fresh_request() {
     use ckb_types::core::TransactionBuilder;
-    use ckb_types::packed::{Byte32, CellInput, OutPoint, Transaction};
+    use ckb_types::packed::{Byte32, Bytes, CellInput, CellOutput, OutPoint};
+    use ckb_types::prelude::Pack;
     use fiber_types::{OnchainKeyPurpose, OnchainSigningContent, WatchtowerSignerState};
-    use std::collections::HashSet;
 
-    #[derive(Clone, Default)]
-    struct LockTracker {
-        locked: HashSet<OutPoint>,
-    }
-
-    #[async_trait::async_trait]
-    impl CellCollector for LockTracker {
-        async fn collect_live_cells_async(
-            &mut self,
-            _query: &CellQueryOptions,
-            _apply_changes: bool,
-        ) -> Result<(Vec<LiveCell>, u64), CellCollectorError> {
-            Ok((vec![], 0))
-        }
-        fn lock_cell(&mut self, out_point: OutPoint, _: u64) -> Result<(), CellCollectorError> {
-            self.locked.insert(out_point);
-            Ok(())
-        }
-        fn apply_tx(&mut self, _: Transaction, _: u64) -> Result<(), CellCollectorError> {
-            Ok(())
-        }
-        fn reset(&mut self) {}
-    }
+    let template_tx = |seed: u8| {
+        let mut witness = [0u8; 16 + 1 + 1 + 72 + 1 + 1 + 65];
+        witness[16] = 0x01;
+        witness[90] = 0xfe;
+        TransactionBuilder::default()
+            .input(CellInput::new(
+                OutPoint::new(Byte32::from([seed; 32]), 0),
+                0,
+            ))
+            .output(CellOutput::default())
+            .output_data(Bytes::default())
+            .witness(witness.as_slice().pack())
+            .build()
+            .data()
+    };
 
     let (store, _dir) = generate_store();
     let server = WatchtowerRpcServerImpl::new(store.clone());
@@ -740,7 +707,6 @@ async fn submit_watchtower_signature_rejects_expired_and_refreshes_hold_on_accep
                 remote_funding_pubkey: Privkey::from([6; 32]).pubkey().into(),
                 settlement_data: snapshot(0).into(),
                 channel_features: Default::default(),
-                payout_lock_script: None,
             },
         )
         .await
@@ -749,33 +715,26 @@ async fn submit_watchtower_signature_rejects_expired_and_refreshes_hold_on_accep
     let now_ms = crate::now_timestamp_as_millis_u64();
 
     // (a) Backdated pending request older than WATCHTOWER_HOLD_MS must be rejected
-    // without moving into signed_signatures or holding its fee input.
+    // without moving into signed_signatures.
     let expired_req_id = Hash256::from([0xe1; 32]);
-    let expired_fee_outpoint = OutPoint::new(Byte32::from([0xe1; 32]), 1);
+    let expired_tx = template_tx(0xd1);
     let expired_content = OnchainSigningContent {
         key_purpose: OnchainKeyPurpose::Settlement,
-        transaction: TransactionBuilder::default()
-            .input(CellInput::new(
-                OutPoint::new(Byte32::from([0xd1; 32]), 0),
-                0,
-            ))
-            .input(CellInput::new(expired_fee_outpoint.clone(), 0))
-            .build()
-            .data(),
+        transaction: expired_tx.clone(),
     };
     let expired_sig =
         crate::watchtower::sign_onchain_request(&settlement_key, &expired_content).unwrap();
     let expired_created_at = now_ms.saturating_sub(crate::ckb::held_cells::WATCHTOWER_HOLD_MS + 1);
 
-    crate::ckb::held_cells::release_for_watchtower([expired_fee_outpoint.clone()]);
     store
         .update_watchtower_signer(&tenant, &channel_id, |state| {
             if let WatchtowerSignerState::External(ext) = state {
                 ext.pending_requests.insert(
                     expired_req_id,
-                    fiber_types::PendingWatchtowerRequest::OperatorSponsored {
+                    fiber_types::PendingWatchtowerRequest {
                         content: expired_content.clone(),
                         created_at_ms: expired_created_at,
+                        required_expiry_since: None,
                     },
                 );
             }
@@ -790,7 +749,7 @@ async fn submit_watchtower_signature_rejects_expired_and_refreshes_hold_on_accep
                 channel_id: channel_id.into(),
                 request_id: expired_req_id.into(),
                 signature: expired_sig.to_vec(),
-                signed_transaction: None,
+                signed_transaction: expired_tx.into(),
             },
         )
         .await
@@ -808,43 +767,28 @@ async fn submit_watchtower_signature_rejects_expired_and_refreshes_hold_on_accep
         }
         other => panic!("expected external signer state, got {other:?}"),
     }
-    let mut expired_tracker = LockTracker::default();
-    crate::ckb::held_cells::lock_held(&mut expired_tracker, now_ms).unwrap();
-    assert!(
-        !expired_tracker.locked.contains(&expired_fee_outpoint),
-        "rejected expired request must not hold fee cell"
-    );
 
-    // (b) Fresh non-expired pending request (close to original expiry) is accepted and its
-    // fee input hold is refreshed in held_cells to now_ms + WATCHTOWER_HOLD_MS.
+    // (b) Fresh non-expired pending request (close to original expiry) is accepted and
+    // stamped with a fresh created_at_ms.
     let fresh_req_id = Hash256::from([0xe2; 32]);
-    let fresh_fee_outpoint = OutPoint::new(Byte32::from([0xe2; 32]), 1);
+    let fresh_tx = template_tx(0xd2);
     let fresh_content = OnchainSigningContent {
         key_purpose: OnchainKeyPurpose::Settlement,
-        transaction: TransactionBuilder::default()
-            .input(CellInput::new(
-                OutPoint::new(Byte32::from([0xd2; 32]), 0),
-                0,
-            ))
-            .input(CellInput::new(fresh_fee_outpoint.clone(), 0))
-            .build()
-            .data(),
+        transaction: fresh_tx.clone(),
     };
     let fresh_sig =
         crate::watchtower::sign_onchain_request(&settlement_key, &fresh_content).unwrap();
-    // Created almost WATCHTOWER_HOLD_MS ago (5s left): still valid, and checking just past
-    // its old expiry verifies the hold was actually refreshed rather than left at old_created_at.
     let old_created_at = now_ms.saturating_sub(crate::ckb::held_cells::WATCHTOWER_HOLD_MS - 5_000);
 
-    crate::ckb::held_cells::release_for_watchtower([fresh_fee_outpoint.clone()]);
     store
         .update_watchtower_signer(&tenant, &channel_id, |state| {
             if let WatchtowerSignerState::External(ext) = state {
                 ext.pending_requests.insert(
                     fresh_req_id,
-                    fiber_types::PendingWatchtowerRequest::OperatorSponsored {
+                    fiber_types::PendingWatchtowerRequest {
                         content: fresh_content.clone(),
                         created_at_ms: old_created_at,
+                        required_expiry_since: None,
                     },
                 );
             }
@@ -859,7 +803,7 @@ async fn submit_watchtower_signature_rejects_expired_and_refreshes_hold_on_accep
                 channel_id: channel_id.into(),
                 request_id: fresh_req_id.into(),
                 signature: fresh_sig.to_vec(),
-                signed_transaction: None,
+                signed_transaction: fresh_tx.into(),
             },
         )
         .await
@@ -872,24 +816,11 @@ async fn submit_watchtower_signature_rejects_expired_and_refreshes_hold_on_accep
             ext.signed_signatures
                 .get(&fresh_req_id)
                 .expect("signed signature must be recorded")
-                .created_at_ms()
+                .created_at_ms
         }
         other => panic!("expected external signer state, got {other:?}"),
     };
     assert!(stamped_ms >= now_ms);
-
-    let mut refreshed_tracker = LockTracker::default();
-    crate::ckb::held_cells::lock_held(
-        &mut refreshed_tracker,
-        old_created_at + crate::ckb::held_cells::WATCHTOWER_HOLD_MS + 1,
-    )
-    .unwrap();
-    assert!(
-        refreshed_tracker.locked.contains(&fresh_fee_outpoint),
-        "accepted submission must refresh fee input hold past old pending expiry"
-    );
-
-    crate::ckb::held_cells::release_for_watchtower([expired_fee_outpoint, fresh_fee_outpoint]);
 }
 
 #[tokio::test]
@@ -922,7 +853,6 @@ async fn standalone_watchtower_client_bypasses_lsp_tenant_quotas() {
                     remote_funding_pubkey: Privkey::from([6; 32]).pubkey().into(),
                     settlement_data: snapshot(0).into(),
                     channel_features: Default::default(),
-                    payout_lock_script: None,
                 },
             )
             .await

@@ -1605,8 +1605,6 @@ Create a new watched channel.
 * `remote_funding_pubkey` - <em>[Pubkey](#type-pubkey)</em>, The remote party's funding public key (hex without 0x prefix)
 * `settlement_data` - <em>[SettlementData](#type-settlementdata)</em>, Settlement data
 * `channel_features` - <em>[ChannelFeatures](#type-channelfeatures)</em>, Required channel feature bitmap as hex. Only "0x1" (V2 with full payment hashes) is supported.
-* `payout_lock_script` - <em>`Option<Script>`</em>, Optional lock script that receives settled funds. When omitted, settled funds
- are sent to the watchtower fee provider lock script.
 
 ##### Returns
 
@@ -1752,7 +1750,8 @@ Submit an external watchtower settlement or TLC signature.
 * `channel_id` - <em>[Hash256](#type-hash256)</em>, The watched channel that produced the outstanding signature request.
 * `request_id` - <em>[Hash256](#type-hash256)</em>, Identifier of the outstanding signature request.
 * `signature` - <em>`Vec<u8>`</em>, Recoverable ECDSA signature (64 bytes + recovery id), `0x`-prefixed hex.
-* `signed_transaction` - <em>`Option<Transaction>`</em>, Optional client-funded transaction (carrying client `cell_deps`, optional `inputs[1..]`, outputs, and `witness[1..]`) required when responding to `ExternalFundingRequired`.
+* `signed_transaction` - <em>`Transaction`</em>, Client-funded transaction carrying client `cell_deps`, optional `inputs[1..]`,
+ payout/change outputs, and `witness[1..]`.
 
 ##### Returns
 
@@ -2560,8 +2559,9 @@ Read-only projection of a watchtower's external signing requests.
 #### Enum with values of
 
 * `NoSignatureRequired` - No external signature is currently required and no retry backoff is active.
-* `SignatureRequired` - Operator-sponsored settlement or TLC spend is paused until this signature is submitted.
-* `ExternalFundingRequired` - Watchtower issued an unfunded template transaction; the client's external wallet must fund transaction fees (and any CKB capacity shortfall), sign `inputs[0]`, and submit both `signature` and `signed_transaction`.
-* `Backoff` - New fee-holding signing requests are paused due to channel or tenant retry backoff.
+* `ExternalFundingRequired` - Watchtower issued an unfunded template transaction; the client's external wallet must fund
+ transaction fees (and any CKB capacity shortfall), sign `inputs[0]`, and submit both
+ `signature` and `signed_transaction`.
+* `Backoff` - New signing requests are paused due to channel or tenant retry backoff.
 ---
 

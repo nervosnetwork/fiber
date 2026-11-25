@@ -1699,7 +1699,6 @@ fn settlement_data_for_commitment_edge_cases_no_revocation_and_zero_commitment()
         local_settlement_data: local.clone(),
         revocation_data: None,
         channel_features: ChannelFeatures::V2,
-        payout_lock_script: None,
     };
 
     // When revocation_data is None, remote commitment falls back to pending_remote_settlement_data
@@ -1736,7 +1735,6 @@ fn settlement_data_for_commitment_edge_cases_no_revocation_and_zero_commitment()
             output_data: Default::default(),
         }),
         channel_features: ChannelFeatures::V2,
-        payout_lock_script: None,
     };
 
     // Commitment 0 with revocation for 0: checked_sub(1) underflows safely to None -> returns pending
@@ -2135,7 +2133,6 @@ fn test_verify_and_select_settlement_data_preceding_and_pending() {
             output_data: Default::default(),
         }),
         channel_features: ChannelFeatures::V2,
-        payout_lock_script: None,
     };
 
     // A revoked remote lock needs no historical TLC snapshot. The same number in
@@ -2236,7 +2233,6 @@ fn test_invalid_persisted_candidate_does_not_hide_valid_remote_snapshot() {
         local_settlement_data: valid.clone(),
         revocation_data: None,
         channel_features: ChannelFeatures::V2,
-        payout_lock_script: None,
     };
     let lock = create_test_commitment_lock_with_keys(
         &local,
@@ -2288,7 +2284,6 @@ fn test_store_pending_settlement_replay_keeps_unrevoked_witness() {
         },
         settlement_2.clone(),
         fiber_types::ChannelFeatures::V2,
-        None,
     );
     // ACK #2 revokes #1 and makes #2 the preceding remote witness.
     store.update_revocation(
@@ -2440,7 +2435,6 @@ fn test_tracked_settlement_tlcs_extraction() {
         },
         revocation_data: None,
         channel_features: ChannelFeatures::V2,
-        payout_lock_script: None,
     };
 
     // Commitment 2 = pending
@@ -2517,7 +2511,6 @@ fn test_tracked_settlement_tlcs_preserves_verified_empty_snapshot() {
         local_settlement_data: committed_settlement.clone(),
         revocation_data: None,
         channel_features: ChannelFeatures::V2,
-        payout_lock_script: None,
     };
     let witness = settlement_data_to_witness(
         &committed_settlement,
@@ -2763,7 +2756,6 @@ async fn assert_confirmed_snapshot_recovery(wrong_direction: bool, revoked: bool
         },
         pending_settlement.clone(),
         fiber_types::ChannelFeatures::V2,
-        None,
     );
     store.update_revocation(
         NodeId::local(),
@@ -2873,7 +2865,6 @@ async fn test_scenario_b_transient_rpc_failure_retries_and_recovers_under_confir
         },
         settlement.clone(),
         fiber_types::ChannelFeatures::V2,
-        None,
     );
 
     let lock = create_test_commitment_lock_with_keys(
@@ -2997,7 +2988,6 @@ async fn test_scenario_c_cell_dep_pending_tx_recovers_snapshot_and_blocks_until_
         },
         pending_settlement.clone(),
         fiber_types::ChannelFeatures::V2,
-        None,
     );
 
     // Commitment lock for commitment 2 (pending)
@@ -3123,7 +3113,6 @@ fn test_scenario_d_multi_tenant_watchtower_store_isolation() {
         },
         foreign_settlement,
         fiber_types::ChannelFeatures::V2,
-        None,
     );
 
     // get_local_watch_channel MUST NOT return foreign node's channel
@@ -3145,7 +3134,6 @@ fn test_scenario_d_multi_tenant_watchtower_store_isolation() {
         },
         local_settlement,
         fiber_types::ChannelFeatures::V2,
-        None,
     );
 
     // get_local_watch_channel MUST return local node's channel data
@@ -3505,7 +3493,6 @@ async fn test_scenario_g_malformed_script_wrong_funding_and_direction_mismatch_s
         },
         settlement.clone(),
         fiber_types::ChannelFeatures::V2,
-        None,
     );
 
     let (sender, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -3763,7 +3750,6 @@ fn test_fresh_channel_pre_tlc_commitment_uses_verified_snapshot() {
         local_settlement_data: local_settlement.clone(),
         revocation_data: None,
         channel_features: ChannelFeatures::V2,
-        payout_lock_script: None,
     };
 
     for (for_remote, number, expected) in [
@@ -4653,7 +4639,6 @@ fn test_local_force_close_excluded_tlc_ignores_remote_revocation_number() {
                 output_data: Default::default(),
             }),
             channel_features: ChannelFeatures::V2,
-            payout_lock_script: None,
         },
     );
     for for_remote in [false, true] {
@@ -4768,7 +4753,6 @@ async fn assert_excluded_payer_with_unclaimed_balance(
         },
         snapshot.clone(),
         fiber_types::ChannelFeatures::V2,
-        None,
     );
     let lock = create_test_commitment_lock_with_keys(
         &local_key,

@@ -56,9 +56,8 @@ pub use watchtower::{
     settlement_witness_hash, validate_and_normalize_external_funding_watchtower_tx, ChannelData,
     LastAppliedWatchtowerSignature, PendingWatchtowerRequest, RevocationData, SettlementData,
     SettlementKey, SettlementTlc, SignedWatchtowerRequest, WatchChannelKeys,
-    WatchtowerExternalSignerState, WatchtowerFunding, WatchtowerSignerState,
-    MAX_EXTERNAL_FUNDING_WATCHTOWER_TX_BYTES, MAX_EXTERNAL_FUNDING_WATCHTOWER_TX_ITEMS,
-    MAX_WITNESS_TLC_COUNT,
+    WatchtowerExternalSignerState, WatchtowerSignerState, MAX_EXTERNAL_FUNDING_WATCHTOWER_TX_BYTES,
+    MAX_EXTERNAL_FUNDING_WATCHTOWER_TX_ITEMS, MAX_WITNESS_TLC_COUNT,
 };
 
 pub mod watchtower;

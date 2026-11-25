@@ -252,7 +252,6 @@ async fn watchtower_subscription_replays_pending_external_funding_request() {
             tlcs: vec![],
         },
         ChannelFeatures::V2,
-        None,
     );
     let request_id = Hash256::from([0xaa; 32]);
     let expiry_since = 0x4000_0000_0000_0064u64;
@@ -265,7 +264,7 @@ async fn watchtower_subscription_replays_pending_external_funding_request() {
             if let WatchtowerSignerState::External(ext) = state {
                 ext.pending_requests.insert(
                     request_id,
-                    PendingWatchtowerRequest::ExternalFunding {
+                    PendingWatchtowerRequest {
                         content: OnchainSigningContent {
                             key_purpose: OnchainKeyPurpose::Settlement,
                             transaction: tx.clone(),
