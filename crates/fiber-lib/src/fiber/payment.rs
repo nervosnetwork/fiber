@@ -1625,20 +1625,13 @@ where
             let payment_state =
                 SendPaymentState::with_channel_stats(session.request.clone(), channel_stats);
             #[cfg(not(target_arch = "wasm32"))]
-            let mut hops = self
+            let route = self
                 .build_route_in_spawn_task(amount, None, max_fee, payment_state)
-                .await
-                .map_err(|e| {
-                    Error::BuildPaymentRouteError(format!("Failed to build route, {}", e))
-                })?;
+                .await;
 
             #[cfg(target_arch = "wasm32")]
-            let mut hops = self
-                .build_route(amount, None, max_fee, payment_state)
-                .await
-                .map_err(|e| {
-                    Error::BuildPaymentRouteError(format!("Failed to build route, {}", e))
-                })?;
+            let route = self.build_route(amount, None, max_fee, payment_state).await;
+            let mut hops = route.map_err(Error::BuildPaymentRouteError)?;
 
             if let Some(trampoline) = &session.request.trampoline_context {
                 if let Some(last_hop) = hops.last_mut() {
@@ -1762,15 +1755,7 @@ where
             match build_route_result {
                 Err(e) => {
                     error!("build_payment_routes failed to build route: {}", e);
-                    let error = if session.request.trampoline_context.is_some() {
-                        session
-                            .last_error_code
-                            .get_or_insert(TlcErrorCode::TemporaryNodeFailure);
-                        TlcErrorCode::TemporaryNodeFailure.as_ref().to_string()
-                    } else {
-                        format!("Failed to build route, {}", e)
-                    };
-                    return Err(Error::SendPaymentError(error));
+                    return Err(Error::BuildPaymentRouteError(e));
                 }
                 Ok(mut hops) => {
                     assert_ne!(hops[0].funding_tx_hash, Hash256::default());
@@ -2035,6 +2020,24 @@ where
         }
     }
 
+    /// Route errors are classified only when the session actually gives up.
+    /// Replace any code from an earlier attempt, so a stale temporary failure
+    /// cannot make an invalid route look retryable to a hosted LSP delivery.
+    fn update_route_failure_code(
+        session: &mut PaymentSession,
+        error: &Error,
+    ) -> Option<TlcErrorCode> {
+        let path_error = match error {
+            Error::BuildPaymentRouteError(error) | Error::NetworkGraphError(error) => error,
+            _ => return None,
+        };
+        let code = (session.request.trampoline_context.is_some()
+            && matches!(path_error, PathFindError::NoPathFound))
+        .then_some(TlcErrorCode::TemporaryNodeFailure);
+        session.last_error_code = code;
+        code
+    }
+
     fn set_attempt_fail_with_error(
         &self,
         session: &mut PaymentSession,
@@ -2147,7 +2150,8 @@ where
             .build_payment_routes(&mut session)
             .await
             .inspect_err(|e| {
-                self.set_payment_fail_with_error(&mut session, &e.to_string(), None);
+                let code = Self::update_route_failure_code(&mut session, e);
+                self.set_payment_fail_with_error(&mut session, &e.to_string(), code);
             })?;
 
         for attempt in attempts.iter_mut() {
@@ -2201,10 +2205,11 @@ where
                         self.store.insert_attempt(attempt);
                     }
                     Err(err) => {
+                        let code = Self::update_route_failure_code(session, &err);
                         self.set_attempt_fail_with_error(
                             session,
                             &mut attempt,
-                            None,
+                            code,
                             &err.to_string(),
                             false,
                         );
@@ -2834,6 +2839,10 @@ where
         Ok(response)
     }
 }
+
+#[cfg(test)]
+#[path = "tests/payment_route_errors.rs"]
+mod route_error_tests;
 
 #[cfg(test)]
 mod closed_add_tests {

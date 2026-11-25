@@ -55,8 +55,8 @@ pub enum Error {
     CkbInvoiceError(#[from] InvoiceError),
     #[error("Funding error: {0}")]
     FundingError(#[from] FundingError),
-    #[error("Build payment route error: {0}")]
-    BuildPaymentRouteError(String),
+    #[error("Build payment route error: Failed to build route, {0}")]
+    BuildPaymentRouteError(PathFindError),
     #[error("Send payment error: {0}")]
     SendPaymentError(String),
     #[error("Send payment first hop error: {0}")]

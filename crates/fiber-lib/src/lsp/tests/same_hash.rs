@@ -64,7 +64,7 @@ async fn redispatch(network: &LspTestNetwork, delivery: &crate::lsp::LspPaymentD
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn hosted_session_retries_before_reporting_no_remaining_route() {
+async fn hosted_no_path_after_retry_buffers_until_route_recovers() {
     init_tracing();
     let network = create_desk_trade_network(HUGE_CKB_AMOUNT).await;
     let buyer = network.tenant(0, "buyer");
@@ -115,7 +115,13 @@ async fn hosted_session_retries_before_reporting_no_remaining_route() {
     )
     .unwrap()
     .unwrap();
-    network.nodes[1].wait_until_failed(hash).await;
+    wait_until_async_timeout(|| async {
+        network.nodes[0]
+            .store
+            .get_payment_session(key)
+            .is_some_and(|session| session.status == PaymentStatus::Failed)
+    })
+    .await;
     let finished = network.nodes[0].store.get_payment_session(key).unwrap();
     assert_eq!(finished.created_at, original.created_at);
     assert_eq!(finished.status, PaymentStatus::Failed);
@@ -125,8 +131,43 @@ async fn hosted_session_retries_before_reporting_no_remaining_route() {
         .as_deref()
         .is_some_and(|error| error.contains("path") || error.contains("route")));
     assert_eq!(
-        hosted_deliveries(&network.nodes[0], hash)[0].attempt_count,
-        1
+        finished.last_error_code,
+        Some(TlcErrorCode::TemporaryNodeFailure)
+    );
+    wait_for_delivery_status(
+        &network.lsp(0).client,
+        hash,
+        LspPaymentDeliveryStatus::Deferred,
+    )
+    .await;
+    assert_eq!(
+        network.nodes[1].get_payment_status(hash).await,
+        PaymentStatus::Inflight
+    );
+
+    // The first route was penalized only in T's routing history. Restore that
+    // knowledge while the upstream TLC remains buffered, then let LSP retry.
+    network.nodes[0].network_graph.write().await.clear_history();
+    wait_until_async_timeout(|| async {
+        let delivery = &hosted_deliveries(&network.nodes[0], hash)[0];
+        delivery.attempt_count > 1 && delivery.status == DeliveryStatus::InFlight
+    })
+    .await;
+    wait_until_async_timeout(|| async {
+        buyer
+            .node
+            .get_channel_actor_state(buyer.private_channel_id)
+            .tlc_state
+            .received_tlcs
+            .tlcs
+            .iter()
+            .any(|tlc| tlc.payment_hash == hash && tlc.tlc_id != received.tlc_id)
+    })
+    .await;
+    // The invoice stays on hold; a new TLC at B proves forwarding resumed.
+    assert_eq!(
+        network.nodes[1].get_payment_status(hash).await,
+        PaymentStatus::Inflight
     );
     assert!(network.nodes[0].store.get_payment_session(hash).is_none());
     network.stop().await;
