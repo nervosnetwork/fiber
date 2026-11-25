@@ -2043,7 +2043,11 @@ fn external_ckb_settlement_prevents_under_capacity_output_when_only_small_claim_
     let small_preimage = Hash256::from([11; 32]);
     let small_hash: Hash256 = HashAlgorithm::Sha256.hash(small_preimage.as_ref()).into();
 
-    // 1. Only a small timeout TLC is eligible -> returns Ok(None), no pending request queued.
+    // 1. Only a small timeout TLC exists:
+    //    - Before expiry (current_time <= expiry): returns Ok(None), no pending request queued.
+    //    - After expiry (current_time > expiry): skipping the under-capacity timeout TLC
+    //      decrements pending_tlcs_count so the watchtower falls through to the 0xFF / 0xFE
+    //      final party balance sweep instead of locking the main channel balance.
     for for_remote in [false, true] {
         for subsequent in [false, true] {
             let small_tlc = SettlementTlc {
@@ -2071,8 +2075,8 @@ fn external_ckb_settlement_prevents_under_capacity_output_when_only_small_claim_
                 tenant_payout_lock.clone(),
             );
             assert!(fixture
-                .build_at(200_000)
-                .expect("small-only timeout TLC must not error")
+                .build_at(50_000)
+                .expect("unexpired small-only timeout TLC must not error")
                 .is_none());
             let WatchtowerSignerState::External(state) = fixture
                 .store
@@ -2082,8 +2086,48 @@ fn external_ckb_settlement_prevents_under_capacity_output_when_only_small_claim_
             };
             assert!(
                 state.pending_requests.is_empty(),
-                "must not queue an under-capacity TLC signing request"
+                "must not queue an under-capacity TLC or premature balance signing request"
             );
+
+            // After expiry, skipping the small timeout TLC falls through to 0xFF / 0xFE balance sweep.
+            assert!(fixture
+                .build_at(200_000)
+                .expect("expired small timeout TLC falls through to balance settlement")
+                .is_none());
+            let (req_id, content) = fixture.pending();
+            assert_eq!(content.key_purpose, OnchainKeyPurpose::Settlement);
+            let outputs: Vec<_> = content.transaction.raw().outputs().into_iter().collect();
+            assert_eq!(outputs[1].lock(), tenant_payout_lock);
+            assert_eq!(
+                Unpack::<u64>::unpack(&outputs[1].capacity()),
+                100_000_000_000
+            );
+            let witness_bytes = content
+                .transaction
+                .witnesses()
+                .get(0)
+                .expect("settlement witness")
+                .raw_data();
+            let settlement_witness = SettlementWitness::build_from_witness(
+                &witness_bytes[XUDT_COMPATIBLE_WITNESS.len()..],
+            )
+            .expect("parse settlement witness");
+            let expected_unlock_type = if for_remote { 0xFF } else { 0xFE };
+            assert_eq!(
+                settlement_witness
+                    .unlocks
+                    .last()
+                    .expect("unlock")
+                    .unlock_type,
+                expected_unlock_type
+            );
+            let sig = sign_onchain_request(&base_key, &content).expect("sign settlement");
+            fixture.submit(req_id, sig).expect("submit settlement sig");
+            let signed_tx = fixture
+                .build_at(200_000)
+                .expect("build signed balance sweep")
+                .expect("signed final balance sweep tx");
+            assert_applied_signature(&signed_tx, &content, &base_key);
         }
     }
 

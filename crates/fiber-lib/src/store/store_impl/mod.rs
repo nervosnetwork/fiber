@@ -109,14 +109,14 @@ impl WatchtowerQuotaCounts {
             .unwrap_or_default()
     }
     fn inc_channel(&mut self, node_id: &NodeId) {
-        if self.initialized {
+        if self.initialized && *node_id != NodeId::local() {
             self.channels_total = self.channels_total.saturating_add(1);
             *self.channels_per_node.entry(node_id.clone()).or_default() += 1;
         }
     }
 
     fn dec_channel(&mut self, node_id: &NodeId) {
-        if self.initialized {
+        if self.initialized && *node_id != NodeId::local() {
             self.channels_total = self.channels_total.saturating_sub(1);
             if let Some(count) = self.channels_per_node.get_mut(node_id) {
                 *count = count.saturating_sub(1);
@@ -128,14 +128,14 @@ impl WatchtowerQuotaCounts {
     }
 
     fn inc_preimage(&mut self, node_id: &NodeId) {
-        if self.initialized {
+        if self.initialized && *node_id != NodeId::local() {
             self.preimages_total = self.preimages_total.saturating_add(1);
             *self.preimages_per_node.entry(node_id.clone()).or_default() += 1;
         }
     }
 
     fn dec_preimages(&mut self, node_id: &NodeId, removed: usize) {
-        if self.initialized && removed > 0 {
+        if self.initialized && removed > 0 && *node_id != NodeId::local() {
             self.preimages_total = self.preimages_total.saturating_sub(removed);
             if let Some(count) = self.preimages_per_node.get_mut(node_id) {
                 *count = count.saturating_sub(removed);
@@ -2558,17 +2558,22 @@ impl Store {
         if counts.initialized {
             return;
         }
+        let local_node_id = NodeId::local();
         for (raw_key, _) in self.prefix_iterator(vec![WATCHTOWER_CHANNEL_PREFIX]) {
             if let Some((channel_node_id, _)) = Self::parse_watchtower_channel_key(&raw_key) {
-                counts.channels_total += 1;
-                *counts.channels_per_node.entry(channel_node_id).or_default() += 1;
+                if channel_node_id != local_node_id {
+                    counts.channels_total += 1;
+                    *counts.channels_per_node.entry(channel_node_id).or_default() += 1;
+                }
             }
         }
         for (raw_key, _) in self.prefix_iterator(vec![WATCHTOWER_NODE_PAYMENTHASH_PREFIX]) {
             if raw_key.len() > 32 && raw_key.first() == Some(&WATCHTOWER_NODE_PAYMENTHASH_PREFIX) {
                 let owner = NodeId::from_bytes(raw_key[1..raw_key.len() - 32].to_vec());
-                counts.preimages_total += 1;
-                *counts.preimages_per_node.entry(owner).or_default() += 1;
+                if owner != local_node_id {
+                    counts.preimages_total += 1;
+                    *counts.preimages_per_node.entry(owner).or_default() += 1;
+                }
             }
         }
         counts.initialized = true;

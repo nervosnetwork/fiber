@@ -835,3 +835,72 @@ async fn submit_watchtower_signature_rejects_expired_and_refreshes_hold_on_accep
 
     crate::ckb::held_cells::release_for_watchtower([expired_fee_outpoint, fresh_fee_outpoint]);
 }
+
+#[tokio::test]
+async fn standalone_watchtower_client_bypasses_lsp_tenant_quotas() {
+    let (store, _dir) = generate_store();
+    // Default WatchtowerQuotas cap hosted tenants at 64 channels and 256 preimages.
+    let server = WatchtowerRpcServerImpl::new(store.clone()).with_lsp_enabled(false);
+    let standalone_node = NodeId::from_bytes(Privkey::from([91; 32]).pubkey().serialize().to_vec());
+    assert_ne!(standalone_node, NodeId::local());
+    let ctx = RpcContext {
+        node_id: standalone_node.to_string(),
+        tenant_scoped: false,
+    };
+
+    // Standalone (non-tenant-scoped) client must be able to register > 64 watch channels.
+    for i in 0u16..65 {
+        let mut ch_bytes = [0u8; 32];
+        ch_bytes[..2].copy_from_slice(&i.to_le_bytes());
+        let channel_id = Hash256::from(ch_bytes);
+        server
+            .create_watch_channel(
+                ctx.clone(),
+                CreateWatchChannelParams {
+                    channel_id: channel_id.into(),
+                    funding_udt_type_script: None,
+                    local_settlement_key: Some(Privkey::from([1; 32]).into()),
+                    local_settlement_key_pubkey: None,
+                    remote_settlement_key: Privkey::from([2; 32]).pubkey().into(),
+                    local_funding_pubkey: Privkey::from([5; 32]).pubkey().into(),
+                    remote_funding_pubkey: Privkey::from([6; 32]).pubkey().into(),
+                    settlement_data: snapshot(0).into(),
+                    channel_features: Default::default(),
+                    payout_lock_script: None,
+                },
+            )
+            .await
+            .unwrap_or_else(|err| panic!("standalone channel #{i} must succeed: {err}"));
+    }
+    let mut last_ch_bytes = [0u8; 32];
+    last_ch_bytes[..2].copy_from_slice(&64u16.to_le_bytes());
+    assert!(store
+        .get_watch_channel(&standalone_node, &Hash256::from(last_ch_bytes))
+        .is_some());
+
+    // Standalone (non-tenant-scoped) client must also be able to register > 256 preimages.
+    let mut last_hash = Hash256::default();
+    let mut last_preimage = Hash256::default();
+    for i in 0u16..257 {
+        let mut preimage_bytes = [0u8; 32];
+        preimage_bytes[..2].copy_from_slice(&i.to_le_bytes());
+        let preimage = Hash256::from(preimage_bytes);
+        let payment_hash: Hash256 = HashAlgorithm::Sha256.hash(preimage.as_ref()).into();
+        server
+            .create_preimage(
+                ctx.clone(),
+                CreatePreimageParams {
+                    payment_hash: payment_hash.into(),
+                    preimage: preimage.into(),
+                },
+            )
+            .await
+            .unwrap_or_else(|err| panic!("standalone preimage #{i} must succeed: {err}"));
+        last_hash = payment_hash;
+        last_preimage = preimage;
+    }
+    assert_eq!(
+        store.get_watch_preimage(&standalone_node, &last_hash),
+        Some(last_preimage)
+    );
+}

@@ -384,7 +384,7 @@ where
             local_funding: local_funding_pubkey,
             remote_funding: remote_funding_pubkey,
         };
-        let created = if ctx.tenant_scoped || node_id != NodeId::local() {
+        let created = if ctx.tenant_scoped {
             self.store
                 .insert_watch_channel_checked(
                     node_id.clone(),
@@ -515,7 +515,7 @@ where
         {
             return Err(rpc_error("Wrong preimage"));
         }
-        if ctx.tenant_scoped || node_id != NodeId::local() {
+        if ctx.tenant_scoped {
             self.store
                 .insert_watch_preimage_checked(node_id, payment_hash, preimage, &self.quotas)
                 .map_err(rpc_error)?;

@@ -2,20 +2,24 @@ use std::collections::HashSet;
 
 use crate::{
     fiber::{
-        channel::{ChannelActorStateStore, RemoveTlcCommand},
-        onchain_tlc_reconcile::onchain_fulfilled_preimage,
+        channel::{ChannelActorState, ChannelActorStateStore, RemoveTlcCommand},
+        onchain_tlc_reconcile::{
+            onchain_fulfilled_preimage, resolve_onchain_tlc, OnChainTlcResolution,
+        },
     },
     invoice::{CkbInvoice, CkbInvoiceStatus, InvoiceStore, PreimageStore},
     utils::payment::is_invoice_fulfilled,
 };
 use fiber_types::{
-    Hash256, RemoveTlcFulfill, RemoveTlcReason, TLCId, TlcErr, TlcErrPacket, TlcErrorCode, TlcInfo,
+    ChannelState, CloseFlags, Hash256, InboundTlcStatus, RemoveTlcFulfill, RemoveTlcReason,
+    ShuttingDownFlags, TLCId, TlcErr, TlcErrPacket, TlcErrorCode, TlcInfo, TlcStatus,
 };
 
 pub struct SettleTlcSetCommand<'s, S> {
     payment_hash: Hash256,
     is_hold_tlc_set: bool,
     allow_received_invoice: bool,
+    excluded_tlcs: HashSet<(Hash256, u64)>,
     tlcs: Vec<TlcSettlementContext>,
     store: &'s S,
 }
@@ -100,6 +104,7 @@ where
             store,
             is_hold_tlc_set: false,
             allow_received_invoice: false,
+            excluded_tlcs: HashSet::new(),
         }
     }
 
@@ -128,6 +133,7 @@ where
             store,
             is_hold_tlc_set: true,
             allow_received_invoice,
+            excluded_tlcs: excluded_tlcs.clone(),
         }
     }
 
@@ -155,25 +161,23 @@ where
 
         // For an already-Received invoice with a known preimage (e.g. crash recovery or retry
         // after some MPP parts were already fulfilled and removed from payment_hold_tlcs), account
-        // for any TLCs already fulfilling on channels so we settle the remaining accepted parts
-        // without fulfilling concurrent or retried overpaid TLCs.
-        let mut rejected = if self.allow_received_invoice
+        // for any TLCs already fulfilling on channels. Also account for committed received TLCs on
+        // force-closed channels awaiting on-chain settlement (which watchtower can claim with the
+        // preimage without emitting off-chain RemoveTlc commands to the closed channel) so open
+        // parts are settled when the total is met and overpaid open parts are still rejected.
+        let include_already_fulfilled = self.allow_received_invoice
             && invoice_status == CkbInvoiceStatus::Received
-            && self.store.get_preimage(&self.payment_hash).is_some()
-        {
-            if self.tlcs.is_empty() {
-                return Vec::new();
-            }
-            let (already_fulfilled_count, already_fulfilled_amount) =
-                self.already_fulfilled_received_tlcs();
-            self.leave_just_fulfilled_tlcs_with_already_fulfilled(
-                &invoice,
-                already_fulfilled_count,
-                already_fulfilled_amount,
-            )
-        } else {
-            self.leave_just_fulfilled_tlcs(&invoice)
-        };
+            && self.store.get_preimage(&self.payment_hash).is_some();
+        if include_already_fulfilled && self.tlcs.is_empty() {
+            return Vec::new();
+        }
+        let (already_fulfilled_count, already_fulfilled_amount) =
+            self.counted_external_received_tlcs(&invoice, include_already_fulfilled);
+        let mut rejected = self.leave_just_fulfilled_tlcs_with_already_fulfilled(
+            &invoice,
+            already_fulfilled_count,
+            already_fulfilled_amount,
+        );
         if self.tlcs.is_empty() {
             return rejected;
         }
@@ -187,41 +191,67 @@ where
         settlements
     }
 
-    /// Count received non-forwarding TLCs for `self.payment_hash` that have already entered
-    /// fulfillment (removed_reason or queued RemoveTlcFulfill) and are not already in `self.tlcs`.
-    fn already_fulfilled_received_tlcs(&self) -> (usize, u128) {
+    /// Count received non-forwarding TLCs for `self.payment_hash` that are not in `self.tlcs`
+    /// and either:
+    /// - have already entered fulfillment (`removed_reason` or queued `RemoveTlcFulfill`) when
+    ///   `include_already_fulfilled` is true, or
+    /// - sit on a force-closed channel awaiting on-chain settlement (committed and not failed),
+    ///   so the watchtower will claim them on-chain once the preimage is available.
+    fn counted_external_received_tlcs(
+        &self,
+        invoice: &CkbInvoice,
+        include_already_fulfilled: bool,
+    ) -> (usize, u128) {
         let in_current_set: HashSet<(Hash256, u64)> = self
             .tlcs
             .iter()
             .map(|tlc| (tlc.channel_id, tlc.id))
             .collect();
+        let now = crate::now_timestamp_as_millis_u64();
+        let required_amount = invoice.amount.unwrap_or_default();
         let mut count = 0usize;
         let mut amount = 0u128;
         for (_, channel_id, _) in self.store.get_channel_states(None) {
             let Some(state) = self.store.get_channel_actor_state(&channel_id) else {
                 continue;
             };
+            let awaiting_onchain = is_closed_awaiting_onchain_settlement(&state);
             for tlc in &state.core.tlc_state.received_tlcs.tlcs {
                 if tlc.payment_hash != self.payment_hash
                     || tlc.forwarding_tlc.is_some()
                     || state.is_waiting_forward_result_for_received_tlc(tlc.tlc_id)
                     || in_current_set.contains(&(channel_id, tlc.id()))
+                    || self.excluded_tlcs.contains(&(channel_id, tlc.id()))
+                    || is_tlc_failed_or_queued_fail(&state, tlc)
                 {
                     continue;
                 }
-                let is_fulfilling = matches!(
-                    tlc.removed_reason,
-                    Some(RemoveTlcReason::RemoveTlcFulfill(_))
-                ) || state.retryable_tlc_operations.iter().any(|op| {
-                    matches!(
-                        op,
-                        fiber_types::RetryableTlcOperation::RemoveTlc(
-                            queued,
-                            RemoveTlcReason::RemoveTlcFulfill(_)
-                        ) if *queued == tlc.tlc_id
+                let is_fulfilling = include_already_fulfilled && is_tlc_fulfilling(&state, tlc);
+                let is_closed_claimable = if awaiting_onchain
+                    && matches!(
+                        tlc.status,
+                        TlcStatus::Inbound(
+                            InboundTlcStatus::Committed | InboundTlcStatus::LocalRemoved
+                        )
                     )
-                });
-                if is_fulfilling {
+                    && (invoice.allow_mpp() || tlc.amount >= required_amount)
+                {
+                    match resolve_onchain_tlc(
+                        &channel_id,
+                        self.store,
+                        tlc.tlc_id,
+                        tlc.payment_hash,
+                        tlc.hash_algorithm,
+                    ) {
+                        OnChainTlcResolution::Fulfilled(_) => true,
+                        OnChainTlcResolution::Unknown => tlc.expiry > now,
+                        OnChainTlcResolution::SettledWithoutPreimage
+                        | OnChainTlcResolution::SettledWithInvalidPreimage => false,
+                    }
+                } else {
+                    false
+                };
+                if is_fulfilling || is_closed_claimable {
                     count += 1;
                     amount = amount.saturating_add(tlc.amount);
                 }
@@ -240,10 +270,6 @@ where
     ///
     /// When this function returns, and `self.tlcs` is not empty, it means the
     /// invoice is now fulfilled, and `self.tlcs` is ready to be settled.
-    fn leave_just_fulfilled_tlcs(&mut self, invoice: &CkbInvoice) -> Vec<TlcSettlement> {
-        self.leave_just_fulfilled_tlcs_with_already_fulfilled(invoice, 0, 0)
-    }
-
     fn leave_just_fulfilled_tlcs_with_already_fulfilled(
         &mut self,
         invoice: &CkbInvoice,
@@ -520,6 +546,44 @@ fn collect_onchain_fulfilled_received_tlcs(
         .collect()
 }
 
+fn is_tlc_failed_or_queued_fail(state: &ChannelActorState, tlc: &TlcInfo) -> bool {
+    matches!(tlc.removed_reason, Some(RemoveTlcReason::RemoveTlcFail(_)))
+        || state.retryable_tlc_operations.iter().any(|op| {
+            matches!(
+                op,
+                fiber_types::RetryableTlcOperation::RemoveTlc(
+                    queued,
+                    RemoveTlcReason::RemoveTlcFail(_)
+                ) if *queued == tlc.tlc_id
+            )
+        })
+}
+
+fn is_tlc_fulfilling(state: &ChannelActorState, tlc: &TlcInfo) -> bool {
+    matches!(
+        tlc.removed_reason,
+        Some(RemoveTlcReason::RemoveTlcFulfill(_))
+    ) || state.retryable_tlc_operations.iter().any(|op| {
+        matches!(
+            op,
+            fiber_types::RetryableTlcOperation::RemoveTlc(
+                queued,
+                RemoveTlcReason::RemoveTlcFulfill(_)
+            ) if *queued == tlc.tlc_id
+        )
+    })
+}
+
+fn is_closed_awaiting_onchain_settlement(state: &ChannelActorState) -> bool {
+    match state.state {
+        ChannelState::Closed(flags) => flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT),
+        ChannelState::ShuttingDown(flags) => {
+            flags.contains(ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION)
+        }
+        _ => false,
+    }
+}
+
 fn make_sttlement_context<S: ChannelActorStateStore>(
     channel_id: Hash256,
     tlc_id: u64,
@@ -539,19 +603,7 @@ fn make_sttlement_context<S: ChannelActorStateStore>(
         .filter(|tlc_info| {
             tlc_info.forwarding_tlc.is_none()
                 && !state.is_waiting_forward_result_for_received_tlc(tlc_info.tlc_id)
-                && !matches!(
-                    tlc_info.removed_reason,
-                    Some(RemoveTlcReason::RemoveTlcFail(_))
-                )
-                && !state.retryable_tlc_operations.iter().any(|op| {
-                    matches!(
-                        op,
-                        fiber_types::RetryableTlcOperation::RemoveTlc(
-                            queued,
-                            RemoveTlcReason::RemoveTlcFail(_)
-                        ) if *queued == tlc_info.tlc_id
-                    )
-                })
+                && !is_tlc_failed_or_queued_fail(&state, tlc_info)
         })
         .map(|tlc_info| TlcSettlementContext::new(tlc_info, channel_id))
 }

@@ -1775,6 +1775,11 @@ fn build_settlement_tx<S: WatchtowerStore>(
                                                 min_payout_capacity,
                                                 "skipping watchtower CKB TLC timeout claim below payout occupied capacity"
                                             );
+                                            pending_tlcs_count = checked_sub_usize(
+                                                pending_tlcs_count,
+                                                1,
+                                                "pending TLC count",
+                                            )?;
                                             continue;
                                         }
                                         unlock_option = Some((
@@ -1895,6 +1900,11 @@ fn build_settlement_tx<S: WatchtowerStore>(
                                             min_payout_capacity,
                                             "skipping watchtower CKB TLC timeout claim below payout occupied capacity"
                                         );
+                                        pending_tlcs_count = checked_sub_usize(
+                                            pending_tlcs_count,
+                                            1,
+                                            "pending TLC count",
+                                        )?;
                                         continue;
                                     }
                                     unlock_option = Some((
@@ -2018,6 +2028,8 @@ fn build_settlement_tx<S: WatchtowerStore>(
                                     min_payout_capacity,
                                     "skipping watchtower CKB TLC timeout claim below payout occupied capacity"
                                 );
+                                pending_tlcs_count =
+                                    checked_sub_usize(pending_tlcs_count, 1, "pending TLC count")?;
                                 continue;
                             }
                             unlock_option = Some((

@@ -1008,6 +1008,138 @@ fn test_store_watchtower_quotas_enforced_per_node_and_globally() {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
+fn test_store_watchtower_host_rows_excluded_from_tenant_global_quotas() {
+    use crate::lsp_config::WatchtowerQuotas;
+    use fiber_types::SettlementKey;
+
+    let path = TempDir::new("test-watchtower-host-excluded-quotas");
+    let quotas = WatchtowerQuotas {
+        max_channels_per_node: 2,
+        max_channels_total: 2,
+        max_preimages_per_node: 2,
+        max_preimages_total: 2,
+    };
+    let settlement = SettlementData {
+        local_amount: 100,
+        remote_amount: 200,
+        tlcs: vec![],
+    };
+    let local_keys = || WatchChannelKeys {
+        local_settlement: SettlementKey::local(Privkey::from(&[1; 32])),
+        remote_settlement: Privkey::from(&[2; 32]).pubkey(),
+        local_funding: Privkey::from(&[3; 32]).pubkey(),
+        remote_funding: Privkey::from(&[4; 32]).pubkey(),
+    };
+    let tenant_keys = || WatchChannelKeys {
+        local_settlement: SettlementKey::external(Privkey::from(&[1; 32]).pubkey()),
+        remote_settlement: Privkey::from(&[2; 32]).pubkey(),
+        local_funding: Privkey::from(&[3; 32]).pubkey(),
+        remote_funding: Privkey::from(&[4; 32]).pubkey(),
+    };
+
+    let host_ch1 = gen_rand_sha256_hash();
+    let host_ch2 = gen_rand_sha256_hash();
+    let host_ch3 = gen_rand_sha256_hash();
+    let host_h1 = gen_rand_sha256_hash();
+    let host_h2 = gen_rand_sha256_hash();
+    let host_h3 = gen_rand_sha256_hash();
+    let preimage = gen_rand_sha256_hash();
+
+    // Pre-populate host (NodeId::local()) rows BEFORE quota counts are lazily initialized.
+    let store = open_store(&path).expect("created store failed");
+    for ch in [host_ch1, host_ch2] {
+        assert!(store.insert_watch_channel(
+            NodeId::local(),
+            ch,
+            None,
+            local_keys(),
+            settlement.clone(),
+            fiber_types::ChannelFeatures::V2,
+            None,
+        ));
+    }
+    for h in [host_h1, host_h2] {
+        store.insert_watch_preimage(NodeId::local(), h, preimage);
+    }
+
+    // Reopen store to ensure cold-start scan of persisted host rows ignores NodeId::local().
+    drop(store);
+    let store = open_store(&path).expect("reopen store failed");
+
+    let tenant_a = NodeId::from_bytes(PeerId::random().into_bytes());
+    let tenant_b = NodeId::from_bytes(PeerId::random().into_bytes());
+
+    // Even with 2 host channels and 2 host preimages persisted, tenants still get the full
+    // max_channels_total (2) and max_preimages_total (2) quotas.
+    store
+        .insert_watch_channel_checked(
+            tenant_a.clone(),
+            gen_rand_sha256_hash(),
+            None,
+            tenant_keys(),
+            settlement.clone(),
+            fiber_types::ChannelFeatures::V2,
+            None,
+            &quotas,
+        )
+        .expect("tenant_a ch1 must succeed despite host channels");
+
+    // Live host insert & remove after quota initialization must also not affect tenant totals.
+    assert!(store.insert_watch_channel(
+        NodeId::local(),
+        host_ch3,
+        None,
+        local_keys(),
+        settlement.clone(),
+        fiber_types::ChannelFeatures::V2,
+        None,
+    ));
+    assert!(store.remove_watch_channel(NodeId::local(), host_ch1));
+
+    store
+        .insert_watch_channel_checked(
+            tenant_b.clone(),
+            gen_rand_sha256_hash(),
+            None,
+            tenant_keys(),
+            settlement.clone(),
+            fiber_types::ChannelFeatures::V2,
+            None,
+            &quotas,
+        )
+        .expect("tenant_b ch1 must succeed (total tenant channels = 2)");
+    let err = store
+        .insert_watch_channel_checked(
+            tenant_b.clone(),
+            gen_rand_sha256_hash(),
+            None,
+            tenant_keys(),
+            settlement,
+            fiber_types::ChannelFeatures::V2,
+            None,
+            &quotas,
+        )
+        .unwrap_err();
+    assert!(err.contains("global watchtower channel quota"), "{err}");
+
+    // Same for preimages: host rows (pre-existing, live-inserted, or removed) never consume or
+    // corrupt tenant global preimage quotas.
+    store
+        .insert_watch_preimage_checked(tenant_a, gen_rand_sha256_hash(), preimage, &quotas)
+        .expect("tenant_a preimage 1 must succeed despite host preimages");
+    store.insert_watch_preimage(NodeId::local(), host_h3, preimage);
+    store.remove_watch_preimage(NodeId::local(), host_h1);
+    store
+        .insert_watch_preimage_checked(tenant_b.clone(), gen_rand_sha256_hash(), preimage, &quotas)
+        .expect("tenant_b preimage 1 must succeed (total tenant preimages = 2)");
+    let err = store
+        .insert_watch_preimage_checked(tenant_b, gen_rand_sha256_hash(), preimage, &quotas)
+        .unwrap_err();
+    assert!(err.contains("global watchtower preimage quota"), "{err}");
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
 fn test_store_watchtower_superseded_preserved_and_cleared_on_revocation() {
     use fiber_types::SettlementKey;
 
