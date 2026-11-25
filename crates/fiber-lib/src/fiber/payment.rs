@@ -1698,7 +1698,13 @@ where
                     "Retry payment amount overflows remaining amount".to_string(),
                 )
             })?;
-            let max_fee = session.remain_fee_amount();
+            // The refused probe is rebuilt in place, so a trampoline retry keeps the
+            // original fee budget that pays the open fee.
+            let max_fee = if session.request.use_trampoline_routing() {
+                session.request.max_fee_amount
+            } else {
+                session.remain_fee_amount()
+            };
             let channel_stats = {
                 let graph = self.network_graph.read().await;
                 graph.channel_stats()
@@ -1856,8 +1862,12 @@ where
             match build_route_result {
                 Err(e) => {
                     error!("build_payment_routes failed to build route: {}", e);
-                    if matches!(e, PathFindError::NoPathFound)
-                        && session.request.trampoline_context.is_some()
+                    // No channel exists yet, so a fundable JIT payment looks like
+                    // insufficient balance until the open.
+                    if matches!(
+                        e,
+                        PathFindError::NoPathFound | PathFindError::InsufficientBalance(_)
+                    ) && session.request.trampoline_context.is_some()
                         && session.request.udt_type_script.is_none()
                     {
                         return Err(Error::NeedJitChannel);
