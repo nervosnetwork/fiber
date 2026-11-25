@@ -109,6 +109,13 @@ An invoice without a registered hint keeps existing Fiber behavior: Public T
 forwards it immediately as an ordinary trampoline payment. Absence of a hint is
 not a request to fail or buffer the payment.
 
+**Payer version compatibility:** Hosted invoices encode Public T in the
+`TrampolineRouteHint` variant of `InvoiceAttr`
+(`crates/fiber-types/src/schema/invoice.mol`). Payers running older released
+Fiber versions that predate `TrampolineRouteHint` (for example `v0.10.1`)
+cannot decode hosted invoices (decoding fails with `UnknownItem`) and must
+upgrade to a version supporting `TrampolineRouteHint`.
+
 ## Hosted receive flow
 
 1. The payer builds a normal route to Public T. It does not need to know Public

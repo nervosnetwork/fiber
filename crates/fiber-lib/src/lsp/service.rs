@@ -188,8 +188,8 @@ pub struct LspServiceState {
     pub ready_tenants: HashMap<TenantId, HashSet<Hash256>>,
     pub token_epochs: crate::rpc::biscuit::TenantTokenEpochs,
     // Deduplicates in-flight/settling reconciliation timers so periodic ticks
-    // never amplify per-delivery retry loops.
-    reconciling_deliveries: HashSet<LspPaymentDeliveryKey>,
+    // and extra ResumeDelivery calls never amplify per-delivery retry loops.
+    reconciling_deliveries: HashMap<LspPaymentDeliveryKey, AbortHandle>,
     // Deduplicates pending delivery retry timers so overlapping failure paths
     // (e.g., temporary dispatch failure and PaymentOutcomeReady) arm only one timer.
     scheduled_delivery_retries: HashMap<LspPaymentDeliveryKey, AbortHandle>,
@@ -631,15 +631,22 @@ impl LspServiceState {
         }
     }
 
+    fn cancel_reconciliation_retry(&mut self, key: &LspPaymentDeliveryKey) {
+        if let Some(handle) = self.reconciling_deliveries.remove(key) {
+            handle.abort();
+        }
+    }
+
     fn schedule_reconciliation_retry(
         &mut self,
         myself: &ActorRef<LspServiceMessage>,
         key: LspPaymentDeliveryKey,
     ) {
-        if self.reconciling_deliveries.insert(key) {
-            myself.send_after(Duration::from_secs(1), move || {
+        if let Entry::Vacant(entry) = self.reconciling_deliveries.entry(key) {
+            let handle = myself.send_after(Duration::from_secs(1), move || {
                 LspServiceMessage::ResumeDelivery(key)
             });
+            entry.insert(handle.abort_handle());
         }
     }
 
@@ -715,7 +722,7 @@ impl LspServiceState {
             crate::now_timestamp_as_millis_u64(),
         )?;
         self.cancel_scheduled_delivery_retry(key);
-        self.reconciling_deliveries.remove(key);
+        self.cancel_reconciliation_retry(key);
         Ok(())
     }
 }
@@ -785,7 +792,7 @@ impl Actor for LspService {
             signing_events: args.signing_events,
             ready_tenants: HashMap::new(),
             token_epochs,
-            reconciling_deliveries: HashSet::new(),
+            reconciling_deliveries: HashMap::new(),
             scheduled_delivery_retries: HashMap::new(),
             #[cfg(feature = "watchtower")]
             pending_unwatched_by_tenant: HashMap::new(),
@@ -1045,6 +1052,15 @@ impl Actor for LspService {
                 let _ = reply.send(state.delivery_manager.get_by_payment_hash(&payment_hash));
             }
             LspServiceMessage::AcceptTrampolineDelivery(request, reply) => {
+                if reply.is_closed() {
+                    tracing::debug!(
+                        payment_hash = %request.payment_hash,
+                        incoming_channel_id = %request.previous_tlc.prev_channel_id,
+                        incoming_tlc_id = request.previous_tlc.prev_tlc_id,
+                        "Ignoring timed-out hosted trampoline delivery acceptance request"
+                    );
+                    return Ok(());
+                }
                 let result = match state
                     .invoice_registry
                     .get(&request.next_node_id, &request.payment_hash)
@@ -1105,7 +1121,7 @@ impl Actor for LspService {
                 let _ = reply.send(result);
             }
             LspServiceMessage::ResumeDelivery(key) => {
-                state.reconciling_deliveries.remove(&key);
+                state.cancel_reconciliation_retry(&key);
                 state.cancel_scheduled_delivery_retry(&key);
                 self.resume_delivery(myself, state, key).await?;
             }
@@ -1218,6 +1234,7 @@ impl Actor for LspService {
                         );
                         match &decision {
                             Ok(PaymentOutcomeDecision::RetryDelivery) => {
+                                state.cancel_reconciliation_retry(&key);
                                 state.schedule_delivery_retry(&myself, key, deadline);
                             }
                             Ok(PaymentOutcomeDecision::SettleUpstream) => {
@@ -1257,7 +1274,7 @@ impl Actor for LspService {
                         delivery.status,
                         LspPaymentDeliveryStatus::InFlight
                             | LspPaymentDeliveryStatus::SettlingUpstream { .. }
-                    ) && state.reconciling_deliveries.insert(key)
+                    ) && !state.reconciling_deliveries.contains_key(&key)
                     {
                         let _ = myself.send_message(LspServiceMessage::ResumeDelivery(key));
                     }
@@ -1325,7 +1342,7 @@ impl LspService {
             crate::now_timestamp_as_millis_u64(),
         )?;
         state.cancel_scheduled_delivery_retry(key);
-        state.reconciling_deliveries.remove(key);
+        state.cancel_reconciliation_retry(key);
         Ok(())
     }
 
@@ -1632,6 +1649,7 @@ impl LspService {
         }
         if delivery.status.is_final() {
             state.cancel_scheduled_delivery_retry(&key);
+            state.cancel_reconciliation_retry(&key);
             return Ok(());
         }
         if matches!(
@@ -1673,6 +1691,7 @@ impl LspService {
         }
         let reason = Self::EXPIRATION_REASON.to_string();
         state.cancel_scheduled_delivery_retry(&key);
+        state.cancel_reconciliation_retry(&key);
         let delivery = state.delivery_manager.transition_with_error(
             &key,
             LspPaymentDeliveryStatus::SettlingUpstream {

@@ -6144,3 +6144,263 @@ async fn cancelled_open_tenant_channel_aborts_before_persisting_and_channel_crea
 
     service.stop_and_wait(None, None).await.unwrap();
 }
+
+struct CountingGetPaymentNetworkActor;
+
+#[async_trait]
+impl Actor for CountingGetPaymentNetworkActor {
+    type Msg = NetworkActorMessage;
+    type State = Arc<AtomicUsize>;
+    type Arguments = Arc<AtomicUsize>;
+
+    async fn pre_start(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        args: Self::Arguments,
+    ) -> Result<Self::State, ActorProcessingErr> {
+        Ok(args)
+    }
+
+    async fn handle(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        message: Self::Msg,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        if let NetworkActorMessage::Fiber(FiberActorMessage::Command(
+            FiberActorCommand::GetPayment(_, reply),
+        )) = message
+        {
+            state.fetch_add(1, Ordering::SeqCst);
+            let _ = reply.send(Err("payment still in flight".to_string()));
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn duplicate_resume_delivery_does_not_multiply_reconciliation_timers() {
+    let root = tempdir().unwrap();
+    let config = lsp_config(root.path().join("lsp"));
+    let store = open_lsp_store(&config);
+    let manager = LspPaymentDeliveryManager::new(store.clone());
+    let tenant_key = Privkey::from(&[3; 32]);
+    let lsp_key = Privkey::from(&[9; 32]);
+    let tenant = HostedTenantRecord {
+        tenant_id: TenantId::new("reconcile-dedup").unwrap(),
+        root_signer_pubkey: None,
+        tenant_pubkey: tenant_key.pubkey(),
+        created_at: 42,
+        token_epoch: 0,
+    };
+    let payment_hash = Hash256::from([0x41; 32]);
+    let registration = LspInvoiceRegistry::new(store.clone())
+        .register(
+            &tenant,
+            signed_invoice(&tenant_key, payment_hash),
+            None,
+            lsp_key.pubkey(),
+            &lsp_key,
+        )
+        .unwrap();
+    let now = crate::now_timestamp_as_millis_u64();
+    let delivery = manager
+        .accept(
+            &registration,
+            &tenant,
+            Hash256::from([0x42; 32]),
+            hosted_forwarding_request(&tenant, payment_hash, now),
+            now,
+        )
+        .unwrap();
+    let key = delivery.key();
+    manager.begin_dispatch(&key, now).unwrap();
+    manager
+        .transition(&key, LspPaymentDeliveryStatus::InFlight, now)
+        .unwrap();
+
+    let get_payment_calls = Arc::new(AtomicUsize::new(0));
+    let (network, _) = Actor::spawn(
+        None,
+        CountingGetPaymentNetworkActor,
+        get_payment_calls.clone(),
+    )
+    .await
+    .unwrap();
+    let (service, _) = Actor::spawn(
+        None,
+        LspService,
+        LspServiceArgs {
+            config,
+            public_node_id: lsp_key.pubkey(),
+            public_network_actor: network.clone(),
+            watchtower_store: store.clone(),
+            signing_events: Default::default(),
+            store,
+            runtime_factory: Arc::new(FakeRuntimeFactory::new(Arc::new(AtomicUsize::new(0)))),
+            signing_key: lsp_key,
+            token_issuer: test_token_issuer(),
+        },
+    )
+    .await
+    .unwrap();
+
+    // Startup queues an initial ResumeDelivery that schedules one 1s reconciliation timer.
+    ractor::call_t!(service, LspServiceMessage::GetStatus, 2_000).unwrap();
+    assert_eq!(get_payment_calls.load(Ordering::SeqCst), 1);
+
+    // Trigger two additional ResumeDelivery messages (e.g. from tenant channel reconnects)
+    // while the previous reconciliation timer is still armed. Each must abort the prior timer
+    // rather than spawning another independent 1s loop.
+    for _ in 0..2 {
+        service
+            .send_message(LspServiceMessage::ResumeDelivery(key))
+            .unwrap();
+        ractor::call_t!(service, LspServiceMessage::GetStatus, 2_000).unwrap();
+    }
+    let baseline = get_payment_calls.load(Ordering::SeqCst);
+    assert_eq!(baseline, 3);
+
+    // Wait for the single surviving 1s timer to fire, then observe an additional 400ms window:
+    // if prior timers were not aborted, they would also fire within this window (count > baseline + 1).
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while get_payment_calls.load(Ordering::SeqCst) < baseline + 1 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("reconciliation timer should fire once after 1s");
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    ractor::call_t!(service, LspServiceMessage::GetStatus, 2_000).unwrap();
+    assert_eq!(
+        get_payment_calls.load(Ordering::SeqCst),
+        baseline + 1,
+        "extra ResumeDelivery calls must abort prior reconciliation timers instead of multiplying 1s loops"
+    );
+
+    // Transitioning through PaymentOutcomeReady -> PaymentOutcomeSettled settles the delivery
+    // and cancels the reconciliation retry timer.
+    assert_eq!(
+        ractor::call_t!(
+            service,
+            |reply| LspServiceMessage::PaymentOutcomeReady(
+                PaymentOutcomeRequest {
+                    session_key: delivery.request.hosted_session_key(),
+                    payment_status: PaymentStatus::Success,
+                    failure: None,
+                    failure_code: None,
+                },
+                reply,
+            ),
+            2_000
+        )
+        .unwrap()
+        .unwrap(),
+        PaymentOutcomeDecision::SettleUpstream
+    );
+    service
+        .send_message(LspServiceMessage::PaymentOutcomeSettled(
+            SettledPaymentOutcome {
+                session_key: delivery.request.hosted_session_key(),
+                payment_status: PaymentStatus::Success,
+                failure: None,
+            },
+        ))
+        .unwrap();
+    ractor::call_t!(service, LspServiceMessage::GetStatus, 2_000).unwrap();
+    assert_eq!(
+        manager.get(&key).unwrap().unwrap().status,
+        LspPaymentDeliveryStatus::Succeeded
+    );
+
+    service.stop_and_wait(None, None).await.unwrap();
+    network.stop(None);
+}
+
+#[tokio::test]
+async fn accept_trampoline_delivery_skips_when_reply_port_is_closed() {
+    let root = tempdir().expect("temporary directory");
+    let config = lsp_config(root.path().join("lsp"));
+    let store = open_lsp_store(&config);
+    let manager = LspPaymentDeliveryManager::new(store.clone());
+    let factory = Arc::new(FakeRuntimeFactory::new(Arc::new(AtomicUsize::new(0))));
+    let dispatches = Arc::new(AtomicUsize::new(0));
+    let failures = Arc::new(AtomicUsize::new(0));
+    let lsp_key = Privkey::from(&[9; 32]);
+    let tenant_key = Privkey::from(&[1; 32]);
+    let service = start_test_lsp_service(
+        store,
+        config,
+        factory,
+        lsp_key.clone(),
+        dispatches.clone(),
+        failures.clone(),
+    )
+    .await;
+
+    let tenant_id =
+        register_authenticated_test_tenant(&service, &lsp_key, &test_root_signer()).await;
+    let payment_hash = Hash256::from([0x51; 32]);
+    register_test_invoice(&service, tenant_id.clone(), &tenant_key, payment_hash).await;
+    let private_channel_id = Hash256::from([0x52; 32]);
+    service
+        .send_message(LspServiceMessage::TenantChannelOnline(
+            tenant_key.pubkey(),
+            private_channel_id,
+        ))
+        .unwrap();
+    ractor::call_t!(service, LspServiceMessage::GetStatus, 2_000).unwrap();
+
+    let tenant = HostedTenantRecord {
+        tenant_id,
+        root_signer_pubkey: None,
+        tenant_pubkey: tenant_key.pubkey(),
+        created_at: 42,
+        token_epoch: 0,
+    };
+    let now = crate::now_timestamp_as_millis_u64();
+    let request = hosted_forwarding_request(&tenant, payment_hash, now);
+
+    // Drop the receiver half of the reply port before LspService handles the request,
+    // simulating Public T timing out after 15s and failing the upstream TLC back to the payer.
+    let (closed_tx, closed_rx) = tokio::sync::oneshot::channel();
+    drop(closed_rx);
+    service
+        .send_message(LspServiceMessage::AcceptTrampolineDelivery(
+            request.clone(),
+            closed_tx.into(),
+        ))
+        .unwrap();
+    ractor::call_t!(service, LspServiceMessage::GetStatus, 2_000).unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    assert!(
+        manager
+            .get_by_payment_hash(&payment_hash)
+            .unwrap()
+            .is_none(),
+        "timed-out AcceptTrampolineDelivery must not persist a delivery record"
+    );
+    assert_eq!(
+        dispatches.load(Ordering::SeqCst),
+        0,
+        "timed-out AcceptTrampolineDelivery must not dispatch downstream"
+    );
+    assert_eq!(failures.load(Ordering::SeqCst), 0);
+
+    // Positive control: the exact same request with a live reply port is accepted and dispatched.
+    assert_eq!(
+        ractor::call_t!(
+            service,
+            |reply| LspServiceMessage::AcceptTrampolineDelivery(request, reply),
+            2_000
+        )
+        .unwrap()
+        .unwrap(),
+        DeliveryDecision::Buffered
+    );
+    wait_for_delivery_status(&manager, payment_hash, LspPaymentDeliveryStatus::InFlight).await;
+    assert_eq!(dispatches.load(Ordering::SeqCst), 1);
+
+    service.stop_and_wait(None, None).await.unwrap();
+}

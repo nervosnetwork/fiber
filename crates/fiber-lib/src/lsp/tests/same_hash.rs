@@ -145,6 +145,16 @@ async fn hosted_no_path_after_retry_buffers_until_route_recovers() {
         PaymentStatus::Inflight
     );
 
+    // The synthetic RemoveTlc above failed the first TLC without resetting the
+    // hold invoice status from Received back to Open. Restore Open before
+    // clearing T's routing history so B can accept the retried hold TLC.
+    crate::invoice::InvoiceStore::update_invoice_status(
+        &buyer.node.store,
+        &hash,
+        CkbInvoiceStatus::Open,
+    )
+    .unwrap();
+
     // The first route was penalized only in T's routing history. Restore that
     // knowledge while the upstream TLC remains buffered, then let LSP retry.
     network.nodes[0].network_graph.write().await.clear_history();
