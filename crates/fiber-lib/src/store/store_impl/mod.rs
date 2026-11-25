@@ -3069,10 +3069,6 @@ impl WatchtowerStore for Store {
         let key = settlement_key(WATCHTOWER_NUMBERED_SETTLEMENT_PREFIX, &node_id, &channel_id);
         let mut batch = self.batch();
         let mut snapshots = self.numbered_settlements(&key, &node_id, &channel, &mut batch);
-        // The acknowledged and the pending round may both have live variants.
-        if snapshots.len() >= 2 && !snapshots.contains_key(&number) {
-            return Err("watch channel round budget exhausted".to_string());
-        }
         let latest = snapshots.last_key_value().is_none_or(|(n, _)| number >= *n);
         let round = snapshots.entry(number).or_default();
         if round.last() == Some(&settlement) {
@@ -3084,6 +3080,10 @@ impl WatchtowerStore for Store {
             return Err("watch channel settlement budget exhausted".to_string());
         }
         round.push(settlement.clone());
+        // A missed revocation must not prevent retention of a newer signed round.
+        if snapshots.len() > 2 {
+            snapshots.pop_first();
+        }
         if latest {
             channel.pending_remote_settlement_data = settlement;
             let kv = KeyValue::WatchtowerChannel(node_id, channel_id, channel);
