@@ -153,6 +153,9 @@ where
     ) -> Result<Self::State, ActorProcessingErr> {
         let secret_key = config.read_secret_key()?;
         let signer = LocalSigner::new(secret_key);
+        let channels = self.store.get_watch_channels_with_nodes();
+        let now_ms = crate::now_timestamp_as_millis_u64();
+        sync_external_fee_holds(&self.signing_events, &self.store, &channels, now_ms);
         Ok(Self::State {
             config,
             signer,

@@ -1261,6 +1261,7 @@ fn external_udt_settlement_refuses_to_subsidize_from_separate_fee_sponsor() {
 
 #[test]
 fn external_pending_request_expires_after_ttl_releases_fee_cell_and_enforces_backoff() {
+    let _serial = crate::ckb::held_cells::TEST_SERIAL.blocking_lock();
     #[derive(Clone, Default)]
     struct LockTracker {
         locked: std::collections::HashSet<OutPoint>,
@@ -2164,4 +2165,129 @@ fn external_ckb_settlement_prevents_under_capacity_output_when_only_small_claim_
         err.contains("smaller than occupied capacity"),
         "expected occupied capacity check error, got: {err}"
     );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
+async fn watchtower_actor_pre_start_restores_external_fee_holds_before_periodic_check() {
+    let _serial = crate::ckb::held_cells::TEST_SERIAL.lock().await;
+    #[derive(Clone, Default)]
+    struct LockTracker {
+        locked: HashSet<OutPoint>,
+    }
+
+    #[async_trait::async_trait]
+    impl CellCollector for LockTracker {
+        async fn collect_live_cells_async(
+            &mut self,
+            _query: &CellQueryOptions,
+            _apply_changes: bool,
+        ) -> Result<(Vec<LiveCell>, u64), CellCollectorError> {
+            Ok((vec![], 0))
+        }
+        fn lock_cell(&mut self, out_point: OutPoint, _: u64) -> Result<(), CellCollectorError> {
+            self.locked.insert(out_point);
+            Ok(())
+        }
+        fn apply_tx(&mut self, _: Transaction, _: u64) -> Result<(), CellCollectorError> {
+            Ok(())
+        }
+        fn reset(&mut self) {}
+    }
+
+    let fixture = Fixture::with_features(false, false, false, false, ChannelFeatures::V2);
+    let now_ms = crate::now_timestamp_as_millis_u64();
+
+    let pending_id = Hash256::from([0xf1; 32]);
+    let pending_fee_outpoint = OutPoint::new(Byte32::from([0xf1; 32]), 1);
+    let pending_content = OnchainSigningContent {
+        key_purpose: OnchainKeyPurpose::Settlement,
+        transaction: TransactionBuilder::default()
+            .input(CellInput::new(
+                OutPoint::new(Byte32::from([0xc1; 32]), 0),
+                0,
+            ))
+            .input(CellInput::new(pending_fee_outpoint.clone(), 0))
+            .build()
+            .data(),
+    };
+
+    let signed_id = Hash256::from([0xf2; 32]);
+    let signed_fee_outpoint = OutPoint::new(Byte32::from([0xf2; 32]), 1);
+    let signed_content = OnchainSigningContent {
+        key_purpose: OnchainKeyPurpose::Settlement,
+        transaction: TransactionBuilder::default()
+            .input(CellInput::new(
+                OutPoint::new(Byte32::from([0xc2; 32]), 0),
+                0,
+            ))
+            .input(CellInput::new(signed_fee_outpoint.clone(), 0))
+            .build()
+            .data(),
+    };
+
+    fixture
+        .store
+        .update_watchtower_signer(&fixture.node_id, &fixture.channel.channel_id, |state| {
+            if let WatchtowerSignerState::External(ext) = state {
+                ext.pending_requests.insert(pending_id, pending_content);
+                ext.pending_request_created_at_ms.insert(pending_id, now_ms);
+                ext.signed_signatures
+                    .insert(signed_id, (signed_content, [0u8; 65]));
+                ext.signed_signature_created_at_ms.insert(signed_id, now_ms);
+            }
+            Ok::<_, std::convert::Infallible>(())
+        })
+        .unwrap();
+
+    // Simulate process restart: in-memory holds are cleared before WatchtowerActor starts.
+    crate::ckb::held_cells::release_for_watchtower([
+        pending_fee_outpoint.clone(),
+        signed_fee_outpoint.clone(),
+    ]);
+
+    let mut before_start = LockTracker::default();
+    crate::ckb::held_cells::lock_held(&mut before_start, now_ms).unwrap();
+    assert!(!before_start.locked.contains(&pending_fee_outpoint));
+    assert!(!before_start.locked.contains(&signed_fee_outpoint));
+
+    let ckb_dir = tempfile::tempdir().expect("ckb temp dir");
+    std::fs::write(ckb_dir.path().join("key"), "01".repeat(32)).expect("write plain key");
+    static INIT_KEY_PASSWORD: std::sync::Once = std::sync::Once::new();
+    INIT_KEY_PASSWORD.call_once(|| {
+        if std::env::var_os("FIBER_SECRET_KEY_PASSWORD").is_none() {
+            std::env::set_var("FIBER_SECRET_KEY_PASSWORD", "watchtower-test-password");
+        }
+    });
+    let ckb_config = CkbConfig {
+        base_dir: Some(ckb_dir.path().to_path_buf()),
+        rpc_url: "http://127.0.0.1:8114".to_string(),
+        tx_tracing_polling_interval_ms: 4_000,
+        udt_whitelist: None,
+        funding_tx_shell_builder: None,
+    };
+
+    // Spawn WatchtowerActor without sending PeriodicCheck; pre_start alone must restore holds.
+    let (actor, handle) = Actor::spawn(
+        None,
+        WatchtowerActor::new(fixture.store.clone()).with_signing_events(fixture.events.clone()),
+        ckb_config,
+    )
+    .await
+    .expect("spawn WatchtowerActor");
+
+    let mut after_start = LockTracker::default();
+    crate::ckb::held_cells::lock_held(&mut after_start, now_ms).unwrap();
+    assert!(
+        after_start.locked.contains(&pending_fee_outpoint),
+        "WatchtowerActor::pre_start must hold persisted pending request fee cells before PeriodicCheck"
+    );
+    assert!(
+        after_start.locked.contains(&signed_fee_outpoint),
+        "WatchtowerActor::pre_start must hold persisted signed request fee cells before PeriodicCheck"
+    );
+
+    actor.stop(None);
+    let _ = handle.await;
+    crate::ckb::held_cells::release_for_watchtower([pending_fee_outpoint, signed_fee_outpoint]);
 }

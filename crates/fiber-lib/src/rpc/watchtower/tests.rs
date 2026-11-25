@@ -631,3 +631,207 @@ async fn create_watch_channel_retry_does_not_publish_no_signature_required_while
         }
     }
 }
+
+#[tokio::test]
+async fn submit_watchtower_signature_rejects_expired_and_refreshes_hold_on_accept() {
+    let _serial = crate::ckb::held_cells::TEST_SERIAL.lock().await;
+    use ckb_sdk::traits::{CellCollector, CellCollectorError, CellQueryOptions, LiveCell};
+    use ckb_types::core::TransactionBuilder;
+    use ckb_types::packed::{Byte32, CellInput, OutPoint, Transaction};
+    use fiber_types::{OnchainKeyPurpose, OnchainSigningContent, WatchtowerSignerState};
+    use std::collections::HashSet;
+
+    #[derive(Clone, Default)]
+    struct LockTracker {
+        locked: HashSet<OutPoint>,
+    }
+
+    #[async_trait::async_trait]
+    impl CellCollector for LockTracker {
+        async fn collect_live_cells_async(
+            &mut self,
+            _query: &CellQueryOptions,
+            _apply_changes: bool,
+        ) -> Result<(Vec<LiveCell>, u64), CellCollectorError> {
+            Ok((vec![], 0))
+        }
+        fn lock_cell(&mut self, out_point: OutPoint, _: u64) -> Result<(), CellCollectorError> {
+            self.locked.insert(out_point);
+            Ok(())
+        }
+        fn apply_tx(&mut self, _: Transaction, _: u64) -> Result<(), CellCollectorError> {
+            Ok(())
+        }
+        fn reset(&mut self) {}
+    }
+
+    let (store, _dir) = generate_store();
+    let server = WatchtowerRpcServerImpl::new(store.clone());
+    let settlement_key = Privkey::from([81; 32]);
+    let tenant = NodeId::from_bytes(Privkey::from([82; 32]).pubkey().serialize().to_vec());
+    let channel_id = Hash256::from([83; 32]);
+    let ctx = RpcContext {
+        node_id: tenant.to_string(),
+        tenant_scoped: true,
+    };
+
+    server
+        .create_watch_channel(
+            ctx.clone(),
+            CreateWatchChannelParams {
+                channel_id: channel_id.into(),
+                funding_udt_type_script: None,
+                local_settlement_key: None,
+                local_settlement_key_pubkey: Some(settlement_key.pubkey().into()),
+                remote_settlement_key: Privkey::from([2; 32]).pubkey().into(),
+                local_funding_pubkey: Privkey::from([5; 32]).pubkey().into(),
+                remote_funding_pubkey: Privkey::from([6; 32]).pubkey().into(),
+                settlement_data: snapshot(0).into(),
+                channel_features: Default::default(),
+                payout_lock_script: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    let now_ms = crate::now_timestamp_as_millis_u64();
+
+    // (a) Backdated pending request older than WATCHTOWER_HOLD_MS must be rejected
+    // without moving into signed_signatures or holding its fee input.
+    let expired_req_id = Hash256::from([0xe1; 32]);
+    let expired_fee_outpoint = OutPoint::new(Byte32::from([0xe1; 32]), 1);
+    let expired_content = OnchainSigningContent {
+        key_purpose: OnchainKeyPurpose::Settlement,
+        transaction: TransactionBuilder::default()
+            .input(CellInput::new(
+                OutPoint::new(Byte32::from([0xd1; 32]), 0),
+                0,
+            ))
+            .input(CellInput::new(expired_fee_outpoint.clone(), 0))
+            .build()
+            .data(),
+    };
+    let expired_sig =
+        crate::watchtower::sign_onchain_request(&settlement_key, &expired_content).unwrap();
+    let expired_created_at = now_ms.saturating_sub(crate::ckb::held_cells::WATCHTOWER_HOLD_MS + 1);
+
+    crate::ckb::held_cells::release_for_watchtower([expired_fee_outpoint.clone()]);
+    store
+        .update_watchtower_signer(&tenant, &channel_id, |state| {
+            if let WatchtowerSignerState::External(ext) = state {
+                ext.pending_requests
+                    .insert(expired_req_id, expired_content.clone());
+                ext.pending_request_created_at_ms
+                    .insert(expired_req_id, expired_created_at);
+            }
+            Ok::<_, std::convert::Infallible>(())
+        })
+        .unwrap();
+
+    let err = server
+        .submit_watchtower_signature(
+            ctx.clone(),
+            SubmitWatchtowerSignatureParams {
+                channel_id: channel_id.into(),
+                request_id: expired_req_id.into(),
+                signature: expired_sig.to_vec(),
+            },
+        )
+        .await
+        .expect_err("expired pending request must be rejected");
+    assert!(err.message().contains("expired"), "{err}");
+
+    match store.get_watchtower_signer(&tenant, &channel_id) {
+        WatchtowerSignerState::External(ext) => {
+            assert!(
+                ext.signed_signatures.is_empty(),
+                "expired request must not move into signed_signatures"
+            );
+            assert!(ext.signed_signature_created_at_ms.is_empty());
+            assert!(ext.last_applied.is_none());
+            assert!(ext.pending_requests.contains_key(&expired_req_id));
+        }
+        other => panic!("expected external signer state, got {other:?}"),
+    }
+    let mut expired_tracker = LockTracker::default();
+    crate::ckb::held_cells::lock_held(&mut expired_tracker, now_ms).unwrap();
+    assert!(
+        !expired_tracker.locked.contains(&expired_fee_outpoint),
+        "rejected expired request must not hold fee cell"
+    );
+
+    // (b) Fresh non-expired pending request (close to original expiry) is accepted and its
+    // fee input hold is refreshed in held_cells to now_ms + WATCHTOWER_HOLD_MS.
+    let fresh_req_id = Hash256::from([0xe2; 32]);
+    let fresh_fee_outpoint = OutPoint::new(Byte32::from([0xe2; 32]), 1);
+    let fresh_content = OnchainSigningContent {
+        key_purpose: OnchainKeyPurpose::Settlement,
+        transaction: TransactionBuilder::default()
+            .input(CellInput::new(
+                OutPoint::new(Byte32::from([0xd2; 32]), 0),
+                0,
+            ))
+            .input(CellInput::new(fresh_fee_outpoint.clone(), 0))
+            .build()
+            .data(),
+    };
+    let fresh_sig =
+        crate::watchtower::sign_onchain_request(&settlement_key, &fresh_content).unwrap();
+    // Created almost WATCHTOWER_HOLD_MS ago (5s left): still valid, and checking just past
+    // its old expiry verifies the hold was actually refreshed rather than left at old_created_at.
+    let old_created_at = now_ms.saturating_sub(crate::ckb::held_cells::WATCHTOWER_HOLD_MS - 5_000);
+
+    crate::ckb::held_cells::release_for_watchtower([fresh_fee_outpoint.clone()]);
+    store
+        .update_watchtower_signer(&tenant, &channel_id, |state| {
+            if let WatchtowerSignerState::External(ext) = state {
+                ext.pending_requests
+                    .insert(fresh_req_id, fresh_content.clone());
+                ext.pending_request_created_at_ms
+                    .insert(fresh_req_id, old_created_at);
+            }
+            Ok::<_, std::convert::Infallible>(())
+        })
+        .unwrap();
+
+    let res = server
+        .submit_watchtower_signature(
+            ctx,
+            SubmitWatchtowerSignatureParams {
+                channel_id: channel_id.into(),
+                request_id: fresh_req_id.into(),
+                signature: fresh_sig.to_vec(),
+            },
+        )
+        .await
+        .expect("fresh pending request must be accepted");
+    assert_eq!(res, SubmitWatchtowerSignatureResult::Applied);
+
+    let stamped_ms = match store.get_watchtower_signer(&tenant, &channel_id) {
+        WatchtowerSignerState::External(ext) => {
+            assert!(!ext.pending_requests.contains_key(&fresh_req_id));
+            assert!(!ext
+                .pending_request_created_at_ms
+                .contains_key(&fresh_req_id));
+            assert!(ext.signed_signatures.contains_key(&fresh_req_id));
+            *ext.signed_signature_created_at_ms
+                .get(&fresh_req_id)
+                .expect("signed_signature_created_at_ms must be recorded")
+        }
+        other => panic!("expected external signer state, got {other:?}"),
+    };
+    assert!(stamped_ms >= now_ms);
+
+    let mut refreshed_tracker = LockTracker::default();
+    crate::ckb::held_cells::lock_held(
+        &mut refreshed_tracker,
+        old_created_at + crate::ckb::held_cells::WATCHTOWER_HOLD_MS + 1,
+    )
+    .unwrap();
+    assert!(
+        refreshed_tracker.locked.contains(&fresh_fee_outpoint),
+        "accepted submission must refresh fee input hold past old pending expiry"
+    );
+
+    crate::ckb::held_cells::release_for_watchtower([expired_fee_outpoint, fresh_fee_outpoint]);
+}

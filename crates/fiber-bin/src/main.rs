@@ -50,6 +50,26 @@ use tracing_subscriber::{field::MakeExt, fmt, fmt::format, EnvFilter};
 
 const ASSUME_WATCHTOWER_ACTOR_ALIVE: &str = "watchtower actor must be alive";
 
+fn validate_watchtower_config(
+    fiber_config: &fnn::FiberConfig,
+    lsp_enabled: bool,
+) -> Result<(), ExitMessage> {
+    let disable_built_in = fiber_config.disable_built_in_watchtower.unwrap_or_default();
+    if fiber_config.standalone_watchtower_rpc_url.is_none() && disable_built_in {
+        return ExitMessage::err(
+            "fiber config requires standalone watchtower rpc url or built-in watchtower to be enabled"
+                .to_string(),
+        );
+    }
+    if lsp_enabled && disable_built_in {
+        return ExitMessage::err(
+            "LSP service requires the built-in watchtower to be enabled (disable_built_in_watchtower cannot be true)"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 fn cli_confirm(plan: MigrationPlan) -> bool {
     eprintln!("{}", plan.message);
     if plan.has_break_change {
@@ -231,6 +251,12 @@ async fn run_node(
     #[allow(unused_variables)]
     let (network_actor, ckb_chain_actor, network_graph, store_actor) = match config.fiber.clone() {
         Some(fiber_config) => {
+            #[cfg(feature = "lsp")]
+            let lsp_enabled = config.lsp.is_some();
+            #[cfg(not(feature = "lsp"))]
+            let lsp_enabled = false;
+            validate_watchtower_config(&fiber_config, lsp_enabled)?;
+
             // TODO: this is not a super user friendly error message which has actionable information
             // for the user to fix the error and start the node.
             let ckb_config = config.ckb.clone().ok_or_else(|| {
@@ -315,6 +341,60 @@ async fn run_node(
             .map_err(|err| ExitMessage(format!("failed to start store actor: {}", err)))?
             .0;
 
+            let watchtower_client = if let Some(url) =
+                fiber_config.standalone_watchtower_rpc_url.clone()
+            {
+                let mut client_builder = HttpClientBuilder::default();
+
+                if let Some(token) = fiber_config.standalone_watchtower_token.as_ref() {
+                    let mut headers = HeaderMap::new();
+                    headers.insert(
+                        "Authorization",
+                        HeaderValue::from_str(&format!("Bearer {}", token)).map_err(|err| {
+                            ExitMessage(format!("failed to create watchtower rpc client: {err:?}"))
+                        })?,
+                    );
+                    client_builder = client_builder.set_headers(headers);
+                } else {
+                    tracing::debug!(
+                        "create watchtower rpc client without standalone_watchtower_token"
+                    );
+                }
+
+                let watchtower_client = client_builder.build(url).map_err(|err| {
+                    ExitMessage(format!("failed to create watchtower rpc client: {}", err))
+                })?;
+                Some(watchtower_client)
+            } else {
+                None
+            };
+
+            // Start watchtower before network so WatchtowerActor::pre_start restores
+            // persisted external fee-cell holds before any channel funding can pick cells.
+            let watchtower_actor = if fiber_config.disable_built_in_watchtower.unwrap_or_default() {
+                None
+            } else {
+                let watchtower_actor = Actor::spawn_linked(
+                    Some("watchtower".to_string()),
+                    WatchtowerActor::new(store.clone()).with_signing_events(signing_events.clone()),
+                    ckb_config.clone(),
+                    root_actor.get_cell(),
+                )
+                .await
+                .map_err(|err| ExitMessage(format!("failed to start watchtower actor: {}", err)))?
+                .0;
+
+                watchtower_actor.send_interval(
+                    Duration::from_secs(
+                        fiber_config
+                            .watchtower_check_interval_seconds
+                            .unwrap_or(DEFAULT_WATCHTOWER_CHECK_INTERVAL_SECONDS),
+                    ),
+                    || WatchtowerMessage::PeriodicCheck,
+                );
+                Some(watchtower_actor)
+            };
+
             let chain_client = CkbRpcClient::new(&ckb_config);
             let network_actor: ActorRef<NetworkActorMessage> = start_network(
                 signing_events.channels(None),
@@ -345,67 +425,6 @@ async fn run_node(
                     default_shutdown_script,
                 )));
             }
-
-            if fiber_config.standalone_watchtower_rpc_url.is_none()
-                && fiber_config.disable_built_in_watchtower.unwrap_or_default()
-            {
-                return ExitMessage::err(
-                    "fiber config requires standalone watchtower rpc url or built-in watchtower to be enabled"
-                        .to_string(),
-                );
-            }
-
-            let watchtower_client = if let Some(url) =
-                fiber_config.standalone_watchtower_rpc_url.clone()
-            {
-                let mut client_builder = HttpClientBuilder::default();
-
-                if let Some(token) = fiber_config.standalone_watchtower_token.as_ref() {
-                    let mut headers = HeaderMap::new();
-                    headers.insert(
-                        "Authorization",
-                        HeaderValue::from_str(&format!("Bearer {}", token)).map_err(|err| {
-                            ExitMessage(format!("failed to create watchtower rpc client: {err:?}"))
-                        })?,
-                    );
-                    client_builder = client_builder.set_headers(headers);
-                } else {
-                    tracing::debug!(
-                        "create watchtower rpc client without standalone_watchtower_token"
-                    );
-                }
-
-                let watchtower_client = client_builder.build(url).map_err(|err| {
-                    ExitMessage(format!("failed to create watchtower rpc client: {}", err))
-                })?;
-                Some(watchtower_client)
-            } else {
-                None
-            };
-
-            let watchtower_actor = if fiber_config.disable_built_in_watchtower.unwrap_or_default() {
-                None
-            } else {
-                let watchtower_actor = Actor::spawn_linked(
-                    Some("watchtower".to_string()),
-                    WatchtowerActor::new(store.clone()).with_signing_events(signing_events.clone()),
-                    ckb_config,
-                    root_actor.get_cell(),
-                )
-                .await
-                .map_err(|err| ExitMessage(format!("failed to start watchtower actor: {}", err)))?
-                .0;
-
-                watchtower_actor.send_interval(
-                    Duration::from_secs(
-                        fiber_config
-                            .watchtower_check_interval_seconds
-                            .unwrap_or(DEFAULT_WATCHTOWER_CHECK_INTERVAL_SECONDS),
-                    ),
-                    || WatchtowerMessage::PeriodicCheck,
-                );
-                Some(watchtower_actor)
-            };
 
             #[cfg(feature = "metrics")]
             if let Some(addr) = fiber_config.metrics_addr.as_ref() {
@@ -824,4 +843,46 @@ async fn signal_listener() {
         .await
         .expect("listen for Ctrl-c signal");
     tracing::info!("Ctrl-c received, shutting down");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_watchtower_config;
+    use fnn::FiberConfig;
+
+    #[test]
+    fn validate_watchtower_config_rejects_lsp_with_disabled_built_in_watchtower() {
+        let mut lsp_with_disabled_and_standalone = FiberConfig::default();
+        lsp_with_disabled_and_standalone.disable_built_in_watchtower = Some(true);
+        lsp_with_disabled_and_standalone.standalone_watchtower_rpc_url =
+            Some("http://127.0.0.1:8227".to_string());
+        let err = validate_watchtower_config(&lsp_with_disabled_and_standalone, true).expect_err(
+            "LSP must reject disable_built_in_watchtower: true even with standalone URL",
+        );
+        assert!(
+            err.0.contains("LSP") && err.0.contains("built-in watchtower"),
+            "unexpected error message: {}",
+            err.0
+        );
+
+        let mut lsp_with_disabled_only = FiberConfig::default();
+        lsp_with_disabled_only.disable_built_in_watchtower = Some(true);
+        assert!(validate_watchtower_config(&lsp_with_disabled_only, true).is_err());
+
+        // LSP with built-in watchtower enabled succeeds (with or without standalone URL).
+        let lsp_default = FiberConfig::default();
+        assert!(validate_watchtower_config(&lsp_default, true).is_ok());
+
+        let mut lsp_explicit_enabled = FiberConfig::default();
+        lsp_explicit_enabled.disable_built_in_watchtower = Some(false);
+        lsp_explicit_enabled.standalone_watchtower_rpc_url =
+            Some("http://127.0.0.1:8227".to_string());
+        assert!(validate_watchtower_config(&lsp_explicit_enabled, true).is_ok());
+
+        // Non-LSP with standalone watchtower and disable_built_in_watchtower: true still succeeds.
+        assert!(validate_watchtower_config(&lsp_with_disabled_and_standalone, false).is_ok());
+
+        // Non-LSP with neither standalone nor built-in watchtower fails.
+        assert!(validate_watchtower_config(&lsp_with_disabled_only, false).is_err());
+    }
 }

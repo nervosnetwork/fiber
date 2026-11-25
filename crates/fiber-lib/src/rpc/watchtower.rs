@@ -256,6 +256,18 @@ fn validate_script_size(
 }
 
 #[cfg(feature = "watchtower")]
+fn fee_inputs(content: &fiber_types::OnchainSigningContent) -> Vec<ckb_types::packed::OutPoint> {
+    content
+        .transaction
+        .raw()
+        .inputs()
+        .into_iter()
+        .skip(1)
+        .map(|input| input.previous_output())
+        .collect()
+}
+
+#[cfg(feature = "watchtower")]
 fn validate_update_signing_keys<S: WatchtowerStore>(
     store: &S,
     node_id: &NodeId,
@@ -570,11 +582,23 @@ where
                         "submitted signature does not match the previously applied result",
                     ));
                 }
-                let Some(content) = external.pending_requests.remove(&request_id) else {
+                let Some(content) = external.pending_requests.get(&request_id) else {
                     return Err(rpc_error(
                         "signature request id not found in pending requests",
                     ));
                 };
+                let now_ms = crate::now_timestamp_as_millis_u64();
+                if external
+                    .pending_request_created_at_ms
+                    .get(&request_id)
+                    .is_some_and(|created_at_ms| {
+                        now_ms
+                            >= created_at_ms
+                                .saturating_add(crate::ckb::held_cells::WATCHTOWER_HOLD_MS)
+                    })
+                {
+                    return Err(rpc_error("watchtower signature request has expired"));
+                }
                 let superseded = self
                     .store
                     .get_superseded_remote_settlements(&node_id, &channel_id);
@@ -583,14 +607,19 @@ where
                     .map_err(rpc_error)?;
                 crate::watchtower::WatchtowerSigner::apply_submitted(
                     &expected_pubkey,
-                    &content,
+                    content,
                     signature,
                 )
                 .map_err(rpc_error)?;
+                let content = external
+                    .pending_requests
+                    .remove(&request_id)
+                    .expect("pending request checked above");
+                let hold_inputs = fee_inputs(&content);
                 external.pending_request_created_at_ms.remove(&request_id);
                 external
                     .signed_signature_created_at_ms
-                    .insert(request_id, crate::now_timestamp_as_millis_u64());
+                    .insert(request_id, now_ms);
                 external.last_applied = Some(LastAppliedWatchtowerSignature {
                     request_id,
                     signature,
@@ -598,6 +627,9 @@ where
                 external
                     .signed_signatures
                     .insert(request_id, (content, signature));
+                if !hold_inputs.is_empty() {
+                    crate::ckb::held_cells::hold_for_watchtower(hold_inputs, now_ms);
+                }
                 signing_update.watchtower_state(channel_id, state);
                 Ok(SubmitWatchtowerSignatureResult::Applied)
             })?;
