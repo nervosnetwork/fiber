@@ -3361,6 +3361,7 @@ async fn temporary_dispatch_failure_and_payment_outcome_ready_coalesce_to_single
         token_epoch: 0,
     };
 
+    tokio::time::pause();
     ractor::call!(service, |reply| {
         LspServiceMessage::AcceptTrampolineDelivery(
             hosted_forwarding_request(&tenant, payment_hash, crate::now_timestamp_as_millis_u64()),
@@ -3370,17 +3371,7 @@ async fn temporary_dispatch_failure_and_payment_outcome_ready_coalesce_to_single
     .unwrap()
     .unwrap();
 
-    // Wait for the initial dispatch attempt to fail temporarily and arm a retry timer.
-    tokio::time::timeout(Duration::from_secs(3), async {
-        loop {
-            if dispatches.load(Ordering::Relaxed) >= 1 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("first dispatch attempt");
+    // The status call follows the initial dispatch in the service mailbox.
     ractor::call!(service, LspServiceMessage::GetStatus).unwrap();
     let deferred = manager.get_by_payment_hash(&payment_hash).unwrap().unwrap();
     assert_eq!(deferred.status, LspPaymentDeliveryStatus::Deferred);
@@ -3404,30 +3395,23 @@ async fn temporary_dispatch_failure_and_payment_outcome_ready_coalesce_to_single
         PaymentOutcomeDecision::RetryDelivery
     );
 
-    // Wait for the single retry timer to fire attempt #2 (which also fails temporarily).
-    tokio::time::timeout(Duration::from_secs(3), async {
-        loop {
-            if dispatches.load(Ordering::Relaxed) >= 2 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("second dispatch attempt");
+    // Advance just past the first retry; attempt #2 also fails temporarily.
+    tokio::time::advance(Duration::from_millis(1_100)).await;
     ractor::call!(service, LspServiceMessage::GetStatus).unwrap();
+    assert_eq!(dispatches.load(Ordering::Relaxed), 2);
 
     // If PaymentOutcomeReady had armed a second timer, it would fire right after
     // attempt #2 and immediately trigger attempt #3 well before the next 1s retry.
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    tokio::time::advance(Duration::from_millis(100)).await;
     ractor::call!(service, LspServiceMessage::GetStatus).unwrap();
     let after_second = manager.get_by_payment_hash(&payment_hash).unwrap().unwrap();
     assert_eq!(dispatches.load(Ordering::Relaxed), 2);
     assert_eq!(after_second.attempt_count, 2);
     assert_eq!(after_second.status, LspPaymentDeliveryStatus::Deferred);
 
-    // The single retry timer armed after attempt #2 still fires and succeeds on attempt #3.
-    wait_for_delivery_status(&manager, payment_hash, LspPaymentDeliveryStatus::InFlight).await;
+    // The timer armed after attempt #2 still fires and succeeds on attempt #3.
+    tokio::time::advance(Duration::from_millis(1_000)).await;
+    ractor::call!(service, LspServiceMessage::GetStatus).unwrap();
     let settled_in_flight = manager.get_by_payment_hash(&payment_hash).unwrap().unwrap();
     assert_eq!(dispatches.load(Ordering::Relaxed), 3);
     assert_eq!(settled_in_flight.attempt_count, 3);
