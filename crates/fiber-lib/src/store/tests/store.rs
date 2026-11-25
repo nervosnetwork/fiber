@@ -5215,7 +5215,7 @@ mod store_actor_tests {
             _: TakeWhileFn,
             _: usize,
         ) -> Vec<KVPair> {
-            todo!()
+            Vec::new()
         }
         fn restore(&self, _: &Path, _: &Path) -> Result<(), StoreError> {
             todo!()

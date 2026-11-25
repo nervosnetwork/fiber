@@ -526,9 +526,11 @@ fn test_v2_current_epoch_rejects_bootstrap_session_as_closed_channel() {
 #[test]
 fn test_check_validate_accepts_released_records() {
     use fiber_types::sample::StoreSample;
-    // A released database carries the legacy feature byte (`0x00`) in its opening records, which
-    // the current types reject: read-only validation must leave those to the migration instead of
-    // failing on a database that can upgrade. The watchtower records share the same gate.
+    // A released database carries the legacy feature byte (`0x00`) in its opening records, the
+    // released payment-session layout (without `upstream_tlc_key`), and released superseded
+    // watchtower settlement snapshots (with untagged `SettlementTlc::local_key`), all of which the
+    // current types reject: read-only validation must leave those to the migration instead of
+    // failing on a database that can upgrade.
     let channel = fiber_types::ChannelActorData::samples(41).remove(0);
     let old_open = fiber_types_0100::ChannelOpenRecord {
         channel_id: decode_as_new(channel.id).unwrap(),
@@ -546,11 +548,82 @@ fn test_check_validate_accepts_released_records() {
         old_open.channel_id.as_ref(),
     ]
     .concat();
+
+    let payment_hash = fiber_types_0100::Hash256::from([0x42; 32]);
+    let old_session = fiber_types_0100::PaymentSession {
+        request: fiber_types_0100::SendPaymentData {
+            target_pubkey: fiber_types_0100::Privkey::from(&[0x04; 32]).pubkey(),
+            amount: 123_456,
+            payment_hash,
+            invoice: None,
+            final_tlc_expiry_delta: 100,
+            tlc_expiry_limit: 1000,
+            timeout: None,
+            max_fee_amount: Some(1_000),
+            max_parts: None,
+            keysend: false,
+            udt_type_script: None,
+            preimage: None,
+            custom_records: None,
+            allow_self_payment: false,
+            hop_hints: vec![],
+            router: vec![],
+            allow_mpp: false,
+            dry_run: false,
+            trampoline_hops: None,
+            trampoline_context: None,
+        },
+        last_error: Some("released error".to_owned()),
+        last_error_code: None,
+        try_limit: 3,
+        status: fiber_types_0100::PaymentStatus::Failed,
+        created_at: 100,
+        last_updated_at: 200,
+        cached_attempts: vec![],
+    };
+    let old_session_bytes = bincode::serialize(&old_session).unwrap();
+    assert!(
+        bincode::deserialize::<fiber_types::PaymentSession>(&old_session_bytes).is_err(),
+        "released PaymentSession bytes must fail deserialization against current PaymentSession"
+    );
+    let session_key = [
+        &[fiber_types::schema::PAYMENT_SESSION_PREFIX],
+        payment_hash.as_ref(),
+    ]
+    .concat();
+
+    let old_superseded = vec![fiber_types_0100::SettlementData {
+        local_amount: 500_000,
+        remote_amount: 750_000,
+        tlcs: vec![fiber_types_0100::SettlementTlc {
+            tlc_id: fiber_types_0100::TLCId::Offered(7),
+            hash_algorithm: fiber_types_0100::HashAlgorithm::CkbHash,
+            payment_amount: 88_000,
+            payment_hash: fiber_types_0100::Hash256::from([0xab; 32]),
+            expiry: 1_700_000_000_000,
+            // Leading 0x02 byte is an invalid Option tag in head SettlementTlc.
+            local_key: fiber_types_0100::Privkey::from(&[0x02u8; 32]),
+            remote_key: fiber_types_0100::Privkey::from(&[0x03u8; 32]).pubkey(),
+        }],
+    }];
+    let old_superseded_bytes = bincode::serialize(&old_superseded).unwrap();
+    assert!(
+        bincode::deserialize::<Vec<fiber_types::SettlementData>>(&old_superseded_bytes).is_err(),
+        "released superseded settlement bytes must fail deserialization against current SettlementData"
+    );
+    let superseded_key = [
+        &[fiber_types::schema::WATCHTOWER_SUPERSEDED_SETTLEMENT_PREFIX],
+        channel.id.as_ref(),
+    ]
+    .concat();
+
     let path = gen_path();
     {
         let store = fiber_store::Store::open_db(&path).unwrap();
         store.put(MIGRATION_VERSION_KEY, INIT_DB_VERSION);
         store.put(open_key, bincode::serialize(&old_open).unwrap());
+        store.put(session_key, old_session_bytes);
+        store.put(superseded_key, old_superseded_bytes);
     }
     crate::store::check_validate(&path)
         .expect("released records must not block read-only validation");

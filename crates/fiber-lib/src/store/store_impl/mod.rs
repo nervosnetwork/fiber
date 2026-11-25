@@ -899,7 +899,7 @@ pub fn check_validate<P: AsRef<Path>>(path: P) -> Result<(), String> {
                 );
             }
             BROADCAST_MESSAGE_TIMESTAMP_PREFIX => {}
-            PAYMENT_SESSION_PREFIX => {
+            PAYMENT_SESSION_PREFIX if split_schema => {
                 check_deserialization::<PaymentSession>(
                     &value,
                     "PAYMENT_SESSION_PREFIX",
@@ -941,7 +941,7 @@ pub fn check_validate<P: AsRef<Path>>(path: P) -> Result<(), String> {
                 );
             }
             #[cfg(feature = "watchtower")]
-            WATCHTOWER_SUPERSEDED_SETTLEMENT_PREFIX => {
+            WATCHTOWER_SUPERSEDED_SETTLEMENT_PREFIX if split_schema => {
                 check_deserialization::<Vec<SettlementData>>(
                     &value,
                     "WATCHTOWER_SUPERSEDED_SETTLEMENT_PREFIX",
