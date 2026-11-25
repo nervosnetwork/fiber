@@ -1,10 +1,11 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{hash_map::Entry, HashMap, HashSet},
     sync::Arc,
     time::Duration,
 };
 
 use ractor::{Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
+use tokio::task::AbortHandle;
 
 use crate::fiber::{
     channel::{ChannelActorState, ChannelActorStateStore},
@@ -158,6 +159,9 @@ pub struct LspServiceState {
     // Deduplicates in-flight/settling reconciliation timers so periodic ticks
     // never amplify per-delivery retry loops.
     reconciling_deliveries: HashSet<LspPaymentDeliveryKey>,
+    // Deduplicates pending delivery retry timers so overlapping failure paths
+    // (e.g., temporary dispatch failure and PaymentOutcomeReady) arm only one timer.
+    scheduled_delivery_retries: HashMap<LspPaymentDeliveryKey, AbortHandle>,
 }
 
 impl LspServiceState {
@@ -260,18 +264,28 @@ impl LspServiceState {
         });
     }
 
+    fn cancel_scheduled_delivery_retry(&mut self, key: &LspPaymentDeliveryKey) {
+        if let Some(handle) = self.scheduled_delivery_retries.remove(key) {
+            handle.abort();
+        }
+    }
+
     fn schedule_delivery_retry(
+        &mut self,
         myself: &ActorRef<LspServiceMessage>,
         key: LspPaymentDeliveryKey,
         deadline: u64,
     ) {
         let remaining = deadline.saturating_sub(crate::now_timestamp_as_millis_u64());
         if remaining == 0 {
+            self.cancel_scheduled_delivery_retry(&key);
             let _ = myself.send_message(LspServiceMessage::ExpireDelivery(key));
-        } else {
-            myself.send_after(Duration::from_millis(remaining.min(1_000)), move || {
-                LspServiceMessage::ResumeDelivery(key)
-            });
+        } else if let Entry::Vacant(entry) = self.scheduled_delivery_retries.entry(key) {
+            let handle = myself
+                .send_after(Duration::from_millis(remaining.min(1_000)), move || {
+                    LspServiceMessage::ResumeDelivery(key)
+                });
+            entry.insert(handle.abort_handle());
         }
     }
 
@@ -337,7 +351,7 @@ impl LspServiceState {
     }
 
     fn finish_upstream_settlement(
-        &self,
+        &mut self,
         key: &LspPaymentDeliveryKey,
         status: PaymentStatus,
         failure: Option<String>,
@@ -358,6 +372,8 @@ impl LspServiceState {
             delivery_status,
             crate::now_timestamp_as_millis_u64(),
         )?;
+        self.cancel_scheduled_delivery_retry(key);
+        self.reconciling_deliveries.remove(key);
         Ok(())
     }
 }
@@ -427,6 +443,7 @@ impl Actor for LspService {
             ready_tenants: HashMap::new(),
             token_epochs,
             reconciling_deliveries: HashSet::new(),
+            scheduled_delivery_retries: HashMap::new(),
         })
     }
 
@@ -678,6 +695,7 @@ impl Actor for LspService {
             }
             LspServiceMessage::ResumeDelivery(key) => {
                 state.reconciling_deliveries.remove(&key);
+                state.cancel_scheduled_delivery_retry(&key);
                 self.resume_delivery(myself, state, key).await?;
             }
             LspServiceMessage::ExpireDelivery(key) => {
@@ -769,8 +787,14 @@ impl Actor for LspService {
                             failure,
                             failure_code,
                         );
-                        if let Ok(PaymentOutcomeDecision::RetryDelivery) = decision {
-                            LspServiceState::schedule_delivery_retry(&myself, key, deadline);
+                        match &decision {
+                            Ok(PaymentOutcomeDecision::RetryDelivery) => {
+                                state.schedule_delivery_retry(&myself, key, deadline);
+                            }
+                            Ok(PaymentOutcomeDecision::SettleUpstream) => {
+                                state.cancel_scheduled_delivery_retry(&key);
+                            }
+                            Err(_) => {}
                         }
                         decision
                     }
@@ -837,7 +861,7 @@ impl LspService {
     }
 
     fn fail_removed_delivery(
-        state: &LspServiceState,
+        state: &mut LspServiceState,
         key: &LspPaymentDeliveryKey,
     ) -> Result<(), String> {
         state.delivery_manager.transition(
@@ -847,6 +871,8 @@ impl LspService {
             },
             crate::now_timestamp_as_millis_u64(),
         )?;
+        state.cancel_scheduled_delivery_retry(key);
+        state.reconciling_deliveries.remove(key);
         Ok(())
     }
 
@@ -950,11 +976,7 @@ impl LspService {
                         payment.failed_error_code,
                     )?;
                     if decision == PaymentOutcomeDecision::RetryDelivery {
-                        LspServiceState::schedule_delivery_retry(
-                            &myself,
-                            key,
-                            delivery.buffer_deadline,
-                        );
+                        state.schedule_delivery_retry(&myself, key, delivery.buffer_deadline);
                         return Ok(());
                     }
                     let settlement = ractor::call_t!(
@@ -1021,7 +1043,7 @@ impl LspService {
                     %payment_hash,
                     "Cannot determine hosted delivery upstream TLC state"
                 );
-                LspServiceState::schedule_delivery_retry(&myself, key, delivery.buffer_deadline);
+                state.schedule_delivery_retry(&myself, key, delivery.buffer_deadline);
                 return Ok(());
             }
             Err(error) => {
@@ -1030,7 +1052,7 @@ impl LspService {
                     %error,
                     "Failed to inspect hosted delivery upstream TLC"
                 );
-                LspServiceState::schedule_delivery_retry(&myself, key, delivery.buffer_deadline);
+                state.schedule_delivery_retry(&myself, key, delivery.buffer_deadline);
                 return Ok(());
             }
         }
@@ -1062,7 +1084,7 @@ impl LspService {
             ready.is_some_and(|ready| ready.contains(&delivery.private_channel_id))
         };
         if !channel_ready {
-            LspServiceState::schedule_delivery_retry(&myself, key, delivery.buffer_deadline);
+            state.schedule_delivery_retry(&myself, key, delivery.buffer_deadline);
             return Ok(());
         }
         if let Err(error) = state.supervisor.ensure(&tenant).await {
@@ -1072,7 +1094,7 @@ impl LspService {
                 delivery.tenant_id,
                 error
             );
-            LspServiceState::schedule_delivery_retry(&myself, key, delivery.buffer_deadline);
+            state.schedule_delivery_retry(&myself, key, delivery.buffer_deadline);
             return Ok(());
         }
 
@@ -1114,7 +1136,7 @@ impl LspService {
                     attempt_count = delivery.attempt_count,
                     "Deferring hosted delivery after a transient dispatch failure"
                 );
-                LspServiceState::schedule_delivery_retry(&myself, key, delivery.buffer_deadline);
+                state.schedule_delivery_retry(&myself, key, delivery.buffer_deadline);
             }
             Err(DeliveryDispatchError::Permanent { reason, error_code }) => {
                 let delivery = state.delivery_manager.transition_with_error(
@@ -1146,12 +1168,14 @@ impl LspService {
             return Ok(());
         }
         if delivery.status.is_final() {
+            state.cancel_scheduled_delivery_retry(&key);
             return Ok(());
         }
         if matches!(
             delivery.status,
             LspPaymentDeliveryStatus::SettlingUpstream { .. }
         ) {
+            state.cancel_scheduled_delivery_retry(&key);
             state.schedule_reconciliation_retry(&myself, key);
             return Ok(());
         }
@@ -1185,6 +1209,7 @@ impl LspService {
             }
         }
         let reason = Self::EXPIRATION_REASON.to_string();
+        state.cancel_scheduled_delivery_retry(&key);
         let delivery = state.delivery_manager.transition_with_error(
             &key,
             LspPaymentDeliveryStatus::SettlingUpstream {

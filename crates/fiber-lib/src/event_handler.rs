@@ -173,7 +173,7 @@ pub fn forward_event_to_watchtower_store<S: crate::watchtower::WatchtowerStore>(
         ) => {
             let signing_scope = events.watchtower(&node_id);
             let signing_update = signing_scope.prepare_created(channel_id);
-            if node_id == fiber_types::NodeId::local() {
+            let created = if node_id == fiber_types::NodeId::local() {
                 store.insert_watch_channel(
                     node_id,
                     channel_id,
@@ -182,25 +182,31 @@ pub fn forward_event_to_watchtower_store<S: crate::watchtower::WatchtowerStore>(
                     settlement_data,
                     commitment_contract_features,
                     None,
-                );
-                signing_update.publish();
-            } else if let Err(error) = store.insert_watch_channel_checked(
-                node_id.clone(),
-                channel_id,
-                funding_udt_type_script,
-                keys,
-                settlement_data,
-                commitment_contract_features,
-                Some(local_shutdown_script),
-                quotas,
-            ) {
-                tracing::warn!(
-                    node_id = %node_id,
-                    %channel_id,
-                    %error,
-                    "skipping hosted watchtower channel registration: quota exceeded"
-                );
+                )
             } else {
+                match store.insert_watch_channel_checked(
+                    node_id.clone(),
+                    channel_id,
+                    funding_udt_type_script,
+                    keys,
+                    settlement_data,
+                    commitment_contract_features,
+                    Some(local_shutdown_script),
+                    quotas,
+                ) {
+                    Ok(created) => created,
+                    Err(error) => {
+                        tracing::warn!(
+                            node_id = %node_id,
+                            %channel_id,
+                            %error,
+                            "skipping hosted watchtower channel registration: quota exceeded"
+                        );
+                        false
+                    }
+                }
+            };
+            if created {
                 signing_update.publish();
             }
         }

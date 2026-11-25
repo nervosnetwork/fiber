@@ -492,3 +492,142 @@ async fn watchtower_rejects_tenant_calls_when_lsp_disabled() {
         .unwrap();
     assert!(store.get_watch_channel(&NodeId::local(), &ch).is_some());
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
+async fn create_watch_channel_retry_does_not_publish_no_signature_required_while_pending() {
+    use ckb_types::core::TransactionBuilder;
+    use ckb_types::packed::OutPoint;
+    use fiber_types::{OnchainKeyPurpose, OnchainSigningContent, WatchtowerSignerState};
+    use futures::FutureExt;
+
+    use crate::signing::{
+        notifications::{SigningChange, SigningScope},
+        SigningEvents,
+    };
+
+    let (store, _dir) = generate_store();
+    let signing_events = SigningEvents::default();
+    let server =
+        WatchtowerRpcServerImpl::new(store.clone()).with_signing_events(signing_events.clone());
+
+    let tenant = NodeId::from_bytes(Privkey::from([71; 32]).pubkey().serialize().to_vec());
+    for (node_id, tenant_scoped, ch_byte, req_byte) in [
+        (tenant, true, 72u8, 73u8),
+        (NodeId::local(), false, 74u8, 75u8),
+    ] {
+        let ctx = RpcContext {
+            node_id: node_id.to_string(),
+            tenant_scoped,
+        };
+        let channel_id = Hash256::from([ch_byte; 32]);
+        let make_params = || CreateWatchChannelParams {
+            channel_id: channel_id.into(),
+            funding_udt_type_script: None,
+            local_settlement_key: None,
+            local_settlement_key_pubkey: Some(Privkey::from([1; 32]).pubkey().into()),
+            remote_settlement_key: Privkey::from([2; 32]).pubkey().into(),
+            local_funding_pubkey: Privkey::from([5; 32]).pubkey().into(),
+            remote_funding_pubkey: Privkey::from([6; 32]).pubkey().into(),
+            settlement_data: snapshot(1).into(),
+            channel_features: Default::default(),
+            payout_lock_script: None,
+        };
+
+        let mut changes = signing_events
+            .hub
+            .subscribe(SigningScope::Watchtower(node_id.clone()));
+
+        // First registration inserts a new row and emits WatchtowerCreated(NoSignatureRequired).
+        server
+            .create_watch_channel(ctx.clone(), make_params())
+            .await
+            .unwrap();
+        let created_event = changes
+            .recv()
+            .now_or_never()
+            .expect("initial create_watch_channel must publish WatchtowerCreated")
+            .unwrap();
+        assert!(
+            matches!(
+                created_event.as_ref(),
+                SigningChange::WatchtowerCreated {
+                    channel_id: id,
+                    status: WatchtowerSigningStatus::NoSignatureRequired,
+                } if *id == channel_id
+            ),
+            "unexpected created event: {created_event:?}"
+        );
+        assert!(changes.recv().now_or_never().is_none());
+
+        // Transition signer state to a pending external signature request (SignatureRequired).
+        let req_id = Hash256::from([req_byte; 32]);
+        let now_ms = crate::now_timestamp_as_millis_u64();
+        let signing_scope = signing_events.watchtower(&node_id);
+        let mut signing_update = signing_scope.prepare_update();
+        store
+            .update_watchtower_signer(&node_id, &channel_id, |state| {
+                if let WatchtowerSignerState::External(ext) = state {
+                    let tx = TransactionBuilder::default()
+                        .input(ckb_types::packed::CellInput::new(OutPoint::default(), 0))
+                        .build()
+                        .data();
+                    ext.pending_requests.insert(
+                        req_id,
+                        OnchainSigningContent {
+                            key_purpose: OnchainKeyPurpose::Settlement,
+                            transaction: tx,
+                        },
+                    );
+                    ext.pending_request_created_at_ms.insert(req_id, now_ms);
+                }
+                signing_update.watchtower_state(channel_id, state);
+                Ok::<_, std::convert::Infallible>(())
+            })
+            .unwrap();
+        signing_update.publish();
+
+        let pending_event = changes
+            .recv()
+            .now_or_never()
+            .expect("pending external request must publish WatchtowerUpdated")
+            .unwrap();
+        match pending_event.as_ref() {
+            SigningChange::WatchtowerUpdated {
+                channel_id: id,
+                status: WatchtowerSigningStatus::SignatureRequired { request_id, .. },
+            } => {
+                assert_eq!(*id, channel_id);
+                assert_eq!(*request_id, req_id.into());
+            }
+            other => panic!("expected WatchtowerUpdated(SignatureRequired), got {other:?}"),
+        }
+
+        // Retrying create_watch_channel on the already-monitored channel must succeed,
+        // emit NO spurious NoSignatureRequired event, and keep SignatureRequired intact.
+        server
+            .create_watch_channel(ctx.clone(), make_params())
+            .await
+            .unwrap();
+        assert!(
+            changes.recv().now_or_never().is_none(),
+            "re-registering an existing watch channel must not publish a signing event"
+        );
+
+        let status = server
+            .get_watchtower_signing_status(
+                ctx,
+                GetWatchtowerSigningStatusParams {
+                    channel_id: channel_id.into(),
+                },
+            )
+            .await
+            .unwrap();
+        match status.status {
+            WatchtowerSigningStatus::SignatureRequired { request_id, .. } => {
+                assert_eq!(request_id, req_id.into());
+            }
+            other => panic!("expected SignatureRequired to survive retry, got {other:?}"),
+        }
+    }
+}

@@ -182,7 +182,7 @@ where
             ) => {
                 let signing_scope = self.signing_events.watchtower(&NodeId::local());
                 let signing_update = signing_scope.prepare_created(channel_id);
-                self.store.insert_watch_channel(
+                if self.store.insert_watch_channel(
                     NodeId::local(),
                     channel_id,
                     funding_udt_type_script,
@@ -190,8 +190,9 @@ where
                     settlement_data,
                     channel_features,
                     None,
-                );
-                signing_update.publish();
+                ) {
+                    signing_update.publish();
+                }
             }
 
             WatchtowerMessage::RemoveChannel(channel_id) => {
@@ -3258,11 +3259,12 @@ mod tests {
             _settlement_data: SettlementData,
             channel_features: ChannelFeatures,
             _payout_lock_script: Option<Script>,
-        ) {
+        ) -> bool {
             self.registered_features
                 .lock()
                 .expect("lock poisoned")
                 .push(channel_features);
+            true
         }
 
         fn remove_watch_channel(&self, _node_id: NodeId, _channel_id: Hash256) -> bool {

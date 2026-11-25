@@ -836,6 +836,74 @@ fn hosted_invoice_registration_is_signed_and_persistent() {
 }
 
 #[test]
+fn hosted_invoice_registration_retry_reuses_existing_for_matching_terms_and_rejects_mismatch() {
+    let root = tempdir().expect("temporary directory");
+    let config = lsp_config(root.path().join("lsp"));
+    let store = open_lsp_store(&config);
+    let invoices = LspInvoiceRegistry::new(store);
+    let tenant_key = Privkey::from(&[3; 32]);
+    let lsp_key = Privkey::from(&[9; 32]);
+    let tenant = HostedTenantRecord {
+        tenant_id: TenantId::new("u1").unwrap(),
+        root_signer_pubkey: None,
+        tenant_pubkey: tenant_key.pubkey(),
+        created_at: 42,
+        token_epoch: 0,
+    };
+    let payment_hash = Hash256::from([17; 32]);
+    let first_invoice = signed_invoice(&tenant_key, payment_hash);
+    let first_registration = invoices
+        .register(&tenant, first_invoice, None, lsp_key.pubkey(), &lsp_key)
+        .expect("register initial hosted invoice");
+
+    std::thread::sleep(Duration::from_millis(2));
+    let retried_invoice = signed_invoice(&tenant_key, payment_hash);
+    assert_ne!(
+        first_registration.invoice.data.timestamp,
+        retried_invoice.data.timestamp
+    );
+    let retried_registration = invoices
+        .register(&tenant, retried_invoice, None, lsp_key.pubkey(), &lsp_key)
+        .expect("retry with matching hosted invoice terms should reuse existing registration");
+    assert_eq!(retried_registration, first_registration);
+
+    let conflicting_invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(2_000))
+        .payment_hash(payment_hash)
+        .expiry_time(Duration::from_secs(60 * 60))
+        .build_with_sign(|message| {
+            secp256k1::SECP256K1.sign_ecdsa_recoverable(message, &tenant_key.0)
+        })
+        .expect("build conflicting hosted invoice");
+    assert_eq!(
+        invoices
+            .register(
+                &tenant,
+                conflicting_invoice,
+                None,
+                lsp_key.pubkey(),
+                &lsp_key,
+            )
+            .unwrap_err(),
+        "payment hash is already registered to another hosted invoice"
+    );
+
+    let no_expiry_invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(1_000))
+        .payment_hash(Hash256::from([18; 32]))
+        .build_with_sign(|message| {
+            secp256k1::SECP256K1.sign_ecdsa_recoverable(message, &tenant_key.0)
+        })
+        .expect("build invoice without expiry");
+    assert_eq!(
+        invoices
+            .register(&tenant, no_expiry_invoice, None, lsp_key.pubkey(), &lsp_key)
+            .unwrap_err(),
+        "hosted invoice must have a finite expiry"
+    );
+}
+
+#[test]
 fn hosted_invoice_route_hint_must_match_public_t() {
     let root = tempdir().expect("temporary directory");
     let config = lsp_config(root.path().join("lsp"));
@@ -3251,6 +3319,120 @@ async fn transient_dispatch_failure_returns_to_deferred_and_retries() {
         delivery.last_error_code,
         Some(TlcErrorCode::TemporaryNodeFailure)
     );
+}
+
+#[tokio::test]
+async fn temporary_dispatch_failure_and_payment_outcome_ready_coalesce_to_single_retry() {
+    let root = tempdir().expect("temporary directory");
+    let config = lsp_config(root.path().join("lsp"));
+    let store = open_lsp_store(&config);
+    let manager = LspPaymentDeliveryManager::new(store.clone());
+    let factory = Arc::new(FakeRuntimeFactory::new(Arc::new(AtomicUsize::new(0))));
+    let dispatches = Arc::new(AtomicUsize::new(0));
+    let upstream_failures = Arc::new(AtomicUsize::new(0));
+    let tenant_key = Privkey::from(&[1; 32]);
+    let service = start_test_lsp_service_with_dispatch_failures(
+        store,
+        config,
+        factory,
+        Privkey::from(&[9; 32]),
+        dispatches.clone(),
+        Arc::new(AtomicUsize::new(2)),
+        upstream_failures.clone(),
+    )
+    .await;
+    let lsp_key = Privkey::from(&[9; 32]);
+    let tenant_id =
+        register_authenticated_test_tenant(&service, &lsp_key, &test_root_signer()).await;
+    let payment_hash = Hash256::from([26; 32]);
+    register_test_invoice(&service, tenant_id.clone(), &tenant_key, payment_hash).await;
+    let private_channel_id = Hash256::from([36; 32]);
+    service
+        .send_message(LspServiceMessage::TenantChannelOnline(
+            tenant_key.pubkey(),
+            private_channel_id,
+        ))
+        .unwrap();
+    let tenant = HostedTenantRecord {
+        tenant_id,
+        root_signer_pubkey: None,
+        tenant_pubkey: tenant_key.pubkey(),
+        created_at: 42,
+        token_epoch: 0,
+    };
+
+    ractor::call!(service, |reply| {
+        LspServiceMessage::AcceptTrampolineDelivery(
+            hosted_forwarding_request(&tenant, payment_hash, crate::now_timestamp_as_millis_u64()),
+            reply,
+        )
+    })
+    .unwrap()
+    .unwrap();
+
+    // Wait for the initial dispatch attempt to fail temporarily and arm a retry timer.
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if dispatches.load(Ordering::Relaxed) >= 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("first dispatch attempt");
+    ractor::call!(service, LspServiceMessage::GetStatus).unwrap();
+    let deferred = manager.get_by_payment_hash(&payment_hash).unwrap().unwrap();
+    assert_eq!(deferred.status, LspPaymentDeliveryStatus::Deferred);
+    assert_eq!(deferred.attempt_count, 1);
+    assert_eq!(dispatches.load(Ordering::Relaxed), 1);
+
+    // Simulate the concurrent PaymentOutcomeReady notification for the same
+    // temporary routing failure; it must coalesce onto the already-armed retry timer.
+    assert_eq!(
+        ractor::call!(service, |reply| LspServiceMessage::PaymentOutcomeReady(
+            PaymentOutcomeRequest {
+                session_key: deferred.request.hosted_session_key(),
+                payment_status: PaymentStatus::Failed,
+                failure: Some("temporary routing failure".to_string()),
+                failure_code: Some(TlcErrorCode::TemporaryNodeFailure),
+            },
+            reply,
+        ))
+        .unwrap()
+        .unwrap(),
+        PaymentOutcomeDecision::RetryDelivery
+    );
+
+    // Wait for the single retry timer to fire attempt #2 (which also fails temporarily).
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if dispatches.load(Ordering::Relaxed) >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("second dispatch attempt");
+    ractor::call!(service, LspServiceMessage::GetStatus).unwrap();
+
+    // If PaymentOutcomeReady had armed a second timer, it would fire right after
+    // attempt #2 and immediately trigger attempt #3 well before the next 1s retry.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    ractor::call!(service, LspServiceMessage::GetStatus).unwrap();
+    let after_second = manager.get_by_payment_hash(&payment_hash).unwrap().unwrap();
+    assert_eq!(dispatches.load(Ordering::Relaxed), 2);
+    assert_eq!(after_second.attempt_count, 2);
+    assert_eq!(after_second.status, LspPaymentDeliveryStatus::Deferred);
+
+    // The single retry timer armed after attempt #2 still fires and succeeds on attempt #3.
+    wait_for_delivery_status(&manager, payment_hash, LspPaymentDeliveryStatus::InFlight).await;
+    let settled_in_flight = manager.get_by_payment_hash(&payment_hash).unwrap().unwrap();
+    assert_eq!(dispatches.load(Ordering::Relaxed), 3);
+    assert_eq!(settled_in_flight.attempt_count, 3);
+    assert_eq!(upstream_failures.load(Ordering::Relaxed), 0);
+    service.stop(None);
 }
 
 #[tokio::test]

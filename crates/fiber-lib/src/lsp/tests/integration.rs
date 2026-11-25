@@ -2524,6 +2524,248 @@ async fn hosted_tenant_new_invoice_rejects_mpp_before_registration() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn hosted_tenant_new_invoice_validation_failure_does_not_consume_payment_hash_and_partial_registration_is_retryable(
+) {
+    init_tracing();
+
+    let network = create_lsp_test_network(
+        &[((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT), true)],
+        2,
+        &[((0, TENANT_ID), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT))],
+    )
+    .await;
+    let public_t = &network.nodes[0];
+    let lsp = network.lsp(0);
+    let tenant = network.tenant(0, TENANT_ID);
+
+    // 1. Missing expiry is rejected before inserting into the tenant store, so
+    //    retrying with the same payment_hash and a valid expiry succeeds.
+    let payment_hash = gen_rand_sha256_hash();
+    let missing_expiry_err = tenant
+        .client
+        .request::<fiber_json_types::InvoiceResult, _>(
+            "new_invoice",
+            rpc_params![fiber_json_types::NewInvoiceParams {
+                amount: 1_000_000,
+                description: Some("hosted invoice missing expiry".to_string()),
+                currency: fiber_json_types::Currency::Fibd,
+                payment_preimage: None,
+                payment_hash: Some(payment_hash.into()),
+                expiry: None,
+                fallback_address: None,
+                final_expiry_delta: None,
+                udt_type_script: None,
+                hash_algorithm: None,
+                allow_mpp: None,
+                allow_trampoline_routing: Some(true),
+            }],
+        )
+        .await
+        .expect_err("hosted invoice without finite expiry must fail");
+    assert!(
+        missing_expiry_err
+            .to_string()
+            .contains("hosted invoice must have a finite expiry"),
+        "unexpected missing-expiry error: {missing_expiry_err}"
+    );
+    assert_eq!(tenant.node.get_invoice_status(&payment_hash), None);
+    assert!(public_t
+        .store
+        .namespaced(NodeNamespace::lsp_metadata())
+        .get_lsp_invoice(&tenant.node.pubkey, &payment_hash)
+        .expect("read rejected hosted invoice registration")
+        .is_none());
+
+    let zero_expiry_err = tenant
+        .client
+        .request::<fiber_json_types::InvoiceResult, _>(
+            "new_invoice",
+            rpc_params![fiber_json_types::NewInvoiceParams {
+                amount: 1_000_000,
+                description: Some("hosted invoice zero expiry".to_string()),
+                currency: fiber_json_types::Currency::Fibd,
+                payment_preimage: None,
+                payment_hash: Some(payment_hash.into()),
+                expiry: Some(0),
+                fallback_address: None,
+                final_expiry_delta: None,
+                udt_type_script: None,
+                hash_algorithm: None,
+                allow_mpp: None,
+                allow_trampoline_routing: Some(true),
+            }],
+        )
+        .await
+        .expect_err("hosted invoice with zero expiry must fail");
+    assert!(
+        zero_expiry_err
+            .to_string()
+            .contains("hosted invoice has already expired"),
+        "unexpected zero-expiry error: {zero_expiry_err}"
+    );
+    assert_eq!(tenant.node.get_invoice_status(&payment_hash), None);
+    assert!(public_t
+        .store
+        .namespaced(NodeNamespace::lsp_metadata())
+        .get_lsp_invoice(&tenant.node.pubkey, &payment_hash)
+        .expect("read zero-expiry hosted invoice registration")
+        .is_none());
+
+    let retry_params = fiber_json_types::NewInvoiceParams {
+        amount: 1_000_000,
+        description: Some("hosted invoice valid retry".to_string()),
+        currency: fiber_json_types::Currency::Fibd,
+        payment_preimage: None,
+        payment_hash: Some(payment_hash.into()),
+        expiry: Some(60 * 60),
+        fallback_address: None,
+        final_expiry_delta: None,
+        udt_type_script: None,
+        hash_algorithm: None,
+        allow_mpp: None,
+        allow_trampoline_routing: Some(true),
+    };
+    let created: fiber_json_types::InvoiceResult = tenant
+        .client
+        .request("new_invoice", rpc_params![retry_params.clone()])
+        .await
+        .expect("retrying the same payment hash with a finite expiry must succeed");
+    assert_eq!(created.invoice.data.payment_hash, payment_hash.into());
+    assert_eq!(
+        tenant.node.get_invoice_status(&payment_hash),
+        Some(CkbInvoiceStatus::Open)
+    );
+    let stored_reg = public_t
+        .store
+        .namespaced(NodeNamespace::lsp_metadata())
+        .get_lsp_invoice(&tenant.node.pubkey, &payment_hash)
+        .expect("read registered hosted invoice")
+        .expect("hosted invoice should be in LSP registry");
+    assert_eq!(stored_reg.invoice.to_string(), created.invoice_address);
+
+    // 2. A duplicate call for an already-completed invoice is still rejected.
+    let duplicate_err = tenant
+        .client
+        .request::<fiber_json_types::InvoiceResult, _>("new_invoice", rpc_params![retry_params])
+        .await
+        .expect_err("duplicate hosted invoice must still be rejected");
+    assert!(
+        duplicate_err.to_string().contains("invoice already exists"),
+        "unexpected duplicate error: {duplicate_err}"
+    );
+
+    // 3. Partial registration (persisted in LSP registry, missing from tenant
+    //    store) recovers cleanly on retry with matching terms while still
+    //    rejecting conflicting terms and subsequent duplicates.
+    let partial_hash = gen_rand_sha256_hash();
+    let partial_invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(1_000_000))
+        .payment_hash(partial_hash)
+        .description("partial hosted invoice".to_string())
+        .expiry_time(Duration::from_secs(60 * 60))
+        .allow_trampoline_routing(true)
+        .trampoline_route_hint(public_t.pubkey.into())
+        .final_expiry_delta(crate::fiber::config::MIN_TLC_EXPIRY_DELTA)
+        .payee_pub_key(tenant.node.pubkey.into())
+        .build_with_sign(|message| {
+            SECP256K1.sign_ecdsa_recoverable(message, &tenant.node.private_key.0)
+        })
+        .expect("build partial hosted invoice");
+    let pre_registered = ractor::call!(lsp.actor, |reply| LspServiceMessage::RegisterInvoice {
+        tenant_id: tenant.tenant_id.clone(),
+        invoice: partial_invoice.clone(),
+        buffer_duration_ms: None,
+        reply,
+    })
+    .expect("register partial invoice reply")
+    .expect("pre-register partial invoice in LSP");
+    assert_eq!(tenant.node.get_invoice_status(&partial_hash), None);
+
+    tokio::time::sleep(Duration::from_millis(2)).await;
+
+    let mismatch_err = tenant
+        .client
+        .request::<fiber_json_types::InvoiceResult, _>(
+            "new_invoice",
+            rpc_params![fiber_json_types::NewInvoiceParams {
+                amount: 2_000_000,
+                description: Some("partial hosted invoice".to_string()),
+                currency: fiber_json_types::Currency::Fibd,
+                payment_preimage: None,
+                payment_hash: Some(partial_hash.into()),
+                expiry: Some(60 * 60),
+                fallback_address: None,
+                final_expiry_delta: None,
+                udt_type_script: None,
+                hash_algorithm: None,
+                allow_mpp: None,
+                allow_trampoline_routing: Some(true),
+            }],
+        )
+        .await
+        .expect_err("partial registration retry with conflicting terms must fail");
+    assert!(
+        mismatch_err
+            .to_string()
+            .contains("payment hash is already registered to another hosted invoice"),
+        "unexpected mismatch error: {mismatch_err}"
+    );
+    assert_eq!(tenant.node.get_invoice_status(&partial_hash), None);
+
+    let partial_retry_params = fiber_json_types::NewInvoiceParams {
+        amount: 1_000_000,
+        description: Some("partial hosted invoice".to_string()),
+        currency: fiber_json_types::Currency::Fibd,
+        payment_preimage: None,
+        payment_hash: Some(partial_hash.into()),
+        expiry: Some(60 * 60),
+        fallback_address: None,
+        final_expiry_delta: None,
+        udt_type_script: None,
+        hash_algorithm: None,
+        allow_mpp: None,
+        allow_trampoline_routing: Some(true),
+    };
+    let recovered: fiber_json_types::InvoiceResult = tenant
+        .client
+        .request("new_invoice", rpc_params![partial_retry_params.clone()])
+        .await
+        .expect("retrying partial registration with matching terms must recover");
+    assert_eq!(
+        recovered.invoice_address,
+        pre_registered.invoice.to_string()
+    );
+    assert_eq!(
+        tenant.node.get_invoice_status(&partial_hash),
+        Some(CkbInvoiceStatus::Open)
+    );
+    let stored_partial_reg = public_t
+        .store
+        .namespaced(NodeNamespace::lsp_metadata())
+        .get_lsp_invoice(&tenant.node.pubkey, &partial_hash)
+        .expect("read recovered hosted invoice registration")
+        .expect("recovered hosted invoice should stay in LSP registry");
+    assert_eq!(stored_partial_reg, pre_registered);
+
+    let post_recovery_dup = tenant
+        .client
+        .request::<fiber_json_types::InvoiceResult, _>(
+            "new_invoice",
+            rpc_params![partial_retry_params],
+        )
+        .await
+        .expect_err("duplicate after recovery must be rejected");
+    assert!(
+        post_recovery_dup
+            .to_string()
+            .contains("invoice already exists"),
+        "unexpected post-recovery duplicate error: {post_recovery_dup}"
+    );
+
+    network.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn hosted_invoice_rejects_second_payer_without_settling_first() {
     init_tracing();
 

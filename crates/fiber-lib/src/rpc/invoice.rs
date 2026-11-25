@@ -257,14 +257,6 @@ where
             if params.allow_mpp == Some(true) {
                 return Err(rpc_error("hosted tenant invoices do not support MPP"));
             }
-            let tenant_id = tenant.tenant_id.clone();
-            let result = backend.new_invoice(params).await?;
-            let invoice = result
-                .invoice_address
-                .parse::<InternalCkbInvoice>()
-                .map_err(|error| {
-                    rpc_error(format!("failed to parse generated hosted invoice: {error}"))
-                })?;
             #[cfg(feature = "lsp")]
             {
                 let lsp_actor = self
@@ -272,7 +264,17 @@ where
                     .lsp()
                     .as_ref()
                     .ok_or_else(|| rpc_error("hosted LSP service is not enabled"))?;
-                call!(lsp_actor, |reply| {
+                let (invoice, preimage_opt) = backend.build_invoice(params)?;
+                crate::lsp::LspInvoiceRegistration::validate_invoice_terms(
+                    &invoice,
+                    tenant.public_node_id,
+                )
+                .rpc_err()?;
+                if backend.store.get_invoice(invoice.payment_hash()).is_some() {
+                    return Err(rpc_error("invoice already exists"));
+                }
+                let tenant_id = tenant.tenant_id.clone();
+                let registration = call!(lsp_actor, |reply| {
                     crate::lsp::LspServiceMessage::RegisterInvoice {
                         tenant_id,
                         invoice,
@@ -282,12 +284,13 @@ where
                 })
                 .rpc_err()?
                 .rpc_err()?;
+                return backend.insert_built_invoice(registration.invoice, preimage_opt);
             }
             #[cfg(not(feature = "lsp"))]
             {
-                let _ = (tenant_id, invoice);
+                let _ = (&tenant.tenant_id, backend, params);
+                return Err(rpc_error("hosted LSP service is not enabled"));
             }
-            return Ok(result);
         }
         self.public_backend().new_invoice(params).await
     }
@@ -344,10 +347,10 @@ impl<S> InvoiceBackend<S>
 where
     S: InvoiceStore + Send + Sync + 'static,
 {
-    pub async fn new_invoice(
+    fn build_invoice(
         &self,
         params: NewInvoiceParams,
-    ) -> Result<InvoiceResult, ErrorObjectOwned> {
+    ) -> Result<(InternalCkbInvoice, Option<fiber_types::Hash256>), ErrorObjectOwned> {
         let error = |msg: &str| Err(rpc_error(msg.to_string()));
 
         let params_currency = params.currency.into();
@@ -459,20 +462,34 @@ where
         };
 
         match invoice {
-            Ok(invoice) => {
-                if self.store.get_invoice(invoice.payment_hash()).is_some() {
-                    return error("invoice already exists");
-                }
-                match self.store.insert_invoice(invoice.clone(), preimage_opt) {
-                    Ok(_) => Ok(InvoiceResult {
-                        invoice_address: invoice.to_string(),
-                        invoice: invoice.clone().into(),
-                    }),
-                    Err(e) => error(&e.to_string()),
-                }
-            }
+            Ok(invoice) => Ok((invoice, preimage_opt)),
             Err(e) => error(&e.to_string()),
         }
+    }
+
+    fn insert_built_invoice(
+        &self,
+        invoice: InternalCkbInvoice,
+        preimage_opt: Option<fiber_types::Hash256>,
+    ) -> Result<InvoiceResult, ErrorObjectOwned> {
+        if self.store.get_invoice(invoice.payment_hash()).is_some() {
+            return Err(rpc_error("invoice already exists"));
+        }
+        match self.store.insert_invoice(invoice.clone(), preimage_opt) {
+            Ok(_) => Ok(InvoiceResult {
+                invoice_address: invoice.to_string(),
+                invoice: invoice.into(),
+            }),
+            Err(e) => Err(rpc_error(e.to_string())),
+        }
+    }
+
+    pub async fn new_invoice(
+        &self,
+        params: NewInvoiceParams,
+    ) -> Result<InvoiceResult, ErrorObjectOwned> {
+        let (invoice, preimage_opt) = self.build_invoice(params)?;
+        self.insert_built_invoice(invoice, preimage_opt)
     }
 
     pub async fn parse_invoice(

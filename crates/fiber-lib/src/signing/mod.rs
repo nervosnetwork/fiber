@@ -104,6 +104,11 @@ impl WatchtowerSigningEvents {
         )
     }
 
+    /// Prepare a creation event for a newly inserted watchtower channel row.
+    ///
+    /// Callers must publish the returned update only when a new row is actually
+    /// inserted; re-registering an existing channel preserves its signer state
+    /// and must not emit a `NoSignatureRequired` creation event.
     pub(crate) fn prepare_created(&self, id: Hash256) -> SigningUpdate<'_> {
         let update = self.prepare_update();
         #[cfg(not(target_arch = "wasm32"))]
@@ -112,7 +117,7 @@ impl WatchtowerSigningEvents {
             if update.write.observed() {
                 update.change = Some(notifications::SigningChange::WatchtowerCreated {
                     channel_id: id,
-                    // Registration resets the signer to Internal or an empty External.
+                    // A newly inserted row initializes the signer to Internal or an empty External.
                     status: fiber_json_types::WatchtowerSigningStatus::NoSignatureRequired,
                 });
             }

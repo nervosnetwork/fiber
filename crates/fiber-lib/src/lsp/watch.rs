@@ -29,7 +29,7 @@ pub fn ensure_hosted_watch_channel(
         let snapshot = state.hosted_watch_channel_snapshot()?;
         let signing_scope = events.watchtower(&node_id);
         let signing_update = signing_scope.prepare_created(channel_id);
-        store.insert_watch_channel_checked(
+        if store.insert_watch_channel_checked(
             node_id,
             channel_id,
             snapshot.funding_udt_type_script,
@@ -38,8 +38,9 @@ pub fn ensure_hosted_watch_channel(
             snapshot.channel_features,
             snapshot.payout_lock_script,
             quotas,
-        )?;
-        signing_update.publish();
+        )? {
+            signing_update.publish();
+        }
         return Ok(());
     }
 
@@ -62,7 +63,7 @@ pub fn ensure_hosted_watch_channel(
     }
     let signing_scope = events.watchtower(&node_id);
     let signing_update = signing_scope.prepare_created(channel_id);
-    store.insert_watch_channel_checked(
+    if store.insert_watch_channel_checked(
         node_id.clone(),
         channel_id,
         snapshot.funding_udt_type_script,
@@ -73,8 +74,9 @@ pub fn ensure_hosted_watch_channel(
         snapshot.channel_features,
         snapshot.remote_payout_lock_script,
         quotas,
-    )?;
-    signing_update.publish();
+    )? {
+        signing_update.publish();
+    }
     Ok(())
 }
 

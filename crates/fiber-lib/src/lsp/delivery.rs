@@ -11,6 +11,7 @@ use super::{LspInvoiceRegistration, TenantChannelRecord, TenantId};
 
 const PAYMENT_DELIVERY_PREFIX: &[u8] = b"\xf2lsp/delivery/";
 const PAYMENT_DELIVERY_HASH_INDEX_PREFIX: &[u8] = b"\xf2lsp/delivery-by-hash/";
+const PAYMENT_DELIVERY_PENDING_INDEX_PREFIX: &[u8] = b"\xf2lsp/delivery-pending/";
 /// Time retained between the end of buffering and the downstream expiry budget.
 pub const LSP_DELIVERY_SAFETY_MARGIN_MS: u64 = 30_000;
 
@@ -182,6 +183,13 @@ pub trait LspPaymentDeliveryStore: Clone + Send + Sync + 'static {
     ) -> Result<Option<LspPaymentDelivery>, String>;
     fn put_lsp_payment_delivery(&self, delivery: &LspPaymentDelivery) -> Result<(), String>;
     fn list_lsp_payment_deliveries(&self) -> Result<Vec<LspPaymentDelivery>, String>;
+    fn list_pending_lsp_payment_deliveries(&self) -> Result<Vec<LspPaymentDelivery>, String> {
+        Ok(self
+            .list_lsp_payment_deliveries()?
+            .into_iter()
+            .filter(|delivery| !delivery.status.is_final())
+            .collect())
+    }
     fn list_lsp_payment_deliveries_by_payment_hash(
         &self,
         payment_hash: &Hash256,
@@ -210,8 +218,17 @@ fn payment_hash_index_key(payment_hash: &Hash256, key: &LspPaymentDeliveryKey) -
     bytes
 }
 
-fn parse_indexed_upstream_tlc_key(bytes: &[u8]) -> Result<LspPaymentDeliveryKey, String> {
-    let key_offset = PAYMENT_DELIVERY_HASH_INDEX_PREFIX.len() + 32;
+fn pending_index_key(key: &LspPaymentDeliveryKey) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(PAYMENT_DELIVERY_PENDING_INDEX_PREFIX.len() + 40);
+    bytes.extend_from_slice(PAYMENT_DELIVERY_PENDING_INDEX_PREFIX);
+    append_upstream_tlc_key(&mut bytes, key);
+    bytes
+}
+
+fn parse_upstream_tlc_key_at(
+    bytes: &[u8],
+    key_offset: usize,
+) -> Result<LspPaymentDeliveryKey, String> {
     if bytes.len() != key_offset + 40 {
         return Err(format!(
             "invalid hosted payment delivery index key length: {}",
@@ -231,6 +248,14 @@ fn parse_indexed_upstream_tlc_key(bytes: &[u8]) -> Result<LspPaymentDeliveryKey,
     })
 }
 
+fn parse_indexed_upstream_tlc_key(bytes: &[u8]) -> Result<LspPaymentDeliveryKey, String> {
+    parse_upstream_tlc_key_at(bytes, PAYMENT_DELIVERY_HASH_INDEX_PREFIX.len() + 32)
+}
+
+fn parse_pending_upstream_tlc_key(bytes: &[u8]) -> Result<LspPaymentDeliveryKey, String> {
+    parse_upstream_tlc_key_at(bytes, PAYMENT_DELIVERY_PENDING_INDEX_PREFIX.len())
+}
+
 impl LspPaymentDeliveryStore for Store {
     fn get_lsp_payment_delivery(
         &self,
@@ -247,6 +272,11 @@ impl LspPaymentDeliveryStore for Store {
         let mut batch = self.batch();
         batch.put(delivery_key(&key), bytes);
         batch.put(payment_hash_index_key(&delivery.payment_hash, &key), []);
+        if delivery.status.is_final() {
+            batch.delete(pending_index_key(&key));
+        } else {
+            batch.put(pending_index_key(&key), []);
+        }
         batch.commit();
         Ok(())
     }
@@ -255,6 +285,21 @@ impl LspPaymentDeliveryStore for Store {
         self.collect_by_prefix(PAYMENT_DELIVERY_PREFIX)
             .into_iter()
             .map(|pair| deserialize(&pair.value).map_err(|error| error.to_string()))
+            .collect()
+    }
+
+    fn list_pending_lsp_payment_deliveries(&self) -> Result<Vec<LspPaymentDelivery>, String> {
+        self.collect_by_prefix(PAYMENT_DELIVERY_PENDING_INDEX_PREFIX)
+            .into_iter()
+            .map(|pair| {
+                let key = parse_pending_upstream_tlc_key(&pair.key)?;
+                self.get_lsp_payment_delivery(&key)?.ok_or_else(|| {
+                    format!(
+                        "hosted payment delivery pending index points to missing execution {:?}",
+                        key
+                    )
+                })
+            })
             .collect()
     }
 
@@ -355,12 +400,7 @@ impl<S: LspPaymentDeliveryStore> LspPaymentDeliveryManager<S> {
     }
 
     pub fn list_pending(&self) -> Result<Vec<LspPaymentDelivery>, String> {
-        Ok(self
-            .store
-            .list_lsp_payment_deliveries()?
-            .into_iter()
-            .filter(|delivery| !delivery.status.is_final())
-            .collect())
+        self.store.list_pending_lsp_payment_deliveries()
     }
 
     pub fn has_pending_for_tenant(&self, tenant_id: &TenantId) -> Result<bool, String> {
@@ -678,5 +718,134 @@ mod tests {
             .expect("selected delivery");
         assert_eq!(selected.status, LspPaymentDeliveryStatus::Succeeded);
         assert_eq!(selected.key().incoming_channel_id, channel_a);
+    }
+
+    #[test]
+    fn list_pending_uses_pending_index_without_decoding_final_deliveries() {
+        let (store, _dir) = generate_store();
+        let manager = LspPaymentDeliveryManager::new(store.clone());
+        let channel = Hash256::from([7u8; 32]);
+
+        let make_delivery = |tlc_id: u64, status: LspPaymentDeliveryStatus| {
+            let payment_hash = gen_rand_sha256_hash();
+            LspPaymentDelivery {
+                payment_hash,
+                tenant_id: TenantId::new("tenant-pending-index").unwrap(),
+                private_channel_id: gen_rand_sha256_hash(),
+                status,
+                request: TrampolineForwardingRequest {
+                    next_node_id: gen_rand_fiber_public_key(),
+                    amount_to_forward: 100,
+                    payment_hash,
+                    tlc_expiry_delta: 3600,
+                    tlc_expiry_limit: 7200,
+                    build_max_fee_amount: 10,
+                    max_parts: None,
+                    udt_type_script: None,
+                    remaining_trampoline_onion: vec![],
+                    previous_tlc: PrevTlcInfo::new_with_shared_secret(
+                        channel, tlc_id, 10, [0u8; 32],
+                    ),
+                    hash_algorithm: HashAlgorithm::CkbHash,
+                    max_outgoing_tlc_expiry: 100_000,
+                },
+                buffer_deadline: 10_000,
+                created_at: 5_000,
+                updated_at: 5_000,
+                attempt_count: 0,
+                last_error: None,
+                last_error_code: None,
+            }
+        };
+
+        let succeeded = make_delivery(1, LspPaymentDeliveryStatus::Deferred);
+        let failed = make_delivery(2, LspPaymentDeliveryStatus::Deferred);
+        let deferred = make_delivery(3, LspPaymentDeliveryStatus::Deferred);
+        let in_flight = make_delivery(4, LspPaymentDeliveryStatus::Deferred);
+
+        for delivery in [&succeeded, &failed, &deferred, &in_flight] {
+            store.put_lsp_payment_delivery(delivery).unwrap();
+        }
+        assert_eq!(manager.list_pending().unwrap().len(), 4);
+
+        // Transition delivery 1 through full lifecycle to Succeeded, and delivery 2 to Failed.
+        let key_1 = succeeded.key();
+        manager.begin_dispatch(&key_1, 5_001).unwrap();
+        manager
+            .transition(&key_1, LspPaymentDeliveryStatus::InFlight, 5_002)
+            .unwrap();
+        manager
+            .transition(
+                &key_1,
+                LspPaymentDeliveryStatus::SettlingUpstream {
+                    payment_status: PaymentStatus::Success,
+                    failure: None,
+                },
+                5_003,
+            )
+            .unwrap();
+        assert_eq!(manager.list_pending().unwrap().len(), 4);
+        manager
+            .transition(&key_1, LspPaymentDeliveryStatus::Succeeded, 5_004)
+            .unwrap();
+
+        let key_2 = failed.key();
+        manager
+            .transition(
+                &key_2,
+                LspPaymentDeliveryStatus::Failed {
+                    reason: "expired".to_string(),
+                },
+                5_005,
+            )
+            .unwrap();
+
+        let key_4 = in_flight.key();
+        manager.begin_dispatch(&key_4, 5_006).unwrap();
+        let in_flight = manager
+            .transition(&key_4, LspPaymentDeliveryStatus::InFlight, 5_007)
+            .unwrap();
+
+        // Corrupt the primary records of finalized deliveries. A full-table scan
+        // fails to decode them, while the pending-only index must ignore them.
+        store.put(delivery_key(&key_1), b"corrupt-historical-delivery");
+        store.put(delivery_key(&key_2), b"corrupt-historical-delivery");
+        assert!(store.list_lsp_payment_deliveries().is_err());
+
+        let pending = manager.list_pending().unwrap();
+        assert_eq!(pending, vec![deferred.clone(), in_flight.clone()]);
+
+        // Pending index persists across reopening the delivery manager.
+        let reopened = LspPaymentDeliveryManager::new(store.clone());
+        assert_eq!(reopened.list_pending().unwrap(), vec![deferred, in_flight]);
+
+        // Completing the remaining pending deliveries empties the pending index.
+        let key_3 = pending[0].key();
+        reopened
+            .transition(
+                &key_3,
+                LspPaymentDeliveryStatus::Failed {
+                    reason: "removed".to_string(),
+                },
+                5_008,
+            )
+            .unwrap();
+        reopened
+            .transition(
+                &key_4,
+                LspPaymentDeliveryStatus::SettlingUpstream {
+                    payment_status: PaymentStatus::Success,
+                    failure: None,
+                },
+                5_009,
+            )
+            .unwrap();
+        reopened
+            .transition(&key_4, LspPaymentDeliveryStatus::Succeeded, 5_010)
+            .unwrap();
+        store.put(delivery_key(&key_3), b"corrupt-historical-delivery");
+        store.put(delivery_key(&key_4), b"corrupt-historical-delivery");
+
+        assert!(reopened.list_pending().unwrap().is_empty());
     }
 }

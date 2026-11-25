@@ -2585,7 +2585,7 @@ impl Store {
         channel_features: ChannelFeatures,
         payout_lock_script: Option<Script>,
         quotas: Option<&crate::lsp_config::WatchtowerQuotas>,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         let lock = self.watchtower_write_lock(&node_id);
         let _guard = lock.lock();
         let key = [
@@ -2597,7 +2597,7 @@ impl Store {
         // Registration is at-least-once across channel actor crashes. Never reset
         // an already monitored channel's usable settlement/revocation or signer state.
         if self.get(&key).is_some() {
-            return Ok(());
+            return Ok(false);
         }
         let external = keys.local_settlement.is_external();
         settlement_data.validate_signing_keys(external)?;
@@ -2657,7 +2657,7 @@ impl Store {
         }
         batch.commit();
         counts.inc_channel(&node_id);
-        Ok(())
+        Ok(true)
     }
 
     fn insert_watch_preimage_inner(
@@ -2737,8 +2737,8 @@ impl WatchtowerStore for Store {
         settlement_data: SettlementData,
         channel_features: ChannelFeatures,
         payout_lock_script: Option<Script>,
-    ) {
-        if let Err(error) = self.insert_watch_channel_inner(
+    ) -> bool {
+        match self.insert_watch_channel_inner(
             node_id,
             channel_id,
             funding_udt_type_script,
@@ -2748,7 +2748,11 @@ impl WatchtowerStore for Store {
             payout_lock_script,
             None,
         ) {
-            tracing::error!(%channel_id, %error, "invalid watch channel signing keys");
+            Ok(created) => created,
+            Err(error) => {
+                tracing::error!(%channel_id, %error, "invalid watch channel signing keys");
+                false
+            }
         }
     }
 
@@ -2762,7 +2766,7 @@ impl WatchtowerStore for Store {
         channel_features: ChannelFeatures,
         payout_lock_script: Option<Script>,
         quotas: &crate::lsp_config::WatchtowerQuotas,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         self.insert_watch_channel_inner(
             node_id,
             channel_id,

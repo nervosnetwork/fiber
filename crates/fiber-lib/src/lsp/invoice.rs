@@ -97,6 +97,65 @@ pub struct LspInvoiceRegistration {
     pub hint: LspInvoiceHint,
 }
 
+fn same_invoice_attrs(
+    left: &[crate::fiber_types::Attribute],
+    right: &[crate::fiber_types::Attribute],
+) -> bool {
+    left.len() == right.len()
+        && left.iter().all(|attr| right.contains(attr))
+        && right.iter().all(|attr| left.contains(attr))
+}
+
+impl LspInvoiceRegistration {
+    /// Validate hosted-invoice terms before writing to either the tenant store
+    /// or the LSP invoice registry, returning the invoice expiry timestamp in
+    /// Unix milliseconds.
+    pub fn validate_invoice_terms(
+        invoice: &CkbInvoice,
+        lsp_node_id: Pubkey,
+    ) -> Result<u64, String> {
+        invoice
+            .check_signature()
+            .map_err(|error| format!("invalid hosted invoice signature: {error}"))?;
+        if !invoice.is_signed() {
+            return Err("hosted invoice must be signed by the tenant".to_string());
+        }
+        if invoice
+            .trampoline_route_hint()
+            .is_some_and(|node_id| Pubkey::from(*node_id) != lsp_node_id)
+        {
+            return Err("hosted invoice trampoline route hint does not match Public T".to_string());
+        }
+        let expiry = invoice
+            .expiry_time()
+            .ok_or_else(|| "hosted invoice must have a finite expiry".to_string())?;
+        if expiry.is_zero() || invoice.is_expired() {
+            return Err("hosted invoice has already expired".to_string());
+        }
+        invoice
+            .data
+            .timestamp
+            .checked_add(expiry.as_millis())
+            .and_then(|value| u64::try_from(value).ok())
+            .ok_or_else(|| "hosted invoice expiry overflows u64 milliseconds".to_string())
+    }
+
+    /// Returns whether `candidate` is an idempotent retry of the same hosted
+    /// invoice terms (differing only in build timestamp/signature) while this
+    /// registration is still unexpired.
+    fn matches_retry(&self, candidate: &Self) -> bool {
+        self.tenant_id == candidate.tenant_id
+            && self.hint.payload.lsp_node_id == candidate.hint.payload.lsp_node_id
+            && self.hint.payload.buffer_duration_ms == candidate.hint.payload.buffer_duration_ms
+            && !self.invoice.is_expired()
+            && crate::now_timestamp_as_millis_u64() < self.hint.payload.expires_at
+            && self.invoice.currency == candidate.invoice.currency
+            && self.invoice.amount == candidate.invoice.amount
+            && self.invoice.data.payment_hash == candidate.invoice.data.payment_hash
+            && same_invoice_attrs(&self.invoice.data.attrs, &candidate.invoice.data.attrs)
+    }
+}
+
 /// Persistence interface for registered hosted invoices.
 pub trait LspInvoiceStore: Clone + Send + Sync + 'static {
     fn get_lsp_invoice(
@@ -184,12 +243,7 @@ impl<S: LspInvoiceStore> LspInvoiceRegistry<S> {
         lsp_node_id: Pubkey,
         signer: &Privkey,
     ) -> Result<LspInvoiceRegistration, String> {
-        invoice
-            .check_signature()
-            .map_err(|error| format!("invalid hosted invoice signature: {error}"))?;
-        if !invoice.is_signed() {
-            return Err("hosted invoice must be signed by the tenant".to_string());
-        }
+        let expires_at = LspInvoiceRegistration::validate_invoice_terms(&invoice, lsp_node_id)?;
         let payee = invoice
             .recover_payee_pub_key()
             .map(Pubkey::from)
@@ -200,24 +254,6 @@ impl<S: LspInvoiceStore> LspInvoiceRegistry<S> {
                 tenant.tenant_id
             ));
         }
-        if invoice
-            .trampoline_route_hint()
-            .is_some_and(|node_id| Pubkey::from(*node_id) != lsp_node_id)
-        {
-            return Err("hosted invoice trampoline route hint does not match Public T".to_string());
-        }
-        if invoice.is_expired() {
-            return Err("hosted invoice has already expired".to_string());
-        }
-        let expiry = invoice
-            .expiry_time()
-            .ok_or_else(|| "hosted invoice must have a finite expiry".to_string())?;
-        let expires_at = invoice
-            .data
-            .timestamp
-            .checked_add(expiry.as_millis())
-            .and_then(|value| u64::try_from(value).ok())
-            .ok_or_else(|| "hosted invoice expiry overflows u64 milliseconds".to_string())?;
         let requested_buffer_duration_ms =
             buffer_duration_ms.unwrap_or(DEFAULT_LSP_BUFFER_DURATION_MS);
         if requested_buffer_duration_ms > MAX_LSP_BUFFER_DURATION_MS {
@@ -251,7 +287,7 @@ impl<S: LspInvoiceStore> LspInvoiceRegistry<S> {
         if let Some(existing) =
             self.get(&tenant.tenant_pubkey, registration.invoice.payment_hash())?
         {
-            if existing == registration {
+            if existing == registration || existing.matches_retry(&registration) {
                 return Ok(existing);
             }
             return Err("payment hash is already registered to another hosted invoice".to_string());

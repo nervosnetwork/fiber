@@ -344,7 +344,7 @@ where
             local_funding: local_funding_pubkey,
             remote_funding: remote_funding_pubkey,
         };
-        if ctx.tenant_scoped || node_id != NodeId::local() {
+        let created = if ctx.tenant_scoped || node_id != NodeId::local() {
             self.store
                 .insert_watch_channel_checked(
                     node_id,
@@ -356,7 +356,7 @@ where
                     payout_lock_script,
                     &self.quotas,
                 )
-                .map_err(rpc_error)?;
+                .map_err(rpc_error)?
         } else {
             self.store.insert_watch_channel(
                 node_id,
@@ -366,9 +366,11 @@ where
                 settlement_data,
                 fiber_types::ChannelFeatures::V2,
                 payout_lock_script,
-            );
+            )
+        };
+        if created {
+            signing_update.publish();
         }
-        signing_update.publish();
         Ok(())
     }
 
