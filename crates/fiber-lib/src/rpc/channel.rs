@@ -366,81 +366,19 @@ where
             let actor = backend.actor_opt().cloned().ok_or_else(|| {
                 rpc_error("tenant channel opening requires a running Fiber actor")
             })?;
-            let mut is_existing_opening_retry = false;
-            if let Some(signer) = command.external_channel_signer.as_ref() {
-                let key = signer.base_public_keys.tlc_base_key;
-                let temp_id = crate::fiber::channel::derive_temp_channel_id_from_tlc_key(&key);
-                let existing = backend
-                    .store
-                    .get_tenant_channel_opening(&temp_id)
-                    .or_else(|| {
-                        backend
-                            .store
-                            .list_tenant_channel_openings()
-                            .into_iter()
-                            .find(|opening| {
-                                opening
-                                    .command
-                                    .external_channel_signer
-                                    .as_ref()
-                                    .is_some_and(|existing| {
-                                        existing.base_public_keys.tlc_base_key == key
-                                    })
-                            })
-                    });
-                if let Some(opening) = existing {
-                    let channel_state = backend.store.get_channel_actor_state(&opening.channel_id);
-                    let open_record = backend.store.get_channel_open_record(&opening.channel_id);
-                    let open_record_ready = open_record
-                        .as_ref()
-                        .is_some_and(|record| record.status == ChannelOpeningStatus::ChannelReady);
-                    let open_record_failed = open_record
-                        .as_ref()
-                        .is_some_and(|record| record.status == ChannelOpeningStatus::Failed);
-                    let has_live_channel = ractor::call_t!(
-                        actor,
-                        |reply| FiberActorMessage::new_command(FiberActorCommand::HasLiveChannel(
-                            opening.channel_id,
-                            reply
-                        )),
-                        5_000
-                    )
-                    .unwrap_or(false);
-                    let orphaned = opening.result.is_none()
-                        && channel_state.is_none()
-                        && !has_live_channel
-                        && !open_record_ready;
-                    let stale_pre_funding = opening.result.is_none()
-                        && opening.channel_id != temp_id
-                        && channel_state.as_ref().is_some_and(|channel| {
-                            channel.reestablishing
-                                && channel.external_funding.is_none()
-                                && matches!(
-                                    channel.state,
-                                    fiber_types::ChannelState::NegotiatingFunding(flags)
-                                        if !flags.contains(
-                                            fiber_types::NegotiatingFundingFlags::AWAITING_EXTERNAL_FUNDING
-                                        )
-                                )
-                                && channel.session.outgoing.is_none()
-                                && channel.session.incoming.is_none()
-                                && channel.session.pending_incoming.is_none()
-                        });
-                    is_existing_opening_retry = !opening.terminated
-                        && !open_record_failed
-                        && !orphaned
-                        && !stale_pre_funding;
-                }
-            }
-            if !is_existing_opening_retry {
-                self.check_tenant_watchtower_admission(&tenant.tenant_id)
-                    .await?;
-            }
-            // The actor owns the durable tenant opening; a disconnected caller can retry.
+            let admission_error = self
+                .check_tenant_watchtower_admission(&tenant.tenant_id)
+                .await
+                .err()
+                .map(|error| error.message().to_string());
+            // The actor owns the durable tenant opening; a disconnected caller can retry an
+            // existing in-flight opening even when quota is full, while any new opening is gated
+            // on `admission_error` inside `open_tenant_channel_inner`.
             return ractor::call_t!(
                 actor,
                 |reply| FiberActorMessage::new_command(FiberActorCommand::OpenTenantChannel {
                     command,
+                    admission_error,
                     reply
                 }),
                 30_000

@@ -4173,6 +4173,7 @@ async fn test_tenant_opening_restart_between_channel_actor_final_id_write_and_ne
             .send_message(NetworkActorMessage::new_command(
                 FiberActorCommand::OpenTenantChannel {
                     command,
+                    admission_error: None,
                     reply: RpcReplyPort::from(retry_tx),
                 },
             ))
@@ -4254,6 +4255,7 @@ async fn test_tenant_opening_restart_reconciles_split_temp_id_records() {
             .send_message(NetworkActorMessage::new_command(
                 FiberActorCommand::OpenTenantChannel {
                     command: command_a.clone(),
+                    admission_error: None,
                     reply: RpcReplyPort::from(open_tx),
                 },
             ))
@@ -4297,6 +4299,9 @@ async fn test_tenant_opening_restart_reconciles_split_temp_id_records() {
             .send_message(NetworkActorMessage::new_command(
                 FiberActorCommand::OpenTenantChannel {
                     command: command_a,
+                    // A valid in-flight opening retry must still succeed even when watchtower
+                    // admission quota is full.
+                    admission_error: Some("watchtower channel quota exceeded".to_string()),
                     reply: RpcReplyPort::from(retry_a_tx),
                 },
             ))
@@ -4382,6 +4387,7 @@ async fn test_tenant_opening_restart_reconciles_split_temp_id_records() {
             .send_message(NetworkActorMessage::new_command(
                 FiberActorCommand::OpenTenantChannel {
                     command: command_b.clone(),
+                    admission_error: None,
                     reply: RpcReplyPort::from(retry_b_tx),
                 },
             ))
@@ -4461,7 +4467,7 @@ async fn test_tenant_opening_restart_reconciles_split_temp_id_records() {
                 peer.pubkey,
                 command_b.funding_amount,
             ));
-        let mut orphan_command = command_b;
+        let mut orphan_command = command_b.clone();
         orphan_command.external_channel_signer = None;
         tenant
             .store
@@ -4505,6 +4511,101 @@ async fn test_tenant_opening_restart_reconciles_split_temp_id_records() {
                 .status,
             ChannelOpeningStatus::Failed
         );
+
+        // With `admission_error` set, retrying a Failed opening (`temp_id_b`), an orphaned opening,
+        // or a brand-new opening must be rejected by `open_tenant_channel_inner` without creating
+        // a new `TenantChannelOpening`.
+        let (failed_tx, failed_rx) = tokio::sync::oneshot::channel();
+        tenant
+            .network_actor
+            .send_message(NetworkActorMessage::new_command(
+                FiberActorCommand::OpenTenantChannel {
+                    command: command_b.clone(),
+                    admission_error: Some("watchtower channel quota exceeded".to_string()),
+                    reply: RpcReplyPort::from(failed_tx),
+                },
+            ))
+            .expect("send OpenTenantChannel for failed opening");
+        let failed_err = tokio::time::timeout(Duration::from_secs(5), failed_rx)
+            .await
+            .expect("failed opening admission rejection replies promptly")
+            .expect("reply port open")
+            .expect_err("failed opening must not bypass admission_error");
+        assert!(failed_err.contains("quota exceeded"), "{failed_err}");
+        assert!(tenant
+            .store
+            .get_tenant_channel_opening(&temp_id_b)
+            .is_none());
+
+        // Seed an orphaned opening while actor is live and verify `admission_error` rejects it too.
+        let (_restartable_orphan, signer_orphan) = RestartableExternalSigner::create().await;
+        let mat_orphan_live = signer_orphan.channel_open_material(false).await.unwrap();
+        let orphan_live_id =
+            derive_temp_channel_id_from_tlc_key(&mat_orphan_live.base_public_keys.tlc_base_key);
+        let mut command_orphan_live = command_b.clone();
+        command_orphan_live.external_channel_signer = Some(mat_orphan_live);
+        tenant
+            .store
+            .insert_channel_open_record(ChannelOpenRecord::new(
+                orphan_live_id,
+                peer.pubkey,
+                command_orphan_live.funding_amount,
+            ));
+        tenant
+            .store
+            .put_tenant_channel_opening(TenantChannelOpening {
+                command: command_orphan_live.clone(),
+                channel_id: orphan_live_id,
+                result: None,
+                terminated: false,
+            });
+        let (orphan_tx, orphan_rx) = tokio::sync::oneshot::channel();
+        tenant
+            .network_actor
+            .send_message(NetworkActorMessage::new_command(
+                FiberActorCommand::OpenTenantChannel {
+                    command: command_orphan_live,
+                    admission_error: Some("watchtower channel quota exceeded".to_string()),
+                    reply: RpcReplyPort::from(orphan_tx),
+                },
+            ))
+            .expect("send OpenTenantChannel for orphaned opening");
+        let orphan_err = tokio::time::timeout(Duration::from_secs(5), orphan_rx)
+            .await
+            .expect("orphaned opening admission rejection replies promptly")
+            .expect("reply port open")
+            .expect_err("orphaned opening must not bypass admission_error");
+        assert!(orphan_err.contains("quota exceeded"), "{orphan_err}");
+        assert!(tenant
+            .store
+            .get_tenant_channel_opening(&orphan_live_id)
+            .is_none());
+
+        // Brand-new opening with `admission_error` must also be rejected cleanly.
+        let (_restartable_fresh, signer_fresh) = RestartableExternalSigner::create().await;
+        let mat_fresh = signer_fresh.channel_open_material(false).await.unwrap();
+        let fresh_id =
+            derive_temp_channel_id_from_tlc_key(&mat_fresh.base_public_keys.tlc_base_key);
+        let mut command_fresh = command_b;
+        command_fresh.external_channel_signer = Some(mat_fresh);
+        let (fresh_tx, fresh_rx) = tokio::sync::oneshot::channel();
+        tenant
+            .network_actor
+            .send_message(NetworkActorMessage::new_command(
+                FiberActorCommand::OpenTenantChannel {
+                    command: command_fresh,
+                    admission_error: Some("watchtower channel quota exceeded".to_string()),
+                    reply: RpcReplyPort::from(fresh_tx),
+                },
+            ))
+            .expect("send OpenTenantChannel for fresh opening");
+        let fresh_err = tokio::time::timeout(Duration::from_secs(5), fresh_rx)
+            .await
+            .expect("fresh opening admission rejection replies promptly")
+            .expect("reply port open")
+            .expect_err("fresh opening must be rejected by admission_error");
+        assert!(fresh_err.contains("quota exceeded"), "{fresh_err}");
+        assert!(tenant.store.get_tenant_channel_opening(&fresh_id).is_none());
     })
     .await;
 }

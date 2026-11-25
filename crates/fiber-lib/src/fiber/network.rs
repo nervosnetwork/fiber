@@ -1293,8 +1293,6 @@ pub enum FiberActorCommand {
         SubmitChannelSignatureCommand,
         RpcReplyPort<Result<fiber_types::SubmitSignatureOutcome, String>>,
     ),
-    /// Check whether a channel actor is currently live in memory.
-    HasLiveChannel(Hash256, RpcReplyPort<bool>),
     #[cfg(any(test, feature = "bench"))]
     GetChannelActor(Hash256, RpcReplyPort<Option<ActorRef<ChannelActorMessage>>>),
     // Send an onion packet to the next hop. The `PeeledPaymentOnionPacket::current` contains
@@ -1410,6 +1408,9 @@ pub enum FiberActorCommand {
     /// Tenant-only opening, serialized by the tenant's Fiber actor.
     OpenTenantChannel {
         command: OpenChannelWithExternalFundingCommand,
+        /// Pre-evaluated admission rejection (e.g. watchtower quota exceeded), enforced only when
+        /// starting a new opening rather than reusing an existing in-flight opening.
+        admission_error: Option<String>,
         reply: RpcReplyPort<Result<fiber_json_types::OpenChannelWithExternalFundingResult, String>>,
     },
     OpenChannelWithExternalFunding(
@@ -3436,9 +3437,6 @@ where
                     ),
                 ))?;
             }
-            FiberActorCommand::HasLiveChannel(channel_id, reply) => {
-                let _ = reply.send(state.channels.contains_key(&channel_id));
-            }
             #[cfg(any(test, feature = "bench"))]
             FiberActorCommand::GetChannelActor(channel_id, reply) => {
                 let _ = reply.send(state.channels.get(&channel_id).cloned());
@@ -4260,8 +4258,17 @@ where
                 ))
                 .await?;
             }
-            FiberActorCommand::OpenTenantChannel { command, reply } => {
-                let outcome = Box::pin(Self::open_tenant_channel_inner(state, command)).await;
+            FiberActorCommand::OpenTenantChannel {
+                command,
+                admission_error,
+                reply,
+            } => {
+                let outcome = Box::pin(Self::open_tenant_channel_inner(
+                    state,
+                    command,
+                    admission_error,
+                ))
+                .await;
                 match outcome {
                     Ok((Some(result), reply_key)) => {
                         state.reply_tenant_opening(reply_key, Ok(result.clone()));
@@ -4374,6 +4381,7 @@ where
     async fn open_tenant_channel_inner(
         state: &mut FiberActorState<S, C>,
         command: OpenChannelWithExternalFundingCommand,
+        admission_error: Option<String>,
     ) -> Result<
         (
             Option<fiber_json_types::OpenChannelWithExternalFundingResult>,
@@ -4522,6 +4530,10 @@ where
             .is_some_and(|record| record.status != ChannelOpeningStatus::Failed)
         {
             return Err("tenant channel is already open".to_string());
+        }
+
+        if let Some(error) = admission_error {
+            return Err(error);
         }
 
         state

@@ -4510,8 +4510,7 @@ async fn over_quota_hosted_channel_online_is_not_marked_ready_and_cannot_receive
 async fn hosted_channel_admission_quota_releases_closed_channels_enforces_global_pending_and_blocks_rpc_bypasses(
 ) {
     use crate::fiber::channel::{
-        derive_temp_channel_id_from_tlc_key, ChannelActorState, ChannelActorStateStore,
-        ChannelOpenRecordStore, TenantChannelOpening,
+        ChannelActorState, ChannelActorStateStore, ChannelOpenRecordStore, TenantChannelOpening,
     };
     use crate::fiber::network::OpenChannelWithExternalFundingCommand;
     use crate::rpc::channel::{
@@ -4521,10 +4520,7 @@ async fn hosted_channel_admission_quota_releases_closed_channels_enforces_global
     use crate::rpc::tenant::AuthenticatedTenant;
     use crate::store::sample::StoreSample;
     use crate::watchtower::WatchtowerStore;
-    use fiber_json_types::{
-        ChannelOpenSignerMaterial as JsonChannelOpenSignerMaterial,
-        OpenChannelWithExternalFundingResult,
-    };
+    use fiber_json_types::ChannelOpenSignerMaterial as JsonChannelOpenSignerMaterial;
     use fiber_types::{
         ChannelBasePublicKeys, ChannelOpenRecord, ChannelOpenSignerMaterial, ChannelOpeningStatus,
         ChannelState, CloseFlags,
@@ -4556,15 +4552,20 @@ async fn hosted_channel_admission_quota_releases_closed_channels_enforces_global
         ) -> Result<(), ActorProcessingErr> {
             match message {
                 NetworkActorMessage::Fiber(FiberActorMessage::Command(
-                    FiberActorCommand::HasLiveChannel(_, reply),
+                    FiberActorCommand::OpenChannel(_, _),
                 )) => {
-                    let _ = reply.send(false);
+                    panic!("over-quota open_channel must be rejected before reaching tenant actor");
                 }
                 NetworkActorMessage::Fiber(FiberActorMessage::Command(
-                    FiberActorCommand::OpenTenantChannel { .. }
-                    | FiberActorCommand::OpenChannel(_, _),
+                    FiberActorCommand::OpenTenantChannel {
+                        admission_error,
+                        reply,
+                        ..
+                    },
                 )) => {
-                    panic!("over-quota channel open must be rejected before reaching tenant actor");
+                    let err = admission_error
+                        .expect("open_channel_with_external_funding must forward admission_error");
+                    let _ = reply.send(Err(err));
                 }
                 _ => {}
             }
@@ -4809,7 +4810,8 @@ async fn hosted_channel_admission_quota_releases_closed_channels_enforces_global
     .expect("open_channel must enforce watchtower quota for hosted tenants");
     assert!(err.to_string().contains("quota exceeded"), "{err}");
 
-    // 2b. `open_channel_with_external_funding` rejects a new opening when quota is full.
+    // 2b. `open_channel_with_external_funding` evaluates watchtower quota and forwards
+    //     `admission_error` into `OpenTenantChannel` (which enforces it on new/non-retry opens).
     let (_, json_new) = make_signer_material(20);
     let err = ChannelRpcServer::open_channel_with_external_funding(
         &rpc,
@@ -4835,127 +4837,6 @@ async fn hosted_channel_admission_quota_releases_closed_channels_enforces_global
     )
     .await
     .expect_err("new external-funding open must reject when watchtower quota is full");
-    assert!(err.to_string().contains("quota exceeded"), "{err}");
-
-    // 2c. A Failed opening (even with cached `result.is_some()` and surviving ChannelActorState)
-    //     must NOT bypass watchtower admission quota via `is_existing_opening_retry`.
-    let (mat_failed, json_failed) = make_signer_material(30);
-    let failed_id = derive_temp_channel_id_from_tlc_key(&mat_failed.base_public_keys.tlc_base_key);
-    let mut failed_state = ChannelActorState::samples(203).remove(0);
-    failed_state.id = failed_id;
-    tenant_store.insert_channel_actor_state(failed_state);
-    let mut failed_record = ChannelOpenRecord::new(failed_id, lsp_key.pubkey(), 100_000_000_000);
-    failed_record.fail("funding failed".to_string());
-    tenant_store.insert_channel_open_record(failed_record);
-    tenant_store.put_tenant_channel_opening(TenantChannelOpening {
-        command: OpenChannelWithExternalFundingCommand {
-            pubkey: lsp_key.pubkey(),
-            funding_amount: 100_000_000_000,
-            public: false,
-            shutdown_script: Script::default(),
-            funding_lock_script: Script::default(),
-            funding_lock_script_cell_deps: Vec::new(),
-            funding_udt_type_script: None,
-            commitment_fee_rate: None,
-            commitment_delay_epoch: None,
-            funding_fee_rate: None,
-            tlc_expiry_delta: None,
-            tlc_min_value: None,
-            tlc_fee_proportional_millionths: None,
-            max_tlc_value_in_flight: None,
-            max_tlc_number_in_flight: None,
-            external_channel_signer: Some(mat_failed),
-        },
-        channel_id: failed_id,
-        result: Some(OpenChannelWithExternalFundingResult {
-            channel_id: failed_id.into(),
-            unsigned_funding_tx: Default::default(),
-            opening_context: None,
-        }),
-        terminated: false,
-    });
-    let err = ChannelRpcServer::open_channel_with_external_funding(
-        &rpc,
-        &ext,
-        OpenChannelWithExternalFundingParams {
-            pubkey: lsp_key.pubkey().into(),
-            funding_amount: 100_000_000_000,
-            public: Some(false),
-            funding_udt_type_script: None,
-            shutdown_script: Script::default().into(),
-            funding_lock_script: Script::default().into(),
-            funding_lock_script_cell_deps: Some(Vec::new()),
-            commitment_delay_epoch: None,
-            commitment_fee_rate: None,
-            funding_fee_rate: None,
-            tlc_expiry_delta: None,
-            tlc_min_value: None,
-            tlc_fee_proportional_millionths: None,
-            max_tlc_value_in_flight: None,
-            max_tlc_number_in_flight: None,
-            external_channel_signer: Some(json_failed),
-        },
-    )
-    .await
-    .expect_err("failed opening must not bypass watchtower quota");
-    assert!(err.to_string().contains("quota exceeded"), "{err}");
-
-    // 2d. An orphaned opening (`WaitingForPeer` open record, no ChannelActorState, no live actor)
-    //     must NOT bypass watchtower admission quota either.
-    let (mat_orphan, json_orphan) = make_signer_material(40);
-    let orphan_id = derive_temp_channel_id_from_tlc_key(&mat_orphan.base_public_keys.tlc_base_key);
-    tenant_store.insert_channel_open_record(ChannelOpenRecord::new(
-        orphan_id,
-        lsp_key.pubkey(),
-        100_000_000_000,
-    ));
-    tenant_store.put_tenant_channel_opening(TenantChannelOpening {
-        command: OpenChannelWithExternalFundingCommand {
-            pubkey: lsp_key.pubkey(),
-            funding_amount: 100_000_000_000,
-            public: false,
-            shutdown_script: Script::default(),
-            funding_lock_script: Script::default(),
-            funding_lock_script_cell_deps: Vec::new(),
-            funding_udt_type_script: None,
-            commitment_fee_rate: None,
-            commitment_delay_epoch: None,
-            funding_fee_rate: None,
-            tlc_expiry_delta: None,
-            tlc_min_value: None,
-            tlc_fee_proportional_millionths: None,
-            max_tlc_value_in_flight: None,
-            max_tlc_number_in_flight: None,
-            external_channel_signer: Some(mat_orphan),
-        },
-        channel_id: orphan_id,
-        result: None,
-        terminated: false,
-    });
-    let err = ChannelRpcServer::open_channel_with_external_funding(
-        &rpc,
-        &ext,
-        OpenChannelWithExternalFundingParams {
-            pubkey: lsp_key.pubkey().into(),
-            funding_amount: 100_000_000_000,
-            public: Some(false),
-            funding_udt_type_script: None,
-            shutdown_script: Script::default().into(),
-            funding_lock_script: Script::default().into(),
-            funding_lock_script_cell_deps: Some(Vec::new()),
-            commitment_delay_epoch: None,
-            commitment_fee_rate: None,
-            funding_fee_rate: None,
-            tlc_expiry_delta: None,
-            tlc_min_value: None,
-            tlc_fee_proportional_millionths: None,
-            max_tlc_value_in_flight: None,
-            max_tlc_number_in_flight: None,
-            external_channel_signer: Some(json_orphan),
-        },
-    )
-    .await
-    .expect_err("orphaned opening must not bypass watchtower quota");
     assert!(err.to_string().contains("quota exceeded"), "{err}");
 
     public_actor.stop(None);
