@@ -1675,7 +1675,22 @@ impl ChannelActorStateStore for Store {
     }
 
     fn delete_channel_actor_state(&self, id: &Hash256) {
-        self.channel_states().delete(id)
+        self.channel_states().delete(id);
+        self.delete([&[CHANNEL_RESIGN_STATE_PREFIX], id.as_ref()].concat());
+    }
+
+    fn get_channel_resign_state(&self, channel_id: &Hash256) -> Option<(u64, u32)> {
+        let key = [&[CHANNEL_RESIGN_STATE_PREFIX], channel_id.as_ref()].concat();
+        self.get(key)
+            .map(|value| deserialize_from(value.as_ref(), "ChannelResignState"))
+    }
+
+    fn set_channel_resign_state(&self, channel_id: &Hash256, number: u64, count: u32) {
+        let key = [&[CHANNEL_RESIGN_STATE_PREFIX], channel_id.as_ref()].concat();
+        self.put(
+            key,
+            serialize_to_vec(&(number, count), "ChannelResignState"),
+        );
     }
 
     fn get_channel_ids_by_pubkey(&self, pubkey: &Pubkey) -> Vec<Hash256> {
@@ -3019,7 +3034,6 @@ impl WatchtowerStore for Store {
             let kv = KeyValue::WatchtowerChannel(node_id, channel_id, channel_data);
             batch.put(kv.key(), kv.value());
             if keep_previous {
-                const MAX_SUPERSEDED: usize = 32;
                 let mut superseded: Vec<SettlementData> = self
                     .get(superseded_key.clone())
                     .map(|value| {
@@ -3028,13 +3042,13 @@ impl WatchtowerStore for Store {
                     .unwrap_or_default();
                 let mut changed = false;
                 if !superseded.contains(&previous) {
-                    if superseded.len() < MAX_SUPERSEDED {
+                    if superseded.len() < crate::store::MAX_SUPERSEDED {
                         superseded.push(previous);
                         changed = true;
                     } else {
                         tracing::warn!(
                             %channel_id,
-                            max = MAX_SUPERSEDED,
+                            max = crate::store::MAX_SUPERSEDED,
                             "superseded remote settlement snapshot cap reached; preserving earliest unrevoked snapshots"
                         );
                     }

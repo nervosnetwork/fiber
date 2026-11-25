@@ -258,6 +258,12 @@ impl ChannelActorStateStore for MockStore {
         self.channel_states.borrow_mut().remove(id);
     }
 
+    fn get_channel_resign_state(&self, _channel_id: &Hash256) -> Option<(u64, u32)> {
+        None
+    }
+
+    fn set_channel_resign_state(&self, _channel_id: &Hash256, _number: u64, _count: u32) {}
+
     fn get_channel_ids_by_pubkey(&self, _pubkey: &Pubkey) -> Vec<Hash256> {
         self.channel_states.borrow().keys().cloned().collect()
     }

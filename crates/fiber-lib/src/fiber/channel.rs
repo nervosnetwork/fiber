@@ -10665,6 +10665,10 @@ pub trait ChannelActorStateStore {
     /// Atomically move a channel state (and any opening records keyed by `old_id`) to `state.id`.
     fn move_channel_actor_state(&self, old_id: &Hash256, state: ChannelActorState);
     fn delete_channel_actor_state(&self, id: &Hash256);
+    /// Return the persisted same-number V2 re-sign budget for `channel_id`.
+    fn get_channel_resign_state(&self, channel_id: &Hash256) -> Option<(u64, u32)>;
+    /// Persist the same-number V2 re-sign budget for `channel_id`.
+    fn set_channel_resign_state(&self, channel_id: &Hash256, number: u64, count: u32);
     fn get_channel_ids_by_pubkey(&self, pubkey: &Pubkey) -> Vec<Hash256>;
     fn get_active_channel_ids_by_pubkey(&self, pubkey: &Pubkey) -> Vec<Hash256> {
         self.get_channel_ids_by_pubkey(pubkey)
@@ -12405,6 +12409,29 @@ where
             }
         }
         if resign_outstanding_cs {
+            // Keep the number of same-number signatures within the watchtower's retained
+            // snapshot budget. Once the budget is exhausted, force close instead of signing
+            // another replacement that the watchtower could not settle.
+            let max_resigns = crate::store::MAX_SUPERSEDED as u32;
+            let (stored_number, count) = self
+                .store
+                .get_channel_resign_state(&state.id)
+                .unwrap_or((0, 0));
+            if stored_number == local && count >= max_resigns {
+                tracing::warn!(
+                    channel_id = %state.get_id(),
+                    commitment_number = local,
+                    max_resigns,
+                    "same-number V2 re-sign limit reached; force closing channel"
+                );
+                self.notify_network_actor_shutdown_me(state);
+                return Ok(());
+            }
+            self.store.set_channel_resign_state(
+                &state.id,
+                local,
+                if stored_number == local { count + 1 } else { 1 },
+            );
             if !state.channel_signer.is_local() && !pending_send {
                 let owner = *state.get_remote_funding_pubkey();
                 state.fresh_external_nonce_v2(owner, local, NoncePurposeV2::Commitment)?;

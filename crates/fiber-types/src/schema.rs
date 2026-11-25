@@ -20,6 +20,7 @@
 //! | 224          | Hash256              | ChannelData                 |
 //! | 201          | Hash256              | ChannelOpenRecord           |
 //! | 202          | (singleton)          | TenantChannelOpening        |
+//! | 203          | Hash256              | ChannelResignState          |
 //! | 232          | Payment_hash         | CchOrder                    |
 //! | 233          | Payment_hash         | CchReceiveBtcOrderCreation  |
 //! | 234          | Payment_hash         | CchSendBtcOrderCreation    |
@@ -51,6 +52,8 @@ pub const WATCHTOWER_TLC_SETTLED_PREFIX: u8 = 200;
 pub const CHANNEL_OPEN_RECORD_PREFIX: u8 = 201;
 /// Single pending or frozen opening in a tenant's namespaced store.
 pub const TENANT_CHANNEL_OPENING_PREFIX: u8 = 202;
+/// Persisted same-number V2 re-sign budget: channel id -> (commitment number, count).
+pub const CHANNEL_RESIGN_STATE_PREFIX: u8 = 203;
 /// Original keys and bytes of safely retired V1 records; never loaded by the V2 runtime.
 pub const ARCHIVED_V1_PREFIX: u8 = 240;
 #[cfg(feature = "watchtower")]

@@ -1140,6 +1140,37 @@ fn test_store_watchtower_host_rows_excluded_from_tenant_global_quotas() {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
+fn test_channel_resign_state_round_trip_and_delete() {
+    let path = TempDir::new("test-channel-resign-state");
+    let channel_id = gen_rand_sha256_hash();
+    {
+        let store = open_store(path.as_ref()).expect("created store failed");
+        assert_eq!(store.get_channel_resign_state(&channel_id), None);
+        store.set_channel_resign_state(&channel_id, 7, 2);
+        assert_eq!(
+            store.get_channel_resign_state(&channel_id),
+            Some((7, 2)),
+            "the commitment number and count must round-trip"
+        );
+        store.set_channel_resign_state(&channel_id, 8, 1);
+        assert_eq!(store.get_channel_resign_state(&channel_id), Some((8, 1)));
+    }
+
+    let store = open_store(path.as_ref()).expect("reopened store failed");
+    assert_eq!(
+        store.get_channel_resign_state(&channel_id),
+        Some((8, 1)),
+        "the re-sign budget must survive a reopen"
+    );
+    store.delete_channel_actor_state(&channel_id);
+    assert_eq!(
+        store.get_channel_resign_state(&channel_id),
+        None,
+        "deleting a channel must drop its re-sign budget"
+    );
+}
+
+#[test]
 fn test_store_watchtower_superseded_preserved_and_cleared_on_revocation() {
     use fiber_types::SettlementKey;
 

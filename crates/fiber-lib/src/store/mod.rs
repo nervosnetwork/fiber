@@ -15,5 +15,9 @@ pub use store_trait::FiberStore;
 // Re-export migration types for callers of open_store_with_migration
 pub use fiber_store::migration::{MigrationPlan, MigrationProgress};
 
+/// Number of superseded same-number remote settlement snapshots the watchtower retains.
+/// The channel re-sign budget follows this so every signature the node produces stays selectable.
+pub(crate) const MAX_SUPERSEDED: usize = 32;
+
 #[cfg(test)]
 mod tests;

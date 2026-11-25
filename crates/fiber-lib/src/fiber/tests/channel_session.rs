@@ -5860,6 +5860,75 @@ async fn test_v2_rejected_shutdown_leaves_no_stale_remote_info_across_restore() 
 }
 
 #[tokio::test]
+async fn test_v2_same_number_resign_budget_and_cap() {
+    for force_close in [false, true] {
+        let (a, b, id) =
+            create_nodes_with_established_channel(100000000000, 11800000000, false).await;
+        let mut state = a.get_channel_actor_state(id);
+        let myself = a.get_channel_actor(id).await.unwrap();
+        state.prepare_outgoing_v2(false).unwrap();
+        state.tlc_state.waiting_ack = true;
+        state.mark_reestablishing_offline();
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let (network, task) = Actor::spawn(None, CaptureNetwork, captured.clone())
+            .await
+            .unwrap();
+        state.network = Some(network.clone().into());
+        let actor = ChannelActor::new(a.pubkey, b.pubkey, network.clone(), a.store.clone(), None);
+        let original = state.session.outgoing.as_ref().unwrap().request.clone();
+        let local = state.get_local_commitment_number();
+        let max = crate::store::MAX_SUPERSEDED as u32;
+        let stored = if force_close { max } else { 0 };
+        a.store.set_channel_resign_state(&id, local, stored);
+
+        let incoming = b.get_channel_actor_state(id);
+        let reestablish = incoming.reestablish_message_v2();
+        actor
+            .handle_peer_message(
+                &myself,
+                &mut state,
+                FiberChannelMessage::ReestablishChannelV2(reestablish),
+            )
+            .await
+            .unwrap();
+
+        if force_close {
+            assert_eq!(
+                state.session.outgoing.as_ref().unwrap().request.as_slice(),
+                original.as_slice(),
+                "the capped re-sign must keep the existing CS"
+            );
+            assert_eq!(a.store.get_channel_resign_state(&id), Some((local, max)));
+        } else {
+            assert_ne!(
+                state.session.outgoing.as_ref().unwrap().request.as_slice(),
+                original.as_slice(),
+                "a re-sign below the cap must produce a fresh CS"
+            );
+            assert_eq!(a.store.get_channel_resign_state(&id), Some((local, 1)));
+        }
+
+        capture_barrier(&network, id).await;
+        let force_close_requested = captured.lock().unwrap().iter().any(|message| {
+            matches!(
+                message,
+                FiberActorMessage::Command(FiberActorCommand::ControlFiberChannel(
+                    super::ChannelCommandWithId {
+                        command: super::ChannelCommand::Shutdown(command, _),
+                        ..
+                    }
+                )) if command.force
+            )
+        });
+        assert_eq!(force_close_requested, force_close);
+
+        myself.stop(None);
+        network.stop(None);
+        task.await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn test_v2_recovery_handshake_precedes_replay_and_watchdog_bounds_wait() {
     let (a, b, id) = create_nodes_with_established_channel(100000000000, 11800000000, false).await;
     let mut state = a.get_channel_actor_state(id);
