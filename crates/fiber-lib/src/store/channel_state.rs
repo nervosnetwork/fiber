@@ -14,13 +14,13 @@ use fiber_types::schema::{
     CHANNEL_OUTPOINT_CHANNEL_ID_PREFIX, CHANNEL_SHUTDOWN_SETTLEMENT_PREFIX,
     PUBKEY_CHANNEL_ID_PREFIX,
 };
-use fiber_types::{ChannelState, Hash256};
+use fiber_types::{ChannelOpeningStatus, ChannelState, Hash256};
 
-use crate::fiber::channel::ChannelActorState;
+use crate::fiber::channel::{ChannelActorState, ChannelOpenRecordStore};
 
 use super::store_impl::{
     channel_immutable_key, channel_mutable_key, deserialize_channel_state_parts,
-    stage_channel_actor_state, Store,
+    stage_channel_actor_state, stage_move_channel_open_records, Store,
 };
 use super::NodeNamespace;
 
@@ -224,7 +224,27 @@ impl<'a> ChannelStates<'a> {
             }
         }
         // `new_id` did not exist before this batch, so it needs both records whatever the state is.
+        let new_id = state.id;
         stage_channel_actor_state(self.store, &mut batch, state, true);
+        // Atomically re-key any persisted opening records alongside the channel state so a
+        // restart between ChannelActor's final-ID write and NetworkActor's event handling
+        // cannot leave channel state at `new_id` while open records remain stranded at `old_id`.
+        let open_record = self
+            .store
+            .get_channel_open_record(old_id)
+            .map(|mut record| {
+                record.channel_id = new_id;
+                record.update_status(ChannelOpeningStatus::FundingTxBuilding);
+                record
+            });
+        let tenant_opening = self
+            .store
+            .get_tenant_channel_opening(old_id)
+            .map(|mut opening| {
+                opening.channel_id = new_id;
+                opening
+            });
+        stage_move_channel_open_records(&mut batch, old_id, open_record, tenant_opening);
         batch.commit();
     }
 

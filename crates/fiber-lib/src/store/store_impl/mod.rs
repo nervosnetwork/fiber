@@ -949,7 +949,8 @@ pub fn check_validate<P: AsRef<Path>>(path: P) -> Result<(), String> {
                 );
             }
             CHANNEL_SHUTDOWN_SETTLEMENT_PREFIX
-                if bincode::deserialize::<ShutdownSettlementRecord>(&value).is_err()
+                if split_schema
+                    && bincode::deserialize::<ShutdownSettlementRecord>(&value).is_err()
                     && bincode::deserialize::<SettlementData>(&value).is_err() =>
             {
                 errors.insert(
@@ -1904,6 +1905,31 @@ fn tenant_channel_opening_key(channel_id: &Hash256) -> Vec<u8> {
     key
 }
 
+pub(super) fn stage_move_channel_open_records(
+    batch: &mut impl BatchWriter,
+    temporary_channel_id: &Hash256,
+    record: Option<ChannelOpenRecord>,
+    opening: Option<crate::fiber::channel::TenantChannelOpening>,
+) {
+    if let Some(opening) = opening {
+        if opening.channel_id != *temporary_channel_id {
+            batch.delete(tenant_channel_opening_key(temporary_channel_id));
+        }
+        batch.put(
+            tenant_channel_opening_key(&opening.channel_id),
+            serde_json::to_vec(&opening).expect("serializable tenant opening"),
+        );
+    }
+    if let Some(record) = record {
+        if record.channel_id != *temporary_channel_id {
+            let old_key = [&[CHANNEL_OPEN_RECORD_PREFIX], temporary_channel_id.as_ref()].concat();
+            batch.delete(old_key);
+        }
+        let kv = KeyValue::ChannelOpenRecord(record.channel_id, record);
+        batch.put(kv.key(), kv.value());
+    }
+}
+
 impl ChannelOpenRecordStore for Store {
     // Use a tenant-namespaced Store: get() prefixes the key and reads only that tenant's record.
     fn get_tenant_channel_opening(
@@ -1969,24 +1995,7 @@ impl ChannelOpenRecordStore for Store {
         opening: Option<crate::fiber::channel::TenantChannelOpening>,
     ) {
         let mut batch = self.batch();
-        if let Some(opening) = opening {
-            if opening.channel_id != *temporary_channel_id {
-                batch.delete(tenant_channel_opening_key(temporary_channel_id));
-            }
-            batch.put(
-                tenant_channel_opening_key(&opening.channel_id),
-                serde_json::to_vec(&opening).expect("serializable tenant opening"),
-            );
-        }
-        if let Some(record) = record {
-            if record.channel_id != *temporary_channel_id {
-                let old_key =
-                    [&[CHANNEL_OPEN_RECORD_PREFIX], temporary_channel_id.as_ref()].concat();
-                batch.delete(old_key);
-            }
-            let kv = KeyValue::ChannelOpenRecord(record.channel_id, record);
-            batch.put(kv.key(), kv.value());
-        }
+        stage_move_channel_open_records(&mut batch, temporary_channel_id, record, opening);
         batch.commit();
     }
 }

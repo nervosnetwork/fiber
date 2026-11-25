@@ -600,3 +600,89 @@ async fn test_upgrade_retains_real_v2_signed_history_and_remains_valid() {
     drop(store);
     crate::store::check_validate(&path).expect("upgraded signed history remains valid");
 }
+
+#[test]
+fn test_upgrade_migrates_released_shutdown_settlement_record_with_tlc() {
+    use crate::fiber::channel::ChannelActorStateStore;
+    use fiber_types::schema::CHANNEL_SHUTDOWN_SETTLEMENT_PREFIX;
+
+    let channel_id = fiber_types::Hash256::from([0x91; 32]);
+    let raw_key = [0x02u8; 32];
+    let old_local_key = fiber_types_0100::Privkey::from(&raw_key);
+    let expected_local_key = fiber_types::Privkey::from(&raw_key);
+    let old_remote_key = fiber_types_0100::Privkey::from(&[0x03u8; 32]).pubkey();
+    let expected_remote_key: fiber_types::Pubkey = decode_as_new(old_remote_key).unwrap();
+
+    let old_record = fiber_types_0100::ShutdownSettlementRecord {
+        shutdown_tx_hash: ckb_types::H256::from([0xab; 32]),
+        for_remote: true,
+        commitment_number: 14,
+        settlement_data: fiber_types_0100::SettlementData {
+            local_amount: 500_000,
+            remote_amount: 750_000,
+            tlcs: vec![fiber_types_0100::SettlementTlc {
+                tlc_id: fiber_types_0100::TLCId::Offered(9),
+                hash_algorithm: fiber_types_0100::HashAlgorithm::CkbHash,
+                payment_amount: 88_000,
+                payment_hash: fiber_types_0100::Hash256::from([0xcd; 32]),
+                expiry: 1_700_000_012_345,
+                local_key: old_local_key,
+                remote_key: old_remote_key,
+            }],
+        },
+    };
+    let old_bytes = bincode::serialize(&old_record).unwrap();
+    // Prove the unmigrated v0.10.1 bytes silently fail deserialization in Store::get_shutdown_settlement_record.
+    assert!(
+        bincode::deserialize::<fiber_types::ShutdownSettlementRecord>(&old_bytes).is_err(),
+        "unmigrated v0.10.1 prefix-49 record with 0x02-prefixed TLC key must not deserialize as head"
+    );
+
+    let key = [&[CHANNEL_SHUTDOWN_SETTLEMENT_PREFIX], channel_id.as_ref()].concat();
+    let path = gen_path();
+    {
+        let store = fiber_store::Store::open_db(&path).unwrap();
+        store.put(MIGRATION_VERSION_KEY, INIT_DB_VERSION);
+        store.put(&key, &old_bytes);
+    }
+
+    crate::store::check_validate(&path)
+        .expect("read-only validation accepts an upgradeable released prefix-49 snapshot");
+    {
+        let store = fiber_store::Store::open_db(&path).unwrap();
+        assert_eq!(
+            store.get(MIGRATION_VERSION_KEY).unwrap(),
+            INIT_DB_VERSION.as_bytes()
+        );
+        assert_eq!(store.get(&key).unwrap(), old_bytes);
+    }
+
+    let store = crate::store::open_store(&path).expect("migrate released prefix-49 snapshot");
+    assert_eq!(
+        store.get(MIGRATION_VERSION_KEY).unwrap(),
+        LATEST_DB_VERSION.as_bytes()
+    );
+
+    let restored = store
+        .get_shutdown_settlement_record(&channel_id)
+        .expect("migrated shutdown settlement record must be readable through normal getter");
+    assert_eq!(restored.shutdown_tx_hash, old_record.shutdown_tx_hash);
+    assert_eq!(restored.for_remote, old_record.for_remote);
+    assert_eq!(restored.commitment_number, old_record.commitment_number);
+    assert_eq!(restored.settlement_data.local_amount, 500_000);
+    assert_eq!(restored.settlement_data.remote_amount, 750_000);
+    assert_eq!(restored.settlement_data.tlcs.len(), 1);
+    let tlc = &restored.settlement_data.tlcs[0];
+    assert_eq!(tlc.tlc_id, fiber_types::TLCId::Offered(9));
+    assert_eq!(tlc.hash_algorithm, fiber_types::HashAlgorithm::CkbHash);
+    assert_eq!(tlc.payment_amount, 88_000);
+    assert_eq!(tlc.payment_hash, fiber_types::Hash256::from([0xcd; 32]));
+    assert_eq!(tlc.expiry, 1_700_000_012_345);
+    assert_eq!(tlc.local_key.as_ref(), Some(&expected_local_key));
+    assert_eq!(tlc.local_key_pubkey, Some(expected_local_key.pubkey()));
+    assert_eq!(tlc.local_key_commitment_number, None);
+    assert_eq!(tlc.remote_key, expected_remote_key);
+
+    drop(store);
+    crate::store::check_validate(&path).expect("upgraded prefix-49 snapshot remains valid");
+}

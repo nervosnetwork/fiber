@@ -135,11 +135,12 @@ use fiber_types::{
     blake2b_hash_with_salt, AddTlcCommand, AppliedFlags, AwaitingChannelReadyFlags,
     AwaitingTxSignaturesFlags, ChannelFeatures, ChannelOpenRecord, ChannelOpenSignerMaterial,
     ChannelOpeningStatus, ChannelState, ChannelTlcInfo, CloseFlags, EcdsaSignature, EntityHex,
-    FeatureVector, Hash256, InMemorySigner, NodeAnnouncement, PaymentCustomRecords, PaymentSession,
-    PaymentStatus, PeeledPaymentOnionPacket, PersistentNetworkActorState, PrevTlcInfo, Privkey,
-    Pubkey, PublicChannelInfo, RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation,
-    RevocationData, RouterHop, SettlementData, ShutdownSettlementRecord, ShuttingDownFlags, TLCId,
-    TlcErr, TlcErrPacket, TlcErrorCode, UdtCfgInfos, WatchChannelKeys, NO_SHARED_SECRET,
+    FeatureVector, Hash256, InMemorySigner, NegotiatingFundingFlags, NodeAnnouncement,
+    PaymentCustomRecords, PaymentSession, PaymentStatus, PeeledPaymentOnionPacket,
+    PersistentNetworkActorState, PrevTlcInfo, Privkey, Pubkey, PublicChannelInfo, RemoveTlcFulfill,
+    RemoveTlcReason, RetryableTlcOperation, RevocationData, RouterHop, SettlementData,
+    ShutdownSettlementRecord, ShuttingDownFlags, TLCId, TlcErr, TlcErrPacket, TlcErrorCode,
+    UdtCfgInfos, WatchChannelKeys, NO_SHARED_SECRET,
 };
 
 pub const FIBER_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
@@ -4401,17 +4402,39 @@ where
             });
 
         if let Some(mut opening) = existing {
+            state.reconcile_split_tenant_opening(&mut opening);
+            let channel_state = state.store.get_channel_actor_state(&opening.channel_id);
+            let open_record = state.store.get_channel_open_record(&opening.channel_id);
+            let has_live_channel = state.channels.contains_key(&opening.channel_id);
+            let open_record_ready = open_record
+                .as_ref()
+                .is_some_and(|record| record.status == ChannelOpeningStatus::ChannelReady);
+            let open_record_failed = open_record
+                .as_ref()
+                .is_some_and(|record| record.status == ChannelOpeningStatus::Failed);
             let orphaned = opening.result.is_none()
-                && state
-                    .store
-                    .get_channel_actor_state(&opening.channel_id)
-                    .is_none()
-                && state
-                    .store
-                    .get_channel_open_record(&opening.channel_id)
-                    .is_none()
-                && !state.channels.contains_key(&opening.channel_id);
-            let failed = opening.terminated || orphaned;
+                && channel_state.is_none()
+                && !has_live_channel
+                && !open_record_ready;
+            // A restored channel still in NegotiatingFunding before an unsigned funding tx was
+            // persisted can never recover on reestablish (reestablish_v2 always aborts it).
+            // Once moved off `temp_id`, clean it up immediately so a retry does not strand or
+            // race with the abort event.
+            let stale_pre_funding = opening.result.is_none()
+                && opening.channel_id != temp_id
+                && channel_state.as_ref().is_some_and(|channel| {
+                    channel.reestablishing
+                        && channel.external_funding.is_none()
+                        && matches!(
+                            channel.state,
+                            ChannelState::NegotiatingFunding(flags)
+                                if !flags.contains(NegotiatingFundingFlags::AWAITING_EXTERNAL_FUNDING)
+                        )
+                        && channel.session.outgoing.is_none()
+                        && channel.session.incoming.is_none()
+                        && channel.session.pending_incoming.is_none()
+                });
+            let failed = opening.terminated || open_record_failed || orphaned || stale_pre_funding;
             if !failed {
                 if serde_json::to_value(&opening.command).map_err(|e| e.to_string())?
                     != command_value
@@ -4421,16 +4444,11 @@ where
                             .to_string(),
                     );
                 }
-                if state
-                    .store
-                    .get_channel_open_record(&opening.channel_id)
-                    .is_some_and(|record| record.status == ChannelOpeningStatus::ChannelReady)
-                {
+                if open_record_ready {
                     return Err("tenant channel is already open".to_string());
                 }
                 if opening.result.is_none() {
-                    if let Some(channel) = state.store.get_channel_actor_state(&opening.channel_id)
-                    {
+                    if let Some(channel) = &channel_state {
                         if let Some(external) = &channel.external_funding {
                             if !external.signed_submitted {
                                 let result = channel
@@ -4442,6 +4460,44 @@ where
                     }
                 }
                 return Ok((opening.result, opening.channel_id));
+            }
+            if stale_pre_funding {
+                if let Some(actor) = state.channels.remove(&opening.channel_id) {
+                    let _ = actor.send_message(ChannelActorMessage::Event(ChannelEvent::Stop(
+                        StopReason::AbortFunding,
+                    )));
+                    // Keep the persisted channel state until `ChannelActor` finishes handling
+                    // `Stop(AbortFunding)` and emits `ChannelActorStopped`, which deletes the
+                    // record via `on_channel_actor_stopped`. Deleting here would race with
+                    // `ChannelActor`'s final `Closed(FUNDING_ABORTED)` write and leave a
+                    // mutable-only record without its immutable half.
+                } else {
+                    if let Some(channel) = &channel_state {
+                        state
+                            .peer_channel_index
+                            .remove_channel(&channel.remote_pubkey, &opening.channel_id);
+                    }
+                    state
+                        .channels_funding_lock_script_cache
+                        .remove(&opening.channel_id);
+                    state
+                        .pending_external_funding_replies
+                        .remove(&opening.channel_id);
+                    let signing_update = state.signing_events.prepare_removed(opening.channel_id);
+                    state.store.delete_channel_actor_state(&opening.channel_id);
+                    signing_update.publish();
+                }
+            }
+            if let Some(mut record) = open_record {
+                if record.status != ChannelOpeningStatus::ChannelReady
+                    && record.status != ChannelOpeningStatus::Failed
+                {
+                    record.fail(format!(
+                        "[Channel {}] Tenant channel opening interrupted before funding",
+                        opening.channel_id
+                    ));
+                    state.store.insert_channel_open_record(record);
+                }
             }
             state.reply_tenant_opening(
                 opening.channel_id,
@@ -8194,13 +8250,13 @@ where
                 opening.channel_id = final_channel_id;
                 opening
             });
-        if record.is_none() && opening.is_none() {
-            return;
+        if record.is_some() || opening.is_some() {
+            self.store
+                .move_channel_open_records(temporary_channel_id, record, opening);
         }
-        let has_opening = opening.is_some();
-        self.store
-            .move_channel_open_records(temporary_channel_id, record, opening);
-        if has_opening {
+        // Always migrate in-memory reply waiters even when ChannelActor already
+        // atomically moved the persisted opening records during AcceptChannelV2.
+        if *temporary_channel_id != final_channel_id {
             if let Some(replies) = self
                 .pending_tenant_opening_replies
                 .remove(temporary_channel_id)
@@ -8209,6 +8265,108 @@ where
                     .entry(final_channel_id)
                     .or_default()
                     .extend(replies);
+            }
+        }
+    }
+
+    /// Reconcile a tenant opening record whose channel state already moved to its final ID
+    /// on disk while the opening metadata remained under an earlier (temporary) ID.
+    fn reconcile_split_tenant_opening(
+        &mut self,
+        opening: &mut super::channel::TenantChannelOpening,
+    ) {
+        if opening.terminated
+            || opening.result.is_some()
+            || self.channels.contains_key(&opening.channel_id)
+            || self
+                .store
+                .get_channel_actor_state(&opening.channel_id)
+                .is_some()
+        {
+            return;
+        }
+        let Some(key) = opening
+            .command
+            .external_channel_signer
+            .as_ref()
+            .map(|signer| signer.base_public_keys.tlc_base_key)
+        else {
+            return;
+        };
+        let old_id = opening.channel_id;
+        let old_record = self.store.get_channel_open_record(&old_id);
+        if old_record
+            .as_ref()
+            .is_some_and(|record| record.status == ChannelOpeningStatus::Failed)
+        {
+            return;
+        }
+        let mut active_match = None;
+        let mut closed_match = None;
+        for (_, channel_id, _) in self.store.get_channel_states(None) {
+            if channel_id == old_id || self.store.get_channel_open_record(&channel_id).is_some() {
+                continue;
+            }
+            let Some(channel) = self.store.get_channel_actor_state(&channel_id) else {
+                continue;
+            };
+            if channel.get_local_channel_public_keys().tlc_base_key == key {
+                if !channel.is_closed() {
+                    active_match = Some(channel);
+                    break;
+                }
+                if closed_match.is_none() {
+                    closed_match = Some(channel);
+                }
+            }
+        }
+        let Some(channel) = active_match.or(closed_match) else {
+            return;
+        };
+        let final_id = channel.get_id();
+        opening.channel_id = final_id;
+        let reconciled_record = old_record.map(|mut record| {
+            record.channel_id = final_id;
+            if channel.is_closed() {
+                if record.status != ChannelOpeningStatus::ChannelReady
+                    && record.status != ChannelOpeningStatus::Failed
+                {
+                    record.fail(format!(
+                        "[Channel {}] Channel closed before becoming ready",
+                        final_id
+                    ));
+                }
+            } else if channel.state == ChannelState::ChannelReady {
+                record.update_status(ChannelOpeningStatus::ChannelReady);
+            } else {
+                record.update_status(ChannelOpeningStatus::FundingTxBuilding);
+            }
+            record
+        });
+        if channel.is_closed() {
+            opening.terminated = true;
+        } else if let Some(external) = &channel.external_funding {
+            if !external.signed_submitted {
+                if let Ok(result) =
+                    channel.tenant_opening_result(external.unsigned_funding_tx.clone())
+                {
+                    opening.result = Some(result);
+                }
+            }
+        }
+        self.store
+            .move_channel_open_records(&old_id, reconciled_record, Some(opening.clone()));
+        if old_id != final_id {
+            if let Some(replies) = self.pending_tenant_opening_replies.remove(&old_id) {
+                self.pending_tenant_opening_replies
+                    .entry(final_id)
+                    .or_default()
+                    .extend(replies);
+            }
+            if let Some(reply) = self.pending_external_funding_replies.remove(&old_id) {
+                self.pending_external_funding_replies
+                    .entry(final_id)
+                    .or_insert(reply);
             }
         }
     }
@@ -9419,6 +9577,9 @@ where
     }
 
     async fn restore_persisted_offline_channels(&mut self) -> HashSet<PaymentSessionKey> {
+        for mut opening in self.store.list_tenant_channel_openings() {
+            self.reconcile_split_tenant_opening(&mut opening);
+        }
         let mut payment_hashes = self.store.reconcile_attempts_channel_index();
         for (pubkey, channel_id, _channel_state) in self.store.get_channel_states(None) {
             let Some(channel_actor_state) = self.store.get_channel_actor_state(&channel_id) else {

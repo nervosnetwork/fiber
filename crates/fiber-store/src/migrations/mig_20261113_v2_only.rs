@@ -14,13 +14,14 @@ use fiber_types::schema::{
 };
 use fiber_types::{
     ChannelActorData, ChannelData, ChannelFeatures, ChannelImmutableData, ChannelOpenRecord,
-    ChannelSessionV2, Hash256,
+    ChannelSessionV2, Hash256, ShutdownSettlementRecord,
 };
 use fiber_types_0100::schema::PENDING_COMMIT_DIFF_PREFIX;
 use fiber_types_0100::{
     ChannelActorData as OldChannelActorData, ChannelData as OldChannelData,
     ChannelOpenRecord as OldChannelOpenRecord, ChannelOpeningStatus as OldChannelOpeningStatus,
     ChannelState as OldChannelState, CloseFlags as OldCloseFlags, Hash256 as OldHash256,
+    ShutdownSettlementRecord as OldShutdownSettlementRecord,
 };
 use serde::de::DeserializeOwned;
 
@@ -89,6 +90,17 @@ fn convert_settlement(
                 })
             })
             .collect::<Result<_, String>>()?,
+    })
+}
+
+fn convert_shutdown_settlement_record(
+    old: OldShutdownSettlementRecord,
+) -> Result<ShutdownSettlementRecord, String> {
+    Ok(ShutdownSettlementRecord {
+        shutdown_tx_hash: old.shutdown_tx_hash,
+        for_remote: old.for_remote,
+        commitment_number: old.commitment_number,
+        settlement_data: convert_settlement(old.settlement_data)?,
     })
 }
 
@@ -474,6 +486,7 @@ fn scan(store: &dyn MigrationStore, apply: bool) -> Result<(), String> {
         }
     };
     let mut mutable_records: HashSet<Hash256> = HashSet::new();
+    let mut retired_v1_channels: HashSet<Hash256> = HashSet::new();
     for (key, value) in store.iter_prefix(&[CHANNEL_ACTOR_STATE_PREFIX]) {
         let immutable_key = immutable_key(&key)?;
         // Remembered for the reverse check below, without reading the mutable record again.
@@ -533,6 +546,7 @@ fn scan(store: &dyn MigrationStore, apply: bool) -> Result<(), String> {
                     );
                     continue;
                 }
+                let id = stored_channel_id(&key)?;
                 let mut keys = vec![
                     key,
                     [
@@ -557,6 +571,7 @@ fn scan(store: &dyn MigrationStore, apply: bool) -> Result<(), String> {
                     keys.push(key);
                 }
                 archive(store, &keys, apply)?;
+                retired_v1_channels.insert(id);
             }
         }
     }
@@ -809,6 +824,55 @@ fn scan(store: &dyn MigrationStore, apply: bool) -> Result<(), String> {
                     &key,
                     &bincode::serialize(&converted).map_err(|error| error.to_string())?,
                 );
+            }
+        }
+    }
+    for (key, value) in store.iter_prefix(&[CHANNEL_SHUTDOWN_SETTLEMENT_PREFIX]) {
+        let id = stored_channel_id(&key)?;
+        if !upgrading {
+            let _: ShutdownSettlementRecord = decode_exact(&value)
+                .map_err(|error| format!("Invalid shutdown settlement record {id}: {error}"))?;
+            continue;
+        }
+        if retired_v1_channels.contains(&id) {
+            // During preflight (apply == false), the closed V1 channel's prefix-49 record is
+            // still present and will be archived verbatim when apply == true.
+            continue;
+        }
+        let old_id: OldHash256 = decode_as_new(id)?;
+        if archived_or_closed_channel(store, &old_id, version)?.is_some() {
+            archive(store, &[key], apply)?;
+            continue;
+        }
+        let old: OldShutdownSettlementRecord = match decode_exact(&value) {
+            Ok(old) => old,
+            Err(old_error) => match decode_exact::<ShutdownSettlementRecord>(&value) {
+                Ok(current) => {
+                    // Already converted by an interrupted run before db-version advanced.
+                    if current
+                        .settlement_data
+                        .tlcs
+                        .iter()
+                        .any(|tlc| tlc.local_key.is_none() && tlc.local_key_pubkey.is_none())
+                    {
+                        return Err(format!(
+                            "Invalid shutdown settlement record {id}: TLC missing local key"
+                        ));
+                    }
+                    continue;
+                }
+                Err(_) => {
+                    return Err(format!(
+                        "Invalid shutdown settlement record {id}: {old_error}"
+                    ));
+                }
+            },
+        };
+        let converted = convert_shutdown_settlement_record(old)?;
+        if apply {
+            let encoded = bincode::serialize(&converted).map_err(|error| error.to_string())?;
+            if encoded != value {
+                store.put(&key, &encoded);
             }
         }
     }

@@ -695,14 +695,12 @@ where
                 state.handle_accept_channel_message(accept_channel)?;
                 let old_id = state.get_id();
                 state.fill_in_channel_id();
-                if !state.ephemeral_config.external_funding.enabled {
-                    self.store.move_channel_actor_state(&old_id, state.clone());
-                }
 
                 if state.ephemeral_config.external_funding.enabled {
                     // External funding may pause while the initiator leaves the app to sign
-                    // the funding tx. Persist the acceptor under the final channel id now so
-                    // reconnect/restart can still route the later TxUpdate/CommitmentSigned.
+                    // the funding tx. Persist the channel and its opening records under the
+                    // final channel id atomically so reconnect/restart can still route the
+                    // later TxUpdate/CommitmentSigned without stranding opening records.
                     let signing_update = self.signing_events.prepare(state);
                     self.store.move_channel_actor_state(&old_id, state.clone());
                     signing_update.publish_removed(old_id);
@@ -742,6 +740,7 @@ where
                         ))
                         .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                 } else {
+                    self.store.move_channel_actor_state(&old_id, state.clone());
                     // Normal flow: send ChannelAccepted to start funding collaboration
                     self.network
                         .send_message(FiberActorMessage::new_event(
@@ -10644,6 +10643,7 @@ pub trait ChannelActorStateStore {
     /// `Store::insert_channel_actor_state_for_test`).
     fn insert_channel_actor_state(&self, state: ChannelActorState);
 
+    /// Atomically move a channel state (and any opening records keyed by `old_id`) to `state.id`.
     fn move_channel_actor_state(&self, old_id: &Hash256, state: ChannelActorState);
     fn delete_channel_actor_state(&self, id: &Hash256);
     fn get_channel_ids_by_pubkey(&self, pubkey: &Pubkey) -> Vec<Hash256>;

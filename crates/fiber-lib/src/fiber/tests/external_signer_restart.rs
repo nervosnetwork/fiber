@@ -3934,3 +3934,540 @@ async fn test_external_signer_diverged_local_counter_does_not_hit_lookahead_limi
     })
     .await;
 }
+
+/// Drive `ChannelActor`'s real `AcceptChannelV2` transition against `tenant.store` using a probe
+/// network so the emitted `ChannelAcceptedForExternalFunding` event is never delivered to
+/// `NetworkActor` (simulating a crash right after `ChannelActor`'s final-ID write).
+async fn drive_external_funding_accept_before_network_event(
+    tenant: &NetworkNode,
+    peer_pubkey: crate::fiber::types::Pubkey,
+    command: &OpenChannelWithExternalFundingCommand,
+    material: fiber_types::ChannelOpenSignerMaterial,
+) -> (Hash256, Hash256) {
+    use crate::fiber::channel::{
+        derive_temp_channel_id_from_tlc_key, ChannelActor, ChannelActorState,
+        ChannelEphemeralConfig, ChannelInitializationOperation, ChannelInitializationParameter,
+        ChannelOpenRecordStore, OpenChannelWithExternalFundingParameter, TenantChannelOpening,
+    };
+    use crate::fiber::channel_signer::ChannelSigner;
+    use crate::fiber::network::{FiberActorEvent, FiberActorMessage};
+    use crate::fiber::types::{AcceptChannelV2, FiberChannelMessage};
+    use crate::fiber::FiberActorRef;
+    use fiber_types::{ChannelOpenRecord, ChannelTlcInfo, InMemorySigner};
+    use ractor::Actor;
+
+    let temp_id = derive_temp_channel_id_from_tlc_key(&material.base_public_keys.tlc_base_key);
+    tenant
+        .store
+        .put_tenant_channel_opening(TenantChannelOpening {
+            command: command.clone(),
+            channel_id: temp_id,
+            result: None,
+            terminated: false,
+        });
+    tenant
+        .store
+        .insert_channel_open_record(ChannelOpenRecord::new(
+            temp_id,
+            peer_pubkey,
+            command.funding_amount,
+        ));
+
+    let (sender, mut messages) = tokio::sync::mpsc::unbounded_channel();
+    let (probe_network, probe_network_task) = Actor::spawn(None, DeadlineNetworkProbe, sender)
+        .await
+        .unwrap();
+    let network_ref = FiberActorRef::from_network(&probe_network);
+    let (id_tx, id_rx) = tokio::sync::oneshot::channel();
+    let channel_actor = ChannelActor::new(
+        tenant.pubkey,
+        peer_pubkey,
+        network_ref,
+        tenant.store.clone(),
+        None,
+    );
+    let (myself, myself_task) = Actor::spawn(None, DeadlineChannelProbe, ()).await.unwrap();
+    let mut state: ChannelActorState = Actor::pre_start(
+        &channel_actor,
+        myself.clone(),
+        ChannelInitializationParameter {
+            operation: ChannelInitializationOperation::OpenChannelWithExternalFunding(
+                OpenChannelWithExternalFundingParameter {
+                    funding_amount: command.funding_amount,
+                    channel_signer: ChannelSigner::external(),
+                    external_channel_signer: Some(material),
+                    tlc_info: ChannelTlcInfo::new(
+                        0,
+                        MIN_TLC_EXPIRY_DELTA,
+                        0,
+                        crate::now_timestamp_as_millis_u64(),
+                    ),
+                    public_channel_info: None,
+                    funding_udt_type_script: None,
+                    shutdown_script: Script::default(),
+                    funding_lock_script: Script::default(),
+                    funding_lock_script_cell_deps: Vec::new(),
+                    channel_id_sender: id_tx,
+                    commitment_fee_rate: None,
+                    commitment_delay_epoch: None,
+                    funding_fee_rate: None,
+                    max_tlc_value_in_flight: u128::MAX,
+                    max_tlc_number_in_flight: 10,
+                },
+            ),
+            ephemeral_config: ChannelEphemeralConfig::default(),
+            private_key: tenant.private_key.clone(),
+        },
+    )
+    .await
+    .expect("initialize external-funding channel actor");
+    assert_eq!(id_rx.await.unwrap(), temp_id);
+
+    let peer_signer = InMemorySigner::generate_from_seed(&[0x55; 32]);
+    let peer_pubkeys = peer_signer.get_base_public_keys();
+    let peer_nonce = musig2::SecNonce::build([0x77; 32]).build().public_nonce();
+    let accept = AcceptChannelV2 {
+        channel_id: temp_id,
+        funding_amount: 0,
+        shutdown_script: Script::default(),
+        reserved_ckb_amount: state.local_reserved_ckb_amount,
+        max_tlc_value_in_flight: u128::MAX,
+        max_tlc_number_in_flight: 10,
+        funding_pubkey: peer_pubkeys.funding_pubkey,
+        tlc_basepoint: peer_pubkeys.tlc_base_key,
+        first_per_commitment_point: peer_signer.get_commitment_point(1),
+        second_per_commitment_point: peer_signer.get_commitment_point(2),
+        initial_commitment_nonce: peer_nonce,
+        channel_features: 1,
+        channel_announcement_nonce: None,
+    };
+    channel_actor
+        .handle_peer_message(
+            &myself,
+            &mut state,
+            FiberChannelMessage::AcceptChannelV2(accept),
+        )
+        .await
+        .expect("ChannelActor accepts AcceptChannelV2");
+    let crashed_final_id = state.get_id();
+    assert_ne!(crashed_final_id, temp_id);
+
+    let saw_accepted_event = tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(msg) = messages.recv().await {
+            if let NetworkActorMessage::Fiber(FiberActorMessage::Event(
+                FiberActorEvent::ChannelAcceptedForExternalFunding {
+                    new_channel_id,
+                    old_channel_id,
+                    ..
+                },
+            )) = msg
+            {
+                assert_eq!(old_channel_id, temp_id);
+                assert_eq!(new_channel_id, crashed_final_id);
+                return true;
+            }
+        }
+        false
+    })
+    .await
+    .unwrap_or(false);
+    assert!(
+        saw_accepted_event,
+        "ChannelActor must emit ChannelAcceptedForExternalFunding"
+    );
+
+    myself.stop(None);
+    probe_network.stop(None);
+    myself_task.await.unwrap();
+    probe_network_task.await.unwrap();
+
+    (temp_id, crashed_final_id)
+}
+
+#[tokio::test]
+async fn test_tenant_opening_restart_between_channel_actor_final_id_write_and_network_event() {
+    Box::pin(async {
+        use crate::fiber::channel::{ChannelActorStateStore, ChannelOpenRecordStore};
+        use fiber_types::ChannelOpeningStatus;
+
+        init_tracing();
+        let nodes = NetworkNode::new_n_interconnected_nodes_with_config(2, |index| {
+            let mut builder = NetworkNodeConfigBuilder::new()
+                .node_name(Some(format!("tenant-open-restart-{index}")))
+                .base_dir_prefix(&format!("tenant-open-restart-{index}-"));
+            if index == 1 {
+                builder = builder.fiber_config_updater(|config| {
+                    config.auto_accept_channel_ckb_funding_amount =
+                        Some(DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT);
+                });
+            }
+            builder.build()
+        })
+        .await;
+        let [mut tenant, mut peer]: [NetworkNode; 2] = nodes.try_into().unwrap();
+        let (_restartable, signer) = RestartableExternalSigner::create().await;
+        let material = signer.channel_open_material(false).await.unwrap();
+        let command = OpenChannelWithExternalFundingCommand {
+            pubkey: peer.pubkey,
+            funding_amount: 100_000_000_000,
+            public: false,
+            shutdown_script: Script::default(),
+            funding_lock_script: Script::default(),
+            funding_lock_script_cell_deps: Vec::new(),
+            funding_udt_type_script: None,
+            commitment_fee_rate: None,
+            commitment_delay_epoch: None,
+            funding_fee_rate: None,
+            tlc_expiry_delta: None,
+            tlc_min_value: None,
+            tlc_fee_proportional_millionths: None,
+            max_tlc_value_in_flight: None,
+            max_tlc_number_in_flight: None,
+            external_channel_signer: Some(material.clone()),
+        };
+
+        tenant.stop().await;
+        let (temp_id, crashed_final_id) = drive_external_funding_accept_before_network_event(
+            &tenant,
+            peer.pubkey,
+            &command,
+            material,
+        )
+        .await;
+
+        // Atomic persistence invariant: immediately after ChannelActor's move_channel_actor_state
+        // (and before NetworkActor ever handles ChannelAcceptedForExternalFunding), channel state
+        // AND both opening records must already be re-keyed to crashed_final_id and removed from temp_id.
+        assert!(tenant.store.get_channel_actor_state(&temp_id).is_none());
+        assert!(tenant
+            .store
+            .get_channel_actor_state(&crashed_final_id)
+            .is_some());
+        assert!(tenant.store.get_channel_open_record(&temp_id).is_none());
+        assert_eq!(
+            tenant
+                .store
+                .get_channel_open_record(&crashed_final_id)
+                .expect("open record moved atomically")
+                .status,
+            ChannelOpeningStatus::FundingTxBuilding
+        );
+        assert!(tenant.store.get_tenant_channel_opening(&temp_id).is_none());
+        assert_eq!(
+            tenant
+                .store
+                .get_tenant_channel_opening(&crashed_final_id)
+                .expect("tenant opening moved atomically")
+                .channel_id,
+            crashed_final_id
+        );
+
+        // Restart the tenant node, reconnect to peer, and retry the exact same opening request.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        tenant.start().await;
+        tenant.connect_to(&mut peer).await;
+
+        let (retry_tx, retry_rx) = tokio::sync::oneshot::channel();
+        tenant
+            .network_actor
+            .send_message(NetworkActorMessage::new_command(
+                FiberActorCommand::OpenTenantChannel {
+                    command,
+                    reply: RpcReplyPort::from(retry_tx),
+                },
+            ))
+            .expect("send retry OpenTenantChannel");
+        let recovered = tokio::time::timeout(Duration::from_secs(10), retry_rx)
+            .await
+            .expect("retry after crash must not strand/timeout under temp_id")
+            .expect("reply port stays open")
+            .expect("retry recovers cleanly with a live channel opening");
+        let live_channel_id: Hash256 = recovered.channel_id.into();
+        assert_ne!(live_channel_id, temp_id);
+        assert_ne!(live_channel_id, crashed_final_id);
+        assert!(tenant
+            .store
+            .get_channel_actor_state(&live_channel_id)
+            .is_some());
+        assert!(tenant.store.get_tenant_channel_opening(&temp_id).is_none());
+        assert!(tenant
+            .store
+            .get_tenant_channel_opening(&live_channel_id)
+            .is_some_and(|opening| opening.result.is_some()));
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn test_tenant_opening_restart_reconciles_split_temp_id_records() {
+    Box::pin(async {
+        use crate::fiber::channel::{
+            derive_temp_channel_id_from_tlc_key, ChannelActorStateStore, ChannelOpenRecordStore,
+            TenantChannelOpening,
+        };
+        use fiber_types::{ChannelOpenRecord, ChannelOpeningStatus};
+
+        init_tracing();
+        let nodes = NetworkNode::new_n_interconnected_nodes_with_config(2, |index| {
+            let mut builder = NetworkNodeConfigBuilder::new()
+                .node_name(Some(format!("tenant-split-reconcile-{index}")))
+                .base_dir_prefix(&format!("tenant-split-reconcile-{index}-"));
+            if index == 1 {
+                builder = builder.fiber_config_updater(|config| {
+                    config.auto_accept_channel_ckb_funding_amount =
+                        Some(DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT);
+                });
+            }
+            builder.build()
+        })
+        .await;
+        let [mut tenant, mut peer]: [NetworkNode; 2] = nodes.try_into().unwrap();
+
+        // Case A: Split state where channel_actor_state at final_id already has unsigned_funding_tx,
+        // while channel_open_record and tenant_channel_opening are stranded at temp_id.
+        let (_restartable_a, signer_a) = RestartableExternalSigner::create().await;
+        let material_a = signer_a.channel_open_material(false).await.unwrap();
+        let temp_id_a =
+            derive_temp_channel_id_from_tlc_key(&material_a.base_public_keys.tlc_base_key);
+        let command_a = OpenChannelWithExternalFundingCommand {
+            pubkey: peer.pubkey,
+            funding_amount: 100_000_000_000,
+            public: false,
+            shutdown_script: Script::default(),
+            funding_lock_script: Script::default(),
+            funding_lock_script_cell_deps: Vec::new(),
+            funding_udt_type_script: None,
+            commitment_fee_rate: None,
+            commitment_delay_epoch: None,
+            funding_fee_rate: None,
+            tlc_expiry_delta: None,
+            tlc_min_value: None,
+            tlc_fee_proportional_millionths: None,
+            max_tlc_value_in_flight: None,
+            max_tlc_number_in_flight: None,
+            external_channel_signer: Some(material_a),
+        };
+
+        let (open_tx, open_rx) = tokio::sync::oneshot::channel();
+        tenant
+            .network_actor
+            .send_message(NetworkActorMessage::new_command(
+                FiberActorCommand::OpenTenantChannel {
+                    command: command_a.clone(),
+                    reply: RpcReplyPort::from(open_tx),
+                },
+            ))
+            .expect("send initial OpenTenantChannel");
+        let initial_a = tokio::time::timeout(Duration::from_secs(10), open_rx)
+            .await
+            .expect("initial OpenTenantChannel must not hang after atomic ChannelActor move")
+            .expect("reply port open")
+            .expect("initial OpenTenantChannel succeeds");
+        let final_id_a: Hash256 = initial_a.channel_id.into();
+        assert_ne!(final_id_a, temp_id_a);
+
+        // Stop tenant and rewrite disk into a split state (channel at final_id_a,
+        // open_record + tenant_opening stranded at temp_id_a).
+        tenant.stop().await;
+        tenant.store.delete_channel_open_record(&final_id_a);
+        tenant.store.delete_tenant_channel_opening(&final_id_a);
+        tenant
+            .store
+            .insert_channel_open_record(ChannelOpenRecord::new(
+                temp_id_a,
+                peer.pubkey,
+                command_a.funding_amount,
+            ));
+        tenant
+            .store
+            .put_tenant_channel_opening(TenantChannelOpening {
+                command: command_a.clone(),
+                channel_id: temp_id_a,
+                result: None,
+                terminated: false,
+            });
+
+        // Restart tenant and retry: reconciliation must re-key records to final_id_a and
+        // immediately return the persisted unsigned_funding_tx result without stranding.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        tenant.start().await;
+        let (retry_a_tx, retry_a_rx) = tokio::sync::oneshot::channel();
+        tenant
+            .network_actor
+            .send_message(NetworkActorMessage::new_command(
+                FiberActorCommand::OpenTenantChannel {
+                    command: command_a,
+                    reply: RpcReplyPort::from(retry_a_tx),
+                },
+            ))
+            .expect("send retry OpenTenantChannel for case A");
+        let recovered_a = tokio::time::timeout(Duration::from_secs(5), retry_a_rx)
+            .await
+            .expect("case A retry must reconcile and reply immediately")
+            .expect("reply port open")
+            .expect("case A retry returns existing opening");
+        assert_eq!(recovered_a.channel_id, initial_a.channel_id);
+        assert_eq!(
+            recovered_a.unsigned_funding_tx,
+            initial_a.unsigned_funding_tx
+        );
+        assert!(tenant.store.get_channel_open_record(&temp_id_a).is_none());
+        assert!(tenant
+            .store
+            .get_tenant_channel_opening(&temp_id_a)
+            .is_none());
+        assert!(tenant.store.get_channel_open_record(&final_id_a).is_some());
+        assert!(tenant
+            .store
+            .get_tenant_channel_opening(&final_id_a)
+            .is_some_and(|opening| opening.result.is_some()));
+
+        // Case B: Split state where channel_actor_state at final_id_b is still in
+        // NegotiatingFunding(INIT_SENT) with external_funding == None, while open_record +
+        // tenant_opening are stranded at temp_id_b.
+        tenant.stop().await;
+        let (_restartable_b, signer_b) = RestartableExternalSigner::create().await;
+        let material_b = signer_b.channel_open_material(false).await.unwrap();
+        let command_b = OpenChannelWithExternalFundingCommand {
+            pubkey: peer.pubkey,
+            funding_amount: 100_000_000_000,
+            public: false,
+            shutdown_script: Script::default(),
+            funding_lock_script: Script::default(),
+            funding_lock_script_cell_deps: Vec::new(),
+            funding_udt_type_script: None,
+            commitment_fee_rate: None,
+            commitment_delay_epoch: None,
+            funding_fee_rate: None,
+            tlc_expiry_delta: None,
+            tlc_min_value: None,
+            tlc_fee_proportional_millionths: None,
+            max_tlc_value_in_flight: None,
+            max_tlc_number_in_flight: None,
+            external_channel_signer: Some(material_b.clone()),
+        };
+        let (temp_id_b, final_id_b) = drive_external_funding_accept_before_network_event(
+            &tenant,
+            peer.pubkey,
+            &command_b,
+            material_b,
+        )
+        .await;
+        // Rewrite disk into the pre-fix split state (channel at final_id_b, records at temp_id_b).
+        tenant.store.delete_channel_open_record(&final_id_b);
+        tenant.store.delete_tenant_channel_opening(&final_id_b);
+        tenant
+            .store
+            .insert_channel_open_record(ChannelOpenRecord::new(
+                temp_id_b,
+                peer.pubkey,
+                command_b.funding_amount,
+            ));
+        tenant
+            .store
+            .put_tenant_channel_opening(TenantChannelOpening {
+                command: command_b.clone(),
+                channel_id: temp_id_b,
+                result: None,
+                terminated: false,
+            });
+
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        tenant.start().await;
+        tenant.connect_to(&mut peer).await;
+
+        let (retry_b_tx, retry_b_rx) = tokio::sync::oneshot::channel();
+        tenant
+            .network_actor
+            .send_message(NetworkActorMessage::new_command(
+                FiberActorCommand::OpenTenantChannel {
+                    command: command_b.clone(),
+                    reply: RpcReplyPort::from(retry_b_tx),
+                },
+            ))
+            .expect("send retry OpenTenantChannel for case B");
+        let recovered_b = tokio::time::timeout(Duration::from_secs(10), retry_b_rx)
+            .await
+            .expect("case B retry must not strand/timeout under temp_id")
+            .expect("reply port open")
+            .expect("case B retry cleans up unrecoverable pre-funding channel and opens cleanly");
+        let live_id_b: Hash256 = recovered_b.channel_id.into();
+        assert_ne!(live_id_b, temp_id_b);
+        assert_ne!(live_id_b, final_id_b);
+        // Wait for the stopped stale ChannelActor at final_id_b to exit cleanly and for
+        // on_channel_actor_stopped to delete its persisted record without leaving a half-record.
+        wait_until_async_timeout(|| async {
+            tenant.store.get_channel_actor_state(&final_id_b).is_none()
+        })
+        .await;
+        assert!(tenant.store.get_channel_actor_state(&live_id_b).is_some());
+        assert_eq!(
+            tenant
+                .store
+                .get_channel_open_record(&final_id_b)
+                .expect("aborted pre-funding open record marked failed")
+                .status,
+            ChannelOpeningStatus::Failed
+        );
+
+        // Restart again and confirm the store loads cleanly without a mutable-only half-record
+        // panic (catches deleting channel_actor_state before the live actor handles Stop).
+        tenant.stop().await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        tenant.start().await;
+        assert!(tenant.store.get_channel_actor_state(&final_id_b).is_none());
+        assert!(tenant.store.get_channel_actor_state(&live_id_b).is_some());
+
+        // Case C: A Failed opening at temp_id must NOT hijack an earlier closed channel's
+        // ChannelOpenRecord (already keyed at its own final_id with preserved failure detail).
+        tenant.stop().await;
+        let mut closed_channel = tenant
+            .store
+            .get_channel_actor_state(&live_id_b)
+            .expect("live channel state");
+        closed_channel.state = ChannelState::Closed(fiber_types::CloseFlags::UNCOOPERATIVE_LOCAL);
+        tenant
+            .store
+            .insert_channel_actor_state_for_test(closed_channel);
+        let mut closed_record =
+            ChannelOpenRecord::new(live_id_b, peer.pubkey, command_b.funding_amount);
+        closed_record.fail("earlier closed channel failure".to_string());
+        tenant
+            .store
+            .insert_channel_open_record(closed_record.clone());
+        tenant.store.delete_tenant_channel_opening(&live_id_b);
+
+        let mut failed_temp_record =
+            ChannelOpenRecord::new(temp_id_b, peer.pubkey, command_b.funding_amount);
+        failed_temp_record.fail("temporary attempt failed".to_string());
+        tenant.store.insert_channel_open_record(failed_temp_record);
+        tenant
+            .store
+            .put_tenant_channel_opening(TenantChannelOpening {
+                command: command_b,
+                channel_id: temp_id_b,
+                result: None,
+                terminated: false,
+            });
+
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        tenant.start().await;
+        assert_eq!(
+            tenant
+                .store
+                .get_channel_open_record(&live_id_b)
+                .expect("earlier closed channel open record preserved")
+                .failure_detail,
+            closed_record.failure_detail
+        );
+        assert_eq!(
+            tenant
+                .store
+                .get_tenant_channel_opening(&temp_id_b)
+                .expect("failed temp opening not moved onto earlier closed channel")
+                .channel_id,
+            temp_id_b
+        );
+    })
+    .await;
+}

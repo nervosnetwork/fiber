@@ -3180,6 +3180,337 @@ async fn allows_unexpired_outbound_single_part_retry_after_cancellation_and_stil
 }
 
 #[tokio::test]
+async fn lagging_lane_outbound_retry_preserves_attempt_resolution_and_prevents_double_debit() {
+    let outbound_settlement =
+        |f: &Fixture, for_remote: bool, tlc_num: u64, local: u128, remote: u128| {
+            let mut tlc = f.tlc(false, for_remote);
+            tlc.tlc_id = if for_remote {
+                TLCId::Offered(tlc_num)
+            } else {
+                TLCId::Received(tlc_num)
+            };
+            SettlementData {
+                local_amount: local,
+                remote_amount: remote,
+                tlcs: vec![tlc],
+            }
+        };
+
+    // Order 1 & 2: Either lane leads through Cancel(id=4) + Fulfill(id=5) while the lagging
+    // lane catches up afterwards (including across a persisted store restart).
+    for lead_for_remote in [true, false] {
+        let lag_for_remote = !lead_for_remote;
+        let mut f = Fixture::new(false).await;
+        f.sign(lead_for_remote, 0, f.opening()).await;
+        f.sign(lag_for_remote, 0, f.opening()).await;
+
+        let terms = f.terms(false);
+        let payment_hash = terms.payment_hash;
+        f.signer.authorize_payment(terms).await.unwrap();
+
+        // Lead lane commits attempt #1 (id=4), cancels/refunds it, and adds retry #2 (id=5).
+        f.sign(
+            lead_for_remote,
+            1,
+            outbound_settlement(&f, lead_for_remote, 4, 350, 600),
+        )
+        .await;
+        f.signer.authorize_cancellation(payment_hash).await.unwrap();
+        f.sign(lead_for_remote, 2, f.opening()).await;
+        f.sign(
+            lead_for_remote,
+            3,
+            outbound_settlement(&f, lead_for_remote, 5, 350, 600),
+        )
+        .await;
+
+        // While id=5 is active on the lead lane, adding id=4 on the lagging lane is rejected
+        // (concurrent active TLCs for the same payment hash across lanes remain forbidden).
+        let (content, context) = f
+            .request(
+                lag_for_remote,
+                1,
+                outbound_settlement(&f, lag_for_remote, 4, 350, 600),
+            )
+            .await;
+        f.assert_rejected(content, context, "differs between commitment lanes")
+            .await;
+
+        // Retry #2 (id=5) succeeds on the lead lane, setting payment.resolution = Fulfill.
+        f.signer
+            .authorize_fulfillment(payment_hash, [9; 32].into())
+            .await
+            .unwrap();
+        let paid = SettlementData {
+            local_amount: 350,
+            remote_amount: 650,
+            tlcs: vec![],
+        };
+        f.sign(lead_for_remote, 4, paid.clone()).await;
+
+        // Restart the signer from persisted state to ensure locked per-attempt resolutions
+        // survive serialization/deserialization.
+        let restored_store = MemoryStore::from_snapshot(&f.store.snapshot().unwrap()).unwrap();
+        let restored_root =
+            RootSigner::open(RootKey::import([42; 32]).unwrap(), restored_store.clone())
+                .await
+                .unwrap();
+        f.store = restored_store;
+        f.signer = restored_root
+            .open_channel(f.signer.channel_key_id())
+            .await
+            .unwrap();
+
+        // Lagging lane catches up with attempt #1 (id=4).
+        f.sign(
+            lag_for_remote,
+            1,
+            outbound_settlement(&f, lag_for_remote, 4, 350, 600),
+        )
+        .await;
+
+        // Adversarial LSP attempts to debit attempt #1 (id=4) as Fulfill because
+        // payment.resolution is now Fulfill from retry #2. Must be rejected!
+        let (content, context) = f.request(lag_for_remote, 2, paid.clone()).await;
+        f.assert_rejected(content, context, "balances do not match")
+            .await;
+
+        // Lagging lane must resolve attempt #1 (id=4) as Cancel (refunding back to 400/600).
+        f.sign(lag_for_remote, 2, f.opening()).await;
+
+        // Lagging lane catches up with retry #2 (id=5).
+        f.sign(
+            lag_for_remote,
+            3,
+            outbound_settlement(&f, lag_for_remote, 5, 350, 600),
+        )
+        .await;
+
+        // Adversarial LSP cannot invert retry #2 (id=5) to Cancel either.
+        let (content, context) = f.request(lag_for_remote, 4, f.opening()).await;
+        f.assert_rejected(content, context, "balances do not match")
+            .await;
+
+        // Lagging lane resolves retry #2 (id=5) as Fulfill, ending at 350/650 (EXACTLY ONE debit).
+        let (content, context) = f.request(lag_for_remote, 4, paid.clone()).await;
+        let prepared = f
+            .signer
+            .prepare_commitment(content, context, 100)
+            .await
+            .unwrap();
+        let review = prepared.commitment_review().unwrap();
+        assert_eq!(review.local_amount, 350);
+        assert_eq!(review.remote_amount, 650);
+        f.signer.sign_commitment(prepared, 100).await.unwrap();
+
+        // Neither lane may replay id=4, id=5, or a fresh id=6 after fulfillment.
+        for replay_id in [4, 5, 6] {
+            for lane in [lead_for_remote, lag_for_remote] {
+                let (content, context) = f
+                    .request(lane, 5, outbound_settlement(&f, lane, replay_id, 300, 650))
+                    .await;
+                f.assert_rejected(content, context, "retired TLC or invoice replay")
+                    .await;
+            }
+        }
+    }
+
+    // Order 3: Lagging lane skips cancelled attempt #1 (id=4) while retry #2 (id=5) is active,
+    // both lanes fulfill id=5, and then an adversarial LSP tries to replay id=4 on the lagging
+    // lane (even though id=4 exists in lead.retired). Must be rejected to prevent an on-chain
+    // double-debit using the revealed preimage!
+    {
+        let f = Fixture::new(false).await;
+        f.sign(true, 0, f.opening()).await;
+        f.sign(false, 0, f.opening()).await;
+
+        let terms = f.terms(false);
+        let payment_hash = terms.payment_hash;
+        f.signer.authorize_payment(terms).await.unwrap();
+
+        f.sign(true, 1, outbound_settlement(&f, true, 4, 350, 600))
+            .await;
+        f.signer.authorize_cancellation(payment_hash).await.unwrap();
+        f.sign(true, 2, f.opening()).await;
+        f.sign(true, 3, outbound_settlement(&f, true, 5, 350, 600))
+            .await;
+
+        // Lagging local lane skips id=4 and accepts active retry id=5 directly.
+        f.sign(false, 1, outbound_settlement(&f, false, 5, 350, 600))
+            .await;
+
+        f.signer
+            .authorize_fulfillment(payment_hash, [9; 32].into())
+            .await
+            .unwrap();
+        let paid = SettlementData {
+            local_amount: 350,
+            remote_amount: 650,
+            tlcs: vec![],
+        };
+        // Local lane removes id=5 first, then remote lane removes id=5.
+        f.sign(false, 2, paid.clone()).await;
+        f.sign(true, 4, paid).await;
+
+        // Replaying id=4 on the local lane after id=5 was already fulfilled must be rejected.
+        let (content, context) = f
+            .request(false, 3, outbound_settlement(&f, false, 4, 300, 650))
+            .await;
+        f.assert_rejected(content, context, "retired TLC or invoice replay")
+            .await;
+    }
+
+    // Order 4: Lagging lane catches up with a combined transition that removes id=4 and adds
+    // id=5 in a single commitment update after the lead lane already fulfilled id=5.
+    {
+        let f = Fixture::new(false).await;
+        f.sign(true, 0, f.opening()).await;
+        f.sign(false, 0, f.opening()).await;
+
+        let terms = f.terms(false);
+        let payment_hash = terms.payment_hash;
+        f.signer.authorize_payment(terms).await.unwrap();
+
+        f.sign(true, 1, outbound_settlement(&f, true, 4, 350, 600))
+            .await;
+        f.signer.authorize_cancellation(payment_hash).await.unwrap();
+        f.sign(true, 2, f.opening()).await;
+        f.sign(true, 3, outbound_settlement(&f, true, 5, 350, 600))
+            .await;
+        f.signer
+            .authorize_fulfillment(payment_hash, [9; 32].into())
+            .await
+            .unwrap();
+        let paid = SettlementData {
+            local_amount: 350,
+            remote_amount: 650,
+            tlcs: vec![],
+        };
+        f.sign(true, 4, paid.clone()).await;
+
+        // Lagging local lane adds id=4.
+        f.sign(false, 1, outbound_settlement(&f, false, 4, 350, 600))
+            .await;
+
+        // Adversarial combined transition attempting to debit id=4 as Fulfill while adding id=5
+        // (local=300, remote=650, tlcs=[5]) must be rejected.
+        let (content, context) = f
+            .request(false, 2, outbound_settlement(&f, false, 5, 300, 650))
+            .await;
+        f.assert_rejected(content, context, "balances do not match")
+            .await;
+
+        // Honest combined transition refunds id=4 (Cancel) and locks id=5 (local=350, remote=600).
+        f.sign(false, 2, outbound_settlement(&f, false, 5, 350, 600))
+            .await;
+        // Final removal settles id=5 as Fulfill (local=350, remote=650 — exactly one debit).
+        f.sign(false, 3, paid).await;
+    }
+
+    // Order 5: Adversarial combined transition on the lagging remote lane removing id=5
+    // (Fulfill) and adding cancelled id=4 in the SAME commitment must be rejected before
+    // signing (prevents on-chain double-debit using the already-revealed preimage).
+    {
+        let f = Fixture::new(false).await;
+        f.sign(true, 0, f.opening()).await;
+        f.sign(false, 0, f.opening()).await;
+
+        let terms = f.terms(false);
+        let payment_hash = terms.payment_hash;
+        f.signer.authorize_payment(terms).await.unwrap();
+
+        // Local lane commits id=4, cancels id=4, and adds retry id=5.
+        f.sign(false, 1, outbound_settlement(&f, false, 4, 350, 600))
+            .await;
+        f.signer.authorize_cancellation(payment_hash).await.unwrap();
+        f.sign(false, 2, f.opening()).await;
+        f.sign(false, 3, outbound_settlement(&f, false, 5, 350, 600))
+            .await;
+
+        // Remote lane skips id=4 and adds id=5 directly.
+        f.sign(true, 1, outbound_settlement(&f, true, 5, 350, 600))
+            .await;
+
+        // Retry id=5 succeeds on the local lane.
+        f.signer
+            .authorize_fulfillment(payment_hash, [9; 32].into())
+            .await
+            .unwrap();
+        let paid = SettlementData {
+            local_amount: 350,
+            remote_amount: 650,
+            tlcs: vec![],
+        };
+        f.sign(false, 4, paid.clone()).await;
+
+        // Adversarial LSP proposes removing id=5 (Fulfill, remote += 50) while adding id=4
+        // (local -= 50) in one remote commitment (`300/650, tlcs=[id=4]`). Must be rejected.
+        let (content, context) = f
+            .request(true, 2, outbound_settlement(&f, true, 4, 300, 650))
+            .await;
+        f.assert_rejected(content, context, "retired TLC or invoice replay")
+            .await;
+
+        // Honest settlement of id=5 still succeeds with exactly one debit.
+        f.sign(true, 2, paid).await;
+    }
+
+    // Order 6: Combined `Cancel(id=4) + Add(id=5)` in a UDT channel where the entire local
+    // balance is locked in id=4 (`previous_local == 0`) must succeed because removed refunds
+    // are credited before added TLCs debit `local`.
+    {
+        let f = Fixture::new(true).await;
+        f.sign(true, 0, f.opening()).await;
+        f.sign(false, 0, f.opening()).await;
+
+        let mut terms = f.terms(false);
+        terms.amount = 400;
+        let payment_hash = terms.payment_hash;
+        f.signer.authorize_payment(terms).await.unwrap();
+
+        let make_full_outbound = |for_remote: bool, id: u64| {
+            let mut tlc = f.tlc(false, for_remote);
+            tlc.tlc_id = if for_remote {
+                TLCId::Offered(id)
+            } else {
+                TLCId::Received(id)
+            };
+            tlc.payment_amount = 400;
+            SettlementData {
+                local_amount: 0,
+                remote_amount: 600,
+                tlcs: vec![tlc],
+            }
+        };
+
+        // Lock all 400 local UDT in id=4 on both lanes (`local_amount == 0`).
+        f.sign(true, 1, make_full_outbound(true, 4)).await;
+        f.sign(false, 1, make_full_outbound(false, 4)).await;
+
+        // Cancel id=4 and remove it from the local lane first.
+        f.signer.authorize_cancellation(payment_hash).await.unwrap();
+        f.sign(false, 2, f.opening()).await;
+
+        // Remote lane removes id=4 (+400) and adds retry id=5 (-400) in one commitment.
+        f.sign(true, 2, make_full_outbound(true, 5)).await;
+        f.sign(false, 3, make_full_outbound(false, 5)).await;
+
+        // Fulfill id=5 on both lanes -> local=0, remote=1000.
+        f.signer
+            .authorize_fulfillment(payment_hash, [9; 32].into())
+            .await
+            .unwrap();
+        let paid = SettlementData {
+            local_amount: 0,
+            remote_amount: 1000,
+            tlcs: vec![],
+        };
+        f.sign(false, 4, paid.clone()).await;
+        f.sign(true, 3, paid).await;
+    }
+}
+
+#[tokio::test]
 async fn next_material_limits_commitment_points_to_local_lane_lookahead() {
     let f = Fixture::new(false).await;
     let slot = fiber_types::NonceSlot {

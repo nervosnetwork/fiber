@@ -135,7 +135,7 @@ pub struct CommitmentReview {
     pub has_outbound_changes: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum Resolution {
     Pending,
     Fulfill,
@@ -161,6 +161,12 @@ struct TrackedTlc {
     remote_key: Pubkey,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct RetiredTlc {
+    tlc: TrackedTlc,
+    resolution: Resolution,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Lane {
     version: u64,
@@ -170,7 +176,7 @@ struct Lane {
     local_amount: u128,
     remote_amount: u128,
     tlcs: Vec<TrackedTlc>,
-    retired: Vec<TrackedTlc>,
+    retired: Vec<RetiredTlc>,
 }
 
 #[serde_as]
@@ -456,6 +462,61 @@ impl CommitmentState {
         let mut remote = previous.map_or(self.parameters.remote_amount, |p| p.remote_amount);
         let mut outbound = tlcs.iter().any(|t| !t.inbound);
         let mut retry_resets = Vec::new();
+        // Process removals before additions so:
+        // 1. TLCs settled as `Fulfill` in this commitment are already in `retired` before
+        //    addition checks evaluate `lane_fulfilled_hash` (blocking combined
+        //    `remove(Fulfill) + add(cancelled attempt)` on-chain double-debits).
+        // 2. Balances freed by removed TLCs are credited before added TLCs debit `local`/`remote`
+        //    (allowing combined `Cancel + retry` even when `previous_local < tlc.amount`).
+        for old in old_tlcs {
+            if tlcs
+                .iter()
+                .any(|t| t.id == old.id && t.inbound == old.inbound)
+            {
+                continue;
+            }
+            let payment = self
+                .payments
+                .iter()
+                .find(|p| p.terms.payment_hash == old.hash)
+                .ok_or_else(|| invalid("removed TLC has no authorization"))?;
+            // Preserve the locked resolution for this exact `(id, inbound)` attempt if the
+            // other lane already retired it, so a later outbound retry's `Fulfill` or `Cancel`
+            // cannot rewrite an earlier attempt's outcome when the lagging lane catches up.
+            let locked_resolution = if let Some(retired_other) =
+                self.lanes[1 - index].as_ref().and_then(|lane| {
+                    lane.retired
+                        .iter()
+                        .find(|r| r.tlc.id == old.id && r.tlc.inbound == old.inbound)
+                }) {
+                if retired_other.tlc != *old {
+                    return Err(invalid("TLC differs between commitment lanes"));
+                }
+                Some(retired_other.resolution)
+            } else {
+                None
+            };
+            let resolution = locked_resolution.unwrap_or(payment.resolution);
+            let pay_local = match resolution {
+                Resolution::Pending => {
+                    return Err(invalid(
+                        "TLC removed without a locally authorized resolution",
+                    ))
+                }
+                Resolution::Fulfill => old.inbound,
+                Resolution::Cancel => !old.inbound,
+            };
+            if pay_local {
+                local = sum(local, old.amount)?;
+            } else {
+                remote = sum(remote, old.amount)?;
+            }
+            outbound |= !old.inbound;
+            retired.push(RetiredTlc {
+                tlc: old.clone(),
+                resolution,
+            });
+        }
         for tlc in &tlcs {
             let existing = old_tlcs
                 .iter()
@@ -481,7 +542,7 @@ impl CommitmentState {
             let other = self.lanes[1 - index].as_ref().and_then(|lane| {
                 lane.tlcs
                     .iter()
-                    .chain(&lane.retired)
+                    .chain(lane.retired.iter().map(|r| &r.tlc))
                     .find(|t| t.id == tlc.id && t.inbound == tlc.inbound)
             });
             if let Some(other) = other {
@@ -504,14 +565,20 @@ impl CommitmentState {
                 ));
             }
             // Always reject reusing a retired `(id, inbound)`. For payment hashes, inbound
-            // invoices and already-fulfilled payments can never replay, whereas an unexpired
-            // single-part outbound payment whose previous attempt was refunded (`Cancel`) may
-            // retry with a fresh TLC ID once the prior attempt is no longer active on either lane.
+            // invoices and already-fulfilled payments can never replay (including replaying an
+            // earlier cancelled attempt after this lane already fulfilled a retry), whereas an
+            // unexpired single-part outbound payment whose previous attempt was refunded (`Cancel`)
+            // may retry with a fresh TLC ID once the prior attempt is no longer active on either lane.
             let replayed_id = retired
                 .iter()
-                .any(|t| t.id == tlc.id && t.inbound == tlc.inbound);
-            let replayed_hash = retired.iter().any(|t| t.hash == tlc.hash)
-                && (tlc.inbound || (payment.resolution == Resolution::Fulfill && other.is_none()));
+                .any(|r| r.tlc.id == tlc.id && r.tlc.inbound == tlc.inbound);
+            let lane_fulfilled_hash = retired
+                .iter()
+                .any(|r| r.tlc.hash == tlc.hash && r.resolution == Resolution::Fulfill);
+            let replayed_hash = lane_fulfilled_hash
+                || (retired.iter().any(|r| r.tlc.hash == tlc.hash)
+                    && (tlc.inbound
+                        || (payment.resolution == Resolution::Fulfill && other.is_none())));
             if replayed_id || replayed_hash {
                 return Err(invalid("retired TLC or invoice replay"));
             }
@@ -541,35 +608,6 @@ impl CommitmentState {
             } else {
                 local = sub(local, tlc.amount)?;
             }
-        }
-        for old in old_tlcs {
-            if tlcs
-                .iter()
-                .any(|t| t.id == old.id && t.inbound == old.inbound)
-            {
-                continue;
-            }
-            let payment = self
-                .payments
-                .iter()
-                .find(|p| p.terms.payment_hash == old.hash)
-                .ok_or_else(|| invalid("removed TLC has no authorization"))?;
-            let pay_local = match payment.resolution {
-                Resolution::Pending => {
-                    return Err(invalid(
-                        "TLC removed without a locally authorized resolution",
-                    ))
-                }
-                Resolution::Fulfill => old.inbound,
-                Resolution::Cancel => !old.inbound,
-            };
-            if pay_local {
-                local = sum(local, old.amount)?;
-            } else {
-                remote = sum(remote, old.amount)?;
-            }
-            outbound |= !old.inbound;
-            retired.push(old.clone());
         }
         if local != snapshot.data.local_amount || remote != snapshot.data.remote_amount {
             return Err(invalid("balances do not match authorized TLC transitions"));

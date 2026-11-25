@@ -1689,3 +1689,479 @@ fn external_fee_hold_caps_and_cross_channel_per_node_backoff() {
         "once below global cap and outside own-node backoff, new fee-holding request succeeds"
     );
 }
+
+#[allow(clippy::too_many_arguments)]
+fn build_separate_payout_ckb_fixture(
+    for_remote: bool,
+    subsequent: bool,
+    local_amount: u128,
+    remote_amount: u128,
+    tlcs: Vec<SettlementTlc>,
+    preimages: Vec<(Hash256, Hash256)>,
+    payout_lock: Script,
+) -> Fixture {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let store = open_store(dir.path()).expect("open store");
+    let node_id = NodeId::local();
+    let base_key = Privkey::from([42; 32]);
+    let tlc_key =
+        fiber_types::channel::derive_private_key(&base_key, &Privkey::from([7; 32]).pubkey());
+
+    // For subsequent settlement tests, prepend a dummy TLC at index 0 that was
+    // already unlocked in the preceding witness so `tlcs` remain at indices 0..N.
+    let mut full_tlcs = Vec::new();
+    if subsequent {
+        let unlocked_key = Privkey::from([5; 32]);
+        full_tlcs.push(SettlementTlc {
+            tlc_id: TLCId::Offered(99),
+            hash_algorithm: HashAlgorithm::Sha256,
+            payment_amount: 10_000_000_000,
+            payment_hash: Hash256::from([99; 32]),
+            expiry: 50_000,
+            local_key: None,
+            local_key_pubkey: Some(unlocked_key.pubkey()),
+            local_key_commitment_number: Some(5),
+            remote_key: Privkey::from([12; 32]).pubkey(),
+        });
+    }
+    full_tlcs.extend(tlcs);
+
+    let settlement = SettlementData {
+        local_amount,
+        remote_amount,
+        tlcs: full_tlcs,
+    };
+    let channel_id = Hash256::from([9; 32]);
+    store.insert_watch_channel(
+        node_id.clone(),
+        channel_id,
+        None,
+        WatchChannelKeys {
+            local_settlement: SettlementKey::external(base_key.pubkey()),
+            remote_settlement: Privkey::from([10; 32]).pubkey(),
+            local_funding: Privkey::from([11; 32]).pubkey(),
+            remote_funding: Privkey::from([12; 32]).pubkey(),
+        },
+        settlement,
+        ChannelFeatures::V2,
+        Some(payout_lock),
+    );
+    for (payment_hash, preimage) in preimages {
+        store.insert_watch_preimage(node_id.clone(), payment_hash, preimage);
+    }
+    let channel = store
+        .get_watch_channel(&node_id, &channel_id)
+        .expect("channel");
+    let snapshot = &channel.local_settlement_data;
+    let witness_bytes = settlement_data_to_witness(
+        snapshot,
+        for_remote,
+        base_key.pubkey(),
+        channel.remote_settlement_key,
+    );
+    let since = Since::new(
+        SinceType::EpochNumberWithFraction,
+        EpochNumberWithFraction::new(3, 0, 1).full_value(),
+        true,
+    )
+    .value();
+    let mut args =
+        ckb_hash::blake2b_256(channel_data_x_only_aggregated_pubkey(&channel, !for_remote))[..20]
+            .to_vec();
+    args.extend_from_slice(&since.to_le_bytes());
+    args.extend_from_slice(&10u64.to_be_bytes());
+    args.extend_from_slice(blake160(&witness_bytes).as_ref());
+    args.push(0);
+    args.push(ChannelFeatures::V2.bits());
+    let mut lock = get_script_by_contract(Contract::CommitmentLock, &args);
+    let mut tracked = crate::fiber::onchain_tlc_reconcile::verified_tracked_settlement_tlcs(
+        &lock, &channel, for_remote,
+    )
+    .expect("verified TLC identities");
+    let witness = subsequent.then(|| {
+        let mut witness =
+            SettlementWitness::build_from_witness(&[&[0], witness_bytes.as_slice()].concat())
+                .expect("witness");
+        witness.unlocks.push(Unlock {
+            unlock_type: 0,
+            with_preimage: false,
+            signature: [0; 65],
+            preimage: None,
+        });
+        tracked.remove(0);
+        witness
+    });
+    if let Some(previous) = &witness {
+        let mut remaining = previous.clone();
+        assert!(remaining.update());
+        let mut args = lock.args().raw_data()[..36].to_vec();
+        args.extend_from_slice(blake160(&remaining.to_witness()).as_ref());
+        args.push(1);
+        args.push(ChannelFeatures::V2.bits());
+        lock = lock.as_builder().args(args.pack()).build();
+    }
+    let cell = Cell {
+        output: CellOutput::new_builder()
+            .capacity(250_000_000_000u64)
+            .lock(lock)
+            .build()
+            .into(),
+        output_data: Some(ckb_jsonrpc_types::JsonBytes::default()),
+        out_point: OutPoint::new(Byte32::from([3; 32]), 0).into(),
+        block_number: 0u64.into(),
+        tx_index: 0u32.into(),
+    };
+    Fixture {
+        events: Default::default(),
+        store,
+        _dir: dir,
+        node_id,
+        channel,
+        cell,
+        tracked,
+        witness,
+        base_key,
+        tlc_key,
+        for_remote,
+    }
+}
+
+#[test]
+fn external_ckb_settlement_skips_small_tlc_and_claims_larger_tlc() {
+    let tenant_payout_lock = get_script_by_contract(Contract::Secp256k1Lock, &[0xaa; 20]);
+    let fee_signer = LocalSigner::new(secp256k1::SecretKey::from_slice(&[21; 32]).expect("key"));
+    let sponsor_lock = get_script_by_contract(Contract::Secp256k1Lock, fee_signer.pubkey_hash());
+    assert_ne!(tenant_payout_lock, sponsor_lock);
+
+    let min_payout_capacity = CellOutput::new_builder()
+        .lock(tenant_payout_lock.clone())
+        .build()
+        .occupied_capacity(Capacity::shannons(0))
+        .expect("occupied capacity")
+        .as_u64();
+    let small_amount = (min_payout_capacity - 1) as u128;
+    let large_amount = 20_000_000_000u128;
+
+    let base_key = Privkey::from([42; 32]);
+    let small_tlc_key =
+        fiber_types::channel::derive_private_key(&base_key, &Privkey::from([6; 32]).pubkey());
+    let large_tlc_key =
+        fiber_types::channel::derive_private_key(&base_key, &Privkey::from([7; 32]).pubkey());
+    let small_preimage = Hash256::from([11; 32]);
+    let large_preimage = Hash256::from([13; 32]);
+    let small_hash: Hash256 = HashAlgorithm::Sha256.hash(small_preimage.as_ref()).into();
+    let large_hash: Hash256 = HashAlgorithm::Sha256.hash(large_preimage.as_ref()).into();
+
+    for for_remote in [false, true] {
+        for subsequent in [false, true] {
+            for with_preimage in [false, true] {
+                let offered = for_remote != with_preimage;
+                let small_tlc = SettlementTlc {
+                    tlc_id: if offered {
+                        TLCId::Offered(0)
+                    } else {
+                        TLCId::Received(0)
+                    },
+                    hash_algorithm: HashAlgorithm::Sha256,
+                    payment_amount: small_amount,
+                    payment_hash: small_hash,
+                    expiry: 100_000,
+                    local_key: None,
+                    local_key_pubkey: Some(small_tlc_key.pubkey()),
+                    local_key_commitment_number: Some(6),
+                    remote_key: Privkey::from([12; 32]).pubkey(),
+                };
+                let large_tlc = SettlementTlc {
+                    tlc_id: if offered {
+                        TLCId::Offered(1)
+                    } else {
+                        TLCId::Received(1)
+                    },
+                    hash_algorithm: HashAlgorithm::Sha256,
+                    payment_amount: large_amount,
+                    payment_hash: large_hash,
+                    expiry: 100_000,
+                    local_key: None,
+                    local_key_pubkey: Some(large_tlc_key.pubkey()),
+                    local_key_commitment_number: Some(7),
+                    remote_key: Privkey::from([12; 32]).pubkey(),
+                };
+                let preimages = if with_preimage {
+                    vec![(small_hash, small_preimage), (large_hash, large_preimage)]
+                } else {
+                    vec![]
+                };
+                let fixture = build_separate_payout_ckb_fixture(
+                    for_remote,
+                    subsequent,
+                    100_000_000_000,
+                    100_000_000_000,
+                    vec![small_tlc, large_tlc],
+                    preimages,
+                    tenant_payout_lock.clone(),
+                );
+
+                // Must skip the first under-capacity TLC and queue a signing request for the second TLC.
+                assert!(fixture
+                    .build_at(200_000)
+                    .expect("small TLC must not block larger TLC")
+                    .is_none());
+                let (request_id, content) = fixture.pending();
+                assert_eq!(
+                    content.key_purpose,
+                    OnchainKeyPurpose::Tlc {
+                        commitment_number: 7
+                    },
+                    "for_remote={for_remote} subsequent={subsequent} with_preimage={with_preimage}"
+                );
+
+                let witness_bytes = content
+                    .transaction
+                    .witnesses()
+                    .get(0)
+                    .expect("settlement witness")
+                    .raw_data();
+                let parsed = SettlementWitness::build_from_witness(
+                    &witness_bytes[XUDT_COMPATIBLE_WITNESS.len()..],
+                )
+                .expect("parsed witness");
+                let unlock = parsed.unlocks.last().expect("unlock");
+                assert_eq!(unlock.unlock_type, 1);
+                assert_eq!(unlock.with_preimage, with_preimage);
+
+                let outputs: Vec<_> = content.transaction.raw().outputs().into_iter().collect();
+                assert_eq!(outputs.len(), 3);
+                assert_eq!(outputs[1].lock(), tenant_payout_lock);
+                assert_eq!(
+                    Unpack::<u64>::unpack(&outputs[1].capacity()),
+                    large_amount as u64
+                );
+                assert_eq!(outputs[2].lock(), sponsor_lock);
+
+                let sig = sign_onchain_request(&large_tlc_key, &content).expect("TLC signature");
+                assert_eq!(
+                    fixture.submit(request_id, sig).expect("submit"),
+                    SubmitWatchtowerSignatureResult::Applied
+                );
+                let tx = fixture
+                    .build_at(200_000)
+                    .expect("build signed tx")
+                    .expect("signed tx");
+                assert_applied_signature(&tx, &content, &large_tlc_key);
+            }
+        }
+    }
+
+    // Mixed initial settlement: small timeout TLC at index 0 followed by large preimage TLC at
+    // index 1. Skipping index 0 must leave `delay_epoch` intact so index 1 uses 1/3 delay_epoch.
+    for for_remote in [false, true] {
+        let small_timeout_tlc = SettlementTlc {
+            tlc_id: if for_remote {
+                TLCId::Offered(0)
+            } else {
+                TLCId::Received(0)
+            },
+            hash_algorithm: HashAlgorithm::Sha256,
+            payment_amount: small_amount,
+            payment_hash: small_hash,
+            expiry: 100_000,
+            local_key: None,
+            local_key_pubkey: Some(small_tlc_key.pubkey()),
+            local_key_commitment_number: Some(6),
+            remote_key: Privkey::from([12; 32]).pubkey(),
+        };
+        let large_preimage_tlc = SettlementTlc {
+            tlc_id: if for_remote {
+                TLCId::Received(1)
+            } else {
+                TLCId::Offered(1)
+            },
+            hash_algorithm: HashAlgorithm::Sha256,
+            payment_amount: large_amount,
+            payment_hash: large_hash,
+            expiry: 500_000,
+            local_key: None,
+            local_key_pubkey: Some(large_tlc_key.pubkey()),
+            local_key_commitment_number: Some(7),
+            remote_key: Privkey::from([12; 32]).pubkey(),
+        };
+        let fixture = build_separate_payout_ckb_fixture(
+            for_remote,
+            false,
+            100_000_000_000,
+            100_000_000_000,
+            vec![small_timeout_tlc, large_preimage_tlc],
+            vec![(large_hash, large_preimage)],
+            tenant_payout_lock.clone(),
+        );
+        assert!(fixture
+            .build_at(200_000)
+            .expect("mixed claim build")
+            .is_none());
+        let (_id, content) = fixture.pending();
+        assert_eq!(
+            content.key_purpose,
+            OnchainKeyPurpose::Tlc {
+                commitment_number: 7
+            }
+        );
+        // Commitment delay_epoch is 3 epochs; preimage unlock must use 1/3 * 3 = 1 epoch.
+        let commitment_since: u64 = content
+            .transaction
+            .raw()
+            .inputs()
+            .get(0)
+            .expect("commitment input")
+            .since()
+            .unpack();
+        let expected_delay = mul(EpochNumberWithFraction::new(3, 0, 1), 1, 3).expect("1/3 delay");
+        let expected_since = Since::new(
+            SinceType::EpochNumberWithFraction,
+            expected_delay.full_value(),
+            true,
+        )
+        .value();
+        assert_eq!(commitment_since, expected_since);
+    }
+}
+
+#[test]
+fn external_ckb_settlement_prevents_under_capacity_output_when_only_small_claim_eligible() {
+    let tenant_payout_lock = get_script_by_contract(Contract::Secp256k1Lock, &[0xaa; 20]);
+    let min_payout_capacity = CellOutput::new_builder()
+        .lock(tenant_payout_lock.clone())
+        .build()
+        .occupied_capacity(Capacity::shannons(0))
+        .expect("occupied capacity")
+        .as_u64();
+    let small_amount = (min_payout_capacity - 1) as u128;
+
+    let base_key = Privkey::from([42; 32]);
+    let small_tlc_key =
+        fiber_types::channel::derive_private_key(&base_key, &Privkey::from([6; 32]).pubkey());
+    let small_preimage = Hash256::from([11; 32]);
+    let small_hash: Hash256 = HashAlgorithm::Sha256.hash(small_preimage.as_ref()).into();
+
+    // 1. Only a small timeout TLC is eligible -> returns Ok(None), no pending request queued.
+    for for_remote in [false, true] {
+        for subsequent in [false, true] {
+            let small_tlc = SettlementTlc {
+                tlc_id: if for_remote {
+                    TLCId::Offered(0)
+                } else {
+                    TLCId::Received(0)
+                },
+                hash_algorithm: HashAlgorithm::Sha256,
+                payment_amount: small_amount,
+                payment_hash: small_hash,
+                expiry: 100_000,
+                local_key: None,
+                local_key_pubkey: Some(small_tlc_key.pubkey()),
+                local_key_commitment_number: Some(6),
+                remote_key: Privkey::from([12; 32]).pubkey(),
+            };
+            let fixture = build_separate_payout_ckb_fixture(
+                for_remote,
+                subsequent,
+                100_000_000_000,
+                100_000_000_000,
+                vec![small_tlc],
+                vec![],
+                tenant_payout_lock.clone(),
+            );
+            assert!(fixture
+                .build_at(200_000)
+                .expect("small-only timeout TLC must not error")
+                .is_none());
+            let WatchtowerSignerState::External(state) = fixture
+                .store
+                .get_watchtower_signer(&fixture.node_id, &fixture.channel.channel_id)
+            else {
+                panic!("expected external signer state");
+            };
+            assert!(
+                state.pending_requests.is_empty(),
+                "must not queue an under-capacity TLC signing request"
+            );
+        }
+    }
+
+    // 2. Only a small preimage TLC is eligible BEFORE expiry -> returns Ok(None), no request queued.
+    //    Once it expires (current_time > expiry), it falls through to local balance settlement
+    //    instead of permanently blocking the main channel balance.
+    for for_remote in [false, true] {
+        for subsequent in [false, true] {
+            let small_tlc = SettlementTlc {
+                tlc_id: if for_remote {
+                    TLCId::Received(0)
+                } else {
+                    TLCId::Offered(0)
+                },
+                hash_algorithm: HashAlgorithm::Sha256,
+                payment_amount: small_amount,
+                payment_hash: small_hash,
+                expiry: 150_000,
+                local_key: None,
+                local_key_pubkey: Some(small_tlc_key.pubkey()),
+                local_key_commitment_number: Some(6),
+                remote_key: Privkey::from([12; 32]).pubkey(),
+            };
+            let fixture = build_separate_payout_ckb_fixture(
+                for_remote,
+                subsequent,
+                100_000_000_000,
+                100_000_000_000,
+                vec![small_tlc],
+                vec![(small_hash, small_preimage)],
+                tenant_payout_lock.clone(),
+            );
+            assert!(fixture
+                .build_at(100_000)
+                .expect("unexpired small preimage TLC must not error")
+                .is_none());
+            let WatchtowerSignerState::External(state) = fixture
+                .store
+                .get_watchtower_signer(&fixture.node_id, &fixture.channel.channel_id)
+            else {
+                panic!("expected external signer state");
+            };
+            assert!(
+                state.pending_requests.is_empty(),
+                "must not queue an under-capacity preimage TLC signing request"
+            );
+
+            // After expiry, the unclaimable peer TLC no longer blocks local balance settlement.
+            assert!(fixture
+                .build_at(200_000)
+                .expect("expired small preimage TLC falls through to balance settlement")
+                .is_none());
+            let (_id, content) = fixture.pending();
+            assert_eq!(content.key_purpose, OnchainKeyPurpose::Settlement);
+            let outputs: Vec<_> = content.transaction.raw().outputs().into_iter().collect();
+            assert_eq!(outputs[1].lock(), tenant_payout_lock);
+            assert_eq!(
+                Unpack::<u64>::unpack(&outputs[1].capacity()),
+                100_000_000_000
+            );
+        }
+    }
+
+    // 3. Safety capacity check remains intact when local balance itself is below occupied capacity.
+    let fixture = build_separate_payout_ckb_fixture(
+        false,
+        false,
+        small_amount,
+        100_000_000_000,
+        vec![],
+        vec![],
+        tenant_payout_lock,
+    );
+    let err = fixture
+        .build_at(200_000)
+        .expect_err("under-capacity balance payout must still be rejected")
+        .to_string();
+    assert!(
+        err.contains("smaller than occupied capacity"),
+        "expected occupied capacity check error, got: {err}"
+    );
+}

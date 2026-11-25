@@ -1681,6 +1681,38 @@ fn build_settlement_tx<S: WatchtowerStore>(
     let change_output = CellOutput::new_builder()
         .lock(fee_provider_lock_script.clone())
         .build();
+    let cell_capacity: u64 = cell_output.capacity().unpack();
+    let ckb_min_payout_capacity = if separate_fee_sponsor && cell_output.type_().is_none() {
+        Some(
+            CellOutput::new_builder()
+                .lock(payout_lock_script.clone())
+                .build()
+                .occupied_capacity(Capacity::shannons(0))
+                .map_err(|err| {
+                    ArithmeticError::new(format!(
+                        "settlement output occupied capacity calculation failed: {}",
+                        err
+                    ))
+                })?
+                .as_u64(),
+        )
+    } else {
+        None
+    };
+    let ckb_tlc_payout_shortfall =
+        |unlock_amount: u128| -> Result<Option<(u64, u64)>, ArithmeticError> {
+            let Some(min_payout_capacity) = ckb_min_payout_capacity else {
+                return Ok(None);
+            };
+            let new_capacity = (cell_capacity as u128).saturating_sub(unlock_amount) as u64;
+            let payout_capacity =
+                checked_sub_u64(cell_capacity, new_capacity, "settlement payout capacity")?;
+            if payout_capacity < min_payout_capacity {
+                Ok(Some((payout_capacity, min_payout_capacity)))
+            } else {
+                Ok(None)
+            }
+        };
 
     let mut two_parties_all_settled = false;
     let (unlock, mut unlock_amount, unlock_key, new_settlement_witness) = match settlement_witness {
@@ -1729,6 +1761,18 @@ fn build_settlement_tx<S: WatchtowerStore>(
 
                                 if tlc.is_offered() {
                                     if current_time > expiry {
+                                        if let Some((payout_capacity, min_payout_capacity)) =
+                                            ckb_tlc_payout_shortfall(tlc.payment_amount)?
+                                        {
+                                            warn!(
+                                                channel_id = %channel_data.channel_id,
+                                                tlc_index = i,
+                                                payout_capacity,
+                                                min_payout_capacity,
+                                                "skipping watchtower CKB TLC timeout claim below payout occupied capacity"
+                                            );
+                                            continue;
+                                        }
                                         unlock_option = Some((
                                             Unlock {
                                                 unlock_type: i as u8,
@@ -1741,30 +1785,53 @@ fn build_settlement_tx<S: WatchtowerStore>(
                                         ));
                                         break;
                                     }
-                                } else if let Some(preimage) =
-                                    verified_watch_preimage(store, self_node_id, &tracked_tlcs[i])
-                                {
-                                    unlock_option = Some((
-                                        Unlock {
-                                            unlock_type: i as u8,
-                                            with_preimage: true,
-                                            signature: [0u8; 65],
-                                            preimage: Some(preimage),
-                                        },
-                                        tlc.payment_amount,
-                                        None,
-                                    ));
-                                    break;
-                                } else if current_time > expiry {
-                                    pending_tlcs_count = checked_sub_usize(
-                                        pending_tlcs_count,
-                                        1,
-                                        "pending TLC count",
-                                    )?;
+                                } else {
+                                    let claimable_preimage = if let Some(preimage) =
+                                        verified_watch_preimage(
+                                            store,
+                                            self_node_id,
+                                            &tracked_tlcs[i],
+                                        ) {
+                                        if let Some((payout_capacity, min_payout_capacity)) =
+                                            ckb_tlc_payout_shortfall(tlc.payment_amount)?
+                                        {
+                                            warn!(
+                                                channel_id = %channel_data.channel_id,
+                                                tlc_index = i,
+                                                payout_capacity,
+                                                min_payout_capacity,
+                                                "skipping watchtower CKB TLC preimage claim below payout occupied capacity"
+                                            );
+                                            None
+                                        } else {
+                                            Some(preimage)
+                                        }
+                                    } else {
+                                        None
+                                    };
+                                    if let Some(preimage) = claimable_preimage {
+                                        unlock_option = Some((
+                                            Unlock {
+                                                unlock_type: i as u8,
+                                                with_preimage: true,
+                                                signature: [0u8; 65],
+                                                preimage: Some(preimage),
+                                            },
+                                            tlc.payment_amount,
+                                            None,
+                                        ));
+                                        break;
+                                    } else if current_time > expiry {
+                                        pending_tlcs_count = checked_sub_usize(
+                                            pending_tlcs_count,
+                                            1,
+                                            "pending TLC count",
+                                        )?;
+                                    }
                                 }
                             }
 
-                            if pending_tlcs_count == 0 {
+                            if unlock_option.is_none() && pending_tlcs_count == 0 {
                                 unlock_option = Some((
                                     Unlock {
                                         unlock_type: 0xFF,
@@ -1814,6 +1881,18 @@ fn build_settlement_tx<S: WatchtowerStore>(
 
                             if !tlc.is_offered() {
                                 if current_time > expiry {
+                                    if let Some((payout_capacity, min_payout_capacity)) =
+                                        ckb_tlc_payout_shortfall(tlc.payment_amount)?
+                                    {
+                                        warn!(
+                                            channel_id = %channel_data.channel_id,
+                                            tlc_index = i,
+                                            payout_capacity,
+                                            min_payout_capacity,
+                                            "skipping watchtower CKB TLC timeout claim below payout occupied capacity"
+                                        );
+                                        continue;
+                                    }
                                     unlock_option = Some((
                                         Unlock {
                                             unlock_type: i as u8,
@@ -1826,27 +1905,50 @@ fn build_settlement_tx<S: WatchtowerStore>(
                                     ));
                                     break;
                                 }
-                            } else if let Some(preimage) =
-                                verified_watch_preimage(store, self_node_id, &tracked_tlcs[i])
-                            {
-                                unlock_option = Some((
-                                    Unlock {
-                                        unlock_type: i as u8,
-                                        with_preimage: true,
-                                        signature: [0u8; 65],
-                                        preimage: Some(preimage),
-                                    },
-                                    tlc.payment_amount,
-                                    None,
-                                ));
-                                break;
-                            } else if current_time > expiry {
-                                pending_tlcs_count =
-                                    checked_sub_usize(pending_tlcs_count, 1, "pending TLC count")?;
+                            } else {
+                                let claimable_preimage = if let Some(preimage) =
+                                    verified_watch_preimage(store, self_node_id, &tracked_tlcs[i])
+                                {
+                                    if let Some((payout_capacity, min_payout_capacity)) =
+                                        ckb_tlc_payout_shortfall(tlc.payment_amount)?
+                                    {
+                                        warn!(
+                                            channel_id = %channel_data.channel_id,
+                                            tlc_index = i,
+                                            payout_capacity,
+                                            min_payout_capacity,
+                                            "skipping watchtower CKB TLC preimage claim below payout occupied capacity"
+                                        );
+                                        None
+                                    } else {
+                                        Some(preimage)
+                                    }
+                                } else {
+                                    None
+                                };
+                                if let Some(preimage) = claimable_preimage {
+                                    unlock_option = Some((
+                                        Unlock {
+                                            unlock_type: i as u8,
+                                            with_preimage: true,
+                                            signature: [0u8; 65],
+                                            preimage: Some(preimage),
+                                        },
+                                        tlc.payment_amount,
+                                        None,
+                                    ));
+                                    break;
+                                } else if current_time > expiry {
+                                    pending_tlcs_count = checked_sub_usize(
+                                        pending_tlcs_count,
+                                        1,
+                                        "pending TLC count",
+                                    )?;
+                                }
                             }
                         }
 
-                        if pending_tlcs_count == 0 {
+                        if unlock_option.is_none() && pending_tlcs_count == 0 {
                             unlock_option = Some((
                                 Unlock {
                                     unlock_type: 0xFE,
@@ -1902,6 +2004,18 @@ fn build_settlement_tx<S: WatchtowerStore>(
                             <= current_epoch.to_rational()
                             && current_time > tlc.expiry
                         {
+                            if let Some((payout_capacity, min_payout_capacity)) =
+                                ckb_tlc_payout_shortfall(tlc.payment_amount)?
+                            {
+                                warn!(
+                                    channel_id = %channel_data.channel_id,
+                                    tlc_index = i,
+                                    payout_capacity,
+                                    min_payout_capacity,
+                                    "skipping watchtower CKB TLC timeout claim below payout occupied capacity"
+                                );
+                                continue;
+                            }
                             unlock_option = Some((
                                 Unlock {
                                     unlock_type: i as u8,
@@ -1923,9 +2037,27 @@ fn build_settlement_tx<S: WatchtowerStore>(
                         if cell_header_epoch.to_rational() + delay.to_rational()
                             <= current_epoch.to_rational()
                         {
-                            if let Some(preimage) =
+                            let claimable_preimage = if let Some(preimage) =
                                 verified_watch_preimage(store, self_node_id, &tracked_tlcs[i])
                             {
+                                if let Some((payout_capacity, min_payout_capacity)) =
+                                    ckb_tlc_payout_shortfall(tlc.payment_amount)?
+                                {
+                                    warn!(
+                                        channel_id = %channel_data.channel_id,
+                                        tlc_index = i,
+                                        payout_capacity,
+                                        min_payout_capacity,
+                                        "skipping watchtower CKB TLC preimage claim below payout occupied capacity"
+                                    );
+                                    None
+                                } else {
+                                    Some(preimage)
+                                }
+                            } else {
+                                None
+                            };
+                            if let Some(preimage) = claimable_preimage {
                                 unlock_option = Some((
                                     Unlock {
                                         unlock_type: i as u8,
@@ -1950,7 +2082,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
                 }
             }
 
-            if pending_tlcs_count == 0 {
+            if unlock_option.is_none() && pending_tlcs_count == 0 {
                 if cell_header_epoch.to_rational() + delay_epoch.to_rational()
                     > current_epoch.to_rational()
                 {

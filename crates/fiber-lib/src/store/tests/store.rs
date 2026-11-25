@@ -5480,3 +5480,94 @@ fn test_move_channel_open_records_atomically_rekeys_both_records() {
             .terminated
     );
 }
+
+#[test]
+fn test_move_channel_open_records_atomically_with_channel_actor_state() {
+    use crate::fiber::channel::{
+        ChannelActorStateStore, ChannelOpenRecordStore, TenantChannelOpening,
+    };
+    use crate::fiber::network::OpenChannelWithExternalFundingCommand;
+    use ckb_types::packed::Script;
+    use fiber_types::{ChannelOpenRecord, ChannelOpeningStatus, NegotiatingFundingFlags};
+
+    let (store, _dir) = generate_store();
+    let tenant = store.namespaced(NodeNamespace::hosted_tenant("atomic-move-channel-owner"));
+    let mut channel = sample_channel_actor_state(
+        ChannelState::NegotiatingFunding(NegotiatingFundingFlags::OUR_INIT_SENT),
+        None,
+    );
+    let temporary_id = channel.id;
+    let final_id = gen_rand_sha256_hash();
+    let peer_pubkey = channel.remote_pubkey;
+    let command = OpenChannelWithExternalFundingCommand {
+        pubkey: peer_pubkey,
+        funding_amount: 100_000_000_000,
+        public: false,
+        shutdown_script: Script::default(),
+        funding_lock_script: Script::default(),
+        funding_lock_script_cell_deps: Vec::new(),
+        funding_udt_type_script: None,
+        commitment_fee_rate: None,
+        commitment_delay_epoch: None,
+        funding_fee_rate: None,
+        tlc_expiry_delta: None,
+        tlc_min_value: None,
+        tlc_fee_proportional_millionths: None,
+        max_tlc_value_in_flight: None,
+        max_tlc_number_in_flight: None,
+        external_channel_signer: None,
+    };
+
+    tenant.insert_channel_actor_state(channel.clone());
+    tenant.insert_channel_open_record(ChannelOpenRecord::new(
+        temporary_id,
+        peer_pubkey,
+        command.funding_amount,
+    ));
+    tenant.put_tenant_channel_opening(TenantChannelOpening {
+        command,
+        channel_id: temporary_id,
+        result: None,
+        terminated: false,
+    });
+
+    channel.id = final_id;
+    channel.state = ChannelState::NegotiatingFunding(NegotiatingFundingFlags::INIT_SENT);
+    tenant.move_channel_actor_state(&temporary_id, channel.clone());
+
+    assert!(tenant.get_channel_actor_state(&temporary_id).is_none());
+    assert!(tenant.get_channel_open_record(&temporary_id).is_none());
+    assert!(tenant.get_tenant_channel_opening(&temporary_id).is_none());
+
+    let moved_channel = tenant
+        .get_channel_actor_state(&final_id)
+        .expect("channel moved to final id");
+    assert_eq!(moved_channel.id, final_id);
+    let moved_record = tenant
+        .get_channel_open_record(&final_id)
+        .expect("open record moved with channel state");
+    assert_eq!(moved_record.channel_id, final_id);
+    assert_eq!(moved_record.status, ChannelOpeningStatus::FundingTxBuilding);
+    let moved_opening = tenant
+        .get_tenant_channel_opening(&final_id)
+        .expect("tenant opening moved with channel state");
+    assert_eq!(moved_opening.channel_id, final_id);
+    assert_eq!(tenant.list_tenant_channel_openings().len(), 1);
+
+    // Same-ID move must preserve existing open records unchanged.
+    let mut ready_record = moved_record;
+    ready_record.update_status(ChannelOpeningStatus::ChannelReady);
+    tenant.insert_channel_open_record(ready_record);
+    tenant.move_channel_actor_state(&final_id, channel);
+    assert_eq!(
+        tenant.get_channel_open_record(&final_id).unwrap().status,
+        ChannelOpeningStatus::ChannelReady
+    );
+    assert_eq!(
+        tenant
+            .get_tenant_channel_opening(&final_id)
+            .unwrap()
+            .channel_id,
+        final_id
+    );
+}
