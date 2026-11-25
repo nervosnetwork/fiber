@@ -516,9 +516,15 @@ async fn tenant_watchtower_rpc_rejects_secrets_and_cross_tenant_signatures() {
     };
     let request_id = Hash256::from([0x88; 32]);
     let mut external = WatchtowerExternalSignerState::default();
-    external
-        .pending_requests
-        .insert(request_id, content.clone());
+    external.pending_requests.insert(
+        request_id,
+        fiber_types::PendingWatchtowerRequest {
+            content: content.clone(),
+            created_at_ms: crate::now_timestamp_as_millis_u64(),
+            self_funded: false,
+            required_expiry_since: None,
+        },
+    );
     let node = crate::lsp::tenant_watchtower_node_id(&owner_pubkey);
     let signing_scope = fixture.public_t.signing_events.watchtower(&node);
     let mut signing_update = signing_scope.prepare_update();
@@ -567,6 +573,7 @@ async fn tenant_watchtower_rpc_rejects_secrets_and_cross_tenant_signatures() {
         signature: crate::watchtower::sign_onchain_request(&key, &content)
             .unwrap()
             .to_vec(),
+        signed_transaction: None,
     };
     let err = other
         .request::<SubmitWatchtowerSignatureResult, _>(

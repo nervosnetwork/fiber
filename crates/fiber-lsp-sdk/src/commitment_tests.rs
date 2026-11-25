@@ -1648,6 +1648,8 @@ async fn onchain_claim_checks_live_input_witness_destination_fee_and_maturity() 
                     transaction: content.transaction.clone().into(),
                 },
                 expires_at_ms: 0,
+                self_funded: false,
+                required_expiry_since: None,
             };
             let wire = serde_json::to_vec(&status).unwrap();
             let ProcessOutcome::NeedConfirmation(pending) = session
@@ -2627,6 +2629,8 @@ async fn assert_onchain_rpc_rejected(
                 transaction: content.transaction.clone().into(),
             },
             expires_at_ms: 0,
+            self_funded: false,
+            required_expiry_since: None,
         };
         let wire = serde_json::to_vec(&status).unwrap();
         let before = f.store.snapshot().unwrap();
@@ -3539,4 +3543,317 @@ async fn next_material_limits_commitment_points_to_local_lane_lookahead() {
     assert_eq!(remote_lane.v2_nonces.len(), 1);
     assert!(remote_lane.commitment_points.is_empty());
     assert!(remote_lane.next_commitment_point.is_none());
+}
+
+#[cfg(feature = "json")]
+#[tokio::test]
+async fn self_funded_udt_tlc_watchtower_session_flow() {
+    use ckb_types::core::DepType;
+    use ckb_types::packed::CellDep;
+
+    // Test both funding from `destination` (`fee_sponsor_lock: None`) and funding from a separate
+    // wallet address (`fee_sponsor_lock: Some(custom_wallet_lock)`).
+    for separate_wallet_lock in [false, true] {
+        let f = Fixture::new(true).await;
+        f.signer
+            .authorize_invoice(f.terms(true), [9; 32].into())
+            .await
+            .unwrap();
+        f.sign(false, 0, f.opening()).await;
+        f.sign(false, 1, f.incoming(false)).await;
+        f.sign(true, 0, f.opening()).await;
+        f.sign(true, 1, f.incoming(true)).await;
+        let (content, context) = f.revocation(true, 1).await;
+        let prepared = f
+            .signer
+            .prepare_revocation(content, context, 100)
+            .await
+            .unwrap();
+        f.signer.sign_revocation(prepared, 100).await.unwrap();
+        let record = f
+            .signer
+            .recovery_records()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|r| !r.reference.for_remote && r.reference.version == 2)
+            .unwrap();
+        let source = record.transaction.raw().outputs().get(0).unwrap();
+        let outpoint = OutPoint::new(record.transaction.calc_tx_hash(), 0);
+        let destination = Script::new_builder().args([42u8].pack()).build();
+        let wallet_funding_lock = if separate_wallet_lock {
+            Script::new_builder().args([77u8; 24].pack()).build()
+        } else {
+            destination.clone()
+        };
+        let wallet_cell_outpoint = OutPoint::new([88u8; 32].pack(), 0);
+        let wallet_dep = CellDep::new_builder()
+            .out_point(OutPoint::new([66u8; 32].pack(), 0))
+            .dep_type(DepType::Code)
+            .build();
+        let chain = TestChain {
+            outpoint: outpoint.clone(),
+            cell: VerifiedCell {
+                output: source.clone(),
+                data: record
+                    .transaction
+                    .raw()
+                    .outputs_data()
+                    .get(0)
+                    .unwrap()
+                    .raw_data()
+                    .to_vec(),
+            },
+            now: 100,
+            mature: true,
+            extras: vec![(
+                wallet_cell_outpoint.clone(),
+                VerifiedCell {
+                    output: CellOutput::new_builder()
+                        .capacity(300u64)
+                        .lock(wallet_funding_lock.clone())
+                        .build(),
+                    data: vec![],
+                },
+            )],
+        };
+
+        let body = fiber_types::settlement_data_to_witness(
+            &record.settlement.data,
+            false,
+            record.settlement.local_settlement_key,
+            record.settlement.remote_settlement_key,
+        );
+        let mut next = body.clone();
+        next.drain(1..98);
+        next[0] = 0;
+        let mut args = source.lock().args().raw_data()[..36].to_vec();
+        args.extend_from_slice(&fiber_types::blake2b_hash_with_salt(&next, &[])[..20]);
+        args.push(1);
+        args.push(fiber_types::ChannelFeatures::V2.bits());
+        let remainder = source
+            .clone()
+            .as_builder()
+            .capacity(990u64)
+            .lock(source.lock().as_builder().args(args.pack()).build())
+            .build();
+
+        let mut witness = vec![16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0, 1];
+        witness.extend_from_slice(&body);
+        witness.extend_from_slice(&[0, 1]);
+        witness.extend_from_slice(&[0; 65]);
+        witness.extend_from_slice(&[9; 32]);
+
+        // Unfunded template emitted by watchtower: only commitment input[0], outputs[0..2], witness[0].
+        let template_tx = TransactionBuilder::default()
+            .input(CellInput::new(
+                outpoint.clone(),
+                u64::from_le_bytes(f.parameters.delay_epoch),
+            ))
+            .output(remainder.clone())
+            .output_data(950u128.to_le_bytes().to_vec().pack())
+            .output(
+                CellOutput::new_builder()
+                    .capacity(142u64)
+                    .type_(source.type_())
+                    .lock(destination.clone())
+                    .build(),
+            )
+            .output_data(50u128.to_le_bytes().to_vec().pack())
+            .witness(witness.clone().pack())
+            .build()
+            .data();
+
+        // Wallet funds the template with its own cell_dep, funding input, change output, and witnesses.
+        let wallet_witness_1 = vec![0xdeu8, 0xad, 0xbe, 0xef];
+        let wallet_witness_2 = vec![0xcau8, 0xfe];
+        let funded_tx = template_tx
+            .clone()
+            .into_view()
+            .as_advanced_builder()
+            .cell_dep(wallet_dep.clone())
+            .input(CellInput::new(wallet_cell_outpoint.clone(), 0))
+            .output(
+                CellOutput::new_builder()
+                    .capacity(153u64) // 300 - 142 (UDT cell) - 5 (fee)
+                    .lock(wallet_funding_lock.clone())
+                    .build(),
+            )
+            .output_data(ckb_types::packed::Bytes::default())
+            .witness(wallet_witness_1.clone().pack())
+            .witness(wallet_witness_2.clone().pack())
+            .build()
+            .data();
+
+        let channel_id = fiber_types::Hash256::from([0x55; 32]);
+        let request_id = fiber_types::Hash256::from([0x66; 32]);
+        let mut directory = HostedSessionState::default();
+        directory
+            .bindings
+            .insert(channel_id, f.signer.channel_key_id());
+        let root = RootSigner::open(RootKey::import([42; 32]).unwrap(), f.store.clone())
+            .await
+            .unwrap();
+        let session = HostedSession::new(root).with_state(directory);
+
+        let status = fiber_json_types::WatchtowerSigningStatus::SignatureRequired {
+            request_id: request_id.into(),
+            content: fiber_json_types::OnchainSigningContent {
+                key_purpose: fiber_json_types::OnchainKeyPurpose::Tlc {
+                    commitment_number: 1,
+                },
+                transaction: template_tx.clone().into(),
+            },
+            expires_at_ms: 1_800_000,
+            self_funded: true,
+            required_expiry_since: None,
+        };
+        let authorization = OnchainSpendAuthorization {
+            source: record.reference.clone(),
+            destination: destination.clone(),
+            fee_sponsor_lock: separate_wallet_lock.then_some(wallet_funding_lock.clone()),
+            fee: 5,
+            additional_inputs: vec![wallet_cell_outpoint.clone()],
+            cell_deps: vec![wallet_dep.clone()],
+        };
+
+        // 1. Operator-funded route must reject self_funded=true.
+        assert!(session
+            .handle_watchtower_status_verified(
+                channel_id,
+                status.clone(),
+                authorization.clone(),
+                &chain,
+            )
+            .await
+            .is_err());
+
+        // 2. Self-funded route rejects non-self_funded status.
+        let mut non_self_funded_status = status.clone();
+        if let fiber_json_types::WatchtowerSigningStatus::SignatureRequired {
+            self_funded, ..
+        } = &mut non_self_funded_status
+        {
+            *self_funded = false;
+        }
+        assert!(session
+            .handle_self_funded_watchtower_status(
+                channel_id,
+                non_self_funded_status,
+                funded_tx.clone().into(),
+                authorization.clone(),
+                &chain,
+            )
+            .await
+            .is_err());
+
+        // 3. Self-funded route rejects tampered funded tx (e.g. unexpected absolute timestamp since).
+        let tampered_since_tx = funded_tx
+            .clone()
+            .into_view()
+            .as_advanced_builder()
+            .set_inputs(vec![
+                funded_tx.raw().inputs().get(0).unwrap(),
+                CellInput::new(
+                    wallet_cell_outpoint.clone(),
+                    fiber_types::watchtower::settlement_timestamp_since(100_000),
+                ),
+            ])
+            .build()
+            .data();
+        assert!(session
+            .handle_self_funded_watchtower_status(
+                channel_id,
+                status.clone(),
+                tampered_since_tx.into(),
+                authorization.clone(),
+                &chain,
+            )
+            .await
+            .is_err());
+
+        // 4. Valid self-funded flow prepares PendingRequest -> confirm_self_funded_onchain returns
+        //    SubmitWatchtowerSignatureParams with signed_transaction preserving client witnesses.
+        let ProcessOutcome::NeedConfirmation(pending) = session
+            .handle_self_funded_watchtower_status(
+                channel_id,
+                status,
+                funded_tx.clone().into(),
+                authorization,
+                &chain,
+            )
+            .await
+            .expect("prepare self-funded watchtower request")
+        else {
+            panic!("onchain request must require confirmation");
+        };
+        assert!(pending.self_funded());
+        assert_eq!(pending.required_expiry_since(), None);
+
+        // Operator-funded confirm_onchain must reject a self-funded PendingRequest.
+        let err = session
+            .confirm_onchain(pending, &chain)
+            .await
+            .expect_err("confirm_onchain must reject self-funded pending request");
+        assert!(err.to_string().contains("confirm_self_funded_onchain"));
+
+        // Re-prepare and confirm via confirm_self_funded_onchain.
+        let status_again = fiber_json_types::WatchtowerSigningStatus::SignatureRequired {
+            request_id: request_id.into(),
+            content: fiber_json_types::OnchainSigningContent {
+                key_purpose: fiber_json_types::OnchainKeyPurpose::Tlc {
+                    commitment_number: 1,
+                },
+                transaction: template_tx.into(),
+            },
+            expires_at_ms: 1_800_000,
+            self_funded: true,
+            required_expiry_since: None,
+        };
+        let auth_again = OnchainSpendAuthorization {
+            source: record.reference,
+            destination,
+            fee_sponsor_lock: separate_wallet_lock.then_some(wallet_funding_lock),
+            fee: 5,
+            additional_inputs: vec![wallet_cell_outpoint],
+            cell_deps: vec![wallet_dep.clone()],
+        };
+        let ProcessOutcome::NeedConfirmation(pending) = session
+            .handle_self_funded_watchtower_status(
+                channel_id,
+                status_again,
+                funded_tx.clone().into(),
+                auth_again,
+                &chain,
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("need confirmation");
+        };
+        let SubmitParams::Watchtower(params) = session
+            .confirm_self_funded_onchain(pending, &chain)
+            .await
+            .expect("confirm self-funded watchtower request")
+        else {
+            panic!("expected watchtower submit params");
+        };
+        assert_eq!(params.channel_id, channel_id.into());
+        assert_eq!(params.request_id, request_id.into());
+        assert_eq!(params.signature.len(), 65);
+        let submitted_tx: ckb_types::packed::Transaction = params
+            .signed_transaction
+            .expect("self-funded submission must carry signed_transaction")
+            .into();
+        assert_eq!(submitted_tx.as_slice(), funded_tx.as_slice());
+        assert_eq!(
+            submitted_tx.witnesses().get(1).unwrap().raw_data().as_ref(),
+            wallet_witness_1.as_slice()
+        );
+        assert_eq!(
+            submitted_tx.witnesses().get(2).unwrap().raw_data().as_ref(),
+            wallet_witness_2.as_slice()
+        );
+        assert_eq!(submitted_tx.raw().cell_deps().get(0).unwrap(), wallet_dep);
+    }
 }

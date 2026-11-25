@@ -328,27 +328,71 @@ pub enum WatchtowerSignerState {
     External(WatchtowerExternalSignerState),
 }
 
-/// External watchtower signer state machine.
+/// Maximum serialized byte length allowed for a client-funded watchtower transaction.
+pub const MAX_SELF_FUNDED_WATCHTOWER_TX_BYTES: usize = 64 * 1024;
+/// Maximum number of inputs, outputs, cell_deps, or witnesses allowed in a client-funded
+/// watchtower transaction.
+pub const MAX_SELF_FUNDED_WATCHTOWER_TX_ITEMS: usize = 64;
+
+/// Outstanding external watchtower signing request awaiting a client signature.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct PendingWatchtowerRequest {
+    /// Structured on-chain plaintext to be hashed and signed.
+    ///
+    /// When `self_funded` is `true`, `content.transaction` is an unfunded template containing
+    /// only the commitment input (`inputs[0]`), residual commitment output (`outputs[0]`),
+    /// UDT payout output (`outputs[1]`), and the `CommitmentLock` witness placeholder (`witness[0]`).
+    /// The client attaches its own `cell_deps`, funding inputs (`inputs[1..]`), change output,
+    /// and funding witnesses (`witness[1..]`) before signing `inputs[0]`.
+    pub content: OnchainSigningContent,
+    /// Creation timestamp (Unix ms), used to bound request TTL and fee-cell holds.
+    #[serde(default)]
+    pub created_at_ms: u64,
+    /// Whether the client must fund `inputs[1..]` and supply `signed_transaction` on submit.
+    #[serde(default)]
+    pub self_funded: bool,
+    /// Optional absolute timestamp `since` required on a funding input for a self-funded
+    /// timeout TLC unlock (matching `CommitmentLock`'s `load_expiry_raw_since_value`).
+    #[serde(default)]
+    pub required_expiry_since: Option<u64>,
+}
+
+/// Verified external watchtower signature awaiting transaction assembly and broadcast.
 #[serde_as]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct SignedWatchtowerRequest {
+    /// Structured on-chain plaintext that was signed.
+    ///
+    /// For operator-funded requests, this is the exact watchtower-built transaction.
+    /// For `self_funded` requests, `content.transaction` is the client-funded transaction
+    /// (carrying the client's `cell_deps`, `inputs[1..]`, change outputs, and `witness[1..]`),
+    /// with `witness[0]` normalized to the template placeholder so watchtower applies `signature`.
+    pub content: OnchainSigningContent,
+    /// Recoverable ECDSA signature for `inputs[0]`.
+    #[serde_as(as = "SliceHex")]
+    pub signature: [u8; 65],
+    /// Acceptance timestamp (Unix ms), used to bound holds/TTL if broadcast fails.
+    #[serde(default)]
+    pub created_at_ms: u64,
+    /// Whether `inputs[1..]` belong to the client (never held in operator `held_cells` and
+    /// never signed by the operator's `LocalSigner`).
+    #[serde(default)]
+    pub self_funded: bool,
+}
+
+/// External watchtower signer state machine.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct WatchtowerExternalSignerState {
-    /// Outstanding requests awaiting external signature: request_id -> OnchainSigningContent.
+    /// Outstanding requests awaiting external signature: request_id -> PendingWatchtowerRequest.
     #[serde(default)]
-    pub pending_requests: BTreeMap<Hash256, OnchainSigningContent>,
+    pub pending_requests: BTreeMap<Hash256, PendingWatchtowerRequest>,
     /// Verified signatures received from external signer, awaiting application:
-    /// request_id -> (OnchainSigningContent, [u8; 65]).
-    #[serde_as(as = "BTreeMap<_, (_, SliceHex)>")]
+    /// request_id -> SignedWatchtowerRequest.
     #[serde(default)]
-    pub signed_signatures: BTreeMap<Hash256, (OnchainSigningContent, [u8; 65])>,
+    pub signed_signatures: BTreeMap<Hash256, SignedWatchtowerRequest>,
     /// Last signature that successfully resumed this watch channel (kept simple for persistence).
     #[serde(default)]
     pub last_applied: Option<LastAppliedWatchtowerSignature>,
-    /// Creation timestamps (Unix ms) for outstanding `pending_requests`, used to bound fee-cell holds.
-    #[serde(default)]
-    pub pending_request_created_at_ms: BTreeMap<Hash256, u64>,
-    /// Creation timestamps (Unix ms) for `signed_signatures`, used to bound fee-cell holds if broadcast fails.
-    #[serde(default)]
-    pub signed_signature_created_at_ms: BTreeMap<Hash256, u64>,
     /// Consecutive expired or failed external requests for retry backoff.
     #[serde(default)]
     pub consecutive_expired_requests: u32,
@@ -362,8 +406,11 @@ impl WatchtowerExternalSignerState {
         self.pending_requests.is_empty() && self.signed_signatures.is_empty()
     }
 
-    pub fn first_pending(&self) -> Option<(Hash256, &OnchainSigningContent)> {
-        self.pending_requests.iter().next().map(|(id, c)| (*id, c))
+    pub fn first_pending(&self) -> Option<(Hash256, &PendingWatchtowerRequest)> {
+        self.pending_requests
+            .iter()
+            .next()
+            .map(|(id, req)| (*id, req))
     }
 }
 
@@ -376,6 +423,264 @@ pub struct LastAppliedWatchtowerSignature {
     /// Signature that resumed the spend.
     #[serde_as(as = "SliceHex")]
     pub signature: [u8; 65],
+    /// For `self_funded` submissions, blake2b-256 hash of the submitted transaction bytes
+    /// (including client witnesses) for exact idempotency checking.
+    #[serde(default)]
+    pub signed_transaction_hash: Option<Hash256>,
+}
+
+/// Locate the 65-byte signature slice `(start, end)` inside a V2 single-unlock
+/// `CommitmentLock` settlement witness (`witness[0]`).
+fn settlement_witness_signature_range(witness: &[u8]) -> Result<(usize, usize), String> {
+    // Layout: 16B xudt placeholder + 1B unlock_count(0x01) + 1B htlc_count(N) +
+    // N * 97B V2 HTLC scripts + 72B party balances + 1B unlock_type + 1B with_preimage +
+    // 65B signature + optional 32B preimage.
+    if witness.len() < 18 {
+        return Err("commitment settlement witness is too short".to_string());
+    }
+    if witness[16] != 0x01 {
+        return Err(format!(
+            "commitment settlement witness must have unlock_count=1, got {}",
+            witness[16]
+        ));
+    }
+    let htlc_count = witness[17] as usize;
+    let unlock_offset = 18usize
+        .checked_add(
+            htlc_count
+                .checked_mul(97)
+                .ok_or_else(|| "settlement witness htlc offset overflow".to_string())?,
+        )
+        .and_then(|v| v.checked_add(72))
+        .ok_or_else(|| "settlement witness unlock offset overflow".to_string())?;
+    let with_preimage_idx = unlock_offset
+        .checked_add(1)
+        .ok_or_else(|| "settlement witness flag offset overflow".to_string())?;
+    if witness.len() <= with_preimage_idx {
+        return Err("commitment settlement witness is truncated before unlock".to_string());
+    }
+    let with_preimage = match witness[with_preimage_idx] {
+        0 => false,
+        1 => true,
+        flag => {
+            return Err(format!(
+                "invalid with_preimage flag in commitment witness: {flag}"
+            ));
+        }
+    };
+    let sig_start = with_preimage_idx + 1;
+    let sig_end = sig_start + 65;
+    let expected_len = sig_end + if with_preimage { 32 } else { 0 };
+    if witness.len() != expected_len {
+        return Err(format!(
+            "unexpected commitment witness length: expected {expected_len}, got {}",
+            witness.len()
+        ));
+    }
+    Ok((sig_start, sig_end))
+}
+
+fn is_absolute_timestamp_since(raw_since: u64) -> bool {
+    (raw_since >> 56) == 0x40
+}
+
+/// Deterministic digest binding a self-funded watchtower transaction's raw body and all
+/// client funding witnesses (`witness[1..]`), independent of whether `witness[0]` carries
+/// the placeholder or applied signature.
+pub fn self_funded_watchtower_tx_hash(tx: &Transaction) -> Hash256 {
+    use ckb_types::prelude::*;
+
+    let mut blake2b = ckb_hash::new_blake2b();
+    blake2b.update(tx.raw().as_slice());
+    let funding_witnesses: Vec<_> = tx.witnesses().into_iter().skip(1).collect();
+    blake2b.update(&(funding_witnesses.len() as u64).to_le_bytes());
+    for witness in funding_witnesses {
+        let raw = witness.raw_data();
+        blake2b.update(&(raw.len() as u64).to_le_bytes());
+        blake2b.update(&raw);
+    }
+    let mut out = [0u8; 32];
+    blake2b.finalize(&mut out);
+    Hash256::from(out)
+}
+
+/// Validate a client-funded watchtower transaction against its watchtower-issued template,
+/// returning a normalized copy whose `witness[0]` is reset to the exact template placeholder
+/// while preserving all client-provided `cell_deps`, `inputs[1..]`, `outputs[1..]`, and
+/// `witness[1..]`.
+///
+/// When `submitted_signature` is `Some(sig)`, `witness[0]` in `submitted` may contain either
+/// the all-zero placeholder or `sig` in its 65-byte signature slot. When `None` (pre-signing
+/// validation in the SDK), `witness[0]` must equal the template witness verbatim.
+pub fn validate_and_normalize_self_funded_watchtower_tx(
+    template: &Transaction,
+    submitted: &Transaction,
+    required_expiry_since: Option<u64>,
+    submitted_signature: Option<&[u8; 65]>,
+) -> Result<Transaction, String> {
+    use ckb_types::prelude::*;
+
+    if submitted.as_slice().len() > MAX_SELF_FUNDED_WATCHTOWER_TX_BYTES {
+        return Err(format!(
+            "self-funded watchtower transaction exceeds maximum size ({MAX_SELF_FUNDED_WATCHTOWER_TX_BYTES} bytes)"
+        ));
+    }
+    let template_raw = template.raw();
+    let submitted_raw = submitted.raw();
+    if submitted_raw.version() != template_raw.version() {
+        return Err("self-funded watchtower transaction version mismatch".to_string());
+    }
+    if !submitted_raw.header_deps().is_empty() {
+        return Err("self-funded watchtower transaction must not include header_deps".to_string());
+    }
+    let inputs_len = submitted_raw.inputs().len();
+    if !(2..=MAX_SELF_FUNDED_WATCHTOWER_TX_ITEMS).contains(&inputs_len) {
+        return Err(format!(
+            "self-funded watchtower transaction must have between 2 and {MAX_SELF_FUNDED_WATCHTOWER_TX_ITEMS} inputs, got {inputs_len}"
+        ));
+    }
+    let outputs_len = submitted_raw.outputs().len();
+    if !(2..=MAX_SELF_FUNDED_WATCHTOWER_TX_ITEMS).contains(&outputs_len) {
+        return Err(format!(
+            "self-funded watchtower transaction must have between 2 and {MAX_SELF_FUNDED_WATCHTOWER_TX_ITEMS} outputs, got {outputs_len}"
+        ));
+    }
+    if outputs_len != submitted_raw.outputs_data().len() {
+        return Err(
+            "self-funded watchtower transaction outputs and outputs_data length mismatch"
+                .to_string(),
+        );
+    }
+    if submitted_raw.cell_deps().len() > MAX_SELF_FUNDED_WATCHTOWER_TX_ITEMS {
+        return Err(format!(
+            "self-funded watchtower transaction exceeds maximum cell_deps ({MAX_SELF_FUNDED_WATCHTOWER_TX_ITEMS})"
+        ));
+    }
+    let witnesses_len = submitted.witnesses().len();
+    if !(2..=MAX_SELF_FUNDED_WATCHTOWER_TX_ITEMS).contains(&witnesses_len) {
+        return Err(format!(
+            "self-funded watchtower transaction must have between 2 and {MAX_SELF_FUNDED_WATCHTOWER_TX_ITEMS} witnesses, got {witnesses_len}"
+        ));
+    }
+
+    let template_input0 = template_raw
+        .inputs()
+        .get(0)
+        .ok_or_else(|| "template transaction is missing input[0]".to_string())?;
+    let submitted_input0 = submitted_raw
+        .inputs()
+        .get(0)
+        .ok_or_else(|| "self-funded transaction is missing input[0]".to_string())?;
+    if submitted_input0 != template_input0 {
+        return Err(
+            "self-funded watchtower transaction input[0] must match template commitment input"
+                .to_string(),
+        );
+    }
+    let commitment_outpoint = template_input0.previous_output();
+    if submitted_raw
+        .inputs()
+        .into_iter()
+        .skip(1)
+        .any(|input| input.previous_output() == commitment_outpoint)
+    {
+        return Err(
+            "self-funded watchtower transaction duplicates commitment input[0]".to_string(),
+        );
+    }
+
+    let template_output0 = template_raw
+        .outputs()
+        .get(0)
+        .ok_or_else(|| "template transaction is missing output[0]".to_string())?;
+    let template_data0 = template_raw
+        .outputs_data()
+        .get(0)
+        .ok_or_else(|| "template transaction is missing outputs_data[0]".to_string())?;
+    if submitted_raw.outputs().get(0) != Some(template_output0)
+        || submitted_raw.outputs_data().get(0) != Some(template_data0)
+    {
+        return Err(
+            "self-funded watchtower transaction output[0] must match template commitment output"
+                .to_string(),
+        );
+    }
+
+    // Mirror CommitmentLock::load_expiry_raw_since_value: first absolute-timestamp input since.
+    let first_abs_timestamp_since = submitted_raw
+        .inputs()
+        .into_iter()
+        .map(|input| Unpack::<u64>::unpack(&input.since()))
+        .find(|raw_since| is_absolute_timestamp_since(*raw_since));
+    match required_expiry_since {
+        Some(required) => {
+            if !is_absolute_timestamp_since(required) {
+                return Err(
+                    "template required_expiry_since is not an absolute timestamp".to_string(),
+                );
+            }
+            let Some(actual) = first_abs_timestamp_since else {
+                return Err(
+                    "self-funded timeout TLC transaction requires an input with absolute timestamp since >= expiry"
+                        .to_string(),
+                );
+            };
+            if actual < required {
+                return Err(format!(
+                    "self-funded timeout TLC transaction expiry since ({actual}) is earlier than required ({required})"
+                ));
+            }
+        }
+        None => {
+            if first_abs_timestamp_since.is_some() {
+                return Err(
+                    "self-funded non-timeout watchtower transaction must not carry an absolute timestamp since"
+                        .to_string(),
+                );
+            }
+        }
+    }
+
+    let template_w0 = template
+        .witnesses()
+        .get(0)
+        .ok_or_else(|| "template transaction is missing witness[0]".to_string())?;
+    let submitted_w0 = submitted
+        .witnesses()
+        .get(0)
+        .ok_or_else(|| "self-funded transaction is missing witness[0]".to_string())?;
+    let template_w0_bytes = template_w0.raw_data();
+    let submitted_w0_bytes = submitted_w0.raw_data();
+    let (sig_start, sig_end) = settlement_witness_signature_range(&template_w0_bytes)?;
+    if submitted_w0_bytes.len() != template_w0_bytes.len()
+        || submitted_w0_bytes[..sig_start] != template_w0_bytes[..sig_start]
+        || submitted_w0_bytes[sig_end..] != template_w0_bytes[sig_end..]
+    {
+        return Err(
+            "self-funded watchtower transaction witness[0] does not match template unlock"
+                .to_string(),
+        );
+    }
+    let sig_slot = &submitted_w0_bytes[sig_start..sig_end];
+    let is_zero_placeholder = sig_slot == [0u8; 65].as_slice();
+    let matches_submitted_sig = submitted_signature.is_some_and(|sig| sig_slot == sig.as_slice());
+    if !is_zero_placeholder && !matches_submitted_sig {
+        return Err(
+            "self-funded watchtower transaction witness[0] signature slot must be zero placeholder or match submitted signature"
+                .to_string(),
+        );
+    }
+
+    let mut normalized_witnesses = Vec::with_capacity(witnesses_len);
+    normalized_witnesses.push(template_w0);
+    normalized_witnesses.extend(submitted.witnesses().into_iter().skip(1));
+    Ok(submitted
+        .clone()
+        .into_view()
+        .as_advanced_builder()
+        .set_witnesses(normalized_witnesses)
+        .build()
+        .data())
 }
 
 impl ChannelData {
@@ -937,5 +1242,333 @@ mod key_material_tests {
         assert_eq!(mirrored.remote_settlement, key(1).pubkey());
         assert_eq!(mirrored.local_funding, key(4).pubkey());
         assert_eq!(mirrored.remote_funding, key(3).pubkey());
+    }
+
+    fn build_template_witness(htlc_count: u8, with_preimage: bool, sig: [u8; 65]) -> Vec<u8> {
+        let mut w = vec![
+            16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0,    // xudt placeholder
+            0x01, // unlock_count = 1
+            htlc_count,
+        ];
+        w.extend(std::iter::repeat_n(0x11u8, htlc_count as usize * 97));
+        w.extend(std::iter::repeat_n(0x22u8, 72)); // party balances
+        w.push(if htlc_count > 0 { 0x00 } else { 0xfe }); // unlock_type
+        w.push(u8::from(with_preimage));
+        w.extend_from_slice(&sig);
+        if with_preimage {
+            w.extend_from_slice(&[0xaa; 32]);
+        }
+        w
+    }
+
+    fn build_template_and_funded(
+        htlc_count: u8,
+        with_preimage: bool,
+        required_expiry_since: Option<u64>,
+        funding_since: u64,
+    ) -> (Transaction, Transaction) {
+        use ckb_types::core::{DepType, TransactionBuilder};
+        use ckb_types::packed::{Byte32, CellDep, CellInput, OutPoint};
+        use ckb_types::prelude::*;
+
+        let commitment_outpoint = OutPoint::new(Byte32::from([1u8; 32]), 0);
+        let wallet_outpoint = OutPoint::new(Byte32::from([2u8; 32]), 1);
+        let residual_out = CellOutput::new_builder()
+            .capacity(28_400_000_000u64)
+            .build();
+        let residual_data = 100u128.to_le_bytes().to_vec().pack();
+        let udt_out = CellOutput::new_builder()
+            .capacity(14_200_000_000u64)
+            .build();
+        let udt_data = 50u128.to_le_bytes().to_vec().pack();
+        let change_out = CellOutput::new_builder().capacity(6_000_000_000u64).build();
+        let w0 = build_template_witness(htlc_count, with_preimage, [0u8; 65]);
+
+        let template = TransactionBuilder::default()
+            .cell_dep(
+                CellDep::new_builder()
+                    .out_point(OutPoint::new(Byte32::from([0x10; 32]), 0))
+                    .dep_type(DepType::DepGroup)
+                    .build(),
+            )
+            .input(CellInput::new(commitment_outpoint.clone(), 0))
+            .output(residual_out.clone())
+            .output_data(residual_data.clone())
+            .output(udt_out.clone())
+            .output_data(udt_data.clone())
+            .witness(w0.clone().pack())
+            .build()
+            .data();
+
+        let funded = TransactionBuilder::default()
+            .cell_dep(
+                CellDep::new_builder()
+                    .out_point(OutPoint::new(Byte32::from([0x10; 32]), 0))
+                    .dep_type(DepType::DepGroup)
+                    .build(),
+            )
+            .cell_dep(
+                CellDep::new_builder()
+                    .out_point(OutPoint::new(Byte32::from([0x20; 32]), 0))
+                    .dep_type(DepType::Code)
+                    .build(),
+            )
+            .input(CellInput::new(commitment_outpoint, 0))
+            .input(CellInput::new(wallet_outpoint, funding_since))
+            .output(residual_out)
+            .output_data(residual_data)
+            .output(udt_out)
+            .output_data(udt_data)
+            .output(change_out)
+            .output_data(Bytes::default())
+            .witness(w0.pack())
+            .witness([0xdeu8, 0xad, 0xbe, 0xef].pack())
+            .witness([0xcau8, 0xfe].pack())
+            .build()
+            .data();
+
+        let _ = required_expiry_since;
+        (template, funded)
+    }
+
+    #[test]
+    fn self_funded_watchtower_tx_validation_and_normalization() {
+        use ckb_types::core::DepType;
+        use ckb_types::packed::{Byte32, CellDep, CellInput, OutPoint};
+        use ckb_types::prelude::*;
+
+        let expiry_since = settlement_timestamp_since(100_000);
+        let (template, funded) =
+            build_template_and_funded(1, false, Some(expiry_since), expiry_since);
+        let sig = [0x55u8; 65];
+
+        // 1. Valid timeout TLC with zero placeholder in witness[0] normalizes cleanly and preserves witness[1..].
+        let norm_zero = validate_and_normalize_self_funded_watchtower_tx(
+            &template,
+            &funded,
+            Some(expiry_since),
+            Some(&sig),
+        )
+        .expect("valid zero-placeholder funded tx");
+        assert_eq!(norm_zero.witnesses().len(), 3);
+        assert_eq!(
+            norm_zero.witnesses().get(1).unwrap().raw_data().as_ref(),
+            &[0xde, 0xad, 0xbe, 0xef]
+        );
+        assert_eq!(
+            norm_zero.witnesses().get(2).unwrap().raw_data().as_ref(),
+            &[0xca, 0xfe]
+        );
+
+        // 2. Filled witness[0] matching `submitted_signature` normalizes to identical tx & digest.
+        let filled_w0 = build_template_witness(1, false, sig);
+        let filled = funded
+            .clone()
+            .into_view()
+            .as_advanced_builder()
+            .set_witnesses(vec![
+                filled_w0.pack(),
+                [0xdeu8, 0xad, 0xbe, 0xef].pack(),
+                [0xcau8, 0xfe].pack(),
+            ])
+            .build()
+            .data();
+        let norm_filled = validate_and_normalize_self_funded_watchtower_tx(
+            &template,
+            &filled,
+            Some(expiry_since),
+            Some(&sig),
+        )
+        .expect("valid filled-signature funded tx");
+        assert_eq!(norm_filled.as_slice(), norm_zero.as_slice());
+        assert_eq!(
+            self_funded_watchtower_tx_hash(&filled),
+            self_funded_watchtower_tx_hash(&funded)
+        );
+
+        // Pre-signing mode (`submitted_signature: None`) rejects non-zero signature slot in witness[0].
+        assert!(validate_and_normalize_self_funded_watchtower_tx(
+            &template,
+            &filled,
+            Some(expiry_since),
+            None,
+        )
+        .is_err());
+
+        // Wrong signature in witness[0] rejected.
+        let other_sig = [0x66u8; 65];
+        assert!(validate_and_normalize_self_funded_watchtower_tx(
+            &template,
+            &filled,
+            Some(expiry_since),
+            Some(&other_sig),
+        )
+        .is_err());
+
+        // 3. Changing client funding witness changes self_funded_watchtower_tx_hash.
+        let diff_witness = funded
+            .clone()
+            .into_view()
+            .as_advanced_builder()
+            .set_witnesses(vec![
+                funded.witnesses().get(0).unwrap(),
+                [0xdeu8, 0xad, 0xbe, 0xee].pack(),
+                [0xcau8, 0xfe].pack(),
+            ])
+            .build()
+            .data();
+        assert_ne!(
+            self_funded_watchtower_tx_hash(&funded),
+            self_funded_watchtower_tx_hash(&diff_witness)
+        );
+
+        // 4. Missing or too-early absolute timestamp `since` rejected for timeout TLC.
+        let early = funded
+            .clone()
+            .into_view()
+            .as_advanced_builder()
+            .set_inputs(vec![
+                funded.raw().inputs().get(0).unwrap(),
+                CellInput::new(OutPoint::new(Byte32::from([2u8; 32]), 1), expiry_since - 1),
+            ])
+            .build()
+            .data();
+        assert!(validate_and_normalize_self_funded_watchtower_tx(
+            &template,
+            &early,
+            Some(expiry_since),
+            Some(&sig),
+        )
+        .is_err());
+        let no_since = funded
+            .clone()
+            .into_view()
+            .as_advanced_builder()
+            .set_inputs(vec![
+                funded.raw().inputs().get(0).unwrap(),
+                CellInput::new(OutPoint::new(Byte32::from([2u8; 32]), 1), 0),
+            ])
+            .build()
+            .data();
+        assert!(validate_and_normalize_self_funded_watchtower_tx(
+            &template,
+            &no_since,
+            Some(expiry_since),
+            Some(&sig),
+        )
+        .is_err());
+
+        // 5. Non-timeout (preimage) TLC rejects unexpected absolute timestamp `since`, accepts since=0.
+        let (preimage_tmpl, preimage_funded_ok) = build_template_and_funded(1, true, None, 0);
+        assert!(validate_and_normalize_self_funded_watchtower_tx(
+            &preimage_tmpl,
+            &preimage_funded_ok,
+            None,
+            Some(&sig),
+        )
+        .is_ok());
+        let (_, preimage_funded_bad_since) = build_template_and_funded(1, true, None, expiry_since);
+        assert!(validate_and_normalize_self_funded_watchtower_tx(
+            &preimage_tmpl,
+            &preimage_funded_bad_since,
+            None,
+            Some(&sig),
+        )
+        .is_err());
+
+        // 6. Duplicate inputs[0] rejected.
+        let dup_input = funded
+            .clone()
+            .into_view()
+            .as_advanced_builder()
+            .set_inputs(vec![
+                funded.raw().inputs().get(0).unwrap(),
+                CellInput::new(
+                    funded.raw().inputs().get(0).unwrap().previous_output(),
+                    expiry_since,
+                ),
+            ])
+            .build()
+            .data();
+        assert!(validate_and_normalize_self_funded_watchtower_tx(
+            &template,
+            &dup_input,
+            Some(expiry_since),
+            Some(&sig),
+        )
+        .is_err());
+
+        // 7. Tampered inputs[0], outputs[0], outputs_data[0], or witness[0] preimage rejected.
+        let bad_out0 = funded
+            .clone()
+            .into_view()
+            .as_advanced_builder()
+            .set_outputs(vec![
+                CellOutput::new_builder().capacity(1u64).build(),
+                funded.raw().outputs().get(1).unwrap(),
+                funded.raw().outputs().get(2).unwrap(),
+            ])
+            .build()
+            .data();
+        assert!(validate_and_normalize_self_funded_watchtower_tx(
+            &template,
+            &bad_out0,
+            Some(expiry_since),
+            Some(&sig),
+        )
+        .is_err());
+
+        let mut bad_preimage_w0 = build_template_witness(1, true, [0u8; 65]);
+        *bad_preimage_w0.last_mut().unwrap() ^= 1;
+        let bad_w0_tx = preimage_funded_ok
+            .clone()
+            .into_view()
+            .as_advanced_builder()
+            .set_witnesses(vec![bad_preimage_w0.pack(), [0x01u8].pack()])
+            .build()
+            .data();
+        assert!(validate_and_normalize_self_funded_watchtower_tx(
+            &preimage_tmpl,
+            &bad_w0_tx,
+            None,
+            Some(&sig),
+        )
+        .is_err());
+
+        // 8. Oversized tx (bytes) and excessive item counts rejected.
+        let oversized_witness = funded
+            .clone()
+            .into_view()
+            .as_advanced_builder()
+            .set_witnesses(vec![
+                funded.witnesses().get(0).unwrap(),
+                vec![0u8; MAX_SELF_FUNDED_WATCHTOWER_TX_BYTES + 1].pack(),
+            ])
+            .build()
+            .data();
+        assert!(validate_and_normalize_self_funded_watchtower_tx(
+            &template,
+            &oversized_witness,
+            Some(expiry_since),
+            Some(&sig),
+        )
+        .is_err());
+
+        let mut too_many_deps = funded.clone().into_view().as_advanced_builder();
+        for i in 0..MAX_SELF_FUNDED_WATCHTOWER_TX_ITEMS {
+            too_many_deps = too_many_deps.cell_dep(
+                CellDep::new_builder()
+                    .out_point(OutPoint::new(Byte32::from([i as u8; 32]), i as u32))
+                    .dep_type(DepType::Code)
+                    .build(),
+            );
+        }
+        assert!(validate_and_normalize_self_funded_watchtower_tx(
+            &template,
+            &too_many_deps.build().data(),
+            Some(expiry_since),
+            Some(&sig),
+        )
+        .is_err());
     }
 }

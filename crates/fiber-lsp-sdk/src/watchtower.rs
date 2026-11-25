@@ -119,10 +119,18 @@ pub enum WatchtowerHealthStatus {
         channel_id: Hash256,
         /// Outstanding signature request identifier.
         request_id: Hash256,
-        /// Unix millisecond timestamp when the 30-minute fee-cell hold expires.
+        /// Unix millisecond timestamp when the 30-minute fee-cell hold / TTL expires.
         expires_at_ms: u64,
-        /// Remaining milliseconds before the fee-cell hold expires (`0` if already elapsed).
+        /// Remaining milliseconds before the request expires (`0` if already elapsed).
         remaining_ms: u64,
+        /// Whether the watchtower issued an unfunded template transaction (typical for hosted
+        /// UDT TLC unlocks or low-excess partial UDT settlements) that the wallet must fund
+        /// with its own `cell_deps`, `inputs[1..]`, change output, and funding witnesses before
+        /// submitting via `submit_watchtower_signature`.
+        self_funded: bool,
+        /// Optional absolute timestamp `since` required on a funding input for a self-funded
+        /// timeout TLC unlock.
+        required_expiry_since: Option<u64>,
     },
     /// No signature is currently pending, and new fee-holding requests are paused due to backoff.
     InBackoff {
@@ -219,12 +227,16 @@ pub fn evaluate_watchtower_status(
         fiber_json_types::WatchtowerSigningStatus::SignatureRequired {
             request_id,
             expires_at_ms,
+            self_funded,
+            required_expiry_since,
             ..
         } => WatchtowerHealthStatus::PendingSignature {
             channel_id,
             request_id: (*request_id).into(),
             expires_at_ms: *expires_at_ms,
             remaining_ms: expires_at_ms.saturating_sub(now_ms),
+            self_funded: *self_funded,
+            required_expiry_since: *required_expiry_since,
         },
         fiber_json_types::WatchtowerSigningStatus::Backoff {
             retry_after_ms,
@@ -379,6 +391,8 @@ mod tests {
                         .into(),
                 },
                 expires_at_ms: 2_000,
+                self_funded: false,
+                required_expiry_since: None,
             },
         };
         let pending = evaluate_watchtower_status(&pending_rpc, 1_200);
@@ -389,9 +403,42 @@ mod tests {
                 request_id,
                 expires_at_ms: 2_000,
                 remaining_ms: 800,
+                self_funded: false,
+                required_expiry_since: None,
             }
         );
         assert!(!pending.needs_self_broadcast(2_500, 1_200, 500));
+
+        // Self-funded SignatureRequired carries self_funded=true and required_expiry_since.
+        let self_funded_rpc = fiber_json_types::GetWatchtowerSigningStatusResult {
+            channel_id: channel_id.into(),
+            status: fiber_json_types::WatchtowerSigningStatus::SignatureRequired {
+                request_id: request_id.into(),
+                content: fiber_json_types::OnchainSigningContent {
+                    key_purpose: fiber_json_types::OnchainKeyPurpose::Tlc {
+                        commitment_number: 3,
+                    },
+                    transaction: ckb_types::core::TransactionBuilder::default()
+                        .build()
+                        .data()
+                        .into(),
+                },
+                expires_at_ms: 3_000,
+                self_funded: true,
+                required_expiry_since: Some(0x4000_0000_0000_0064),
+            },
+        };
+        assert_eq!(
+            evaluate_watchtower_status(&self_funded_rpc, 1_000),
+            WatchtowerHealthStatus::PendingSignature {
+                channel_id,
+                request_id,
+                expires_at_ms: 3_000,
+                remaining_ms: 2_000,
+                self_funded: true,
+                required_expiry_since: Some(0x4000_0000_0000_0064),
+            }
+        );
 
         // Expired pending request near dispute deadline -> trigger self-broadcast.
         let expired_pending = evaluate_watchtower_status(&pending_rpc, 2_100);

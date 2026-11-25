@@ -75,6 +75,22 @@ pub struct PendingRequest {
     /// Settlement snapshot when this request assigns balances.
     pub settlement: Option<OwnedSettlementBinding>,
     kind: RequestKind,
+    self_funded: bool,
+    required_expiry_since: Option<u64>,
+}
+
+impl PendingRequest {
+    /// Whether this watchtower request was funded by the client wallet and will submit
+    /// `signed_transaction` via [`HostedSession::confirm_self_funded_onchain`].
+    pub fn self_funded(&self) -> bool {
+        self.self_funded
+    }
+
+    /// Optional absolute timestamp `since` required on a funding input for a self-funded
+    /// timeout TLC unlock.
+    pub fn required_expiry_since(&self) -> Option<u64> {
+        self.required_expiry_since
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -731,11 +747,18 @@ impl<S: SignerStore> HostedSession<S> {
             prepared,
             settlement,
             kind: RequestKind::Channel,
+            self_funded: false,
+            required_expiry_since: None,
         }))
     }
 
-    /// Prepare a watchtower request with wallet-approved spending terms and trusted chain data.
-    /// On-chain signatures always require confirmation, regardless of policy.
+    /// Prepare an operator-funded watchtower request with wallet-approved spending terms and
+    /// trusted chain data. On-chain signatures always require confirmation, regardless of policy.
+    ///
+    /// For self-funded watchtower requests (`self_funded: true`), the wallet must first attach
+    /// its own `cell_deps`, funding inputs (`inputs[1..]`), change output, and funding witnesses
+    /// (`witness[1..]`) to the watchtower template transaction, then call
+    /// [`HostedSession::handle_self_funded_watchtower_status`].
     pub async fn handle_watchtower_status_verified<C: crate::ChainVerifier>(
         &self,
         channel_id: Hash256,
@@ -746,11 +769,17 @@ impl<S: SignerStore> HostedSession<S> {
         let WatchtowerSigningStatus::SignatureRequired {
             request_id,
             content,
+            self_funded,
             ..
         } = status
         else {
             return Ok(ProcessOutcome::Idle);
         };
+        if self_funded {
+            return Err(SessionError::Invalid(
+                "self-funded watchtower request must be funded by the wallet and prepared via handle_self_funded_watchtower_status".into(),
+            ));
+        }
         let signer = self.channel_signer(channel_id).await?;
         let prepared = signer
             .prepare_onchain(onchain_from_rpc(content), authorization, chain)
@@ -761,10 +790,75 @@ impl<S: SignerStore> HostedSession<S> {
             prepared,
             settlement: None,
             kind: RequestKind::Watchtower,
+            self_funded: false,
+            required_expiry_since: None,
         }))
     }
 
-    /// Confirm an on-chain request, rechecking live chain inputs and maturity before signing.
+    /// Prepare a self-funded watchtower request (`self_funded: true`) after the wallet has
+    /// attached its own `cell_deps`, funding inputs (`inputs[1..]`), change output, and funding
+    /// witnesses (`witness[1..]`) to the watchtower-issued template transaction.
+    ///
+    /// Validates `funded_transaction` against both the watchtower template (preserving `inputs[0]`,
+    /// `outputs[0]`, `witness[0]`, and any `required_expiry_since`) and the wallet's trusted
+    /// [`crate::ChainVerifier`] + [`crate::OnchainSpendAuthorization`].
+    pub async fn handle_self_funded_watchtower_status<C: crate::ChainVerifier>(
+        &self,
+        channel_id: Hash256,
+        status: WatchtowerSigningStatus,
+        funded_transaction: ckb_jsonrpc_types::Transaction,
+        authorization: crate::OnchainSpendAuthorization,
+        chain: &C,
+    ) -> Result<ProcessOutcome, SessionError> {
+        let WatchtowerSigningStatus::SignatureRequired {
+            request_id,
+            content: template,
+            self_funded,
+            required_expiry_since,
+            ..
+        } = status
+        else {
+            return Ok(ProcessOutcome::Idle);
+        };
+        if !self_funded {
+            return Err(SessionError::Invalid(
+                "handle_self_funded_watchtower_status only accepts self_funded watchtower requests"
+                    .into(),
+            ));
+        }
+        let template_content = onchain_from_rpc(template);
+        let funded_packed: ckb_types::packed::Transaction = funded_transaction.into();
+        let normalized_funded = fiber_types::validate_and_normalize_self_funded_watchtower_tx(
+            &template_content.transaction,
+            &funded_packed,
+            required_expiry_since,
+            None,
+        )
+        .map_err(SessionError::Invalid)?;
+        let funded_content = crate::OnchainSigningContent {
+            key_purpose: template_content.key_purpose,
+            transaction: normalized_funded,
+        };
+        let signer = self.channel_signer(channel_id).await?;
+        let prepared = signer
+            .prepare_onchain(funded_content, authorization, chain)
+            .await?;
+        Ok(ProcessOutcome::NeedConfirmation(PendingRequest {
+            channel_id,
+            request_id: request_id.into(),
+            prepared,
+            settlement: None,
+            kind: RequestKind::Watchtower,
+            self_funded: true,
+            required_expiry_since,
+        }))
+    }
+
+    /// Confirm an operator-funded on-chain request, rechecking live chain inputs and maturity
+    /// before signing.
+    ///
+    /// For self-funded watchtower requests (`pending.self_funded() == true`), use
+    /// [`HostedSession::confirm_self_funded_onchain`].
     pub async fn confirm_onchain<C: crate::ChainVerifier>(
         &self,
         pending: PendingRequest,
@@ -772,6 +866,11 @@ impl<S: SignerStore> HostedSession<S> {
     ) -> Result<SubmitParams, SessionError> {
         if !matches!(pending.kind, RequestKind::Watchtower) {
             return Err(SessionError::Invalid("expected watchtower request".into()));
+        }
+        if pending.self_funded {
+            return Err(SessionError::Invalid(
+                "self-funded watchtower request requires confirm_self_funded_onchain".into(),
+            ));
         }
         let signer = self.channel_signer(pending.channel_id).await?;
         let ChannelSignature::Onchain(signature) =
@@ -783,6 +882,42 @@ impl<S: SignerStore> HostedSession<S> {
             channel_id: pending.channel_id.into(),
             request_id: pending.request_id.into(),
             signature: signature.signature.to_vec(),
+            signed_transaction: None,
+        }))
+    }
+
+    /// Confirm a self-funded on-chain watchtower request (`pending.self_funded() == true`),
+    /// rechecking live chain inputs and maturity before signing `inputs[0]` and returning
+    /// [`SubmitWatchtowerSignatureParams`] carrying both `signature` and `signed_transaction`
+    /// (with all client funding inputs, cell_deps, outputs, and `witness[1..]` intact).
+    pub async fn confirm_self_funded_onchain<C: crate::ChainVerifier>(
+        &self,
+        pending: PendingRequest,
+        chain: &C,
+    ) -> Result<SubmitParams, SessionError> {
+        if !matches!(pending.kind, RequestKind::Watchtower) {
+            return Err(SessionError::Invalid("expected watchtower request".into()));
+        }
+        if !pending.self_funded {
+            return Err(SessionError::Invalid(
+                "confirm_self_funded_onchain only accepts self-funded watchtower requests".into(),
+            ));
+        }
+        let crate::ChannelSigningContent::Onchain(onchain) = pending.prepared.content() else {
+            return Err(SessionError::Invalid("expected on-chain content".into()));
+        };
+        let funded_tx: ckb_jsonrpc_types::Transaction = onchain.transaction.clone().into();
+        let signer = self.channel_signer(pending.channel_id).await?;
+        let ChannelSignature::Onchain(signature) =
+            signer.sign_onchain(pending.prepared, chain).await?
+        else {
+            return Err(SessionError::Invalid("expected on-chain signature".into()));
+        };
+        Ok(SubmitParams::Watchtower(SubmitWatchtowerSignatureParams {
+            channel_id: pending.channel_id.into(),
+            request_id: pending.request_id.into(),
+            signature: signature.signature.to_vec(),
+            signed_transaction: Some(funded_tx),
         }))
     }
 
@@ -868,6 +1003,7 @@ impl<S: SignerStore> HostedSession<S> {
                     channel_id: pending.channel_id.into(),
                     request_id: pending.request_id.into(),
                     signature: signature.signature.to_vec(),
+                    signed_transaction: None,
                 }))
             }
             _ => Err(SessionError::Invalid(
@@ -1123,6 +1259,8 @@ mod tests {
                 transaction: tx.into(),
             },
             expires_at_ms: 0,
+            self_funded: false,
+            required_expiry_since: None,
         }
     }
 

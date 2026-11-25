@@ -397,13 +397,16 @@ async fn watchtower_signing_status_exposes_backoff_and_pending_ttl() {
                     .data();
                 ext.pending_requests.insert(
                     req_id,
-                    OnchainSigningContent {
-                        key_purpose: OnchainKeyPurpose::Settlement,
-                        transaction: tx,
+                    fiber_types::PendingWatchtowerRequest {
+                        content: OnchainSigningContent {
+                            key_purpose: OnchainKeyPurpose::Settlement,
+                            transaction: tx,
+                        },
+                        created_at_ms,
+                        self_funded: false,
+                        required_expiry_since: None,
                     },
                 );
-                ext.pending_request_created_at_ms
-                    .insert(req_id, created_at_ms);
                 ext.consecutive_expired_requests = 2;
                 ext.retry_after_ms = retry_after_ms;
             }
@@ -459,7 +462,6 @@ async fn watchtower_signing_status_exposes_backoff_and_pending_ttl() {
         .update_watchtower_signer(&tenant, &ch1, |state| {
             if let WatchtowerSignerState::External(ext) = state {
                 ext.pending_requests.clear();
-                ext.pending_request_created_at_ms.clear();
             }
             Ok::<_, std::convert::Infallible>(())
         })
@@ -624,12 +626,16 @@ async fn create_watch_channel_retry_does_not_publish_no_signature_required_while
                         .data();
                     ext.pending_requests.insert(
                         req_id,
-                        OnchainSigningContent {
-                            key_purpose: OnchainKeyPurpose::Settlement,
-                            transaction: tx,
+                        fiber_types::PendingWatchtowerRequest {
+                            content: OnchainSigningContent {
+                                key_purpose: OnchainKeyPurpose::Settlement,
+                                transaction: tx,
+                            },
+                            created_at_ms: now_ms,
+                            self_funded: false,
+                            required_expiry_since: None,
                         },
                     );
-                    ext.pending_request_created_at_ms.insert(req_id, now_ms);
                 }
                 signing_update.watchtower_state(channel_id, state);
                 Ok::<_, std::convert::Infallible>(())
@@ -769,10 +775,15 @@ async fn submit_watchtower_signature_rejects_expired_and_refreshes_hold_on_accep
     store
         .update_watchtower_signer(&tenant, &channel_id, |state| {
             if let WatchtowerSignerState::External(ext) = state {
-                ext.pending_requests
-                    .insert(expired_req_id, expired_content.clone());
-                ext.pending_request_created_at_ms
-                    .insert(expired_req_id, expired_created_at);
+                ext.pending_requests.insert(
+                    expired_req_id,
+                    fiber_types::PendingWatchtowerRequest {
+                        content: expired_content.clone(),
+                        created_at_ms: expired_created_at,
+                        self_funded: false,
+                        required_expiry_since: None,
+                    },
+                );
             }
             Ok::<_, std::convert::Infallible>(())
         })
@@ -785,6 +796,7 @@ async fn submit_watchtower_signature_rejects_expired_and_refreshes_hold_on_accep
                 channel_id: channel_id.into(),
                 request_id: expired_req_id.into(),
                 signature: expired_sig.to_vec(),
+                signed_transaction: None,
             },
         )
         .await
@@ -797,7 +809,6 @@ async fn submit_watchtower_signature_rejects_expired_and_refreshes_hold_on_accep
                 ext.signed_signatures.is_empty(),
                 "expired request must not move into signed_signatures"
             );
-            assert!(ext.signed_signature_created_at_ms.is_empty());
             assert!(ext.last_applied.is_none());
             assert!(ext.pending_requests.contains_key(&expired_req_id));
         }
@@ -835,10 +846,15 @@ async fn submit_watchtower_signature_rejects_expired_and_refreshes_hold_on_accep
     store
         .update_watchtower_signer(&tenant, &channel_id, |state| {
             if let WatchtowerSignerState::External(ext) = state {
-                ext.pending_requests
-                    .insert(fresh_req_id, fresh_content.clone());
-                ext.pending_request_created_at_ms
-                    .insert(fresh_req_id, old_created_at);
+                ext.pending_requests.insert(
+                    fresh_req_id,
+                    fiber_types::PendingWatchtowerRequest {
+                        content: fresh_content.clone(),
+                        created_at_ms: old_created_at,
+                        self_funded: false,
+                        required_expiry_since: None,
+                    },
+                );
             }
             Ok::<_, std::convert::Infallible>(())
         })
@@ -851,6 +867,7 @@ async fn submit_watchtower_signature_rejects_expired_and_refreshes_hold_on_accep
                 channel_id: channel_id.into(),
                 request_id: fresh_req_id.into(),
                 signature: fresh_sig.to_vec(),
+                signed_transaction: None,
             },
         )
         .await
@@ -860,13 +877,10 @@ async fn submit_watchtower_signature_rejects_expired_and_refreshes_hold_on_accep
     let stamped_ms = match store.get_watchtower_signer(&tenant, &channel_id) {
         WatchtowerSignerState::External(ext) => {
             assert!(!ext.pending_requests.contains_key(&fresh_req_id));
-            assert!(!ext
-                .pending_request_created_at_ms
-                .contains_key(&fresh_req_id));
-            assert!(ext.signed_signatures.contains_key(&fresh_req_id));
-            *ext.signed_signature_created_at_ms
+            ext.signed_signatures
                 .get(&fresh_req_id)
-                .expect("signed_signature_created_at_ms must be recorded")
+                .expect("signed signature must be recorded")
+                .created_at_ms
         }
         other => panic!("expected external signer state, got {other:?}"),
     };

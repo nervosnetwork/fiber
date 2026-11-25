@@ -2961,11 +2961,13 @@ impl WatchtowerStore for Store {
                 let fee_inputs: Vec<OutPoint> = ext
                     .pending_requests
                     .values()
-                    .map(|content| &content.transaction)
+                    .filter(|req| !req.self_funded)
+                    .map(|req| &req.content.transaction)
                     .chain(
                         ext.signed_signatures
                             .values()
-                            .map(|(content, _)| &content.transaction),
+                            .filter(|req| !req.self_funded)
+                            .map(|req| &req.content.transaction),
                     )
                     .flat_map(|tx| {
                         tx.raw()

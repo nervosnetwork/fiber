@@ -1663,7 +1663,8 @@ fn test_store_watchtower_preimage_gc_ignores_ambiguous_legacy_settlement() {
 fn test_store_watchtower_signer_roundtrip() {
     use fiber_types::{
         LastAppliedWatchtowerSignature, OnchainKeyPurpose, OnchainSigningContent,
-        WatchtowerExternalSignerState, WatchtowerSignerState,
+        PendingWatchtowerRequest, SignedWatchtowerRequest, WatchtowerExternalSignerState,
+        WatchtowerSignerState,
     };
     use std::collections::BTreeMap;
 
@@ -1694,12 +1695,29 @@ fn test_store_watchtower_signer_roundtrip() {
     let sig_2 = [77u8; 65];
 
     let mut pending = BTreeMap::new();
-    pending.insert(req_id_1, content_1);
+    pending.insert(
+        req_id_1,
+        PendingWatchtowerRequest {
+            content: content_1,
+            created_at_ms: 100,
+            self_funded: true,
+            required_expiry_since: Some(0x4000_0000_0000_0064),
+        },
+    );
     let mut signed = BTreeMap::new();
-    signed.insert(req_id_2, (content_2, sig_2));
+    signed.insert(
+        req_id_2,
+        SignedWatchtowerRequest {
+            content: content_2,
+            signature: sig_2,
+            created_at_ms: 200,
+            self_funded: false,
+        },
+    );
     let last_applied = Some(LastAppliedWatchtowerSignature {
         request_id: req_id_2,
         signature: sig_2,
+        signed_transaction_hash: Some(Hash256::from([9u8; 32])),
     });
 
     let new_state = WatchtowerSignerState::External(WatchtowerExternalSignerState {
@@ -1726,7 +1744,7 @@ fn test_watchtower_atomic_update_preserves_concurrent_signature() {
     use fiber_types::watchtower::WatchtowerExternalSignerState;
     use fiber_types::{
         LastAppliedWatchtowerSignature, OnchainKeyPurpose, OnchainSigningContent,
-        WatchtowerSignerState,
+        PendingWatchtowerRequest, SignedWatchtowerRequest, WatchtowerSignerState,
     };
 
     let path = TempDir::new("watchtower-concurrent-signer-update");
@@ -1739,9 +1757,17 @@ fn test_watchtower_atomic_update_preserves_concurrent_signature() {
         key_purpose: OnchainKeyPurpose::Settlement,
         transaction: Transaction::default(),
     };
+    let pending_req = PendingWatchtowerRequest {
+        content: content.clone(),
+        created_at_ms: 100,
+        self_funded: false,
+        required_expiry_since: None,
+    };
     let signature = [42; 65];
     let mut initial = WatchtowerExternalSignerState::default();
-    initial.pending_requests.insert(signed_id, content.clone());
+    initial
+        .pending_requests
+        .insert(signed_id, pending_req.clone());
     store.put_watchtower_signer(
         &node_id,
         &channel_id,
@@ -1754,7 +1780,7 @@ fn test_watchtower_atomic_update_preserves_concurrent_signature() {
     std::thread::scope(|scope| {
         let store = &store;
         let node_id = &node_id;
-        let content = &content;
+        let pending_req_ref = &pending_req;
         let scan = scope.spawn(move || {
             store
                 .update_watchtower_signer(node_id, &channel_id, |state| {
@@ -1765,7 +1791,9 @@ fn test_watchtower_atomic_update_preserves_concurrent_signature() {
                     let WatchtowerSignerState::External(external) = state else {
                         panic!("external signer");
                     };
-                    external.pending_requests.insert(new_id, content.clone());
+                    external
+                        .pending_requests
+                        .insert(new_id, pending_req_ref.clone());
                     Ok::<_, ()>(())
                 })
                 .expect("scan update");
@@ -1784,12 +1812,19 @@ fn test_watchtower_atomic_update_preserves_concurrent_signature() {
                         .pending_requests
                         .remove(&signed_id)
                         .expect("pending signature");
-                    external
-                        .signed_signatures
-                        .insert(signed_id, (pending, signature));
+                    external.signed_signatures.insert(
+                        signed_id,
+                        SignedWatchtowerRequest {
+                            content: pending.content,
+                            signature,
+                            created_at_ms: pending.created_at_ms,
+                            self_funded: pending.self_funded,
+                        },
+                    );
                     external.last_applied = Some(LastAppliedWatchtowerSignature {
                         request_id: signed_id,
                         signature,
+                        signed_transaction_hash: None,
                     });
                     Ok::<_, ()>(())
                 })
@@ -1816,16 +1851,22 @@ fn test_watchtower_atomic_update_preserves_concurrent_signature() {
     };
     assert_eq!(
         state.signed_signatures.get(&signed_id),
-        Some(&(content.clone(), signature)),
+        Some(&SignedWatchtowerRequest {
+            content,
+            signature,
+            created_at_ms: 100,
+            self_funded: false,
+        }),
         "scan must not overwrite an accepted signature"
     );
     assert!(!state.pending_requests.contains_key(&signed_id));
-    assert_eq!(state.pending_requests.get(&new_id), Some(&content));
+    assert_eq!(state.pending_requests.get(&new_id), Some(&pending_req));
     assert_eq!(
         state.last_applied,
         Some(LastAppliedWatchtowerSignature {
             request_id: signed_id,
-            signature
+            signature,
+            signed_transaction_hash: None,
         })
     );
 }
