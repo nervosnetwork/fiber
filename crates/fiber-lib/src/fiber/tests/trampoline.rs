@@ -5064,7 +5064,9 @@ async fn assert_trampoline_success_drains_remaining_tlc(restart: bool) {
     .await;
     let held = node_c.store.get_payment_hold_tlcs(payment_hash);
     assert_eq!(held.len(), 2);
-    // Delay only the second channel's commitment exchange so its result remains outstanding.
+    // C fails one shard before revealing the preimage. Hold its commitment exchange so B
+    // still has an in-flight attempt when the other shard succeeds. Merely holding messages
+    // without failing the TLC lets C's hold-invoice retry fulfill it as well.
     node_c
         .hold_next_fiber_messages(
             node_b.get_public_key(),
@@ -5073,6 +5075,46 @@ async fn assert_trampoline_success_drains_remaining_tlc(restart: bool) {
             16,
         )
         .await;
+
+    let failed = &held[0];
+    let failed_tlc = node_c
+        .get_tlc(failed.channel_id, TLCId::Received(failed.tlc_id))
+        .expect("failed shard exists");
+    call!(node_c.network_actor, |rpc_reply| {
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: failed.channel_id,
+                command: ChannelCommand::RemoveTlc(
+                    RemoveTlcCommand {
+                        id: failed.tlc_id,
+                        reason: RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+                            TlcErr::new(TlcErrorCode::InvoiceCancelled),
+                            &failed_tlc.shared_secret,
+                        )),
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("C network actor alive")
+    .expect("fail one shard");
+    node_c.wait_for_held_fiber_messages(1).await;
+    assert!(
+        matches!(
+            node_c
+                .get_tlc(failed.channel_id, TLCId::Received(failed.tlc_id))
+                .and_then(|tlc| tlc.removed_reason),
+            Some(RemoveTlcReason::RemoveTlcFail(_))
+        ),
+        "the failed shard must be removed before the preimage is exposed"
+    );
+    let remaining = node_c.store.get_payment_hold_tlcs(payment_hash);
+    assert_eq!(remaining.len(), 1, "only the other shard remains held");
+    assert_eq!(
+        (remaining[0].channel_id, remaining[0].tlc_id),
+        (held[1].channel_id, held[1].tlc_id)
+    );
 
     // Learn the proof while another real outgoing TLC is still committed.
     let fulfilled = &held[1];
@@ -5117,9 +5159,6 @@ async fn assert_trampoline_success_drains_remaining_tlc(restart: bool) {
     let attempts = node_b.store.get_attempts(payment_hash);
     assert_eq!(attempts.len(), 2);
     if restart {
-        // Model a malicious C that cancels/fails the remaining shard instead of
-        // letting honest H12 recovery settle the remaining shard on reconnect.
-        node_c.cancel_invoice(&payment_hash);
         node_b.stop().await;
         node_c.discard_held_fiber_messages().await;
         node_b.start().await;
