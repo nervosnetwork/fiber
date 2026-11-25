@@ -884,6 +884,7 @@ async fn same_hash_delivery_survives_public_node_and_service_restart() {
         .send_message(NetworkActorMessage::new_command(
             PublicNetworkCommand::SetDeliveryPort(crate::lsp::LspDeliveryPort::new(
                 service.clone(),
+                public.store.clone(),
             )),
         ))
         .unwrap();

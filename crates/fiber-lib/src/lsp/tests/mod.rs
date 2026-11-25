@@ -4259,7 +4259,7 @@ async fn payment_outcome_notification_allows_network_queries_before_settlement()
     .unwrap();
     node.network_actor
         .send_message(NetworkActorMessage::new_command(
-            PublicNetworkCommand::SetDeliveryPort(crate::lsp::LspDeliveryPort::new(
+            PublicNetworkCommand::SetDeliveryPort(crate::lsp::LspDeliveryPort::without_fast_path(
                 service.clone(),
             )),
         ))
@@ -4338,7 +4338,7 @@ async fn delayed_payment_outcome_does_not_settle_replacement_execution() {
     .unwrap();
     node.network_actor
         .send_message(NetworkActorMessage::new_command(
-            PublicNetworkCommand::SetDeliveryPort(crate::lsp::LspDeliveryPort::new(
+            PublicNetworkCommand::SetDeliveryPort(crate::lsp::LspDeliveryPort::without_fast_path(
                 service.clone(),
             )),
         ))
@@ -6402,5 +6402,158 @@ async fn accept_trampoline_delivery_skips_when_reply_port_is_closed() {
     wait_for_delivery_status(&manager, payment_hash, LspPaymentDeliveryStatus::InFlight).await;
     assert_eq!(dispatches.load(Ordering::SeqCst), 1);
 
+    service.stop_and_wait(None, None).await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn non_hosted_trampoline_delivery_port_bypasses_stalled_lsp_past_timeout() {
+    use crate::fiber::delivery::{
+        HostedDeliveryPort, PaymentOutcomeRequest, SettledPaymentOutcome,
+    };
+    use crate::fiber_types::{PaymentSessionKey, UpstreamTlcKey};
+
+    struct StallingRuntimeFactory {
+        tenant_pubkey: fiber_types::Pubkey,
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait]
+    impl TenantRuntimeFactory for StallingRuntimeFactory {
+        fn provision(&self, tenant_id: &TenantId) -> Result<HostedTenantRecord, String> {
+            Ok(HostedTenantRecord {
+                tenant_id: tenant_id.clone(),
+                root_signer_pubkey: None,
+                tenant_pubkey: self.tenant_pubkey,
+                created_at: 42,
+                token_epoch: 0,
+            })
+        }
+
+        async fn start(&self, record: &HostedTenantRecord) -> Result<HostedTenantRuntime, String> {
+            self.entered.notify_one();
+            self.release.notified().await;
+            let (actor, _) = Actor::spawn(None, NoopNetworkActor, ())
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(HostedTenantRuntime::network_backed(
+                record.tenant_pubkey,
+                actor,
+            ))
+        }
+    }
+
+    let root = tempdir().expect("temporary directory");
+    let config = lsp_config(root.path().join("lsp"));
+    let store = open_lsp_store(&config);
+    let lsp_key = Privkey::from(&[9; 32]);
+    let tenant_key = Privkey::from(&[1; 32]);
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let service = start_test_lsp_service(
+        store.clone(),
+        config,
+        Arc::new(StallingRuntimeFactory {
+            tenant_pubkey: tenant_key.pubkey(),
+            entered: entered.clone(),
+            release: release.clone(),
+        }),
+        lsp_key.clone(),
+        Arc::new(AtomicUsize::new(0)),
+        Arc::new(AtomicUsize::new(0)),
+    )
+    .await;
+
+    let tenant_id =
+        register_authenticated_test_tenant(&service, &lsp_key, &test_root_signer()).await;
+    let hosted_hash = Hash256::from([0x71; 32]);
+    register_test_invoice(&service, tenant_id.clone(), &tenant_key, hosted_hash).await;
+    let tenant = HostedTenantRecord {
+        tenant_id: tenant_id.clone(),
+        root_signer_pubkey: None,
+        tenant_pubkey: tenant_key.pubkey(),
+        created_at: 42,
+        token_epoch: 0,
+    };
+
+    // Stall LspService's actor mailbox inside EnsureTenant -> TenantRuntimeFactory::start.
+    let ensure_service = service.clone();
+    let ensure_tenant = tenant_id.clone();
+    let ensure_task = tokio::spawn(async move {
+        let _ = ractor::call!(ensure_service, |reply| {
+            LspServiceMessage::EnsureTenant(ensure_tenant, reply)
+        });
+    });
+    entered.notified().await;
+
+    let port = crate::lsp::LspDeliveryPort::new(service.clone(), store.clone());
+    let now = crate::now_timestamp_as_millis_u64();
+
+    // Non-hosted trampoline forward must short-circuit via metadata_store without touching
+    // the stalled LspService actor.
+    let unrelated_target = HostedTenantRecord {
+        tenant_id: TenantId::new("unrelated-bob").unwrap(),
+        root_signer_pubkey: None,
+        tenant_pubkey: Privkey::from(&[77; 32]).pubkey(),
+        created_at: 42,
+        token_epoch: 0,
+    };
+    let non_hosted_hash = Hash256::from([0x72; 32]);
+    let non_hosted_request = hosted_forwarding_request(&unrelated_target, non_hosted_hash, now);
+    assert_eq!(
+        port.accept_trampoline_delivery(non_hosted_request.clone())
+            .await
+            .expect("non-hosted trampoline accept must bypass stalled LSP actor"),
+        DeliveryDecision::NotHosted
+    );
+
+    let non_hosted_session_key = PaymentSessionKey {
+        payment_hash: non_hosted_hash,
+        upstream_tlc_key: Some(UpstreamTlcKey {
+            incoming_channel_id: non_hosted_request.previous_tlc.prev_channel_id,
+            incoming_tlc_id: non_hosted_request.previous_tlc.prev_tlc_id,
+        }),
+    };
+    assert_eq!(
+        port.decide_payment_outcome(PaymentOutcomeRequest {
+            session_key: non_hosted_session_key,
+            payment_status: PaymentStatus::Success,
+            failure: None,
+            failure_code: None,
+        })
+        .await
+        .expect("non-hosted trampoline outcome must bypass stalled LSP actor"),
+        PaymentOutcomeDecision::SettleUpstream
+    );
+    port.report_settled_payment(SettledPaymentOutcome {
+        session_key: non_hosted_session_key,
+        payment_status: PaymentStatus::Success,
+        failure: None,
+    });
+
+    // Positive control: a registered hosted invoice still routes to LspService and times out
+    // once the stalled actor holds the mailbox past the 15s DELIVERY_CALL_TIMEOUT_MS.
+    let hosted_request = hosted_forwarding_request(&tenant, hosted_hash, now);
+    let err = port
+        .accept_trampoline_delivery(hosted_request)
+        .await
+        .expect_err("hosted invoice must still route to stalled LspService and hit 15s timeout");
+    assert!(
+        err.contains("LSP delivery service unavailable"),
+        "unexpected timeout error: {err}"
+    );
+
+    // Even after advancing past 15s, another non-hosted forward still succeeds immediately.
+    let non_hosted_request_2 =
+        hosted_forwarding_request(&unrelated_target, Hash256::from([0x73; 32]), now);
+    assert_eq!(
+        port.accept_trampoline_delivery(non_hosted_request_2)
+            .await
+            .expect("non-hosted trampoline forward must still succeed after >15s stall"),
+        DeliveryDecision::NotHosted
+    );
+
+    release.notify_one();
+    ensure_task.await.unwrap();
     service.stop_and_wait(None, None).await.unwrap();
 }

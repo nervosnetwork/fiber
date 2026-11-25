@@ -585,6 +585,7 @@ async fn run_node(
                 .send_message(NetworkActorMessage::new_command(
                     PublicNetworkCommand::SetDeliveryPort(fnn::lsp::LspDeliveryPort::new(
                         lsp_actor.clone(),
+                        store.clone(),
                     )),
                 ))
                 .map_err(|error| {

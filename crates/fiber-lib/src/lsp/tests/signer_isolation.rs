@@ -175,7 +175,7 @@ impl TestLspFixture {
             .network_actor
             .send_message(NetworkActorMessage::new_command(
                 crate::fiber::network::PublicNetworkCommand::SetDeliveryPort(
-                    crate::lsp::LspDeliveryPort::new(lsp_actor.clone()),
+                    crate::lsp::LspDeliveryPort::new(lsp_actor.clone(), public_t.store.clone()),
                 ),
             ))
             .expect("attach LSP service to public node");

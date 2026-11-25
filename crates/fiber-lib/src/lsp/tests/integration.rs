@@ -1270,6 +1270,7 @@ pub(super) async fn create_lsp_test_network_inner(
             .send_message(NetworkActorMessage::new_command(
                 PublicNetworkCommand::SetDeliveryPort(crate::lsp::LspDeliveryPort::new(
                     lsp_actor.clone(),
+                    nodes[lsp_node_index].store.clone(),
                 )),
             ))
             .expect("attach LSP service to public node");
@@ -2226,6 +2227,7 @@ async fn hosted_payment_buffers_offline_private_channel_and_resumes_via_rpc() {
         .send_message(NetworkActorMessage::new_command(
             PublicNetworkCommand::SetDeliveryPort(crate::lsp::LspDeliveryPort::new(
                 lsp_actor.clone(),
+                public_t.store.clone(),
             )),
         ))
         .expect("attach LSP service to Public T");
@@ -3470,5 +3472,149 @@ async fn hosted_tenant_restart_resumes_persisted_inflight_payment() {
     rpc_handle.stopped().await;
     lsp_actor.stop(Some("integration test complete".to_string()));
 }
+
+#[tokio::test]
+async fn non_hosted_trampoline_forward_succeeds_while_lsp_actor_is_stalled() {
+    init_tracing();
+
+    struct StallingRuntimeFactory {
+        tenant_pubkey: crate::fiber_types::Pubkey,
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait]
+    impl TenantRuntimeFactory for StallingRuntimeFactory {
+        fn provision(&self, tenant_id: &TenantId) -> Result<HostedTenantRecord, String> {
+            Ok(HostedTenantRecord {
+                tenant_id: tenant_id.clone(),
+                root_signer_pubkey: None,
+                tenant_pubkey: self.tenant_pubkey,
+                created_at: 42,
+                token_epoch: 0,
+            })
+        }
+
+        async fn start(&self, record: &HostedTenantRecord) -> Result<HostedTenantRuntime, String> {
+            self.entered.notify_one();
+            self.release.notified().await;
+            let (actor, _) = Actor::spawn(None, super::NoopNetworkActor, ())
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(HostedTenantRuntime::network_backed(
+                record.tenant_pubkey,
+                actor,
+            ))
+        }
+    }
+
+    // 3-node topology: Alice (0) <-> Public T (1) <-> Bob (2), all non-hosted peers.
+    let (nodes, _channels) = create_n_nodes_network_with_visibility(
+        &[
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT), true),
+            ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT), true),
+        ],
+        3,
+    )
+    .await;
+    let alice = &nodes[0];
+    let public_t = &nodes[1];
+    let bob = &nodes[2];
+
+    wait_until_node_supports_trampoline_routing(alice, public_t).await;
+
+    let root_actor = get_test_root_actor().await;
+    let lsp_dir = tempfile::tempdir().expect("lsp tempdir");
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let lsp_actor = Actor::spawn_linked(
+        None,
+        LspService,
+        LspServiceArgs {
+            config: super::lsp_config(lsp_dir.path().join("lsp")),
+            public_node_id: public_t.pubkey,
+            public_network_actor: public_t.network_actor.clone(),
+            store: public_t.store.namespaced(NodeNamespace::lsp_metadata()),
+            runtime_factory: Arc::new(StallingRuntimeFactory {
+                tenant_pubkey: Privkey::from(&[0x51; 32]).pubkey(),
+                entered: entered.clone(),
+                release: release.clone(),
+            }),
+            signing_key: public_t.private_key.clone(),
+            token_issuer: super::test_token_issuer(),
+            watchtower_store: public_t.store.clone(),
+            signing_events: public_t.signing_events.clone(),
+        },
+        root_actor.get_cell(),
+    )
+    .await
+    .expect("start LSP service")
+    .0;
+
+    public_t
+        .network_actor
+        .send_message(NetworkActorMessage::new_command(
+            PublicNetworkCommand::SetDeliveryPort(crate::lsp::LspDeliveryPort::new(
+                lsp_actor.clone(),
+                public_t.store.clone(),
+            )),
+        ))
+        .expect("attach LSP delivery port to Public T");
+
+    let tenant_id = super::register_authenticated_test_tenant(
+        &lsp_actor,
+        &public_t.private_key,
+        &super::test_root_signer(),
+    )
+    .await;
+
+    // Wedge LspService's mailbox inside EnsureTenant -> TenantRuntimeFactory::start.
+    let ensure_actor = lsp_actor.clone();
+    let ensure_tenant = tenant_id.clone();
+    let ensure_task = tokio::spawn(async move {
+        let _ = ractor::call!(ensure_actor, |reply| {
+            LspServiceMessage::EnsureTenant(ensure_tenant, reply)
+        });
+    });
+    entered.notified().await;
+
+    // Confirm LspService really is blocked and cannot answer actor messages.
+    assert!(
+        ractor::call_t!(lsp_actor, LspServiceMessage::GetStatus, 200).is_err(),
+        "LspService actor must be stalled before forwarding non-hosted trampoline"
+    );
+
+    // Alice forwards an unrelated non-hosted trampoline payment to Bob through Public T.
+    // Because Bob's invoice is not hosted, both accept_trampoline_delivery and
+    // decide_payment_outcome bypass the stalled LspService actor and succeed immediately.
+    let (invoice, _preimage) = bob.gen_basic_invoice(1_000_000);
+    let payment_hash = *invoice.payment_hash();
+    let payment = alice
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            max_fee_amount: Some(100_000),
+            trampoline_hops: Some(vec![public_t.pubkey]),
+            ..Default::default()
+        })
+        .await
+        .expect("start non-hosted trampoline payment");
+    assert_eq!(payment.payment_hash, payment_hash);
+    alice.wait_until_success(payment_hash).await;
+    assert_eq!(
+        bob.get_invoice_status(&payment_hash),
+        Some(CkbInvoiceStatus::Paid)
+    );
+
+    // LspService is still blocked throughout the entire non-hosted trampoline payment.
+    assert!(
+        ractor::call_t!(lsp_actor, LspServiceMessage::GetStatus, 200).is_err(),
+        "LspService actor should still be stalled after non-hosted trampoline settled"
+    );
+
+    release.notify_one();
+    ensure_task.await.unwrap();
+    lsp_actor.stop(Some("integration test complete".to_string()));
+}
+
 #[path = "same_hash.rs"]
 mod same_hash;
