@@ -9,11 +9,22 @@ use fnn::ckb::contracts::TypeIDResolver;
 use fnn::ckb::contracts::{get_cell_deps, Contract};
 use fnn::ckb::{contracts::try_init_contracts_context, CkbChainActor};
 use fnn::event_handler::forward_event_to_client;
-use fnn::fiber::{graph::NetworkGraph, network::init_chain_hash, network::NetworkActorMessage};
+#[cfg(feature = "lsp")]
+use fnn::fiber::network::PublicNetworkCommand;
+use fnn::fiber::{
+    graph::NetworkGraph,
+    network::{init_chain_hash, NetworkActorMessage},
+};
+#[cfg(feature = "lsp")]
+use fnn::fiber_types::Privkey;
+#[cfg(feature = "lsp")]
+use fnn::lsp::{BiscuitTokenIssuer, FiberTenantRuntimeFactory, LspService, LspServiceArgs};
 use fnn::rpc::server::start_rpc;
 use fnn::store::actor::{StoreActor, StoreActorInitializationParameter};
 use fnn::store::open_store_with_migration;
 use fnn::store::restore::restore;
+#[cfg(feature = "lsp")]
+use fnn::store::NodeNamespace;
 use fnn::store::{MigrationPlan, MigrationProgress};
 use fnn::tasks::{
     cancel_tasks_and_wait_for_completion, new_tokio_cancellation_token, new_tokio_task_tracker,
@@ -38,6 +49,26 @@ use tracing::{debug, error, info, info_span, trace};
 use tracing_subscriber::{field::MakeExt, fmt, fmt::format, EnvFilter};
 
 const ASSUME_WATCHTOWER_ACTOR_ALIVE: &str = "watchtower actor must be alive";
+
+fn validate_watchtower_config(
+    fiber_config: &fnn::FiberConfig,
+    lsp_enabled: bool,
+) -> Result<(), ExitMessage> {
+    let disable_built_in = fiber_config.disable_built_in_watchtower.unwrap_or_default();
+    if fiber_config.standalone_watchtower_rpc_url.is_none() && disable_built_in {
+        return ExitMessage::err(
+            "fiber config requires standalone watchtower rpc url or built-in watchtower to be enabled"
+                .to_string(),
+        );
+    }
+    if lsp_enabled && disable_built_in {
+        return ExitMessage::err(
+            "LSP service requires the built-in watchtower to be enabled (disable_built_in_watchtower cannot be true)"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
 
 fn cli_confirm(plan: MigrationPlan) -> bool {
     eprintln!("{}", plan.message);
@@ -149,9 +180,19 @@ async fn run() -> Result<(), ExitMessage> {
         let ckb_key_path = ckb_config.base_dir().join("key");
         let fiber_key_path = parsed_fiber_config.base_dir().join("sk");
         let store_path = parsed_fiber_config.store_path();
+        #[cfg(feature = "lsp")]
+        let tenant_store_root = config.lsp.as_ref().map(|lsp| lsp.tenant_store_root());
+        #[cfg(not(feature = "lsp"))]
+        let tenant_store_root: Option<std::path::PathBuf> = None;
 
-        restore(source_path, &store_path, &fiber_key_path, &ckb_key_path)
-            .map_err(|err| ExitMessage(format!("Failed to restore database: {}", err)))?;
+        restore(
+            source_path,
+            &store_path,
+            &fiber_key_path,
+            &ckb_key_path,
+            tenant_store_root.as_deref(),
+        )
+        .map_err(|err| ExitMessage(format!("Failed to restore database: {}", err)))?;
 
         info!("Successfully restored database to {:?}.", store_path);
         info!("Channels may have been marked as 'Stale' for safety audit.");
@@ -204,9 +245,18 @@ async fn run_node(
         }
     });
 
+    let signing_events = fnn::signing::SigningEvents::default();
+    #[cfg(feature = "lsp")]
+    let mut tenant_runtime_factory = None;
     #[allow(unused_variables)]
     let (network_actor, ckb_chain_actor, network_graph, store_actor) = match config.fiber.clone() {
         Some(fiber_config) => {
+            #[cfg(feature = "lsp")]
+            let lsp_enabled = config.lsp.is_some();
+            #[cfg(not(feature = "lsp"))]
+            let lsp_enabled = false;
+            validate_watchtower_config(&fiber_config, lsp_enabled)?;
+
             // TODO: this is not a super user friendly error message which has actionable information
             // for the user to fix the error and start the node.
             let ckb_config = config.ckb.clone().ok_or_else(|| {
@@ -268,6 +318,10 @@ async fn run_node(
             let backup_path = fiber_config.base_dir().join("backups");
             let ckb_key_path = ckb_config.base_dir().join("key");
             let fiber_key_path = fiber_config.base_dir().join("sk");
+            #[cfg(feature = "lsp")]
+            let tenant_store_root = config.lsp.as_ref().map(|lsp| lsp.tenant_store_root());
+            #[cfg(not(feature = "lsp"))]
+            let tenant_store_root = None;
             let store_actor = Actor::spawn_linked(
                 Some("store_actor".to_string()),
                 StoreActor {
@@ -278,6 +332,7 @@ async fn run_node(
                     backup_path,
                     ckb_key_path,
                     fiber_key_path,
+                    tenant_store_root,
                     backup_interval_hours: 24,
                 },
                 root_actor.get_cell(),
@@ -285,30 +340,6 @@ async fn run_node(
             .await
             .map_err(|err| ExitMessage(format!("failed to start store actor: {}", err)))?
             .0;
-
-            let chain_client = CkbRpcClient::new(&ckb_config);
-            let network_actor: ActorRef<NetworkActorMessage> = start_network(
-                fiber_config.clone(),
-                chain_client,
-                ckb_chain_actor.clone(),
-                event_sender,
-                new_tokio_task_tracker(),
-                root_actor.get_cell(),
-                store.clone(),
-                Some(store_actor.clone()),
-                network_graph.clone(),
-                default_shutdown_script,
-            )
-            .await;
-
-            if fiber_config.standalone_watchtower_rpc_url.is_none()
-                && fiber_config.disable_built_in_watchtower.unwrap_or_default()
-            {
-                return ExitMessage::err(
-                    "fiber config requires standalone watchtower rpc url or built-in watchtower to be enabled"
-                        .to_string(),
-                );
-            }
 
             let watchtower_client = if let Some(url) =
                 fiber_config.standalone_watchtower_rpc_url.clone()
@@ -338,13 +369,15 @@ async fn run_node(
                 None
             };
 
+            // Start watchtower before network so WatchtowerActor::pre_start restores
+            // persisted external fee-cell holds before any channel funding can pick cells.
             let watchtower_actor = if fiber_config.disable_built_in_watchtower.unwrap_or_default() {
                 None
             } else {
                 let watchtower_actor = Actor::spawn_linked(
                     Some("watchtower".to_string()),
-                    WatchtowerActor::new(store.clone()),
-                    ckb_config,
+                    WatchtowerActor::new(store.clone()).with_signing_events(signing_events.clone()),
+                    ckb_config.clone(),
                     root_actor.get_cell(),
                 )
                 .await
@@ -361,6 +394,37 @@ async fn run_node(
                 );
                 Some(watchtower_actor)
             };
+
+            let chain_client = CkbRpcClient::new(&ckb_config);
+            let network_actor: ActorRef<NetworkActorMessage> = start_network(
+                signing_events.channels(None),
+                fiber_config.clone(),
+                chain_client.clone(),
+                ckb_chain_actor.clone(),
+                event_sender,
+                new_tokio_task_tracker(),
+                root_actor.get_cell(),
+                store.clone(),
+                Some(store_actor.clone()),
+                network_graph.clone(),
+                default_shutdown_script.clone(),
+            )
+            .await;
+
+            #[cfg(feature = "lsp")]
+            if let Some(lsp_config) = config.lsp.clone() {
+                tenant_runtime_factory = Some(Arc::new(FiberTenantRuntimeFactory::new(
+                    signing_events.clone(),
+                    lsp_config,
+                    fiber_config.clone(),
+                    chain_client,
+                    ckb_chain_actor.clone(),
+                    network_actor.clone(),
+                    store.clone(),
+                    root_actor.get_cell(),
+                    default_shutdown_script,
+                )));
+            }
 
             #[cfg(feature = "metrics")]
             if let Some(addr) = fiber_config.metrics_addr.as_ref() {
@@ -443,6 +507,116 @@ async fn run_node(
         }
         None => (None, None, None, None),
     };
+
+    #[cfg(not(feature = "lsp"))]
+    if config.lsp.is_some() {
+        return ExitMessage::err(
+            "this binary was built without the `lsp` feature, but the config requests it"
+                .to_string(),
+        );
+    }
+    #[cfg(feature = "lsp")]
+    let lsp_actor = match (
+        config.lsp.clone(),
+        network_actor.as_ref(),
+        tenant_runtime_factory,
+    ) {
+        (Some(lsp_config), Some(public_network_actor), Some(runtime_factory)) => {
+            let public_fiber_config = config
+                .fiber
+                .as_ref()
+                .expect("running network actor has Fiber config");
+            let public_node_id =
+                fnn::fiber::types::pubkey_from_tentacle(public_fiber_config.public_key());
+            let public_key_pair =
+                public_fiber_config
+                    .read_or_generate_secret_key()
+                    .map_err(|error| {
+                        ExitMessage(format!("failed to read Public T signing key: {error}"))
+                    })?;
+            let signing_key =
+                Privkey::try_from_slice(public_key_pair.as_ref()).map_err(|error| {
+                    ExitMessage(format!("failed to decode Public T signing key: {error}"))
+                })?;
+            let token_issuer = match (
+                config
+                    .rpc
+                    .as_ref()
+                    .and_then(|rpc| rpc.biscuit_private_key_path.as_deref()),
+                config
+                    .rpc
+                    .as_ref()
+                    .and_then(|rpc| rpc.biscuit_public_key.as_deref()),
+            ) {
+                (Some(path), Some(public_key)) => BiscuitTokenIssuer::from_private_key_file(
+                    path, public_key,
+                )
+                .map_err(|error| {
+                    ExitMessage(format!("failed to configure Biscuit token issuer: {error}"))
+                })?,
+                _ => {
+                    return ExitMessage::err(
+                        "LSP service requires rpc.biscuit_public_key and rpc.biscuit_private_key_path to issue tenant access tokens"
+                            .to_string(),
+                    );
+                }
+            };
+            info!("Starting multi-tenant LSP service");
+            let lsp_actor = Actor::spawn_linked(
+                Some("lsp service".to_string()),
+                LspService,
+                LspServiceArgs {
+                    config: lsp_config,
+                    public_node_id,
+                    public_network_actor: public_network_actor.clone(),
+                    store: store.namespaced(NodeNamespace::lsp_metadata()),
+                    runtime_factory,
+                    signing_key,
+                    token_issuer,
+                    watchtower_store: store.clone(),
+                    signing_events: signing_events.clone(),
+                },
+                root_actor.get_cell(),
+            )
+            .await
+            .map_err(|err| ExitMessage(format!("failed to start LSP service: {err}")))?
+            .0;
+            public_network_actor
+                .send_message(NetworkActorMessage::new_command(
+                    PublicNetworkCommand::SetDeliveryPort(fnn::lsp::LspDeliveryPort::new(
+                        lsp_actor.clone(),
+                        store.clone(),
+                    )),
+                ))
+                .map_err(|error| {
+                    ExitMessage(format!("failed to attach LSP service to Public T: {error}"))
+                })?;
+            Some(lsp_actor)
+        }
+        (Some(_), None, _) => {
+            return ExitMessage::err(
+                "LSP service requires the Fiber service to be enabled".to_string(),
+            );
+        }
+        (Some(_), Some(_), None) => {
+            return ExitMessage::err("LSP tenant runtime factory is unavailable".to_string());
+        }
+        (None, _, _) => None,
+    };
+    // Without the feature nothing can be installed as the delivery port; the type
+    // makes that unrepresentable instead of silently passing a handle around.
+    #[cfg(not(feature = "lsp"))]
+    let lsp_actor = None;
+    if lsp_actor.is_none()
+        && config
+            .rpc
+            .as_ref()
+            .is_some_and(|rpc| rpc.biscuit_private_key_path.is_some())
+    {
+        return ExitMessage::err(
+            "rpc.biscuit_private_key_path requires the LSP service".to_string(),
+        );
+    }
 
     let cch_currency = config
         .parsed_fiber()
@@ -531,11 +705,13 @@ async fn run_node(
                 config.fiber,
                 network_actor,
                 cch_actor,
+                lsp_actor,
                 store,
                 store_actor,
                 network_graph,
                 root_actor.get_cell(),
                 store_change_port,
+                signing_events,
                 #[cfg(debug_assertions)]
                 ckb_chain_actor,
                 #[cfg(debug_assertions)]
@@ -553,11 +729,12 @@ async fn run_node(
     };
 
     signal_listener().await;
-    if let Some((handle, _)) = rpc_server_handle {
-        handle
+    if let Some(server) = rpc_server_handle {
+        server
+            .handle
             .stop()
             .map_err(|err| ExitMessage(format!("failed to stop rpc server: {}", err)))?;
-        handle.stopped().await;
+        server.handle.stopped().await;
     }
     cancel_tasks_and_wait_for_completion().await;
 
@@ -573,21 +750,16 @@ fn forward_event_to_actor(
             _peer_id,
             channel_id,
             funding_udt_type_script,
-            local_settlement_key,
-            remote_settlement_key,
-            local_funding_pubkey,
-            remote_funding_pubkey,
+            keys,
             remote_settlement_data,
             channel_features,
+            _local_shutdown_script,
         ) => {
             watchtower_actor
                 .send_message(WatchtowerMessage::CreateChannel(
                     channel_id,
                     funding_udt_type_script,
-                    local_settlement_key,
-                    remote_settlement_key,
-                    local_funding_pubkey,
-                    remote_funding_pubkey,
+                    keys,
                     remote_settlement_data,
                     channel_features,
                 ))
@@ -672,4 +844,46 @@ async fn signal_listener() {
         .await
         .expect("listen for Ctrl-c signal");
     tracing::info!("Ctrl-c received, shutting down");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_watchtower_config;
+    use fnn::FiberConfig;
+
+    #[test]
+    fn validate_watchtower_config_rejects_lsp_with_disabled_built_in_watchtower() {
+        let mut lsp_with_disabled_and_standalone = FiberConfig::default();
+        lsp_with_disabled_and_standalone.disable_built_in_watchtower = Some(true);
+        lsp_with_disabled_and_standalone.standalone_watchtower_rpc_url =
+            Some("http://127.0.0.1:8227".to_string());
+        let err = validate_watchtower_config(&lsp_with_disabled_and_standalone, true).expect_err(
+            "LSP must reject disable_built_in_watchtower: true even with standalone URL",
+        );
+        assert!(
+            err.0.contains("LSP") && err.0.contains("built-in watchtower"),
+            "unexpected error message: {}",
+            err.0
+        );
+
+        let mut lsp_with_disabled_only = FiberConfig::default();
+        lsp_with_disabled_only.disable_built_in_watchtower = Some(true);
+        assert!(validate_watchtower_config(&lsp_with_disabled_only, true).is_err());
+
+        // LSP with built-in watchtower enabled succeeds (with or without standalone URL).
+        let lsp_default = FiberConfig::default();
+        assert!(validate_watchtower_config(&lsp_default, true).is_ok());
+
+        let mut lsp_explicit_enabled = FiberConfig::default();
+        lsp_explicit_enabled.disable_built_in_watchtower = Some(false);
+        lsp_explicit_enabled.standalone_watchtower_rpc_url =
+            Some("http://127.0.0.1:8227".to_string());
+        assert!(validate_watchtower_config(&lsp_explicit_enabled, true).is_ok());
+
+        // Non-LSP with standalone watchtower and disable_built_in_watchtower: true still succeeds.
+        assert!(validate_watchtower_config(&lsp_with_disabled_and_standalone, false).is_ok());
+
+        // Non-LSP with neither standalone nor built-in watchtower fails.
+        assert!(validate_watchtower_config(&lsp_with_disabled_only, false).is_err());
+    }
 }

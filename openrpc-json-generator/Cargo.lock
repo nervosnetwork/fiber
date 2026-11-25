@@ -2008,6 +2008,7 @@ dependencies = [
  "fiber-types 0.10.1",
  "fiber-wasm-db-common",
  "serde",
+ "serde_json",
  "thiserror 1.0.69",
  "tracing",
  "wasm-bindgen",

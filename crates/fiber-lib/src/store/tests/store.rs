@@ -24,11 +24,15 @@ use crate::gen_rand_sha256_hash;
 use crate::invoice::*;
 use crate::now_timestamp_as_millis_u64;
 #[cfg(not(target_arch = "wasm32"))]
-use crate::store::open_store;
+use crate::rpc::payment::PaymentRpcServer;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::store::sample::StoreSample;
 use crate::store::store_impl::deserialize_from;
 use crate::store::store_impl::serialize_to_vec;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::store::store_trait::PrefixIterOptions;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::store::{open_store, FiberStore, NodeNamespace};
 use crate::tests::test_utils::*;
 use crate::time::SystemTime;
 #[cfg(not(target_arch = "wasm32"))]
@@ -40,18 +44,23 @@ use ckb_types::prelude::*;
 use ckb_types::H256;
 #[cfg(not(target_arch = "wasm32"))]
 use core::cmp::Ordering;
+#[cfg(not(target_arch = "wasm32"))]
+use fiber_store::backend::BatchWriter;
+#[cfg(not(target_arch = "wasm32"))]
 use fiber_store::backend::StorageBackend;
+#[cfg(not(target_arch = "wasm32"))]
+use fiber_store::IteratorDirection;
 use fiber_types::protocol::AnnouncedNodeName;
+#[cfg(not(target_arch = "wasm32"))]
 use fiber_types::schema::WATCHTOWER_TLC_SETTLED_PREFIX;
 #[cfg(not(target_arch = "wasm32"))]
 use fiber_types::{
-    AddTlcCommand, AppliedFlags, ChannelFeatures, CommitmentNumbers, OutboundTlcStatus,
-    RemoveTlcFulfill, RetryableTlcOperation, SettlementTlc, TLCId, TlcErrPacket, TlcErrorCode,
-    TlcInfo, TlcStatus,
+    AddTlcCommand, AppliedFlags, ChannelFeatures, CloseFlags, CommitmentNumbers, OutboundTlcStatus,
+    RemoveTlcFulfill, RetryableTlcOperation, SettlementKey, SettlementTlc, TLCId, TlcErrPacket,
+    TlcErrorCode, TlcInfo, TlcStatus, WatchChannelKeys,
 };
-use fiber_types::{
-    Attempt, AttemptStatus, CloseFlags, HashAlgorithm, PaymentHopData, RouterHop, SessionRoute,
-};
+#[cfg(not(target_arch = "wasm32"))]
+use fiber_types::{Attempt, AttemptStatus, HashAlgorithm, PaymentHopData, RouterHop, SessionRoute};
 use musig2::secp::MaybeScalar;
 #[cfg(not(target_arch = "wasm32"))]
 use musig2::CompactSignature;
@@ -63,6 +72,184 @@ use tentacle::secio::PeerId;
 fn gen_rand_local_signer() -> LocalSigner {
     let (secret_key, _) = gen_rand_secp256k1_keypair_tuple();
     LocalSigner::new(secret_key)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_node_namespace_isolates_shared_physical_store() {
+    let path = TempDir::new("node_namespace_store");
+    let store = open_store(path).expect("create shared store");
+    let lsp_metadata = store.namespaced(NodeNamespace::lsp_metadata());
+    let tenant_u1 = store.namespaced(NodeNamespace::hosted_tenant("u1"));
+    let tenant_u2 = store.namespaced(NodeNamespace::hosted_tenant("u2"));
+    tenant_u1
+        .ensure_current_schema()
+        .expect("initialize u1 schema");
+    tenant_u2
+        .ensure_current_schema()
+        .expect("initialize u2 schema");
+
+    lsp_metadata.put(b"same-key", b"lsp-value");
+    tenant_u1.put(b"same-key", b"u1-value");
+    tenant_u1.put(b"scan/1", b"u1-first");
+    tenant_u1.put(b"scan/2", b"u1-second");
+    let mut tenant_u2_batch = tenant_u2.batch();
+    tenant_u2_batch.put(b"same-key", b"u2-value");
+    tenant_u2_batch.put(b"scan/1", b"u2-first");
+    tenant_u2_batch.commit();
+
+    assert_eq!(tenant_u1.get(b"same-key"), Some(b"u1-value".to_vec()));
+    assert_eq!(tenant_u2.get(b"same-key"), Some(b"u2-value".to_vec()));
+    assert_eq!(lsp_metadata.get(b"same-key"), Some(b"lsp-value".to_vec()));
+    assert_eq!(store.get(b"same-key"), None);
+    assert_eq!(
+        tenant_u1
+            .collect_iterator(
+                b"scan/".to_vec(),
+                IteratorDirection::Forward,
+                Box::new(|key| key.starts_with(b"scan/")),
+                0,
+            )
+            .into_iter()
+            .map(|kv| (kv.key, kv.value))
+            .collect::<Vec<_>>(),
+        vec![
+            (b"scan/1".to_vec(), b"u1-first".to_vec()),
+            (b"scan/2".to_vec(), b"u1-second".to_vec()),
+        ]
+    );
+    assert_eq!(
+        tenant_u1
+            .collect_by_prefix_with(b"scan/", PrefixIterOptions::new().reverse().limit(1))
+            .into_iter()
+            .map(|kv| (kv.key, kv.value))
+            .collect::<Vec<_>>(),
+        vec![(b"scan/2".to_vec(), b"u1-second".to_vec())]
+    );
+
+    let payment_hash = Hash256::from([3; 32]);
+    let u1_preimage = Hash256::from([4; 32]);
+    let u2_preimage = Hash256::from([5; 32]);
+    tenant_u1.insert_preimage(payment_hash, u1_preimage);
+    tenant_u2.insert_preimage(payment_hash, u2_preimage);
+
+    assert_eq!(tenant_u1.get_preimage(&payment_hash), Some(u1_preimage));
+    assert_eq!(tenant_u2.get_preimage(&payment_hash), Some(u2_preimage));
+    assert_eq!(store.get_preimage(&payment_hash), None);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_schema_preflight_scans_only_its_logical_namespace() {
+    let path = TempDir::new("namespace_migration_scope");
+    let store = open_store(path).expect("shared store");
+    let tenant = store.namespaced(NodeNamespace::hosted_tenant("one"));
+    tenant.ensure_current_schema().expect("initialize tenant");
+    let corrupt_key = [
+        &[fiber_types::schema::CHANNEL_ACTOR_STATE_PREFIX],
+        &[19; 32][..],
+    ]
+    .concat();
+    tenant.put(&corrupt_key, b"corrupt tenant state");
+    store
+        .ensure_current_schema()
+        .expect("root must not scan tenant rows");
+    assert!(
+        tenant.ensure_current_schema().is_err(),
+        "tenant validates its own rows"
+    );
+    tenant.delete(&corrupt_key);
+    store.put(&corrupt_key, b"corrupt root state");
+    tenant
+        .ensure_current_schema()
+        .expect("tenant must not scan root rows");
+    assert!(
+        store.ensure_current_schema().is_err(),
+        "root validates its own rows"
+    );
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "watchtower"))]
+#[test]
+fn test_local_watch_channel_resolves_hosted_tenant_namespace() {
+    let path = TempDir::new("local_watch_channel_namespace");
+    let store = open_store(path).expect("create shared store");
+    let tenant_u1 = store.namespaced(NodeNamespace::hosted_tenant("u1"));
+    let tenant_u2 = store.namespaced(NodeNamespace::hosted_tenant("u2"));
+    let unowned_tenant = store.namespaced(NodeNamespace::hosted_tenant("u3"));
+    let u1_state = ChannelActorState::samples(42)
+        .into_iter()
+        .next()
+        .expect("sample channel state");
+    let mut u2_state = ChannelActorState::samples(43)
+        .into_iter()
+        .next()
+        .expect("sample channel state");
+    let channel_id = u1_state.get_id();
+    u2_state.id = channel_id;
+    let u1_node_id = NodeId::from_bytes(u1_state.get_local_pubkey().serialize().to_vec());
+    let u2_node_id = NodeId::from_bytes(u2_state.get_local_pubkey().serialize().to_vec());
+    assert_ne!(u1_node_id, u2_node_id);
+    tenant_u1.insert_channel_actor_state(u1_state.clone());
+    tenant_u2.insert_channel_actor_state(u2_state);
+
+    let insert_watch = |node_id, channel_id, local_amount| {
+        let local_key = Privkey::from(&[1; 32]);
+        store.insert_watch_channel(
+            node_id,
+            channel_id,
+            None,
+            WatchChannelKeys {
+                local_settlement: SettlementKey::local(local_key.clone()),
+                remote_settlement: Privkey::from(&[2; 32]).pubkey(),
+                local_funding: Privkey::from(&[3; 32]).pubkey(),
+                remote_funding: Privkey::from(&[4; 32]).pubkey(),
+            },
+            SettlementData {
+                local_amount,
+                remote_amount: 100,
+                tlcs: vec![],
+            },
+            fiber_types::ChannelFeatures::V2,
+            None,
+        );
+    };
+    // Watchtower rows live in the host's physical keyspace. The channel id alone
+    // must not select the public node's or another tenant's settlement snapshot.
+    insert_watch(u1_node_id.clone(), channel_id, 10);
+    insert_watch(u2_node_id.clone(), channel_id, 20);
+    insert_watch(NodeId::local(), channel_id, 30);
+    for (reader, node_id) in [
+        (&tenant_u1, u1_node_id.clone()),
+        (&tenant_u2, u2_node_id),
+        (&store, NodeId::local()),
+    ] {
+        let expected = store
+            .get_watch_channel(&node_id, &channel_id)
+            .expect("root watch row");
+        assert_eq!(reader.get_local_watch_channel(&channel_id), Some(expected));
+    }
+    assert!(unowned_tenant
+        .get_local_watch_channel(&channel_id)
+        .is_none());
+
+    // Even a row under U1's watchtower identity does not establish ownership of
+    // a channel missing from U1's persisted channel state.
+    let unowned_channel_id = Hash256::from([91; 32]);
+    insert_watch(u1_node_id, unowned_channel_id, 40);
+    insert_watch(NodeId::local(), unowned_channel_id, 50);
+    assert!(tenant_u1
+        .get_local_watch_channel(&unowned_channel_id)
+        .is_none());
+
+    let mut missing_watch_state = u1_state;
+    missing_watch_state.id = Hash256::from([92; 32]);
+    let missing_watch_id = missing_watch_state.get_id();
+    tenant_u1.insert_channel_actor_state(missing_watch_state);
+    assert!(tenant_u1
+        .get_local_watch_channel(&missing_watch_id)
+        .is_none());
+    assert!(store.get_local_watch_channel(&missing_watch_id).is_none());
 }
 
 fn mock_node() -> (Privkey, NodeAnnouncement) {
@@ -430,18 +617,23 @@ fn test_store_watchtower() {
         node_id.clone(),
         channel_id,
         None,
-        local_settlement_key.clone(),
-        remote_settlement_key,
-        local_funding_pubkey,
-        remote_funding_pubkey,
+        WatchChannelKeys {
+            local_settlement: SettlementKey::local(local_settlement_key.clone()),
+            remote_settlement: remote_settlement_key,
+            local_funding: local_funding_pubkey,
+            remote_funding: remote_funding_pubkey,
+        },
         settlement_data.clone(),
+        fiber_types::ChannelFeatures::V2,
+        None,
     );
     assert_eq!(
         store.get_watch_channels(),
         vec![ChannelData {
             channel_id,
             funding_udt_type_script: None,
-            local_settlement_key: local_settlement_key.clone(),
+            local_settlement_key: Some(local_settlement_key.clone()),
+            local_settlement_key_pubkey: Some(local_settlement_key.pubkey()),
             remote_settlement_key,
             local_funding_pubkey,
             remote_funding_pubkey,
@@ -450,6 +642,7 @@ fn test_store_watchtower() {
             pending_remote_settlement_data: settlement_data.clone(),
             remote_settlement_data: settlement_data.clone(),
             channel_features: Default::default(),
+            payout_lock_script: None,
         }]
     );
 
@@ -471,7 +664,8 @@ fn test_store_watchtower() {
         vec![ChannelData {
             channel_id,
             funding_udt_type_script: None,
-            local_settlement_key,
+            local_settlement_key: Some(local_settlement_key.clone()),
+            local_settlement_key_pubkey: Some(local_settlement_key.pubkey()),
             remote_settlement_key,
             local_funding_pubkey,
             remote_funding_pubkey,
@@ -480,6 +674,7 @@ fn test_store_watchtower() {
             pending_remote_settlement_data: settlement_data.clone(),
             remote_settlement_data: settlement_data,
             channel_features: Default::default(),
+            payout_lock_script: None,
         }]
     );
 
@@ -520,15 +715,19 @@ fn test_store_watchtower() {
         node_id.clone(),
         channel_id,
         None,
-        Privkey::from(&[1; 32]),
-        remote_settlement_key,
-        local_funding_pubkey,
-        remote_funding_pubkey,
+        WatchChannelKeys {
+            local_settlement: SettlementKey::local(Privkey::from(&[1; 32])),
+            remote_settlement: remote_settlement_key,
+            local_funding: local_funding_pubkey,
+            remote_funding: remote_funding_pubkey,
+        },
         SettlementData {
             local_amount: 100,
             remote_amount: 200,
             tlcs: vec![],
         },
+        fiber_types::ChannelFeatures::V2,
+        None,
     );
     assert_eq!(store.get_watch_channels().pop().unwrap(), stored);
 
@@ -538,63 +737,476 @@ fn test_store_watchtower() {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
-fn test_store_watchtower_keeps_superseded_pending_remote_settlement() {
-    let path = TempDir::new("test-watchtower-superseded-pending");
+fn test_store_external_watch_channel_contains_no_private_keys() {
+    let path = TempDir::new("test-external-watchtower-store");
     let store = open_store(path).expect("created store failed");
-    let node_id = NodeId::from_bytes(PeerId::random().into_bytes());
+    let node_id = NodeId::local();
     let channel_id = gen_rand_sha256_hash();
+    let local_settlement_pubkey = Privkey::from(&[1; 32]).pubkey();
+    let settlement_data = SettlementData {
+        local_amount: 100,
+        remote_amount: 200,
+        tlcs: vec![SettlementTlc {
+            tlc_id: TLCId::Offered(0),
+            hash_algorithm: HashAlgorithm::CkbHash,
+            payment_amount: 42,
+            payment_hash: gen_rand_sha256_hash(),
+            expiry: u64::MAX,
+            local_key: None,
+            local_key_pubkey: Some(Privkey::from(&[5; 32]).pubkey()),
+            local_key_commitment_number: Some(42),
+            remote_key: Privkey::from(&[6; 32]).pubkey(),
+        }],
+    };
 
     store.insert_watch_channel(
         node_id.clone(),
         channel_id,
         None,
-        Privkey::from(&[1; 32]),
-        Privkey::from(&[2; 32]).pubkey(),
-        Privkey::from(&[3; 32]).pubkey(),
-        Privkey::from(&[4; 32]).pubkey(),
-        SettlementData {
-            local_amount: 100,
-            remote_amount: 200,
-            tlcs: vec![],
+        WatchChannelKeys {
+            local_settlement: SettlementKey::external(local_settlement_pubkey),
+            remote_settlement: Privkey::from(&[2; 32]).pubkey(),
+            local_funding: Privkey::from(&[3; 32]).pubkey(),
+            remote_funding: Privkey::from(&[4; 32]).pubkey(),
         },
+        settlement_data,
+        fiber_types::ChannelFeatures::V2,
+        None,
     );
 
-    // The same commitment number is signed again after a reconnect.
+    let channel = store
+        .get_watch_channels()
+        .into_iter()
+        .next()
+        .expect("stored watch channel");
+    assert!(channel.local_settlement_key.is_none());
+    assert!(channel
+        .remote_settlement_data
+        .tlcs
+        .iter()
+        .all(|tlc| tlc.local_key.is_none()));
+    assert_eq!(
+        store.get_watchtower_signer(&node_id, &channel_id),
+        fiber_types::WatchtowerSignerState::External(
+            fiber_types::WatchtowerExternalSignerState::default()
+        )
+    );
     let original = SettlementData {
         local_amount: 300,
         remote_amount: 400,
         tlcs: vec![],
     };
-    store.update_pending_remote_settlement(node_id.clone(), channel_id, original.clone());
     let resigned = SettlementData {
         local_amount: 500,
         remote_amount: 600,
         tlcs: vec![],
     };
+    store.update_pending_remote_settlement(node_id.clone(), channel_id, original.clone());
     store.update_pending_remote_settlement(node_id.clone(), channel_id, resigned.clone());
-
-    let stored = store.get_watch_channels().pop().unwrap();
+    let stored = store.get_watch_channel(&node_id, &channel_id).unwrap();
     assert_eq!(
         stored.remote_settlement_data,
-        SettlementData {
-            local_amount: 100,
-            remote_amount: 200,
-            tlcs: vec![],
-        },
-        "the peer's latest unrevoked witness must stay in the remote slot"
+        channel.remote_settlement_data
     );
     assert_eq!(stored.pending_remote_settlement_data, resigned);
     assert_eq!(
         store.get_superseded_remote_settlements(&node_id, &channel_id),
-        vec![original],
-        "the superseded same-number snapshot must remain matchable"
+        vec![original]
+    );
+    assert!(
+        matches!(
+            store.get_watchtower_signer(&node_id, &channel_id),
+            fiber_types::WatchtowerSignerState::External(_)
+        ),
+        "superseded snapshots cannot overwrite signer state"
+    );
+    let mut with_secret = channel.local_settlement_data.clone();
+    with_secret.tlcs[0].local_key = Some(Privkey::from(&[5; 32]));
+    store.update_local_settlement(node_id.clone(), channel_id, with_secret);
+    assert_eq!(
+        store
+            .get_watch_channel(&node_id, &channel_id)
+            .unwrap()
+            .local_settlement_data,
+        channel.local_settlement_data,
+        "external channels must not persist host-held TLC secrets"
+    );
+    assert!(store.remove_watch_channel(node_id.clone(), channel_id));
+    assert!(store
+        .get_superseded_remote_settlements(&node_id, &channel_id)
+        .is_empty());
+    assert_eq!(
+        store.get_watchtower_signer(&node_id, &channel_id),
+        fiber_types::WatchtowerSignerState::Internal
     );
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
-fn test_store_watchtower_v1_registration_round_trip() {
-    let path = TempDir::new("test-watchtower-v1-store");
+fn test_store_watchtower_quotas_enforced_per_node_and_globally() {
+    use crate::lsp_config::WatchtowerQuotas;
+    use fiber_types::SettlementKey;
+
+    let path = TempDir::new("test-watchtower-quotas");
+    let store = open_store(path).expect("created store failed");
+    let quotas = WatchtowerQuotas {
+        max_channels_per_node: 2,
+        max_channels_total: 3,
+        max_preimages_per_node: 2,
+        max_preimages_total: 3,
+    };
+    let node_a = NodeId::from_bytes(PeerId::random().into_bytes());
+    let node_b = NodeId::from_bytes(PeerId::random().into_bytes());
+    let settlement = SettlementData {
+        local_amount: 100,
+        remote_amount: 200,
+        tlcs: vec![],
+    };
+    let keys = || WatchChannelKeys {
+        local_settlement: SettlementKey::external(Privkey::from(&[1; 32]).pubkey()),
+        remote_settlement: Privkey::from(&[2; 32]).pubkey(),
+        local_funding: Privkey::from(&[3; 32]).pubkey(),
+        remote_funding: Privkey::from(&[4; 32]).pubkey(),
+    };
+
+    let ch_a1 = gen_rand_sha256_hash();
+    let ch_a2 = gen_rand_sha256_hash();
+    let ch_a3 = gen_rand_sha256_hash();
+    let ch_b1 = gen_rand_sha256_hash();
+    let ch_b2 = gen_rand_sha256_hash();
+
+    store
+        .insert_watch_channel_checked(
+            node_a.clone(),
+            ch_a1,
+            None,
+            keys(),
+            settlement.clone(),
+            fiber_types::ChannelFeatures::V2,
+            None,
+            &quotas,
+        )
+        .expect("a1");
+    store
+        .insert_watch_channel_checked(
+            node_a.clone(),
+            ch_a2,
+            None,
+            keys(),
+            settlement.clone(),
+            fiber_types::ChannelFeatures::V2,
+            None,
+            &quotas,
+        )
+        .expect("a2");
+    // Re-inserting an existing channel is idempotent even at the per-node limit.
+    store
+        .insert_watch_channel_checked(
+            node_a.clone(),
+            ch_a1,
+            None,
+            keys(),
+            settlement.clone(),
+            fiber_types::ChannelFeatures::V2,
+            None,
+            &quotas,
+        )
+        .expect("a1 idempotent");
+    let err = store
+        .insert_watch_channel_checked(
+            node_a.clone(),
+            ch_a3,
+            None,
+            keys(),
+            settlement.clone(),
+            fiber_types::ChannelFeatures::V2,
+            None,
+            &quotas,
+        )
+        .unwrap_err();
+    assert!(err.contains("quota exceeded for node"), "{err}");
+
+    store
+        .insert_watch_channel_checked(
+            node_b.clone(),
+            ch_b1,
+            None,
+            keys(),
+            settlement.clone(),
+            fiber_types::ChannelFeatures::V2,
+            None,
+            &quotas,
+        )
+        .expect("b1");
+    let err = store
+        .insert_watch_channel_checked(
+            node_b.clone(),
+            ch_b2,
+            None,
+            keys(),
+            settlement,
+            fiber_types::ChannelFeatures::V2,
+            None,
+            &quotas,
+        )
+        .unwrap_err();
+    assert!(err.contains("global watchtower channel quota"), "{err}");
+
+    // Same enforcement for preimages.
+    let h_a1 = gen_rand_sha256_hash();
+    let h_a2 = gen_rand_sha256_hash();
+    let h_a3 = gen_rand_sha256_hash();
+    let h_b1 = gen_rand_sha256_hash();
+    let h_b2 = gen_rand_sha256_hash();
+    let preimage = gen_rand_sha256_hash();
+
+    store
+        .insert_watch_preimage_checked(node_a.clone(), h_a1, preimage, &quotas)
+        .expect("preimage a1");
+    store
+        .insert_watch_preimage_checked(node_a.clone(), h_a2, preimage, &quotas)
+        .expect("preimage a2");
+    store
+        .insert_watch_preimage_checked(node_a.clone(), h_a1, preimage, &quotas)
+        .expect("preimage a1 idempotent");
+    let err = store
+        .insert_watch_preimage_checked(node_a, h_a3, preimage, &quotas)
+        .unwrap_err();
+    assert!(err.contains("preimage quota exceeded for node"), "{err}");
+
+    store
+        .insert_watch_preimage_checked(node_b.clone(), h_b1, preimage, &quotas)
+        .expect("preimage b1");
+    let err = store
+        .insert_watch_preimage_checked(node_b.clone(), h_b2, preimage, &quotas)
+        .unwrap_err();
+    assert!(err.contains("global watchtower preimage quota"), "{err}");
+
+    // Removing a channel or preimage updates the cached counters and frees quota immediately.
+    assert!(store.remove_watch_channel(node_b.clone(), ch_b1));
+    store
+        .insert_watch_channel_checked(
+            node_b.clone(),
+            ch_b2,
+            None,
+            keys(),
+            SettlementData {
+                local_amount: 100,
+                remote_amount: 200,
+                tlcs: vec![],
+            },
+            fiber_types::ChannelFeatures::V2,
+            None,
+            &quotas,
+        )
+        .expect("b2 succeeds after removing b1");
+    store.remove_watch_preimage(node_b.clone(), h_b1);
+    store
+        .insert_watch_preimage_checked(node_b, h_b2, preimage, &quotas)
+        .expect("preimage b2 succeeds after removing b1");
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_store_watchtower_host_rows_excluded_from_tenant_global_quotas() {
+    use crate::lsp_config::WatchtowerQuotas;
+    use fiber_types::SettlementKey;
+
+    let path = TempDir::new("test-watchtower-host-excluded-quotas");
+    let quotas = WatchtowerQuotas {
+        max_channels_per_node: 2,
+        max_channels_total: 2,
+        max_preimages_per_node: 2,
+        max_preimages_total: 2,
+    };
+    let settlement = SettlementData {
+        local_amount: 100,
+        remote_amount: 200,
+        tlcs: vec![],
+    };
+    let local_keys = || WatchChannelKeys {
+        local_settlement: SettlementKey::local(Privkey::from(&[1; 32])),
+        remote_settlement: Privkey::from(&[2; 32]).pubkey(),
+        local_funding: Privkey::from(&[3; 32]).pubkey(),
+        remote_funding: Privkey::from(&[4; 32]).pubkey(),
+    };
+    let tenant_keys = || WatchChannelKeys {
+        local_settlement: SettlementKey::external(Privkey::from(&[1; 32]).pubkey()),
+        remote_settlement: Privkey::from(&[2; 32]).pubkey(),
+        local_funding: Privkey::from(&[3; 32]).pubkey(),
+        remote_funding: Privkey::from(&[4; 32]).pubkey(),
+    };
+
+    let host_ch1 = gen_rand_sha256_hash();
+    let host_ch2 = gen_rand_sha256_hash();
+    let host_ch3 = gen_rand_sha256_hash();
+    let host_h1 = gen_rand_sha256_hash();
+    let host_h2 = gen_rand_sha256_hash();
+    let host_h3 = gen_rand_sha256_hash();
+    let preimage = gen_rand_sha256_hash();
+
+    // Pre-populate host (NodeId::local()) rows BEFORE quota counts are lazily initialized.
+    let store = open_store(&path).expect("created store failed");
+    for ch in [host_ch1, host_ch2] {
+        assert!(store.insert_watch_channel(
+            NodeId::local(),
+            ch,
+            None,
+            local_keys(),
+            settlement.clone(),
+            fiber_types::ChannelFeatures::V2,
+            None,
+        ));
+    }
+    for h in [host_h1, host_h2] {
+        store.insert_watch_preimage(NodeId::local(), h, preimage);
+    }
+
+    // Reopen store to ensure cold-start scan of persisted host rows ignores NodeId::local().
+    drop(store);
+    let store = open_store(&path).expect("reopen store failed");
+
+    let tenant_a = NodeId::from_bytes(PeerId::random().into_bytes());
+    let tenant_b = NodeId::from_bytes(PeerId::random().into_bytes());
+
+    // Even with 2 host channels and 2 host preimages persisted, tenants still get the full
+    // max_channels_total (2) and max_preimages_total (2) quotas.
+    store
+        .insert_watch_channel_checked(
+            tenant_a.clone(),
+            gen_rand_sha256_hash(),
+            None,
+            tenant_keys(),
+            settlement.clone(),
+            fiber_types::ChannelFeatures::V2,
+            None,
+            &quotas,
+        )
+        .expect("tenant_a ch1 must succeed despite host channels");
+
+    // Live host insert & remove after quota initialization must also not affect tenant totals.
+    assert!(store.insert_watch_channel(
+        NodeId::local(),
+        host_ch3,
+        None,
+        local_keys(),
+        settlement.clone(),
+        fiber_types::ChannelFeatures::V2,
+        None,
+    ));
+    assert!(store.remove_watch_channel(NodeId::local(), host_ch1));
+
+    store
+        .insert_watch_channel_checked(
+            tenant_b.clone(),
+            gen_rand_sha256_hash(),
+            None,
+            tenant_keys(),
+            settlement.clone(),
+            fiber_types::ChannelFeatures::V2,
+            None,
+            &quotas,
+        )
+        .expect("tenant_b ch1 must succeed (total tenant channels = 2)");
+    let err = store
+        .insert_watch_channel_checked(
+            tenant_b.clone(),
+            gen_rand_sha256_hash(),
+            None,
+            tenant_keys(),
+            settlement,
+            fiber_types::ChannelFeatures::V2,
+            None,
+            &quotas,
+        )
+        .unwrap_err();
+    assert!(err.contains("global watchtower channel quota"), "{err}");
+
+    // Same for preimages: host rows (pre-existing, live-inserted, or removed) never consume or
+    // corrupt tenant global preimage quotas.
+    store
+        .insert_watch_preimage_checked(tenant_a, gen_rand_sha256_hash(), preimage, &quotas)
+        .expect("tenant_a preimage 1 must succeed despite host preimages");
+    store.insert_watch_preimage(NodeId::local(), host_h3, preimage);
+    store.remove_watch_preimage(NodeId::local(), host_h1);
+    store
+        .insert_watch_preimage_checked(tenant_b.clone(), gen_rand_sha256_hash(), preimage, &quotas)
+        .expect("tenant_b preimage 1 must succeed (total tenant preimages = 2)");
+    let err = store
+        .insert_watch_preimage_checked(tenant_b, gen_rand_sha256_hash(), preimage, &quotas)
+        .unwrap_err();
+    assert!(err.contains("global watchtower preimage quota"), "{err}");
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_store_watchtower_superseded_preserved_and_cleared_on_revocation() {
+    use fiber_types::SettlementKey;
+
+    let path = TempDir::new("test-watchtower-superseded-clear");
+    let store = open_store(path).expect("created store failed");
+    let node_id = NodeId::from_bytes(PeerId::random().into_bytes());
+    let channel_id = gen_rand_sha256_hash();
+    let initial = SettlementData {
+        local_amount: 1000,
+        remote_amount: 0,
+        tlcs: vec![],
+    };
+    store.insert_watch_channel(
+        node_id.clone(),
+        channel_id,
+        None,
+        WatchChannelKeys {
+            local_settlement: SettlementKey::external(Privkey::from(&[1; 32]).pubkey()),
+            remote_settlement: Privkey::from(&[2; 32]).pubkey(),
+            local_funding: Privkey::from(&[3; 32]).pubkey(),
+            remote_funding: Privkey::from(&[4; 32]).pubkey(),
+        },
+        initial,
+        fiber_types::ChannelFeatures::V2,
+        None,
+    );
+
+    let variants: Vec<SettlementData> = (1..=5u128)
+        .map(|i| SettlementData {
+            local_amount: 1000 - i * 10,
+            remote_amount: i * 10,
+            tlcs: vec![],
+        })
+        .collect();
+    for v in &variants {
+        store.update_pending_remote_settlement(node_id.clone(), channel_id, v.clone());
+    }
+    let superseded = store.get_superseded_remote_settlements(&node_id, &channel_id);
+    assert_eq!(
+        superseded,
+        variants[..4].to_vec(),
+        "earliest unrevoked same-number snapshots must not be evicted"
+    );
+
+    store.update_revocation(
+        node_id.clone(),
+        channel_id,
+        RevocationData {
+            commitment_number: 1,
+            aggregated_signature: CompactSignature::from_bytes(&[0u8; 64]).unwrap(),
+            output: CellOutput::default(),
+            output_data: Bytes::default(),
+        },
+        variants[4].clone(),
+    );
+    assert!(
+        store
+            .get_superseded_remote_settlements(&node_id, &channel_id)
+            .is_empty(),
+        "advancing revocation must clear superseded snapshots"
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_store_watchtower_v2_registration_round_trip() {
+    let path = TempDir::new("test-watchtower-v2-store");
     let store = open_store(path).expect("created store failed");
     let node_id = NodeId::from_bytes(PeerId::random().into_bytes());
     let channel_id = gen_rand_sha256_hash();
@@ -608,11 +1220,15 @@ fn test_store_watchtower_v1_registration_round_trip() {
         node_id,
         channel_id,
         None,
-        Privkey::from(&[1; 32]),
-        Privkey::from(&[2; 32]).pubkey(),
-        Privkey::from(&[3; 32]).pubkey(),
-        Privkey::from(&[4; 32]).pubkey(),
+        WatchChannelKeys {
+            local_settlement: SettlementKey::local(Privkey::from(&[1; 32])),
+            remote_settlement: Privkey::from(&[2; 32]).pubkey(),
+            local_funding: Privkey::from(&[3; 32]).pubkey(),
+            remote_funding: Privkey::from(&[4; 32]).pubkey(),
+        },
         settlement_data,
+        fiber_types::ChannelFeatures::V2,
+        None,
     );
 
     assert_eq!(
@@ -720,7 +1336,9 @@ fn test_store_watchtower_preimage_gc_waits_for_watched_tlc() {
             payment_amount: 42,
             payment_hash,
             expiry: now_timestamp_as_millis_u64() + 60_000,
-            local_key: Privkey::from(&[5; 32]),
+            local_key: Some(Privkey::from(&[5; 32])),
+            local_key_pubkey: None,
+            local_key_commitment_number: None,
             remote_key: Privkey::from(&[6; 32]).pubkey(),
         }],
     };
@@ -729,11 +1347,15 @@ fn test_store_watchtower_preimage_gc_waits_for_watched_tlc() {
         node_id.clone(),
         channel_id,
         None,
-        local_settlement_key,
-        remote_settlement_key,
-        local_funding_pubkey,
-        remote_funding_pubkey,
+        WatchChannelKeys {
+            local_settlement: SettlementKey::local(local_settlement_key.clone()),
+            remote_settlement: remote_settlement_key,
+            local_funding: local_funding_pubkey,
+            remote_funding: remote_funding_pubkey,
+        },
         settlement_data,
+        fiber_types::ChannelFeatures::V2,
+        None,
     );
     store.insert_watch_preimage(node_id.clone(), payment_hash, preimage);
 
@@ -783,12 +1405,14 @@ fn test_store_watchtower_preimage_gc_waits_for_same_hash_sibling_tlc() {
         payment_amount: 21,
         payment_hash,
         expiry: now_timestamp_as_millis_u64() + 60_000,
-        local_key: Privkey::from(&[5; 32]),
+        local_key: Some(Privkey::from(&[5; 32])),
+        local_key_pubkey: None,
+        local_key_commitment_number: None,
         remote_key: Privkey::from(&[6; 32]).pubkey(),
     };
     let mut second_tlc = first_tlc.clone();
     second_tlc.tlc_id = TLCId::Offered(1);
-    second_tlc.local_key = Privkey::from(&[7; 32]);
+    second_tlc.local_key = Some(Privkey::from(&[7; 32]));
     second_tlc.remote_key = Privkey::from(&[8; 32]).pubkey();
     let settlement_data = SettlementData {
         local_amount: 100,
@@ -800,11 +1424,15 @@ fn test_store_watchtower_preimage_gc_waits_for_same_hash_sibling_tlc() {
         node_id.clone(),
         channel_id,
         None,
-        local_settlement_key,
-        remote_settlement_key,
-        local_funding_pubkey,
-        remote_funding_pubkey,
+        WatchChannelKeys {
+            local_settlement: SettlementKey::local(local_settlement_key.clone()),
+            remote_settlement: remote_settlement_key,
+            local_funding: local_funding_pubkey,
+            remote_funding: remote_funding_pubkey,
+        },
         settlement_data,
+        fiber_types::ChannelFeatures::V2,
+        None,
     );
     store.insert_watch_preimage(node_id.clone(), payment_hash, preimage);
 
@@ -849,7 +1477,9 @@ fn test_store_watchtower_preimage_gc_isolated_between_tenants() {
             payment_amount: 42,
             payment_hash,
             expiry: now_timestamp_as_millis_u64() + 60_000,
-            local_key: Privkey::from(&[5; 32]),
+            local_key: Some(Privkey::from(&[5; 32])),
+            local_key_pubkey: None,
+            local_key_commitment_number: None,
             remote_key: Privkey::from(&[6; 32]).pubkey(),
         }],
     };
@@ -859,11 +1489,15 @@ fn test_store_watchtower_preimage_gc_isolated_between_tenants() {
             node_id.clone(),
             channel_id,
             None,
-            Privkey::from(&[1; 32]),
-            Privkey::from(&[2; 32]).pubkey(),
-            Privkey::from(&[3; 32]).pubkey(),
-            Privkey::from(&[4; 32]).pubkey(),
+            WatchChannelKeys {
+                local_settlement: SettlementKey::local(Privkey::from(&[1; 32])),
+                remote_settlement: Privkey::from(&[2; 32]).pubkey(),
+                local_funding: Privkey::from(&[3; 32]).pubkey(),
+                remote_funding: Privkey::from(&[4; 32]).pubkey(),
+            },
             settlement_data.clone(),
+            fiber_types::ChannelFeatures::V2,
+            None,
         );
         store.insert_watch_preimage(node_id.clone(), payment_hash, preimage);
     }
@@ -911,7 +1545,9 @@ fn test_store_watchtower_preimage_gc_ignores_ambiguous_legacy_settlement() {
             payment_amount: 42,
             payment_hash,
             expiry: now_timestamp_as_millis_u64() + 60_000,
-            local_key: Privkey::from(&[5; 32]),
+            local_key: Some(Privkey::from(&[5; 32])),
+            local_key_pubkey: None,
+            local_key_commitment_number: None,
             remote_key: Privkey::from(&[6; 32]).pubkey(),
         }],
     };
@@ -920,11 +1556,15 @@ fn test_store_watchtower_preimage_gc_ignores_ambiguous_legacy_settlement() {
         node_id.clone(),
         channel_id,
         None,
-        Privkey::from(&[1; 32]),
-        Privkey::from(&[2; 32]).pubkey(),
-        Privkey::from(&[3; 32]).pubkey(),
-        Privkey::from(&[4; 32]).pubkey(),
+        WatchChannelKeys {
+            local_settlement: SettlementKey::local(Privkey::from(&[1; 32])),
+            remote_settlement: Privkey::from(&[2; 32]).pubkey(),
+            local_funding: Privkey::from(&[3; 32]).pubkey(),
+            remote_funding: Privkey::from(&[4; 32]).pubkey(),
+        },
         settlement_data,
+        fiber_types::ChannelFeatures::V2,
+        None,
     );
     store.insert_watch_preimage(node_id.clone(), payment_hash, preimage);
 
@@ -950,6 +1590,199 @@ fn test_store_watchtower_preimage_gc_ignores_ambiguous_legacy_settlement() {
 #[cfg(not(target_arch = "wasm32"))]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_store_watchtower_signer_roundtrip() {
+    use fiber_types::{
+        LastAppliedWatchtowerSignature, OnchainKeyPurpose, OnchainSigningContent,
+        WatchtowerExternalSignerState, WatchtowerSignerState,
+    };
+    use std::collections::BTreeMap;
+
+    let path = TempDir::new("test-watchtower-signer-roundtrip");
+    let store = open_store(path).expect("created store failed");
+    let node_id = NodeId::local();
+    let channel_id = gen_rand_sha256_hash();
+
+    // 1. Initial lookup on non-existent record returns Internal
+    assert_eq!(
+        store.get_watchtower_signer(&node_id, &channel_id),
+        WatchtowerSignerState::Internal
+    );
+
+    // 2. Put and get format with pending and signed requests
+    let req_id_1 = Hash256::from([1u8; 32]);
+    let req_id_2 = Hash256::from([2u8; 32]);
+    let content_1 = OnchainSigningContent {
+        key_purpose: OnchainKeyPurpose::Settlement,
+        transaction: Transaction::default(),
+    };
+    let content_2 = OnchainSigningContent {
+        key_purpose: OnchainKeyPurpose::Tlc {
+            commitment_number: 5,
+        },
+        transaction: Transaction::default(),
+    };
+    let sig_2 = [77u8; 65];
+
+    let mut pending = BTreeMap::new();
+    pending.insert(req_id_1, content_1);
+    let mut signed = BTreeMap::new();
+    signed.insert(req_id_2, (content_2, sig_2));
+    let last_applied = Some(LastAppliedWatchtowerSignature {
+        request_id: req_id_2,
+        signature: sig_2,
+    });
+
+    let new_state = WatchtowerSignerState::External(WatchtowerExternalSignerState {
+        pending_requests: pending,
+        signed_signatures: signed,
+        last_applied,
+        ..Default::default()
+    });
+
+    store.put_watchtower_signer(&node_id, &channel_id, new_state.clone());
+    assert_eq!(
+        store.get_watchtower_signer(&node_id, &channel_id),
+        new_state
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_watchtower_atomic_update_preserves_concurrent_signature() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    use fiber_types::watchtower::WatchtowerExternalSignerState;
+    use fiber_types::{
+        LastAppliedWatchtowerSignature, OnchainKeyPurpose, OnchainSigningContent,
+        WatchtowerSignerState,
+    };
+
+    let path = TempDir::new("watchtower-concurrent-signer-update");
+    let store = open_store(path).expect("open store");
+    let node_id = NodeId::local();
+    let channel_id = Hash256::from([1; 32]);
+    let signed_id = Hash256::from([2; 32]);
+    let new_id = Hash256::from([3; 32]);
+    let content = OnchainSigningContent {
+        key_purpose: OnchainKeyPurpose::Settlement,
+        transaction: Transaction::default(),
+    };
+    let signature = [42; 65];
+    let mut initial = WatchtowerExternalSignerState::default();
+    initial.pending_requests.insert(signed_id, content.clone());
+    store.put_watchtower_signer(
+        &node_id,
+        &channel_id,
+        WatchtowerSignerState::External(initial),
+    );
+
+    let (scan_entered_tx, scan_entered_rx) = mpsc::channel();
+    let (release_scan_tx, release_scan_rx) = mpsc::channel();
+    let (submit_entered_tx, submit_entered_rx) = mpsc::channel();
+    std::thread::scope(|scope| {
+        let store = &store;
+        let node_id = &node_id;
+        let content = &content;
+        let scan = scope.spawn(move || {
+            store
+                .update_watchtower_signer(node_id, &channel_id, |state| {
+                    scan_entered_tx.send(()).expect("scan entered");
+                    release_scan_rx
+                        .recv_timeout(Duration::from_secs(5))
+                        .expect("release scan");
+                    let WatchtowerSignerState::External(external) = state else {
+                        panic!("external signer");
+                    };
+                    external.pending_requests.insert(new_id, content.clone());
+                    Ok::<_, ()>(())
+                })
+                .expect("scan update");
+        });
+        scan_entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("scan read state");
+        let submit = scope.spawn(move || {
+            store
+                .update_watchtower_signer(node_id, &channel_id, |state| {
+                    submit_entered_tx.send(()).expect("submit entered");
+                    let WatchtowerSignerState::External(external) = state else {
+                        panic!("external signer");
+                    };
+                    let pending = external
+                        .pending_requests
+                        .remove(&signed_id)
+                        .expect("pending signature");
+                    external
+                        .signed_signatures
+                        .insert(signed_id, (pending, signature));
+                    external.last_applied = Some(LastAppliedWatchtowerSignature {
+                        request_id: signed_id,
+                        signature,
+                    });
+                    Ok::<_, ()>(())
+                })
+                .expect("submit update");
+        });
+        // Without an atomic update the submitter can save its signature while
+        // the scan still holds the old snapshot. With the lock it waits here.
+        if submit_entered_rx
+            .recv_timeout(Duration::from_millis(200))
+            .is_ok()
+        {
+            submit.join().expect("submit thread");
+            release_scan_tx.send(()).expect("release scan");
+            scan.join().expect("scan thread");
+        } else {
+            release_scan_tx.send(()).expect("release scan");
+            scan.join().expect("scan thread");
+            submit.join().expect("submit thread");
+        }
+    });
+    let WatchtowerSignerState::External(state) = store.get_watchtower_signer(&node_id, &channel_id)
+    else {
+        panic!("external signer");
+    };
+    assert_eq!(
+        state.signed_signatures.get(&signed_id),
+        Some(&(content.clone(), signature)),
+        "scan must not overwrite an accepted signature"
+    );
+    assert!(!state.pending_requests.contains_key(&signed_id));
+    assert_eq!(state.pending_requests.get(&new_id), Some(&content));
+    assert_eq!(
+        state.last_applied,
+        Some(LastAppliedWatchtowerSignature {
+            request_id: signed_id,
+            signature
+        })
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_watchtower_atomic_update_discards_failed_mutation() {
+    use fiber_types::watchtower::WatchtowerExternalSignerState;
+    use fiber_types::WatchtowerSignerState;
+
+    let path = TempDir::new("watchtower-failed-signer-update");
+    let store = open_store(path).expect("open store");
+    let node_id = NodeId::local();
+    let channel_id = Hash256::from([1; 32]);
+    let result = store.update_watchtower_signer(&node_id, &channel_id, |state| {
+        *state = WatchtowerSignerState::External(WatchtowerExternalSignerState::default());
+        Err::<(), _>("invalid signature")
+    });
+    assert_eq!(result, Err("invalid signature"));
+    assert_eq!(
+        store.get_watchtower_signer(&node_id, &channel_id),
+        WatchtowerSignerState::Internal
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
 fn test_onchain_tlc_settlement_roundtrip() {
     let path = TempDir::new("test-onchain-tlc-settlement-roundtrip");
     let store = open_store(path).expect("created store failed");
@@ -999,6 +1832,141 @@ fn test_onchain_tlc_settlement_roundtrip() {
         ),
         None
     );
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "watchtower"))]
+#[test]
+fn test_onchain_tlc_settlement_resolves_hosted_tenant_namespace() {
+    let path = TempDir::new("onchain_tlc_settlement_namespace");
+    let store = open_store(path).expect("create shared store");
+    let tenant_u1 = store.namespaced(NodeNamespace::hosted_tenant("u1"));
+    let tenant_u2 = store.namespaced(NodeNamespace::hosted_tenant("u2"));
+    let unowned_tenant = store.namespaced(NodeNamespace::hosted_tenant("u3"));
+    let u1_state = ChannelActorState::samples(42).remove(0);
+    let mut u2_state = ChannelActorState::samples(43).remove(0);
+    let channel_id = u1_state.get_id();
+    u2_state.id = channel_id;
+    let u1_node_id = NodeId::from_bytes(u1_state.get_local_pubkey().serialize().to_vec());
+    let u2_node_id = NodeId::from_bytes(u2_state.get_local_pubkey().serialize().to_vec());
+    assert_ne!(u1_node_id, u2_node_id);
+    tenant_u1.insert_channel_actor_state(u1_state);
+    tenant_u2.insert_channel_actor_state(u2_state);
+
+    let preimage = Hash256::from([9; 32]);
+    let payment_hash = HashAlgorithm::CkbHash.hash(preimage).into();
+    let fulfilled = OnChainTlcSettlement {
+        payment_hash,
+        hash_algorithm: HashAlgorithm::CkbHash,
+        preimage: Some(preimage),
+        tx_hash: Hash256::from([7; 32]),
+        tlc_index: 0,
+    };
+    let timed_out = OnChainTlcSettlement {
+        preimage: None,
+        tx_hash: Hash256::from([8; 32]),
+        ..fulfilled.clone()
+    };
+    let read = |reader: &crate::store::Store, channel_id: &Hash256, tlc_id| {
+        ChannelActorStateStore::get_onchain_tlc_settlement(
+            reader,
+            channel_id,
+            tlc_id,
+            &payment_hash,
+        )
+    };
+
+    // The host watchtower writes outside the tenant namespace. Even identical
+    // channel/TLC ids must select the proof belonging to this logical node.
+    for (tlc_id, u1_proof, u2_proof) in [
+        (TLCId::Offered(0), &fulfilled, &timed_out),
+        (TLCId::Received(0), &timed_out, &fulfilled),
+    ] {
+        store.insert_onchain_tlc_settlement(&u1_node_id, &channel_id, tlc_id, u1_proof.clone());
+        assert_eq!(
+            read(&tenant_u1, &channel_id, tlc_id),
+            Some(u1_proof.clone())
+        );
+        assert_eq!(read(&tenant_u2, &channel_id, tlc_id), None);
+        assert_eq!(read(&store, &channel_id, tlc_id), None);
+        assert_eq!(read(&unowned_tenant, &channel_id, tlc_id), None);
+
+        store.insert_onchain_tlc_settlement(&u2_node_id, &channel_id, tlc_id, u2_proof.clone());
+        let public_proof = OnChainTlcSettlement {
+            tx_hash: Hash256::from([6; 32]),
+            ..fulfilled.clone()
+        };
+        store.insert_onchain_tlc_settlement(
+            &NodeId::local(),
+            &channel_id,
+            tlc_id,
+            public_proof.clone(),
+        );
+        for (reader, expected) in [
+            (&tenant_u1, u1_proof),
+            (&tenant_u2, u2_proof),
+            (&store, &public_proof),
+        ] {
+            assert_eq!(read(reader, &channel_id, tlc_id), Some(expected.clone()));
+            assert_eq!(read(reader, &channel_id, TLCId::Offered(1)), None);
+        }
+        assert_eq!(read(&unowned_tenant, &channel_id, tlc_id), None);
+    }
+
+    // A proof under U1's identity alone is not enough: the channel must also
+    // belong to U1's namespace before shared watchtower data can be read.
+    let unowned_channel_id = Hash256::from([91; 32]);
+    store.insert_onchain_tlc_settlement(
+        &u1_node_id,
+        &unowned_channel_id,
+        TLCId::Offered(0),
+        fulfilled,
+    );
+    assert_eq!(
+        read(&tenant_u1, &unowned_channel_id, TLCId::Offered(0)),
+        None
+    );
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "watchtower"))]
+#[test]
+fn test_onchain_tlc_settlement_hosted_tenant_rejects_unscoped_legacy_proof() {
+    let path = TempDir::new("onchain_tlc_settlement_legacy_namespace");
+    let store = open_store(path).expect("create shared store");
+    let tenant = store.namespaced(NodeNamespace::hosted_tenant("u1"));
+    let state = ChannelActorState::samples(42).remove(0);
+    let channel_id = state.get_id();
+    tenant.insert_channel_actor_state(state);
+    let payment_hash = Hash256::from([3; 32]);
+    let tlc_id = TLCId::Offered(0);
+    let legacy_key = [
+        &[WATCHTOWER_TLC_SETTLED_PREFIX],
+        channel_id.as_ref(),
+        &payment_hash.as_ref()[..20],
+    ]
+    .concat();
+    for value in [vec![], vec![0, 0, 0]] {
+        store.put(&legacy_key, value);
+        // V2 requires exact proofs with node and TLC identity. Neither the
+        // public node nor a tenant may consume unscoped legacy rows.
+        assert_eq!(
+            ChannelActorStateStore::get_onchain_tlc_settlement(
+                &store,
+                &channel_id,
+                tlc_id,
+                &payment_hash,
+            ),
+            None
+        );
+        assert_eq!(
+            ChannelActorStateStore::get_onchain_tlc_settlement(
+                &tenant,
+                &channel_id,
+                tlc_id,
+                &payment_hash,
+            ),
+            None
+        );
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1196,16 +2164,21 @@ fn test_store_watchtower_with_wrong_node_id() {
         node_id.clone(),
         channel_id,
         None,
-        local_settlement_key.clone(),
-        remote_settlement_key,
-        local_funding_pubkey,
-        remote_funding_pubkey,
+        WatchChannelKeys {
+            local_settlement: SettlementKey::local(local_settlement_key.clone()),
+            remote_settlement: remote_settlement_key,
+            local_funding: local_funding_pubkey,
+            remote_funding: remote_funding_pubkey,
+        },
         settlement_data.clone(),
+        fiber_types::ChannelFeatures::V2,
+        None,
     );
     let expected_value = vec![ChannelData {
         channel_id,
         funding_udt_type_script: None,
-        local_settlement_key: local_settlement_key.clone(),
+        local_settlement_key: Some(local_settlement_key.clone()),
+        local_settlement_key_pubkey: Some(local_settlement_key.pubkey()),
         remote_settlement_key,
         local_funding_pubkey,
         remote_funding_pubkey,
@@ -1214,6 +2187,7 @@ fn test_store_watchtower_with_wrong_node_id() {
         pending_remote_settlement_data: settlement_data.clone(),
         remote_settlement_data: settlement_data.clone(),
         channel_features: Default::default(),
+        payout_lock_script: None,
     }];
     assert_eq!(store.get_watch_channels(), expected_value);
 
@@ -1270,8 +2244,10 @@ fn test_channel_actor_state_store() {
     let pub_nonce = sec_nonce.public_nonce();
     let channel_id = gen_rand_sha256_hash();
     let state = ChannelActorState {
+        channel_signer: crate::fiber::channel_signer::ChannelSigner::local(signer.clone()),
         core: ChannelActorData {
             state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::THEIR_INIT_SENT),
+            signing_context: Default::default(),
             public_channel_info: Some(PublicChannelInfo {
                 local_channel_announcement_signature: Some((
                     mock_ecdsa_signature(),
@@ -1310,12 +2286,9 @@ fn test_channel_actor_state_store() {
             retryable_tlc_operations: Default::default(),
             waiting_forward_tlc_tasks: Default::default(),
             local_shutdown_script: Script::default(),
-            local_channel_public_keys: ChannelBasePublicKeys {
-                funding_pubkey: gen_rand_fiber_public_key(),
-                tlc_base_key: gen_rand_fiber_public_key(),
-            },
+            local_channel_public_keys: signer.get_base_public_keys(),
             session: crate::fiber::session::new_session(channel_id, &signer.funding_key, None),
-            signer,
+            signer: Some(signer),
             remote_channel_public_keys: Some(ChannelBasePublicKeys {
                 funding_pubkey: gen_rand_fiber_public_key(),
                 tlc_base_key: gen_rand_fiber_public_key(),
@@ -1361,11 +2334,13 @@ fn test_channel_actor_state_store() {
         funding_abort_detail: None,
         private_key: None,
         needs_backup: false,
+        pending_messages: Default::default(),
         musig2_agg_context_local_first: Default::default(),
         musig2_agg_context_remote_first: Default::default(),
         pending_remove_effects_v2: 0,
         pending_payment_notifications: Default::default(),
         replayed_tlc_updates_v2: 0,
+        resigning_outgoing_v2: false,
     };
 
     let bincode_encoded = bincode::serialize(&state).unwrap();
@@ -1421,8 +2396,10 @@ fn sample_channel_actor_state(
 
     let channel_id = gen_rand_sha256_hash();
     ChannelActorState {
+        channel_signer: crate::fiber::channel_signer::ChannelSigner::local(signer.clone()),
         core: ChannelActorData {
             state,
+            signing_context: Default::default(),
             public_channel_info: Some(PublicChannelInfo {
                 local_channel_announcement_signature: Some((
                     mock_ecdsa_signature(),
@@ -1461,12 +2438,9 @@ fn sample_channel_actor_state(
             retryable_tlc_operations: Default::default(),
             waiting_forward_tlc_tasks: Default::default(),
             local_shutdown_script: Script::default(),
-            local_channel_public_keys: ChannelBasePublicKeys {
-                funding_pubkey: gen_rand_fiber_public_key(),
-                tlc_base_key: gen_rand_fiber_public_key(),
-            },
+            local_channel_public_keys: signer.get_base_public_keys(),
             session: crate::fiber::session::new_session(channel_id, &signer.funding_key, None),
-            signer,
+            signer: Some(signer),
             remote_channel_public_keys: Some(ChannelBasePublicKeys {
                 funding_pubkey: gen_rand_fiber_public_key(),
                 tlc_base_key: gen_rand_fiber_public_key(),
@@ -1504,11 +2478,13 @@ fn sample_channel_actor_state(
         funding_abort_detail: None,
         private_key: None,
         needs_backup: false,
+        pending_messages: Default::default(),
         musig2_agg_context_local_first: Default::default(),
         musig2_agg_context_remote_first: Default::default(),
         pending_remove_effects_v2: 0,
         pending_payment_notifications: Default::default(),
         replayed_tlc_updates_v2: 0,
+        resigning_outgoing_v2: false,
     }
 }
 
@@ -1584,6 +2560,151 @@ fn test_store_payment_session() {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_hosted_payment_execution_store_isolation() {
+    use crate::fiber_types::UpstreamTlcKey;
+    let (mut store, _dir) = generate_store();
+    let events = std::sync::Arc::new(StoreChangeSaver::default());
+    let watcher = events.clone();
+    store.set_watcher(std::sync::Arc::new(move |event| {
+        watcher.changes.write().unwrap().push(event);
+    }));
+    let hash = gen_rand_sha256_hash();
+    let source = gen_rand_fiber_public_key();
+    let target = gen_rand_fiber_public_key();
+    let data = SendPaymentDataBuilder::new(target, 100, hash)
+        .final_tlc_expiry_delta(DEFAULT_TLC_EXPIRY_DELTA)
+        .tlc_expiry_limit(MAX_PAYMENT_TLC_EXPIRY_LIMIT)
+        .max_fee_amount(Some(1000))
+        .build()
+        .unwrap();
+    let incoming_channel = gen_rand_sha256_hash();
+    let outpoint = OutPoint::new(gen_rand_sha256_hash().into(), 0);
+    let hops = vec![PaymentHopData {
+        amount: 100,
+        expiry: u64::MAX,
+        next_hop: Some(target),
+        funding_tx_hash: outpoint.tx_hash().into(),
+        payment_preimage: None,
+        hash_algorithm: HashAlgorithm::CkbHash,
+        custom_records: None,
+    }];
+    let mut keys = Vec::new();
+    for upstream_tlc_key in [
+        None,
+        Some(UpstreamTlcKey {
+            incoming_channel_id: incoming_channel,
+            incoming_tlc_id: 1,
+        }),
+        Some(UpstreamTlcKey {
+            incoming_channel_id: incoming_channel,
+            incoming_tlc_id: 2,
+        }),
+    ] {
+        let mut request = data.clone();
+        request.upstream_tlc_key = upstream_tlc_key;
+        let session = PaymentSession::new_session(&store, request, 10);
+        let key = session.session_key();
+        assert_eq!(session.attempts_count(), 0);
+        store.insert_payment_session(session.clone());
+        let mut attempt = session.new_attempt(1, source, target, hops.clone());
+        attempt.status = AttemptStatus::Retrying;
+        store.insert_attempt(attempt);
+        keys.push(key);
+    }
+    for key in &keys {
+        let restored = store.get_payment_session(*key).unwrap();
+        assert_eq!(restored.session_key(), *key);
+        assert_eq!(restored.attempts_count(), 1);
+        assert_eq!(restored.attempts().next().unwrap().session_key(), *key);
+    }
+    assert_eq!(store.get_all_payment_sessions().len(), 3);
+    assert_eq!(
+        events.changes.read().unwrap().len(),
+        2,
+        "only the ordinary session and attempt may notify hash-addressed subscribers"
+    );
+    assert_eq!(
+        store.get_payment_sessions_with_limit(10, None, None).len(),
+        1
+    );
+    assert_eq!(
+        store
+            .get_pending_attempts_by_channel_outpoint(&outpoint)
+            .len(),
+        3
+    );
+    // Recovery indices must remain until the execution actually finishes.
+    store.clear_attempts_channel_index(hash);
+    assert_eq!(
+        store
+            .get_pending_attempts_by_channel_outpoint(&outpoint)
+            .len(),
+        3
+    );
+    let finish = |key| {
+        let mut attempt = store.get_attempt(key, 1).unwrap();
+        attempt.set_failed_status("finished", false);
+        store.insert_attempt(attempt);
+        let mut session = store.get_payment_session(key).unwrap();
+        session.set_failed_status("finished");
+        store.insert_payment_session(session);
+    };
+    finish(hash.into());
+    // Clearing a completed hash-only index must preserve hosted executions and
+    // all attempt records. Repeated cleanup must be harmless.
+    store.clear_attempts_channel_index(hash);
+    store.clear_attempts_channel_index(hash);
+    assert!(store.get_attempt(hash, 1).is_some());
+    let pending = store.get_pending_attempts_by_channel_outpoint(&outpoint);
+    assert_eq!(pending.len(), 2);
+    assert!(pending
+        .iter()
+        .any(|attempt| attempt.session_key() == keys[1]));
+    assert!(pending
+        .iter()
+        .any(|attempt| attempt.session_key() == keys[2]));
+
+    finish(keys[1]);
+    store.clear_attempts_channel_index(keys[1]);
+    store.clear_attempts_channel_index(keys[1]);
+    assert_eq!(
+        store
+            .get_pending_attempts_by_channel_outpoint(&outpoint)
+            .len(),
+        1
+    );
+    assert!(store.get_attempt(keys[1], 1).is_some());
+    // In particular, deleting hash-only attempts must not delete scoped records
+    // that share the same byte prefix.
+    store.delete_attempts(hash);
+    store.delete_attempts(hash);
+    assert!(store.get_attempt(hash, 1).is_none());
+    assert!(store.get_attempt(keys[1], 1).is_some());
+    assert!(store.get_attempt(keys[2], 1).is_some());
+    assert_eq!(
+        store
+            .get_pending_attempts_by_channel_outpoint(&outpoint)
+            .len(),
+        1
+    );
+    store.delete_attempts(keys[2]);
+    store.delete_attempts(keys[2]);
+    assert!(store.get_attempt(keys[2], 1).is_none());
+    assert!(store.get_attempt(keys[1], 1).is_some());
+    assert!(store
+        .get_pending_attempts_by_channel_outpoint(&outpoint)
+        .is_empty());
+    // Removing attempts must also work after their indexes were already cleared.
+    store.delete_attempts(keys[1]);
+    store.delete_attempts(keys[1]);
+    for key in keys {
+        assert!(store.get_attempts(key).is_empty());
+        store.clear_attempts_channel_index(key);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 fn test_channel_ready_retry_index_handles_created_attempt_channel_ownership() {
@@ -1619,6 +2740,7 @@ fn test_channel_ready_retry_index_handles_created_attempt_channel_ownership() {
     }];
     let route = SessionRoute::new(first_hop, target, &route_hops);
     let mut attempt = Attempt {
+        upstream_tlc_key: None,
         id: 1,
         hash: payment_hash,
         try_limit: 10,
@@ -1643,6 +2765,7 @@ fn test_channel_ready_retry_index_handles_created_attempt_channel_ownership() {
     assert_eq!(orphan_created_attempts[0].status, AttemptStatus::Created);
 
     channel_state.tlc_state.add_offered_tlc(TlcInfo {
+        upstream_tlc_key: None,
         status: TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced),
         tlc_id: TLCId::Offered(0),
         amount: 100,
@@ -1661,6 +2784,25 @@ fn test_channel_ready_retry_index_handles_created_attempt_channel_ownership() {
         removed_confirmed_at: None,
         applied_flags: AppliedFlags::empty(),
     });
+    let scoped_key = crate::fiber_types::PaymentSessionKey {
+        payment_hash,
+        upstream_tlc_key: Some(crate::fiber_types::UpstreamTlcKey {
+            incoming_channel_id: gen_rand_sha256_hash(),
+            incoming_tlc_id: 1,
+        }),
+    };
+    let mut scoped_attempt = attempt.clone();
+    scoped_attempt.upstream_tlc_key = scoped_key.upstream_tlc_key;
+    assert!(channel_state.owns_payment_attempt(&attempt));
+    assert!(!channel_state.owns_payment_attempt(&scoped_attempt));
+    channel_state.tlc_state.offered_tlcs.tlcs[0].upstream_tlc_key = scoped_key.upstream_tlc_key;
+    assert_eq!(
+        channel_state.tlc_state.offered_tlcs.tlcs[0].session_key(),
+        scoped_key
+    );
+    assert!(channel_state.owns_payment_attempt(&scoped_attempt));
+    assert!(!channel_state.owns_payment_attempt(&attempt));
+    channel_state.tlc_state.offered_tlcs.tlcs[0].upstream_tlc_key = None;
     store.insert_channel_actor_state_for_test(channel_state.clone());
     assert!(
         store
@@ -1692,6 +2834,7 @@ fn test_channel_ready_retry_index_handles_created_attempt_channel_ownership() {
     channel_state
         .retryable_tlc_operations
         .push_back(RetryableTlcOperation::AddTlc(AddTlcCommand {
+            upstream_tlc_key: None,
             amount: 100,
             payment_hash,
             attempt_id: Some(attempt.id),
@@ -1702,6 +2845,22 @@ fn test_channel_ready_retry_index_handles_created_attempt_channel_ownership() {
             is_trampoline_hop: false,
             previous_tlc: None,
         }));
+    if let Some(RetryableTlcOperation::AddTlc(command)) =
+        channel_state.retryable_tlc_operations.front_mut()
+    {
+        assert_eq!(command.session_key(), payment_hash.into());
+        command.upstream_tlc_key = scoped_key.upstream_tlc_key;
+        assert_eq!(command.session_key(), scoped_key);
+    } else {
+        panic!("expected queued AddTlc");
+    }
+    assert!(channel_state.owns_payment_attempt(&scoped_attempt));
+    assert!(!channel_state.owns_payment_attempt(&attempt));
+    if let Some(RetryableTlcOperation::AddTlc(command)) =
+        channel_state.retryable_tlc_operations.front_mut()
+    {
+        command.upstream_tlc_key = None;
+    }
     store.insert_channel_actor_state_for_test(channel_state);
     assert!(
         store
@@ -1854,7 +3013,7 @@ fn test_review_rerouted_attempt_index_recovery() {
     );
     assert_eq!(
         store.reconcile_attempts_channel_index(),
-        [hash].into_iter().collect()
+        [hash.into()].into_iter().collect()
     );
     assert!(store.get(key(&a)).is_none());
     assert!(store.get(key(current)).is_some());
@@ -1898,6 +3057,7 @@ fn test_review_rerouted_attempt_index_recovery() {
             shared_secret: [0; 32],
             is_trampoline_hop: false,
             previous_tlc: None,
+            upstream_tlc_key: None,
         }));
     store.insert_channel_actor_state_for_test(channel.clone());
     store.delete(key(&channel_outpoint));
@@ -2170,7 +3330,7 @@ fn valid_opening_channel() -> ChannelActorState {
         ChannelState::NegotiatingFunding(fiber_types::NegotiatingFundingFlags::empty()),
         None,
     );
-    channel.local_channel_public_keys.funding_pubkey = channel.signer.funding_key.pubkey();
+    channel.local_channel_public_keys = channel.signer.as_ref().unwrap().get_base_public_keys();
     channel
 }
 
@@ -2886,6 +4046,118 @@ fn test_channel_cache_reads_see_completed_writes() {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
+fn test_channel_cache_isolates_namespaces_with_same_channel_id() {
+    use crate::store::open_store_with_migration;
+
+    let dir = TempDir::new("channel-cache-namespaces");
+    let store =
+        open_store_with_migration(dir.as_ref(), false, 8, Box::new(|_| true), Box::new(|_| {}))
+            .expect("open store with cache");
+    let tenant_a = store.namespaced(NodeNamespace::hosted_tenant("alice"));
+    let tenant_a_reopened = store.namespaced(NodeNamespace::hosted_tenant("alice"));
+    let tenant_b = store.namespaced(NodeNamespace::hosted_tenant("bob"));
+
+    let mut host_channel = sample_channel_actor_state(ChannelState::ChannelReady, None);
+    let shared_id = host_channel.id;
+    host_channel.to_local_amount = 100;
+
+    let mut alice_channel = sample_channel_actor_state(ChannelState::ChannelReady, None);
+    alice_channel.id = shared_id;
+    alice_channel.to_local_amount = 200;
+
+    let mut bob_channel = sample_channel_actor_state(ChannelState::ChannelReady, None);
+    bob_channel.id = shared_id;
+    bob_channel.to_local_amount = 300;
+
+    seed_established(&store, &host_channel);
+    seed_established(&tenant_a, &alice_channel);
+    seed_established(&tenant_b, &bob_channel);
+
+    assert_eq!(store.channel_cache_len(), 1);
+    assert_eq!(tenant_a.channel_cache_len(), 1);
+    assert_eq!(tenant_b.channel_cache_len(), 1);
+
+    assert_eq!(
+        store
+            .get_channel_actor_state(&shared_id)
+            .unwrap()
+            .to_local_amount,
+        100
+    );
+    assert_eq!(
+        tenant_a
+            .get_channel_actor_state(&shared_id)
+            .unwrap()
+            .to_local_amount,
+        200
+    );
+    // A second handle for the same namespace shares the cache coherently.
+    assert_eq!(
+        tenant_a_reopened
+            .channel_cache_peek(&shared_id)
+            .unwrap()
+            .to_local_amount,
+        200
+    );
+    assert_eq!(
+        tenant_b
+            .get_channel_actor_state(&shared_id)
+            .unwrap()
+            .to_local_amount,
+        300
+    );
+
+    // Updating through another handle of the same namespace invalidates/updates its cached snapshot,
+    // without disturbing other namespaces sharing the same channel_id.
+    alice_channel.to_local_amount = 250;
+    tenant_a_reopened.insert_channel_actor_state(alice_channel.clone());
+    assert_eq!(
+        tenant_a
+            .channel_cache_peek(&shared_id)
+            .unwrap()
+            .to_local_amount,
+        250
+    );
+    assert_eq!(
+        store
+            .channel_cache_peek(&shared_id)
+            .unwrap()
+            .to_local_amount,
+        100
+    );
+    assert_eq!(
+        tenant_b
+            .channel_cache_peek(&shared_id)
+            .unwrap()
+            .to_local_amount,
+        300
+    );
+
+    // Deleting in one namespace leaves the other namespaces' records and snapshots intact.
+    tenant_a.delete_channel_actor_state(&shared_id);
+    assert!(tenant_a.get_channel_actor_state(&shared_id).is_none());
+    assert!(tenant_a_reopened
+        .get_channel_actor_state(&shared_id)
+        .is_none());
+    assert_eq!(tenant_a.channel_cache_len(), 0);
+    assert_eq!(
+        store
+            .get_channel_actor_state(&shared_id)
+            .unwrap()
+            .to_local_amount,
+        100
+    );
+    assert_eq!(
+        tenant_b
+            .get_channel_actor_state(&shared_id)
+            .unwrap()
+            .to_local_amount,
+        300
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
 fn test_payment_list_skips_unneeded_channel_reads() {
     use crate::store::open_store_with_migration;
     use fiber_types::schema::{ATTEMPT_CHANNEL_INDEX_PREFIX, CHANNEL_ACTOR_STATE_PREFIX};
@@ -3042,6 +4314,7 @@ async fn test_payment_list_index_gate_does_not_change_settlement_status() {
             shared_secret: [0; 32],
             is_trampoline_hop: false,
             previous_tlc: None,
+            upstream_tlc_key: None,
         }));
     store.insert_channel_actor_state_for_test(channel);
     let session_key = [&[PAYMENT_SESSION_PREFIX], hash.as_ref()].concat();
@@ -3088,22 +4361,28 @@ async fn test_payment_list_index_gate_does_not_change_settlement_status() {
         }
         for filter in [None, Some(expected)] {
             let response = rpc
-                .list_payments(crate::rpc::payment::ListPaymentsParams {
-                    status: filter.map(Into::into),
-                    limit: Some(1),
-                    after: None,
-                })
+                .list_payments(
+                    &jsonrpsee::Extensions::new(),
+                    crate::rpc::payment::ListPaymentsParams {
+                        status: filter.map(Into::into),
+                        limit: Some(1),
+                        after: None,
+                    },
+                )
                 .await
                 .unwrap();
             assert_eq!(response.payments.len(), 1);
             assert_eq!(response.payments[0].status, expected.into());
             assert_eq!(response.last_cursor, Some(hash.into()));
             let next = rpc
-                .list_payments(crate::rpc::payment::ListPaymentsParams {
-                    status: filter.map(Into::into),
-                    limit: Some(1),
-                    after: response.last_cursor,
-                })
+                .list_payments(
+                    &jsonrpsee::Extensions::new(),
+                    crate::rpc::payment::ListPaymentsParams {
+                        status: filter.map(Into::into),
+                        limit: Some(1),
+                        after: response.last_cursor,
+                    },
+                )
                 .await
                 .unwrap();
             assert!(next.payments.is_empty());
@@ -3194,6 +4473,7 @@ fn test_review_settled_legacy_timeout_is_not_pending() {
     session.set_failed_status("legacy chain timeout");
     store.insert_payment_session(session);
     channel.tlc_state.add_offered_tlc(TlcInfo {
+        upstream_tlc_key: None,
         status: TlcStatus::Outbound(OutboundTlcStatus::Committed),
         tlc_id: TLCId::Offered(0),
         amount: 100,
@@ -3252,6 +4532,7 @@ fn test_review_settled_legacy_timeout_is_not_pending() {
             shared_secret: [0; 32],
             is_trampoline_hop: false,
             previous_tlc: None,
+            upstream_tlc_key: None,
         }));
     store.insert_channel_actor_state_for_test(channel.clone());
     assert!(
@@ -3515,7 +4796,7 @@ fn test_payment_status_queries_filter_hydrated_attempts_before_pagination() {
     );
     for (index, &(persisted, _, _)) in cases.iter().enumerate() {
         assert_eq!(
-            store.get_persisted_payment_status([index as u8 + 1; 32].into()),
+            store.get_persisted_payment_status(Hash256::from([index as u8 + 1; 32])),
             Some(persisted),
             "queries must not rewrite durable aggregate status"
         );
@@ -3713,6 +4994,27 @@ struct StoreChangeSaver {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
+fn test_node_namespace_does_not_inherit_public_store_watcher() {
+    use crate::store::store_impl::StoreChange;
+    use std::sync::Arc;
+
+    let (mut store, _dir) = generate_store();
+    let saver = Arc::new(StoreChangeSaver::default());
+    let saver_clone = saver.clone();
+    store.set_watcher(Arc::new(move |change: StoreChange| {
+        saver_clone.changes.write().unwrap().push(change);
+    }));
+    let tenant_store = store.namespaced(NodeNamespace::hosted_tenant("u1"));
+
+    tenant_store.insert_preimage(gen_rand_sha256_hash(), gen_rand_sha256_hash());
+    assert!(saver.changes.read().unwrap().is_empty());
+
+    store.insert_preimage(gen_rand_sha256_hash(), gen_rand_sha256_hash());
+    assert_eq!(saver.changes.read().unwrap().len(), 1);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
 fn test_store_change_watcher() {
     use crate::store::store_impl::StoreChange;
     use std::sync::Arc;
@@ -3815,7 +5117,35 @@ fn test_store_sample_channel_actor_state() {
     // Insert all samples
     for sample in &samples {
         assert!(store.get_channel_actor_state(&sample.id).is_none());
-        store.insert_channel_actor_state(sample.clone());
+        let mut with_public_cache = sample.clone();
+        with_public_cache
+            .signing_context
+            .v2_commitment_points
+            .push((100, gen_rand_fiber_public_key()));
+        with_public_cache
+            .signing_context
+            .v2_nonce_pool
+            .push(musig2::SecNonce::build([42; 32]).build().public_nonce());
+        store.insert_channel_actor_state(with_public_cache);
+        // Decode the raw core to verify the write removed derivable material.
+        let key = [
+            &[fiber_types::schema::CHANNEL_ACTOR_STATE_PREFIX],
+            sample.id.as_ref(),
+        ]
+        .concat();
+        let raw = store.get(key).unwrap();
+        let persisted: fiber_types::ChannelMutableData =
+            deserialize_from(raw.as_ref(), "ChannelMutableData");
+        if sample.signer.is_some() {
+            assert!(persisted.signing_context.v2_commitment_points.is_empty());
+            assert!(persisted.signing_context.v2_nonce_pool.is_empty());
+        } else {
+            assert!(persisted
+                .signing_context
+                .v2_commitment_points
+                .iter()
+                .any(|(number, _)| *number == 100));
+        }
     }
 
     // Verify each sample can be queried back and key fields match
@@ -4017,7 +5347,7 @@ mod store_actor_tests {
             _: TakeWhileFn,
             _: usize,
         ) -> Vec<KVPair> {
-            todo!()
+            Vec::new()
         }
         fn restore(&self, _: &Path, _: &Path) -> Result<(), StoreError> {
             todo!()
@@ -4045,6 +5375,7 @@ mod store_actor_tests {
             backup_path: temp_dir.path().to_path_buf(),
             ckb_key_path: temp_dir.path().to_path_buf(),
             fiber_key_path: temp_dir.path().to_path_buf(),
+            tenant_store_root: None,
             backup_interval_hours: 24,
         };
 
@@ -4086,6 +5417,7 @@ mod store_actor_tests {
                 backup_path: temp_dir.path().to_path_buf(),
                 ckb_key_path: temp_dir.path().to_path_buf(),
                 fiber_key_path: temp_dir.path().to_path_buf(),
+                tenant_store_root: None,
                 backup_interval_hours: 24,
             },
             root_actor.get_cell(),
@@ -4112,4 +5444,262 @@ mod store_actor_tests {
             "Requests during cooldown should be throttled and not trigger new backups."
         );
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
+async fn test_tenant_channel_opening_persists_before_and_after_final_id() {
+    let path = TempDir::new("tenant_channel_opening");
+    let created = fiber_lsp_sdk::RootSigner::in_memory().await.unwrap();
+    let signer = created.root_signer.create_channel().await.unwrap();
+    let material = signer.channel_open_material(false).await.unwrap();
+    let request: fiber_json_types::OpenChannelWithExternalFundingParams = serde_json::from_value(serde_json::json!({
+            "pubkey": material.base_public_keys.funding_pubkey, "public": false,
+        "funding_amount":"0xba43b7400", "shutdown_script":ckb_jsonrpc_types::Script::from(Script::default()),
+        "funding_lock_script":ckb_jsonrpc_types::Script::from(Script::default()),
+        "external_channel_signer":fiber_lsp_sdk::json::open_material_to_rpc(&material),
+    })).unwrap();
+    let mut command = crate::rpc::channel::external_funding_command(&request).unwrap();
+    command.funding_amount = u128::MAX;
+    command.tlc_min_value = Some(u128::MAX);
+    command.tlc_fee_proportional_millionths = Some(u128::MAX);
+    command.max_tlc_value_in_flight = Some(u128::MAX);
+    command.commitment_delay_epoch = Some(ckb_types::core::EpochNumberWithFraction::new(1, 0, 1));
+    let temporary_id = Hash256::from([1; 32]);
+    let final_id = Hash256::from([2; 32]);
+    {
+        let store = open_store(&path).unwrap();
+        let tenant = store.namespaced(NodeNamespace::hosted_tenant("opening-owner"));
+        tenant.put_tenant_channel_opening(TenantChannelOpening {
+            command: command.clone(),
+            channel_id: temporary_id,
+            result: None,
+            terminated: false,
+        });
+        assert!(store.get_tenant_channel_opening(&temporary_id).is_none());
+        assert!(store
+            .namespaced(NodeNamespace::hosted_tenant("other-tenant"))
+            .get_tenant_channel_opening(&temporary_id)
+            .is_none());
+    }
+    let result = fiber_json_types::OpenChannelWithExternalFundingResult {
+        channel_id: final_id.into(),
+        unsigned_funding_tx: Transaction::default().into(),
+        opening_context: Some(fiber_json_types::TenantChannelOpeningContext {
+            remote_funding_key: material.base_public_keys.funding_pubkey.into(),
+            remote_settlement_key: material.base_public_keys.tlc_base_key.into(),
+            remote_shutdown_script: Script::default().into(),
+            commitment_delay_epoch: 1.into(),
+            commitment_fee_rate: 1000,
+            local_amount: 50_000_000_000,
+            remote_amount: 50_000_000_000,
+            local_reserved_ckb_amount: 9_900_000_000,
+            remote_reserved_ckb_amount: 9_900_000_000,
+        }),
+    };
+    {
+        let store = open_store(&path)
+            .unwrap()
+            .namespaced(NodeNamespace::hosted_tenant("opening-owner"));
+        let mut pending = store.get_tenant_channel_opening(&temporary_id).unwrap();
+        assert_eq!(pending.channel_id, temporary_id);
+        assert!(pending.result.is_none());
+        assert_eq!(
+            serde_json::to_value(&pending.command).unwrap(),
+            serde_json::to_value(&command).unwrap()
+        );
+        store.delete_tenant_channel_opening(&temporary_id);
+        pending.channel_id = final_id;
+        pending.result = Some(result.clone());
+        store.put_tenant_channel_opening(pending);
+    }
+    let store = open_store(&path)
+        .unwrap()
+        .namespaced(NodeNamespace::hosted_tenant("opening-owner"));
+    let restored = store.get_tenant_channel_opening(&final_id).unwrap();
+    assert_eq!(restored.channel_id, final_id);
+    assert_eq!(
+        serde_json::to_value(restored.result.unwrap()).unwrap(),
+        serde_json::to_value(result).unwrap()
+    );
+
+    let second_id = Hash256::from([3; 32]);
+    store.put_tenant_channel_opening(TenantChannelOpening {
+        command: command.clone(),
+        channel_id: second_id,
+        result: None,
+        terminated: false,
+    });
+    assert_eq!(store.list_tenant_channel_openings().len(), 2);
+    assert!(store.get_tenant_channel_opening(&second_id).is_some());
+    store.delete_tenant_channel_opening(&second_id);
+    assert!(store.get_tenant_channel_opening(&second_id).is_none());
+    assert_eq!(store.list_tenant_channel_openings().len(), 1);
+}
+
+#[test]
+fn test_move_channel_open_records_atomically_rekeys_both_records() {
+    use crate::fiber::channel::{ChannelOpenRecordStore, TenantChannelOpening};
+    use crate::fiber::network::OpenChannelWithExternalFundingCommand;
+    use crate::fiber::types::Privkey;
+    use ckb_types::packed::Script;
+    use fiber_types::{ChannelOpenRecord, ChannelOpeningStatus};
+
+    let (store, _dir) = generate_store();
+    let tenant = store.namespaced(NodeNamespace::hosted_tenant("atomic-move-owner"));
+    let temporary_id = Hash256::from([0x11; 32]);
+    let final_id = Hash256::from([0x22; 32]);
+    let peer_pubkey = Privkey::from(&[2u8; 32]).pubkey();
+    let command = OpenChannelWithExternalFundingCommand {
+        pubkey: peer_pubkey,
+        funding_amount: 100_000_000_000,
+        public: false,
+        shutdown_script: Script::default(),
+        funding_lock_script: Script::default(),
+        funding_lock_script_cell_deps: Vec::new(),
+        funding_udt_type_script: None,
+        commitment_fee_rate: None,
+        commitment_delay_epoch: None,
+        funding_fee_rate: None,
+        tlc_expiry_delta: None,
+        tlc_min_value: None,
+        tlc_fee_proportional_millionths: None,
+        max_tlc_value_in_flight: None,
+        max_tlc_number_in_flight: None,
+        external_channel_signer: None,
+    };
+
+    let mut record = ChannelOpenRecord::new(temporary_id, peer_pubkey, command.funding_amount);
+    let mut opening = TenantChannelOpening {
+        command,
+        channel_id: temporary_id,
+        result: None,
+        terminated: false,
+    };
+    tenant.insert_channel_open_record(record.clone());
+    tenant.put_tenant_channel_opening(opening.clone());
+
+    record.channel_id = final_id;
+    record.update_status(ChannelOpeningStatus::FundingTxBuilding);
+    opening.channel_id = final_id;
+    tenant.move_channel_open_records(&temporary_id, Some(record.clone()), Some(opening.clone()));
+
+    assert!(tenant.get_channel_open_record(&temporary_id).is_none());
+    assert!(tenant.get_tenant_channel_opening(&temporary_id).is_none());
+    let moved_record = tenant
+        .get_channel_open_record(&final_id)
+        .expect("re-keyed open record");
+    assert_eq!(moved_record.channel_id, final_id);
+    assert_eq!(moved_record.status, ChannelOpeningStatus::FundingTxBuilding);
+    let moved_opening = tenant
+        .get_tenant_channel_opening(&final_id)
+        .expect("re-keyed tenant opening");
+    assert_eq!(moved_opening.channel_id, final_id);
+    assert_eq!(tenant.list_tenant_channel_openings().len(), 1);
+
+    // Same-ID update must keep both rows in place rather than deleting them.
+    record.update_status(ChannelOpeningStatus::ChannelReady);
+    opening.terminated = true;
+    tenant.move_channel_open_records(&final_id, Some(record), Some(opening));
+    assert_eq!(
+        tenant.get_channel_open_record(&final_id).unwrap().status,
+        ChannelOpeningStatus::ChannelReady
+    );
+    assert!(
+        tenant
+            .get_tenant_channel_opening(&final_id)
+            .unwrap()
+            .terminated
+    );
+}
+
+#[test]
+fn test_move_channel_open_records_atomically_with_channel_actor_state() {
+    use crate::fiber::channel::{
+        ChannelActorStateStore, ChannelOpenRecordStore, TenantChannelOpening,
+    };
+    use crate::fiber::network::OpenChannelWithExternalFundingCommand;
+    use ckb_types::packed::Script;
+    use fiber_types::{ChannelOpenRecord, ChannelOpeningStatus, NegotiatingFundingFlags};
+
+    let (store, _dir) = generate_store();
+    let tenant = store.namespaced(NodeNamespace::hosted_tenant("atomic-move-channel-owner"));
+    let mut channel = sample_channel_actor_state(
+        ChannelState::NegotiatingFunding(NegotiatingFundingFlags::OUR_INIT_SENT),
+        None,
+    );
+    let temporary_id = channel.id;
+    let final_id = gen_rand_sha256_hash();
+    let peer_pubkey = channel.remote_pubkey;
+    let command = OpenChannelWithExternalFundingCommand {
+        pubkey: peer_pubkey,
+        funding_amount: 100_000_000_000,
+        public: false,
+        shutdown_script: Script::default(),
+        funding_lock_script: Script::default(),
+        funding_lock_script_cell_deps: Vec::new(),
+        funding_udt_type_script: None,
+        commitment_fee_rate: None,
+        commitment_delay_epoch: None,
+        funding_fee_rate: None,
+        tlc_expiry_delta: None,
+        tlc_min_value: None,
+        tlc_fee_proportional_millionths: None,
+        max_tlc_value_in_flight: None,
+        max_tlc_number_in_flight: None,
+        external_channel_signer: None,
+    };
+
+    tenant.insert_channel_actor_state(channel.clone());
+    tenant.insert_channel_open_record(ChannelOpenRecord::new(
+        temporary_id,
+        peer_pubkey,
+        command.funding_amount,
+    ));
+    tenant.put_tenant_channel_opening(TenantChannelOpening {
+        command,
+        channel_id: temporary_id,
+        result: None,
+        terminated: false,
+    });
+
+    channel.id = final_id;
+    channel.state = ChannelState::NegotiatingFunding(NegotiatingFundingFlags::INIT_SENT);
+    tenant.move_channel_actor_state(&temporary_id, channel.clone());
+
+    assert!(tenant.get_channel_actor_state(&temporary_id).is_none());
+    assert!(tenant.get_channel_open_record(&temporary_id).is_none());
+    assert!(tenant.get_tenant_channel_opening(&temporary_id).is_none());
+
+    let moved_channel = tenant
+        .get_channel_actor_state(&final_id)
+        .expect("channel moved to final id");
+    assert_eq!(moved_channel.id, final_id);
+    let moved_record = tenant
+        .get_channel_open_record(&final_id)
+        .expect("open record moved with channel state");
+    assert_eq!(moved_record.channel_id, final_id);
+    assert_eq!(moved_record.status, ChannelOpeningStatus::FundingTxBuilding);
+    let moved_opening = tenant
+        .get_tenant_channel_opening(&final_id)
+        .expect("tenant opening moved with channel state");
+    assert_eq!(moved_opening.channel_id, final_id);
+    assert_eq!(tenant.list_tenant_channel_openings().len(), 1);
+
+    // Same-ID move must preserve existing open records unchanged.
+    let mut ready_record = moved_record;
+    ready_record.update_status(ChannelOpeningStatus::ChannelReady);
+    tenant.insert_channel_open_record(ready_record);
+    tenant.move_channel_actor_state(&final_id, channel);
+    assert_eq!(
+        tenant.get_channel_open_record(&final_id).unwrap().status,
+        ChannelOpeningStatus::ChannelReady
+    );
+    assert_eq!(
+        tenant
+            .get_tenant_channel_opening(&final_id)
+            .unwrap()
+            .channel_id,
+        final_id
+    );
 }

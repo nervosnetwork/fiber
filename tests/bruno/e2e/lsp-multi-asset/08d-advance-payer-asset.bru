@@ -1,0 +1,26 @@
+meta {
+  name: advance payer asset
+  type: http
+  seq: 8.3
+}
+
+get {
+  url: {{LSP_SDK_AGENT_URL}}/status
+  body: none
+  auth: none
+}
+
+assert {
+  res.status: eq 200
+}
+
+script:post-response {
+  const asset = bru.getVar("CURRENT_PAYER_ASSET");
+  if (asset === "ckb") {
+    bru.setNextRequest("open payer SIMPLE_UDT channel");
+  } else if (asset === "simple") {
+    bru.setNextRequest("open payer XUDT channel");
+  } else {
+    bru.setNextRequest("tenant create CKB invoice");
+  }
+}

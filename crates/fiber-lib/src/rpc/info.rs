@@ -1,5 +1,5 @@
 use crate::ckb::CkbConfig;
-use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
+use crate::fiber::{NetworkActorMessage, PublicNetworkCommand};
 use crate::{handle_actor_call, log_and_error};
 use ckb_jsonrpc_types::Script;
 #[cfg(not(target_arch = "wasm32"))]
@@ -57,8 +57,9 @@ impl InfoRpcServerImpl {
         let version = env!("CARGO_PKG_VERSION").to_string();
         let commit_hash = crate::get_git_commit_info();
 
-        let message =
-            |rpc_reply| NetworkActorMessage::Command(NetworkActorCommand::NodeInfo((), rpc_reply));
+        let message = |rpc_reply| {
+            NetworkActorMessage::new_command(PublicNetworkCommand::NodeInfo((), rpc_reply))
+        };
 
         handle_actor_call!(self.actor, message).map(|response| NodeInfoResult {
             version,

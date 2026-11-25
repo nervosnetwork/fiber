@@ -12,7 +12,7 @@ use ckb_types::prelude::{Pack, Unpack};
 use gen_invoice::{
     Description, ExpiryTime, FallbackAddr, Feature, FinalHtlcMinimumExpiryDelta, FinalHtlcTimeout,
     InvoiceAttr, InvoiceAttrUnion, InvoiceAttrsVec, PayeePublicKey, PaymentHash, PaymentSecret,
-    RawInvoiceDataBuilder, UdtScript,
+    RawInvoiceDataBuilder, TrampolineRouteHint, UdtScript,
 };
 use molecule::prelude::Byte;
 use molecule::prelude::{Builder, Entity};
@@ -111,6 +111,9 @@ pub enum InvoiceError {
     /// Description is too long.
     #[error("Description with length of {0} is too long, max length is 639")]
     DescriptionTooLong(usize),
+    /// Fallback address is too long.
+    #[error("Fallback address length {len} exceeds max length {max}")]
+    FallbackAddressTooLong { len: usize, max: usize },
     /// Invoice not found.
     #[error("Invoice not found")]
     InvoiceNotFound,
@@ -132,6 +135,9 @@ pub enum InvoiceError {
     /// Invoice payee public key is malformed.
     #[error("Invalid payee public key")]
     InvalidPayeePublicKey,
+    /// Invoice trampoline route hint is malformed.
+    #[error("Invalid trampoline route hint")]
+    InvalidTrampolineRouteHint,
     /// Invoice signature contains malformed base32 data.
     #[error("Invalid signature encoding")]
     InvalidSignatureEncoding,
@@ -145,6 +151,9 @@ pub const SIGNATURE_U5_SIZE: usize = 104;
 
 /// Maximum allowed length for an invoice description.
 pub const MAX_DESCRIPTION_LENGTH: usize = 639;
+
+/// Maximum allowed length for an invoice fallback address.
+pub const MAX_FALLBACK_ADDRESS_LENGTH: usize = 512;
 
 /// Maximum decompressed molecule payload accepted by the invoice parser.
 ///
@@ -583,6 +592,8 @@ pub enum Attribute {
     Feature(FeatureVector),
     /// The payment secret of the invoice.
     PaymentSecret(Hash256),
+    /// A public trampoline node that the payer should use to reach the payee.
+    TrampolineRouteHint(PublicKey),
 }
 
 /// The metadata of the invoice.
@@ -596,6 +607,15 @@ pub struct InvoiceData {
     pub payment_hash: Hash256,
     /// The attributes of the invoice, e.g. description, expiry time, etc.
     pub attrs: Vec<Attribute>,
+}
+
+impl InvoiceData {
+    /// Returns the uncompressed Molecule-encoded byte length of this invoice data.
+    pub fn encoded_data_len(&self) -> usize {
+        gen_invoice::RawInvoiceData::from(self.clone())
+            .as_slice()
+            .len()
+    }
 }
 
 /// Represents a syntactically and semantically correct Fiber invoice.
@@ -847,6 +867,14 @@ impl CkbInvoice {
             .attrs
             .iter()
             .any(|attr| matches!(attr, Attribute::Feature(feature) if feature.supports_trampoline_routing()))
+    }
+
+    /// Returns the public trampoline node suggested by the payee.
+    pub fn trampoline_route_hint(&self) -> Option<&PublicKey> {
+        self.data.attrs.iter().find_map(|attr| match attr {
+            Attribute::TrampolineRouteHint(node_id) => Some(node_id),
+            _ => None,
+        })
     }
 
     /// Returns whether the invoice has expired based on the current time.
@@ -1112,6 +1140,11 @@ impl From<Attribute> for InvoiceAttr {
                     .value(payment_secret.into())
                     .build(),
             ),
+            Attribute::TrampolineRouteHint(node_id) => InvoiceAttrUnion::TrampolineRouteHint(
+                TrampolineRouteHint::new_builder()
+                    .node_id(node_id.serialize().pack())
+                    .build(),
+            ),
         };
         InvoiceAttr::new_builder().set(a).build()
     }
@@ -1166,6 +1199,13 @@ impl TryFrom<InvoiceAttr> for Attribute {
                 Attribute::HashAlgorithm(hash_algorithm)
             }
             InvoiceAttrUnion::PaymentSecret(x) => Attribute::PaymentSecret(x.value().into()),
+            InvoiceAttrUnion::TrampolineRouteHint(x) => {
+                let node_id: Vec<u8> = x.node_id().unpack();
+                Attribute::TrampolineRouteHint(
+                    PublicKey::from_slice(&node_id)
+                        .map_err(|_| InvoiceError::InvalidTrampolineRouteHint)?,
+                )
+            }
         };
         Ok(attr)
     }

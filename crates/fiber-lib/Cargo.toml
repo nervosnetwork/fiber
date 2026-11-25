@@ -117,8 +117,13 @@ wasm-bindgen-futures = "0.4"
 
 [features]
 bench = ["tempfile", "ckb-testtool"]
-default = ["watchtower"]
+# A crate that depends on `fnn` with `default-features = false` (fiber-bin,
+# fiber-wasm) has to forward these itself; keep that mirror in sync when adding a
+# default feature.
+default = ["watchtower", "lsp"]
 debug-add-tlc = []
+# Hosted LSP service, tenant scoping and external signer plumbing.
+lsp = ["watchtower"]
 portable = ["fiber-store/portable"]
 rocksdb = ["fiber-store/rocksdb"]
 sample = ["fiber-types/sample"]
@@ -128,6 +133,7 @@ metrics = ["dep:metrics", "tentacle/metrics", "tokio-metrics", "metrics-exporter
 pprof = ["dep:pprof"]
 
 [dev-dependencies]
+fiber-lsp-sdk = { path = "../fiber-lsp-sdk", features = ["test-apis"] }
 jsonrpc-core = "18"
 ciborium = "0.2.2"
 ckb-testtool = "1"
@@ -138,6 +144,7 @@ tempfile = "3.10.1"
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 fiber-types-0100 = { package = "fiber-types", version = "=0.10.0-rc1", features = ["watchtower"] }
 criterion = { version = "0.5", features = ["html_reports"] }
+fiber-store = { path = "../fiber-store", features = ["rocksdb"] }
 hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "http2", "tokio"] }
 jsonrpsee = { version = "0.25.1", features = [
   "server",
@@ -145,6 +152,7 @@ jsonrpsee = { version = "0.25.1", features = [
   "http-client",
 ] }
 tokio = { version = "1.x", features = ["test-util"] }
+tokio-tungstenite = "0.28"
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 fiber-store = { path = "../fiber-store", features = ["browser-test"] }

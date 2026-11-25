@@ -173,6 +173,15 @@ impl StorageBackend for Store {
 
     /// Restore the RocksDB database from a checkpoint.
     fn restore(&self, restore_path: &Path, db_path: &Path) -> Result<(), StoreError> {
+        Self::restore_db(restore_path, db_path)
+    }
+}
+
+impl Store {
+    /// Restore the RocksDB database from a checkpoint without opening a live handle
+    /// on `db_path` first (dropping a live RocksDB handle opened on the swapped
+    /// directory can purge restored SST files as obsolete).
+    pub fn restore_db(restore_path: &Path, db_path: &Path) -> Result<(), StoreError> {
         // Usually, the actual RocksDB data is stored in a 'db' subdirectory of the backup
         let source_dir = restore_path.join("db");
 

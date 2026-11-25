@@ -1,0 +1,55 @@
+meta {
+  name: wait payer funding transaction
+  type: http
+  seq: 8.01
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {"id":"42","jsonrpc":"2.0","method":"list_channels","params":[{"pubkey":"{{NODE2_PUBKEY}}"}]}
+}
+
+assert {
+  res.body.error: isUndefined
+}
+
+script:post-response {
+  if (res.body.error) throw new Error(JSON.stringify(res.body.error));
+  const current = bru.getVar("CURRENT_PAYER_UDT_SCRIPT");
+  const channel = (res.body.result.channels || []).find(item => {
+    const asset = item.funding_udt_type_script;
+    return current
+      ? asset && asset.code_hash === current.code_hash && asset.hash_type === current.hash_type && asset.args === current.args
+      : !asset;
+  });
+  const state = channel?.state?.state_name;
+  // A fully signed, broadcast transaction may remain in AwaitingTxSignatures
+  // until confirmation. The following CKB request checks broadcast explicitly.
+  if (["AwaitingTxSignatures", "AwaitingChannelReady", "ChannelReady"].includes(state) && channel.channel_outpoint) {
+    // OutPoint is the funding transaction hash followed by its output index.
+    bru.setVar("CURRENT_PAYER_FUNDING_TX_HASH", channel.channel_outpoint.slice(0, 66));
+    bru.setVar("CURRENT_PAYER_FUNDING_ITERATION", 0);
+    bru.setNextRequest("wait payer funding broadcast");
+    return;
+  }
+  if (["Closed", "ShuttingDown"].includes(state)) {
+    throw new Error(`payer channel closed while funding: ${JSON.stringify(channel)}`);
+  }
+  const iteration = Number(bru.getVar("CURRENT_PAYER_FUNDING_ITERATION") || 0);
+  if (iteration + 1 < 30) {
+    bru.setVar("CURRENT_PAYER_FUNDING_ITERATION", iteration + 1);
+    await new Promise(r => setTimeout(r, 1000));
+    bru.setNextRequest("wait payer funding transaction");
+    return;
+  }
+  throw new Error(`payer funding transaction was not finalized: ${JSON.stringify(channel)}`);
+}

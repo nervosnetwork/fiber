@@ -18,6 +18,8 @@ use crate::backend::StorageBackend;
 use crate::db_migrate::DbMigrate;
 use crate::migration::MIGRATION_VERSION_KEY;
 
+#[path = "payment_tests.rs"]
+mod payment_tests;
 #[path = "test_utils.rs"]
 mod test_utils;
 use test_utils::released_v2;
@@ -472,7 +474,7 @@ fn test_legacy_watchtower_obligation_blocks_all_writes() {
 }
 
 #[test]
-fn test_full_hash_watchtower_record_retains_its_exact_bytes() {
+fn test_full_hash_watchtower_record_retains_keys_and_v2_witness() {
     let (_dir, store) = database();
     let mut record = super::OldChannelData::samples(69).remove(0);
     record.commitment_contract_features =
@@ -485,8 +487,32 @@ fn test_full_hash_watchtower_record_retains_its_exact_bytes() {
     let encoded = bincode::serialize(&record).unwrap();
     store.put(&key, &encoded);
     migrate(&store).unwrap();
-    assert_eq!(store.get(&key).unwrap(), encoded);
-    let _: fiber_types::ChannelData = decode_exact(&encoded).unwrap();
+    let converted: fiber_types::ChannelData = decode_exact(&store.get(&key).unwrap()).unwrap();
+    assert_eq!(converted.channel_features, fiber_types::ChannelFeatures::V2);
+    assert_eq!(
+        converted.local_settlement_key.unwrap().as_ref(),
+        record.local_settlement_key.as_ref()
+    );
+    for (old, new) in record
+        .local_settlement_data
+        .tlcs
+        .iter()
+        .zip(&converted.local_settlement_data.tlcs)
+    {
+        assert_eq!(
+            new.local_key.as_ref().unwrap().as_ref(),
+            old.local_key.as_ref()
+        );
+        assert_eq!(
+            new.local_key_pubkey.unwrap(),
+            new.local_key.as_ref().unwrap().pubkey()
+        );
+        assert_eq!(new.local_key_commitment_number, None);
+        assert_eq!(new.payment_hash.as_ref(), old.payment_hash.as_ref());
+    }
+    let before = snapshot(&store);
+    migrate(&store).unwrap();
+    assert_eq!(snapshot(&store), before, "migration must be idempotent");
 }
 
 #[test]
@@ -789,4 +815,286 @@ fn test_funding_evidence_for_another_channel_does_not_block_orphan_retirement() 
     assert!(store.get(&key).is_none());
     assert_eq!(store.get(archive_key(&key)).unwrap(), encoded);
     assert_split_channel(&store, &other);
+}
+
+#[test]
+fn test_released_v2_channel_with_unresolved_tlc_and_remove_effects_migrates() {
+    let (_dir, store) = database();
+    let mut channel = sample(87);
+
+    // Choose a valid secp256k1 private key whose first byte is 0x02 so decoding it as
+    // head's `Option<Privkey>` fails with an invalid Option tag if released decoding regresses.
+    let raw_key = [0x02u8; 32];
+    let local_key = fiber_types::Privkey::from(&raw_key);
+    let remote_key = fiber_types::Privkey::from(&[0x03u8; 32]).pubkey();
+    let tlc = fiber_types::SettlementTlc {
+        tlc_id: fiber_types::TLCId::Offered(7),
+        hash_algorithm: fiber_types::HashAlgorithm::CkbHash,
+        payment_amount: 50_000,
+        payment_hash: fiber_types::Hash256::from([0x11; 32]),
+        expiry: 1_700_000_000_000,
+        local_key: Some(local_key.clone()),
+        local_key_pubkey: Some(local_key.pubkey()),
+        local_key_commitment_number: None,
+        remote_key,
+    };
+    let settlement = fiber_types::SettlementData {
+        local_amount: 100_000,
+        remote_amount: 200_000,
+        tlcs: vec![tlc],
+    };
+    channel.session.bootstrap_settlement = Some(settlement.clone());
+    let mut old_tlc = OldChannelActorData::samples(89)
+        .remove(1)
+        .tlc_state
+        .offered_tlcs
+        .tlcs
+        .remove(0);
+    old_tlc.amount = 50_000;
+    let current_tlc: fiber_types::TlcInfo = super::convert_named(old_tlc).unwrap();
+    assert_eq!(current_tlc.upstream_tlc_key, None);
+    channel.session.remove_effects = vec![(current_tlc, Some(1))];
+
+    let key = actor_key(&channel.id);
+    let encoded = bincode::serialize(&released_v2(channel.clone())).unwrap();
+    // Prove the released bytes cannot be decoded directly as head's ChannelSessionV2.
+    assert!(
+        decode_exact::<(OldChannelActorData, Option<(u32, ChannelSessionV2)>)>(&encoded).is_err(),
+        "released v0.10.1 session with 0x02-prefixed TLC key must differ from head layout"
+    );
+    store.put(&key, &encoded);
+
+    migrate(&store).unwrap();
+    let restored = assert_split_channel(&store, &channel);
+    let restored_tlc = &restored
+        .session
+        .bootstrap_settlement
+        .as_ref()
+        .unwrap()
+        .tlcs[0];
+    assert_eq!(restored_tlc.local_key.as_ref(), Some(&local_key));
+    assert_eq!(restored_tlc.local_key_pubkey, Some(local_key.pubkey()));
+    assert_eq!(restored_tlc.local_key_commitment_number, None);
+    assert_eq!(restored.session.remove_effects.len(), 1);
+    assert_eq!(restored.session.remove_effects[0].0.upstream_tlc_key, None);
+
+    // Also verify outgoing and incoming commitment snapshots carrying unresolved TLCs round-trip.
+    let mut full_session = channel.session.clone();
+    full_session.outgoing = Some(fiber_types::OutgoingCommitmentV2 {
+        peer_wait_started_at: 123,
+        request: Default::default(),
+        transaction: Default::default(),
+        settlement: settlement.clone(),
+        updates: vec![],
+        funding: channel.session.own.clone(),
+        revocation: None,
+        revocation_context: None,
+    });
+    full_session.incoming = Some(fiber_types::IncomingCommitmentV2 {
+        request: Default::default(),
+        funding: channel.session.own.clone(),
+        revocation: None,
+        revocation_context: None,
+        transaction: Default::default(),
+        settlement: settlement.clone(),
+        response: None,
+    });
+    let mut full_channel = channel.clone();
+    full_channel.session = full_session.clone();
+    let full_released = released_v2(full_channel);
+    let full_encoded = bincode::serialize(&full_released).unwrap();
+    assert!(
+        decode_exact::<(OldChannelActorData, Option<(u32, ChannelSessionV2)>)>(&full_encoded)
+            .is_err()
+    );
+    let (_, decoded_session) = super::released_channel(&full_encoded).unwrap();
+    let decoded_session = decoded_session.expect("decoded V2 session");
+    assert_eq!(
+        decoded_session.outgoing.as_ref().unwrap().settlement,
+        settlement
+    );
+    assert_eq!(
+        decoded_session.incoming.as_ref().unwrap().settlement,
+        settlement
+    );
+}
+
+#[test]
+fn test_released_shutdown_settlement_record_migrates_and_resumes() {
+    let (_dir, store) = database();
+    let remote_key = fiber_types_0100::Privkey::from(&[0x03u8; 32]).pubkey();
+    // First byte 0x02 is an invalid Option tag in bincode, so head's ShutdownSettlementRecord
+    // cannot decode this released v0.10.1 record unless the migration converts it.
+    let raw_key = [0x02u8; 32];
+    let old_local_key = fiber_types_0100::Privkey::from(&raw_key);
+    let expected_local_key = fiber_types::Privkey::from(&raw_key);
+    let old_tlc = fiber_types_0100::SettlementTlc {
+        tlc_id: fiber_types_0100::TLCId::Offered(11),
+        hash_algorithm: fiber_types_0100::HashAlgorithm::CkbHash,
+        payment_amount: 42_000,
+        payment_hash: fiber_types_0100::Hash256::from([0x44; 32]),
+        expiry: 1_700_000_000_123,
+        local_key: old_local_key,
+        remote_key,
+    };
+
+    // 1. Released v0.10.1 prefix-49 record with a pending TLC (needs conversion).
+    let pending_channel = sample(91);
+    let pending_key = [
+        &[CHANNEL_SHUTDOWN_SETTLEMENT_PREFIX],
+        pending_channel.id.as_ref(),
+    ]
+    .concat();
+    let old_pending = fiber_types_0100::ShutdownSettlementRecord {
+        shutdown_tx_hash: ckb_types::H256::from([0xaa; 32]),
+        for_remote: true,
+        commitment_number: 7,
+        settlement_data: fiber_types_0100::SettlementData {
+            local_amount: 100_000,
+            remote_amount: 200_000,
+            tlcs: vec![old_tlc.clone()],
+        },
+    };
+    let old_pending_bytes = bincode::serialize(&old_pending).unwrap();
+    assert!(
+        decode_exact::<fiber_types::ShutdownSettlementRecord>(&old_pending_bytes).is_err(),
+        "released v0.10.1 ShutdownSettlementRecord with 0x02-prefixed TLC key must not decode as head"
+    );
+    store.put(
+        actor_key(&pending_channel.id),
+        bincode::serialize(&released_v2(pending_channel.clone())).unwrap(),
+    );
+    store.put(&pending_key, &old_pending_bytes);
+
+    // 2. Released v0.10.1 prefix-49 record with empty TLCs (identical binary layout).
+    let empty_channel_id = fiber_types::Hash256::from([0x55; 32]);
+    let empty_key = [
+        &[CHANNEL_SHUTDOWN_SETTLEMENT_PREFIX],
+        empty_channel_id.as_ref(),
+    ]
+    .concat();
+    let old_empty = fiber_types_0100::ShutdownSettlementRecord {
+        shutdown_tx_hash: ckb_types::H256::from([0xbb; 32]),
+        for_remote: false,
+        commitment_number: 3,
+        settlement_data: fiber_types_0100::SettlementData {
+            local_amount: 50_000,
+            remote_amount: 60_000,
+            tlcs: vec![],
+        },
+    };
+    let old_empty_bytes = bincode::serialize(&old_empty).unwrap();
+    store.put(&empty_key, &old_empty_bytes);
+
+    // 3. Already-converted prefix-49 record with a pending TLC (simulating interrupted resume).
+    let resumed_channel_id = fiber_types::Hash256::from([0x66; 32]);
+    let resumed_key = [
+        &[CHANNEL_SHUTDOWN_SETTLEMENT_PREFIX],
+        resumed_channel_id.as_ref(),
+    ]
+    .concat();
+    let already_converted = fiber_types::ShutdownSettlementRecord {
+        shutdown_tx_hash: ckb_types::H256::from([0xcc; 32]),
+        for_remote: true,
+        commitment_number: 9,
+        settlement_data: fiber_types::SettlementData {
+            local_amount: 70_000,
+            remote_amount: 80_000,
+            tlcs: vec![fiber_types::SettlementTlc {
+                tlc_id: fiber_types::TLCId::Received(5),
+                hash_algorithm: fiber_types::HashAlgorithm::Sha256,
+                payment_amount: 12_345,
+                payment_hash: fiber_types::Hash256::from([0x77; 32]),
+                expiry: 1_700_000_000_456,
+                local_key: Some(expected_local_key.clone()),
+                local_key_pubkey: Some(expected_local_key.pubkey()),
+                local_key_commitment_number: None,
+                remote_key: decode_as_new(remote_key).unwrap(),
+            }],
+        },
+    };
+    let already_converted_bytes = bincode::serialize(&already_converted).unwrap();
+    store.put(&resumed_key, &already_converted_bytes);
+
+    // 4. Safely closed V1 channel with a prefix-49 record: archived verbatim, not converted.
+    let closed_v1 = legacy(92, OldChannelState::Closed(OldCloseFlags::UNCOOPERATIVE_LOCAL));
+    let v1_p49_key = [&[CHANNEL_SHUTDOWN_SETTLEMENT_PREFIX], closed_v1.id.as_ref()].concat();
+    store.put(actor_key(&closed_v1.id), bincode::serialize(&closed_v1).unwrap());
+    store.put(&v1_p49_key, &old_pending_bytes);
+
+    migrate(&store).expect("shutdown settlement records must migrate and resume cleanly");
+    assert_eq!(
+        store.get(MIGRATION_VERSION_KEY).unwrap(),
+        MIGRATION_DB_VERSION.as_bytes()
+    );
+
+    // Verify converted pending-TLC record.
+    let restored_pending: fiber_types::ShutdownSettlementRecord =
+        decode_exact(&store.get(&pending_key).unwrap()).unwrap();
+    assert_eq!(restored_pending.shutdown_tx_hash, old_pending.shutdown_tx_hash);
+    assert_eq!(restored_pending.for_remote, old_pending.for_remote);
+    assert_eq!(restored_pending.commitment_number, old_pending.commitment_number);
+    assert_eq!(restored_pending.settlement_data.local_amount, 100_000);
+    assert_eq!(restored_pending.settlement_data.remote_amount, 200_000);
+    assert_eq!(restored_pending.settlement_data.tlcs.len(), 1);
+    let restored_tlc = &restored_pending.settlement_data.tlcs[0];
+    assert_eq!(restored_tlc.tlc_id, fiber_types::TLCId::Offered(11));
+    assert_eq!(restored_tlc.hash_algorithm, fiber_types::HashAlgorithm::CkbHash);
+    assert_eq!(restored_tlc.payment_amount, 42_000);
+    assert_eq!(restored_tlc.payment_hash, fiber_types::Hash256::from([0x44; 32]));
+    assert_eq!(restored_tlc.expiry, 1_700_000_000_123);
+    assert_eq!(restored_tlc.local_key.as_ref(), Some(&expected_local_key));
+    assert_eq!(restored_tlc.local_key_pubkey, Some(expected_local_key.pubkey()));
+    assert_eq!(restored_tlc.local_key_commitment_number, None);
+    assert_eq!(restored_tlc.remote_key, decode_as_new(remote_key).unwrap());
+
+    // Verify empty-TLC record.
+    let restored_empty: fiber_types::ShutdownSettlementRecord =
+        decode_exact(&store.get(&empty_key).unwrap()).unwrap();
+    assert_eq!(restored_empty.shutdown_tx_hash, old_empty.shutdown_tx_hash);
+    assert!(!restored_empty.for_remote);
+    assert_eq!(restored_empty.commitment_number, 3);
+    assert_eq!(restored_empty.settlement_data.local_amount, 50_000);
+    assert_eq!(restored_empty.settlement_data.remote_amount, 60_000);
+    assert!(restored_empty.settlement_data.tlcs.is_empty());
+
+    // Verify already-converted resumed record was preserved verbatim.
+    assert_eq!(store.get(&resumed_key).unwrap(), already_converted_bytes);
+
+    // Verify closed V1 channel's prefix-49 record was archived verbatim.
+    assert!(store.get(&v1_p49_key).is_none());
+    assert_eq!(store.get(archive_key(&v1_p49_key)).unwrap(), old_pending_bytes);
+
+    // Verify idempotency on a second run.
+    let completed = snapshot(&store);
+    migrate(&store).unwrap();
+    assert_eq!(snapshot(&store), completed);
+}
+
+#[test]
+fn test_corrupted_shutdown_settlement_record_rejects_without_writes() {
+    let (_dir, store) = database();
+    let channel = sample(93);
+    store.put(
+        actor_key(&channel.id),
+        bincode::serialize(&released_v2(channel.clone())).unwrap(),
+    );
+    let key = [&[CHANNEL_SHUTDOWN_SETTLEMENT_PREFIX], channel.id.as_ref()].concat();
+    let old = fiber_types_0100::ShutdownSettlementRecord {
+        shutdown_tx_hash: ckb_types::H256::from([0xdd; 32]),
+        for_remote: false,
+        commitment_number: 1,
+        settlement_data: fiber_types_0100::SettlementData {
+            local_amount: 10,
+            remote_amount: 20,
+            tlcs: vec![],
+        },
+    };
+    let mut suffixed = bincode::serialize(&old).unwrap();
+    suffixed.push(0);
+    store.put(&key, &suffixed);
+
+    let before = snapshot(&store);
+    assert!(migrate(&store).is_err());
+    assert_eq!(snapshot(&store), before);
 }

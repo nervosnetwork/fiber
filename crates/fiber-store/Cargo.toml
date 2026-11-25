@@ -12,6 +12,7 @@ ckb-types = "1"
 fiber-types = { path = "../fiber-types", features = ["watchtower"] }
 fiber-types-0100 = { package = "fiber-types", version = "=0.10.0-rc1", features = ["watchtower"] }
 serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["arbitrary_precision"] }
 
 # Logging
 tracing = "0.1"

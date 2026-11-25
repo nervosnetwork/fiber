@@ -14,14 +14,19 @@ use fiber_types::schema::{
     CHANNEL_OUTPOINT_CHANNEL_ID_PREFIX, CHANNEL_SHUTDOWN_SETTLEMENT_PREFIX,
     PUBKEY_CHANNEL_ID_PREFIX,
 };
-use fiber_types::{ChannelState, Hash256};
+use fiber_types::{ChannelOpeningStatus, ChannelState, Hash256};
 
-use crate::fiber::channel::ChannelActorState;
+use crate::fiber::channel::{ChannelActorState, ChannelOpenRecordStore};
 
 use super::store_impl::{
     channel_immutable_key, channel_mutable_key, deserialize_channel_state_parts,
-    stage_channel_actor_state, Store,
+    stage_channel_actor_state, stage_move_channel_open_records, Store,
 };
+use super::NodeNamespace;
+
+/// Key in the shared channel cache: physical stores can host multiple logical node namespaces
+/// (host + hosted tenants) that share identical channel IDs.
+type ChannelCacheKey = (Option<NodeNamespace>, Hash256);
 
 /// The channel records of one store.
 pub(crate) struct ChannelStates<'a> {
@@ -32,6 +37,10 @@ pub(crate) struct ChannelStates<'a> {
 impl<'a> ChannelStates<'a> {
     pub(super) fn new(store: &'a Store, cache: Option<&'a Arc<ChannelStateCache>>) -> Self {
         Self { store, cache }
+    }
+
+    fn cache_key(&self, id: &Hash256) -> ChannelCacheKey {
+        (self.store.namespace().cloned(), *id)
     }
 
     /// Decode a channel state from its two stored records, bypassing the cache.
@@ -90,8 +99,9 @@ impl<'a> ChannelStates<'a> {
         // Only writes fill the cache: a reader that decoded a snapshot could otherwise publish it
         // after a concurrent write invalidated the entry, resurrecting a state that no longer
         // matches the record.
+        let key = self.cache_key(id);
         self.cache
-            .and_then(|cache| cache.peek(id))
+            .and_then(|cache| cache.peek(&key))
             .map(|hit| (*hit).clone())
             .or_else(|| self.load(id))
     }
@@ -112,7 +122,8 @@ impl<'a> ChannelStates<'a> {
         self.insert_with(state, true)
     }
 
-    fn insert_with(&self, state: ChannelActorState, force_immutable: bool) {
+    fn insert_with(&self, mut state: ChannelActorState, force_immutable: bool) {
+        state.clear_local_signer_material();
         let write_immutable = force_immutable || !state.state.is_established();
         let Some(cache) = self.cache else {
             return self.write(state, write_immutable);
@@ -123,9 +134,9 @@ impl<'a> ChannelStates<'a> {
         // The commit and the cache update happen under the channel's slot, so a write of a ready
         // state and a transition out of it cannot disagree about which one is current: whichever
         // commits last also decides the snapshot.
-        let id = state.id;
+        let key = self.cache_key(&state.id);
         {
-            let entry = cache.slot(id);
+            let entry = cache.slot(key.clone());
             let mut slot = entry.write();
             if cacheable {
                 // Clone the snapshot only when it can be published: a full cache drops it, and the
@@ -142,7 +153,7 @@ impl<'a> ChannelStates<'a> {
                 self.write(state, write_immutable);
             }
         }
-        cache.discard_if_empty(&id);
+        cache.discard_if_empty(&key);
     }
 
     /// Move a channel to a new id.
@@ -153,7 +164,8 @@ impl<'a> ChannelStates<'a> {
     /// the rewrite happens under them so no concurrent write can interleave with it. The old
     /// record and its indexes go away in the same batch as the new ones, so an interrupted move
     /// leaves the channel untouched.
-    pub(super) fn move_to(&self, old_id: &Hash256, state: ChannelActorState) {
+    pub(super) fn move_to(&self, old_id: &Hash256, mut state: ChannelActorState) {
+        state.clear_local_signer_material();
         if old_id == &state.id {
             self.insert(state);
             return;
@@ -167,8 +179,11 @@ impl<'a> ChannelStates<'a> {
         } else {
             (state.id, *old_id)
         };
-        let first = cache.slot(first_id);
-        let second = cache.slot(second_id);
+        let ns = self.store.namespace().cloned();
+        let first_key = (ns.clone(), first_id);
+        let second_key = (ns, second_id);
+        let first = cache.slot(first_key.clone());
+        let second = cache.slot(second_key.clone());
         {
             let mut first_slot = first.write();
             let mut second_slot = second.write();
@@ -180,8 +195,8 @@ impl<'a> ChannelStates<'a> {
             self.rewrite_records(old_id, previous.as_ref(), state);
         }
         drop((first, second));
-        cache.discard_if_empty(&first_id);
-        cache.discard_if_empty(&second_id);
+        cache.discard_if_empty(&first_key);
+        cache.discard_if_empty(&second_key);
     }
 
     /// Rewrite the channel records under a new id, in one batch.
@@ -209,7 +224,27 @@ impl<'a> ChannelStates<'a> {
             }
         }
         // `new_id` did not exist before this batch, so it needs both records whatever the state is.
+        let new_id = state.id;
         stage_channel_actor_state(self.store, &mut batch, state, true);
+        // Atomically re-key any persisted opening records alongside the channel state so a
+        // restart between ChannelActor's final-ID write and NetworkActor's event handling
+        // cannot leave channel state at `new_id` while open records remain stranded at `old_id`.
+        let open_record = self
+            .store
+            .get_channel_open_record(old_id)
+            .map(|mut record| {
+                record.channel_id = new_id;
+                record.update_status(ChannelOpeningStatus::FundingTxBuilding);
+                record
+            });
+        let tenant_opening = self
+            .store
+            .get_tenant_channel_opening(old_id)
+            .map(|mut opening| {
+                opening.channel_id = new_id;
+                opening
+            });
+        stage_move_channel_open_records(&mut batch, old_id, open_record, tenant_opening);
         batch.commit();
     }
 
@@ -218,8 +253,9 @@ impl<'a> ChannelStates<'a> {
             let existing = self.load(id);
             return self.remove(id, existing.as_ref());
         };
+        let key = self.cache_key(id);
         {
-            let entry = cache.slot(*id);
+            let entry = cache.slot(key.clone());
             let mut slot = entry.write();
             // The snapshot carries the indexes to delete; cloning the state itself just for them
             // would copy it for nothing.
@@ -230,12 +266,19 @@ impl<'a> ChannelStates<'a> {
             // the record is gone.
             self.remove(id, existing.as_deref());
         }
-        cache.discard_if_empty(id);
+        cache.discard_if_empty(&key);
     }
 
     #[cfg(test)]
     pub(super) fn cache_len(&self) -> usize {
-        self.cache.map_or(0, |cache| cache.entries.len())
+        self.cache.map_or(0, |cache| {
+            let ns = self.store.namespace();
+            cache
+                .entries
+                .iter()
+                .filter(|entry| entry.key().0.as_ref() == ns)
+                .count()
+        })
     }
 
     /// The cached snapshot together with the stored record, both read while the slot's read lock
@@ -246,7 +289,8 @@ impl<'a> ChannelStates<'a> {
         id: &Hash256,
     ) -> Option<(ChannelActorState, Option<ChannelActorState>)> {
         let cache = self.cache?;
-        let entry = cache.entries.get(id)?;
+        let key = self.cache_key(id);
+        let entry = cache.entries.get(&key)?;
         let slot = entry.try_read()?;
         let cached = (**slot.as_ref()?).clone();
         let record = self.load(id);
@@ -256,8 +300,9 @@ impl<'a> ChannelStates<'a> {
     /// The cached snapshot only, without falling back to the record (tests only).
     #[cfg(test)]
     pub(super) fn cache_peek(&self, id: &Hash256) -> Option<ChannelActorState> {
+        let key = self.cache_key(id);
         self.cache
-            .and_then(|cache| cache.peek(id))
+            .and_then(|cache| cache.peek(&key))
             .map(|hit| (*hit).clone())
     }
 }
@@ -277,7 +322,7 @@ pub(super) struct ChannelStateCache {
     /// `max_size`. Counting snapshots rather than slots is what lets every write take a slot
     /// without the map growing with channels that are not cached.
     snapshots: AtomicUsize,
-    entries: dashmap::DashMap<Hash256, ChannelCacheEntry>,
+    entries: dashmap::DashMap<ChannelCacheKey, ChannelCacheEntry>,
 }
 
 type ChannelCacheEntry = Arc<parking_lot::RwLock<Option<Arc<ChannelActorState>>>>;
@@ -294,8 +339,8 @@ impl ChannelStateCache {
     /// The cached snapshot, cloned while the slot is briefly read-locked. A slot a writer is
     /// holding is treated as a miss, so a read never waits for a commit, and two readers can read
     /// at the same time.
-    fn peek(&self, id: &Hash256) -> Option<Arc<ChannelActorState>> {
-        let entry = self.entries.get(id)?;
+    fn peek(&self, key: &ChannelCacheKey) -> Option<Arc<ChannelActorState>> {
+        let entry = self.entries.get(key)?;
         let slot = entry.try_read()?;
         slot.as_ref().map(Arc::clone)
     }
@@ -306,12 +351,12 @@ impl ChannelStateCache {
     /// writes of one channel are serialized by the same lock. The returned handle keeps the slot
     /// alive for as long as the writer uses it; an empty slot is dropped from the map afterwards
     /// (see `discard_if_empty`), so slots never outlive the write that created them.
-    fn slot(&self, id: Hash256) -> ChannelCacheEntry {
-        match self.entries.get(&id) {
+    fn slot(&self, key: ChannelCacheKey) -> ChannelCacheEntry {
+        match self.entries.get(&key) {
             Some(entry) => Arc::clone(&entry),
             None => self
                 .entries
-                .entry(id)
+                .entry(key)
                 .or_insert_with(|| Arc::new(parking_lot::RwLock::new(None)))
                 .clone(),
         }
@@ -354,8 +399,8 @@ impl ChannelStateCache {
     ///
     /// A concurrent reader can keep an empty slot alive for one more round; it then stays until
     /// the next write or delete of that channel, which costs a map entry, never correctness.
-    fn discard_if_empty(&self, id: &Hash256) {
-        self.entries.remove_if(id, |_, entry| {
+    fn discard_if_empty(&self, key: &ChannelCacheKey) {
+        self.entries.remove_if(key, |_, entry| {
             // A slot we cannot read-lock is kept: only a reader can hold it here, and removing
             // what someone is reading is the direction this check exists to avoid.
             Arc::strong_count(entry) == 1 && entry.try_read().is_some_and(|slot| slot.is_none())

@@ -13,7 +13,7 @@ use clap_serde_derive::{
 use fiber_types::protocol::AnnouncedNodeName;
 pub use fiber_types::DEFAULT_FINAL_TLC_EXPIRY_DELTA;
 #[cfg(not(any(test, feature = "bench")))]
-use once_cell::sync::OnceCell;
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf, str::FromStr};
 use tentacle::secio::{PublicKey, SecioKeyPair};
@@ -491,7 +491,9 @@ pub struct FiberConfig {
 }
 
 #[cfg(not(any(test, feature = "bench")))]
-static FIBER_SECRET_KEY: OnceCell<super::KeyPair> = OnceCell::new();
+static FIBER_SECRET_KEYS: Lazy<
+    parking_lot::Mutex<std::collections::HashMap<PathBuf, super::KeyPair>>,
+> = Lazy::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
 
 impl FiberConfig {
     /// Returns the CKB invoice currency corresponding to the configured chain.
@@ -542,9 +544,14 @@ impl FiberConfig {
 
     #[cfg(not(any(test, feature = "bench")))]
     pub fn read_or_generate_secret_key(&self) -> Result<super::KeyPair> {
-        FIBER_SECRET_KEY
-            .get_or_try_init(|| self.inner_read_or_generate_secret_key())
-            .cloned()
+        let key_path = self.base_dir().join("sk");
+        let mut keys = FIBER_SECRET_KEYS.lock();
+        if let Some(key) = keys.get(&key_path) {
+            return Ok(key.clone());
+        }
+        let key = self.inner_read_or_generate_secret_key()?;
+        keys.insert(key_path, key.clone());
+        Ok(key)
     }
 
     pub fn store_path(&self) -> PathBuf {
@@ -561,6 +568,25 @@ impl FiberConfig {
             }
         }
         path
+    }
+
+    /// Derive a local-only, non-gossiping Fiber execution context for one
+    /// hosted tenant while preserving chain, script and channel policy settings.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn hosted_tenant_config(&self, base_dir: PathBuf) -> Self {
+        let mut config = self.clone();
+        config.base_dir = Some(base_dir);
+        config.listening_addr = Some("/ip4/127.0.0.1/tcp/0".to_string());
+        config.announce_listening_addr = Some(false);
+        config.announce_private_addr = Some(false);
+        config.announced_addrs.clear();
+        config.bootnode_addrs.clear();
+        config.auto_announce_node = Some(false);
+        config.announce_node_interval_seconds = Some(0);
+        config.sync_network_graph = Some(false);
+        config.min_outbound_peers = Some(0);
+        config.reuse_port_for_websocket = false;
+        config
     }
 
     pub fn listening_addr(&self) -> &str {
@@ -618,12 +644,14 @@ impl FiberConfig {
             .unwrap_or(DEFAULT_ANNOUNCE_NODE_INTERVAL_SECONDS)
     }
 
+    /// Reads or creates the node key and returns its public key.
+    pub fn try_public_key(&self) -> Result<PublicKey> {
+        let secio_kp: SecioKeyPair = self.read_or_generate_secret_key()?.into();
+        Ok(secio_kp.public_key())
+    }
+
     pub fn public_key(&self) -> PublicKey {
-        let secio_kp: SecioKeyPair = self
-            .read_or_generate_secret_key()
-            .expect("read or generate secret key")
-            .into();
-        secio_kp.public_key()
+        self.try_public_key().expect("read or generate secret key")
     }
 
     pub fn gossip_network_maintenance_interval_ms(&self) -> u64 {

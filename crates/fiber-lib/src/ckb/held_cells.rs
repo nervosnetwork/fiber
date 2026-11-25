@@ -346,14 +346,16 @@ pub(crate) fn lock_held(
     Ok(())
 }
 
+/// The holds are one set for the whole process and tests that inspect or mutate it with
+/// synthetic or real timestamps must serialize on this mutex.
+#[cfg(test)]
+pub(crate) static TEST_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[cfg(test)]
 mod tests {
+    use super::TEST_SERIAL as SERIAL;
     use super::*;
     use ckb_types::packed::{CellOutput, Script};
-
-    /// The holds are one set for the whole process and every test here changes it, some with
-    /// made-up times: one test at a time.
-    static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     #[derive(Clone, Default)]
     struct Locks(Vec<OutPoint>);

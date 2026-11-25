@@ -12,6 +12,10 @@ use biscuit_auth::{
 
 use crate::now_timestamp_as_millis_u64;
 use fiber_types::NodeId;
+use fiber_types::TenantId;
+
+#[cfg(feature = "lsp")]
+pub use crate::lsp::BiscuitTokenIssuer;
 
 const DEFAULT_BISCUIT_AUTH_MAX_TIME: Duration = Duration::from_millis(10);
 
@@ -98,6 +102,9 @@ fn build_rules() -> HashMap<&'static str, AuthRule> {
         "subscribe_store_changes",
         r#"allow if internal("store_changes");"#,
     );
+    // subscriptions
+    b.rule("subscribe", r#"allow if write("subscriptions");"#);
+    b.rule("unsubscribe", r#"allow if write("subscriptions");"#);
     // channels
     b.rule("open_channel", r#"allow if write("channels");"#);
     b.rule("accept_channel", r#"allow if write("channels");"#);
@@ -110,6 +117,11 @@ fn build_rules() -> HashMap<&'static str, AuthRule> {
         r#"allow if write("channels");"#,
     );
     b.rule("submit_signed_funding_tx", r#"allow if write("channels");"#);
+    b.rule(
+        "get_channel_signing_status",
+        r#"allow if read("channels");"#,
+    );
+    b.rule("submit_channel_signature", r#"allow if write("channels");"#);
     // dev
     b.rule("commitment_signed", r#"allow if write("dev");"#);
     b.rule("add_tlc", r#"allow if write("dev");"#);
@@ -131,6 +143,15 @@ fn build_rules() -> HashMap<&'static str, AuthRule> {
     b.rule("cancel_invoice", r#"allow if write("invoices");"#);
     b.rule("settle_invoice", r#"allow if write("invoices");"#);
     b.rule("backup", r#"allow if write("node");"#);
+
+    // hosted LSP
+    b.rule("lsp_get_status", r#"allow if read("lsp");"#);
+    b.rule("lsp_register_tenant", r#"allow if write("lsp");"#);
+    b.rule("lsp_ensure_tenant", r#"allow if write("lsp");"#);
+    b.rule("lsp_evict_tenant", r#"allow if write("lsp");"#);
+    b.rule("lsp_revoke_tenant_tokens", r#"allow if write("lsp");"#);
+    b.rule("lsp_list_tenants", r#"allow if read("lsp");"#);
+    b.rule("lsp_get_payment_delivery", r#"allow if read("lsp");"#);
 
     // payment
     b.rule("send_payment", r#"allow if write("payments");"#);
@@ -173,14 +194,68 @@ fn build_rules() -> HashMap<&'static str, AuthRule> {
         "remove_preimage",
         AuthRule::new(r#"allow if write("watchtower");"#).with_require_rpc_context(true),
     );
+    b.with_rule(
+        "get_watchtower_signing_status",
+        AuthRule::new(
+            r#"allow if read("watchtower"); allow if write("watchtower"); allow if read("channels");"#,
+        )
+        .with_require_rpc_context(true),
+    );
+    b.with_rule(
+        "submit_watchtower_signature",
+        AuthRule::new(r#"allow if write("watchtower"); allow if write("channels");"#)
+            .with_require_rpc_context(true),
+    );
 
     b.0
+}
+
+/// Shared runtime map of each hosted tenant's minimum valid token epoch (`> 0`),
+/// paired with a `watch` notification channel so active WebSocket subscriptions
+/// terminate immediately on `lsp_revoke_tenant_tokens`.
+#[derive(Clone, Debug)]
+pub struct TenantTokenEpochs {
+    epochs: std::sync::Arc<parking_lot::RwLock<HashMap<TenantId, u64>>>,
+    revocation_tx: std::sync::Arc<tokio::sync::watch::Sender<u64>>,
+}
+
+impl Default for TenantTokenEpochs {
+    fn default() -> Self {
+        Self::from_map(HashMap::new())
+    }
+}
+
+impl TenantTokenEpochs {
+    pub fn from_map(map: HashMap<TenantId, u64>) -> Self {
+        let (tx, _) = tokio::sync::watch::channel(0u64);
+        Self {
+            epochs: std::sync::Arc::new(parking_lot::RwLock::new(map)),
+            revocation_tx: std::sync::Arc::new(tx),
+        }
+    }
+
+    pub fn get(&self, tenant_id: &TenantId) -> u64 {
+        self.epochs.read().get(tenant_id).copied().unwrap_or(0)
+    }
+
+    pub fn set(&self, tenant_id: TenantId, epoch: u64) {
+        self.epochs.write().insert(tenant_id, epoch);
+        self.revocation_tx.send_modify(|gen| {
+            *gen = gen.wrapping_add(1);
+        });
+    }
+
+    pub fn subscribe_revocations(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.revocation_tx.subscribe()
+    }
 }
 
 pub struct BiscuitAuth {
     pubkey: Option<PublicKey>,
     revocation_list: HashSet<Vec<u8>>,
     rules: HashMap<&'static str, AuthRule>,
+    lsp_enabled: bool,
+    tenant_token_epochs: Option<TenantTokenEpochs>,
 }
 
 impl BiscuitAuth {
@@ -192,6 +267,8 @@ impl BiscuitAuth {
             pubkey: Some(pubkey),
             rules,
             revocation_list,
+            lsp_enabled: cfg!(feature = "lsp"),
+            tenant_token_epochs: None,
         })
     }
 
@@ -202,7 +279,63 @@ impl BiscuitAuth {
             pubkey: None,
             rules,
             revocation_list,
+            lsp_enabled: cfg!(feature = "lsp"),
+            tenant_token_epochs: None,
         }
+    }
+
+    pub fn with_lsp_enabled(mut self, enabled: bool) -> Self {
+        self.lsp_enabled = enabled;
+        self
+    }
+
+    pub fn with_tenant_token_epochs(mut self, epochs: TenantTokenEpochs) -> Self {
+        self.tenant_token_epochs = Some(epochs);
+        self
+    }
+
+    pub(crate) fn tenant_token_epochs(&self) -> Option<&TenantTokenEpochs> {
+        self.tenant_token_epochs.as_ref()
+    }
+
+    /// Validate a Bearer token before upgrading an HTTP request to WebSocket:
+    /// checks signature, revocation list, Datalog checks (including expiry time),
+    /// runtime `lsp_enabled`, and `token_epoch`.
+    pub(crate) fn validate_token_for_ws_upgrade(&self, token: &str) -> Result<()> {
+        let b = self.extract_biscuit(token)?;
+        if b.revocation_identifiers()
+            .iter()
+            .any(|rev_id| self.revocation_list.contains(rev_id))
+        {
+            return Err(anyhow::anyhow!("Token is in revocation list"));
+        }
+        AuthorizerBuilder::new()
+            .code("allow if true;")?
+            .fact(Fact::new(
+                "time".to_string(),
+                &[Term::Date(crate::now_timestamp_as_millis_u64() / 1000)],
+            ))?
+            .build(&b)?
+            .authorize()
+            .context("token authorization check failed")?;
+        let meta = extract_token_metadata(&b)?;
+        if let Some(tenant_id) = meta.tenant_id {
+            if !cfg!(feature = "lsp") || !self.lsp_enabled {
+                return Err(anyhow::anyhow!(
+                    "tenant token rejected because hosted LSP service is not enabled"
+                ));
+            }
+            if let Some(epochs) = &self.tenant_token_epochs {
+                let current_epoch = epochs.get(&tenant_id);
+                let token_epoch = meta.token_epoch.map(|e| e.0).unwrap_or(0);
+                if token_epoch < current_epoch {
+                    return Err(anyhow::anyhow!(
+                        "tenant token has been revoked (epoch {token_epoch} < {current_epoch})"
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     pub fn get_rule(&self, method: &str) -> Result<&AuthRule> {
@@ -250,6 +383,25 @@ impl BiscuitAuth {
             tracing::debug!("revoked token: {token}");
             return Err(anyhow::anyhow!("Token is in revocation list: {token}"));
         }
+        // Reject tenant tokens when hosted LSP is not enabled at runtime, or when
+        // the tenant's token epoch has advanced past this token's epoch.
+        let meta = extract_token_metadata(&b)?;
+        if let Some(tenant_id) = meta.tenant_id {
+            if !cfg!(feature = "lsp") || !self.lsp_enabled {
+                return Err(anyhow::anyhow!(
+                    "tenant token cannot call {method} because hosted LSP service is not enabled"
+                ));
+            }
+            if let Some(epochs) = &self.tenant_token_epochs {
+                let current_epoch = epochs.get(&tenant_id);
+                let token_epoch = meta.token_epoch.map(|e| e.0).unwrap_or(0);
+                if token_epoch < current_epoch {
+                    return Err(anyhow::anyhow!(
+                        "tenant token has been revoked (epoch {token_epoch} < {current_epoch})"
+                    ));
+                }
+            }
+        }
         // check permission
         let rule = self.get_rule(method)?;
         rule.authorize(&b, time_in_ms)?;
@@ -265,23 +417,274 @@ impl BiscuitAuth {
     }
 }
 
+/// Authority-block metadata extracted from a Biscuit token in a single `Authorizer` pass.
+pub(crate) struct TokenMetadata {
+    pub(crate) tenant_id: Option<TenantId>,
+    pub(crate) token_epoch: Option<crate::rpc_scope::TokenEpoch>,
+    pub(crate) node_id: Option<NodeId>,
+}
+
+/// Extract `tenant`, `token_epoch`, and `node` authority facts using one `Authorizer`.
+pub(crate) fn extract_token_metadata(token: &Biscuit) -> Result<TokenMetadata> {
+    let mut authorizer = build_authorizer(token)?;
+
+    let tenants: Vec<(String,)> = authorizer.query("data($id) <- tenant($id)")?;
+    let tenant_id = match tenants.as_slice() {
+        [] => None,
+        [(tenant_id,)] => Some(TenantId::new(tenant_id.clone()).map_err(anyhow::Error::msg)?),
+        _ => {
+            return Err(anyhow!(
+                "token authority block must contain at most one tenant fact"
+            ))
+        }
+    };
+
+    let epochs: Vec<(i64,)> = authorizer.query("data($epoch) <- token_epoch($epoch)")?;
+    let token_epoch = match epochs.as_slice() {
+        [] => None,
+        [(epoch,)] => Some(crate::rpc_scope::TokenEpoch(
+            u64::try_from(*epoch)
+                .map_err(|_| anyhow!("token authority block contains negative token_epoch"))?,
+        )),
+        _ => {
+            return Err(anyhow!(
+                "token authority block must contain at most one token_epoch fact"
+            ))
+        }
+    };
+
+    let nodes: Vec<(String,)> = authorizer.query("data($id) <- node($id)")?;
+    let node_id = match nodes.as_slice() {
+        [] => None,
+        [(id,)] => Some(NodeId::from_str(id.as_str())?),
+        _ => {
+            return Err(anyhow!(
+                "token authority block must contain at most one node fact"
+            ))
+        }
+    };
+
+    Ok(TokenMetadata {
+        tenant_id,
+        token_epoch,
+        node_id,
+    })
+}
+
 /// Extract node id from token
 pub fn extract_node_id(token: &Biscuit) -> Result<NodeId> {
+    extract_optional_node_id(token)?.ok_or_else(|| anyhow!("token is missing a node fact"))
+}
+
+pub(crate) fn extract_optional_node_id(token: &Biscuit) -> Result<Option<NodeId>> {
     const QUERY: &str = "data($id) <- node($id)";
     let mut authorizer = build_authorizer(token)?;
-    let (id,): (String,) = authorizer.query_exactly_one(QUERY)?;
-    NodeId::from_str(id.as_str())
+    let nodes: Vec<(String,)> = authorizer.query(QUERY)?;
+    match nodes.as_slice() {
+        [] => Ok(None),
+        [(id,)] => Ok(Some(NodeId::from_str(id.as_str())?)),
+        _ => Err(anyhow!(
+            "token authority block must contain at most one node fact"
+        )),
+    }
+}
+
+/// Extract the hosted tenant identity from the token authority block.
+///
+/// Biscuit holders may append attenuation blocks, so tenant facts from those
+/// blocks must not be trusted for request routing. `Authorizer::query` only
+/// exposes authority facts unless an additional trust scope is requested.
+pub fn extract_tenant_id(token: &Biscuit) -> Result<Option<TenantId>> {
+    const QUERY: &str = "data($id) <- tenant($id)";
+    let mut authorizer = build_authorizer(token)?;
+    let tenants: Vec<(String,)> = authorizer.query(QUERY)?;
+    match tenants.as_slice() {
+        [] => Ok(None),
+        [(tenant_id,)] => TenantId::new(tenant_id.clone())
+            .map(Some)
+            .map_err(anyhow::Error::msg),
+        _ => Err(anyhow!(
+            "token authority block must contain at most one tenant fact"
+        )),
+    }
+}
+
+/// Extract the revocation `token_epoch` fact from the token authority block.
+pub fn extract_token_epoch(token: &Biscuit) -> Result<Option<u64>> {
+    const QUERY: &str = "data($epoch) <- token_epoch($epoch)";
+    let mut authorizer = build_authorizer(token)?;
+    let epochs: Vec<(i64,)> = authorizer.query(QUERY)?;
+    match epochs.as_slice() {
+        [] => Ok(None),
+        [(epoch,)] => u64::try_from(*epoch)
+            .map(Some)
+            .map_err(|_| anyhow!("token authority block contains negative token_epoch")),
+        _ => Err(anyhow!(
+            "token authority block must contain at most one token_epoch fact"
+        )),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-    use biscuit_auth::{macros::biscuit, KeyPair};
+    use biscuit_auth::{
+        macros::{biscuit, block},
+        KeyPair,
+    };
 
-    use crate::rpc::biscuit::extract_node_id;
+    #[cfg(feature = "lsp")]
+    use crate::lsp::BiscuitTokenIssuer;
+    use crate::rpc::biscuit::{extract_node_id, extract_tenant_id};
+    use crate::rpc::tenant::scoped_rpc_node_id;
+    use fiber_types::{NodeId, TenantId};
 
     use super::{build_authorizer, AuthRule, BiscuitAuth};
+
+    #[cfg(feature = "lsp")]
+    #[test]
+    fn tenant_token_issuer_binds_identity_and_data_plane_capabilities() {
+        let root = KeyPair::new();
+        let issuer = BiscuitTokenIssuer::from_private_key(
+            &root.private().to_prefixed_string(),
+            &root.public().to_string(),
+        )
+        .unwrap();
+        let node_id = NodeId::from_bytes(vec![1, 2, 3]);
+        let token = issuer
+            .issue_tenant_token(
+                &TenantId::new("u1".to_string()).unwrap(),
+                &node_id,
+                crate::now_timestamp_as_millis_u64() / 1_000 + 3_600,
+                0,
+            )
+            .unwrap();
+        let auth = BiscuitAuth::from_pubkey(root.public().to_string()).unwrap();
+
+        let (biscuit, _) = auth
+            .check_permission("get_channel_signing_status", &token)
+            .unwrap();
+        assert_eq!(
+            extract_tenant_id(&biscuit).unwrap(),
+            Some(TenantId::new("u1".to_string()).unwrap())
+        );
+        assert_eq!(extract_node_id(&biscuit).unwrap(), node_id);
+        auth.check_permission("submit_channel_signature", &token)
+            .unwrap();
+        auth.check_permission("list_channels", &token).unwrap();
+        auth.check_permission("open_channel_with_external_funding", &token)
+            .unwrap();
+        assert!(auth
+            .check_permission("open_tenant_channel", &token)
+            .is_err());
+        auth.check_permission("new_invoice", &token).unwrap();
+        auth.check_permission("settle_invoice", &token).unwrap();
+        auth.check_permission("send_payment", &token).unwrap();
+        auth.check_permission("get_invoice", &token).unwrap();
+        auth.check_permission("get_payment", &token).unwrap();
+        auth.check_permission("list_payments", &token).unwrap();
+        auth.check_permission("get_watchtower_signing_status", &token)
+            .unwrap();
+        auth.check_permission("submit_watchtower_signature", &token)
+            .unwrap();
+        for method in ["subscribe", "unsubscribe"] {
+            auth.check_permission(method, &token).unwrap();
+            crate::rpc::tenant::enforce_tenant_method_allowlist(method, &biscuit).unwrap();
+        }
+        crate::rpc::tenant::enforce_tenant_method_allowlist("get_channel_signing_status", &biscuit)
+            .unwrap();
+        crate::rpc::tenant::enforce_tenant_method_allowlist(
+            "open_channel_with_external_funding",
+            &biscuit,
+        )
+        .unwrap();
+        assert!(
+            crate::rpc::tenant::enforce_tenant_method_allowlist("open_channel", &biscuit).is_err()
+        );
+        assert!(crate::rpc::tenant::enforce_tenant_method_allowlist(
+            "open_tenant_channel",
+            &biscuit
+        )
+        .is_err());
+        // write("channels") still exists so biscuit allows node-operation
+        // methods; middleware is the tenant method gate.
+        auth.check_permission("open_channel", &token).unwrap();
+        auth.check_permission("create_preimage", &token).unwrap();
+        crate::rpc::tenant::enforce_tenant_method_allowlist("create_preimage", &biscuit).unwrap();
+        crate::rpc::tenant::enforce_tenant_method_allowlist("new_invoice", &biscuit).unwrap();
+        crate::rpc::tenant::enforce_tenant_method_allowlist("settle_invoice", &biscuit).unwrap();
+        crate::rpc::tenant::enforce_tenant_method_allowlist("send_payment", &biscuit).unwrap();
+        assert!(auth
+            .check_permission("lsp_register_tenant", &token)
+            .is_err());
+        #[cfg(all(debug_assertions, feature = "debug-add-tlc"))]
+        auth.check_permission("check_channel_shutdown", &token)
+            .unwrap();
+        #[cfg(not(all(debug_assertions, feature = "debug-add-tlc")))]
+        assert!(auth
+            .check_permission("check_channel_shutdown", &token)
+            .is_err());
+
+        let other_root = KeyPair::new();
+        assert!(BiscuitTokenIssuer::from_private_key(
+            &other_root.private().to_prefixed_string(),
+            &root.public().to_string(),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn scoped_rpc_node_id_keeps_tenant_tokens_off_the_host_namespace() {
+        let root = KeyPair::new();
+        let tenant_id = TenantId::new("u1").unwrap();
+        let tenant_node = NodeId::from_bytes(vec![1, 2, 3]);
+        let tenant_token = biscuit!(
+            r#"
+                tenant({tenant});
+                node({node});
+                write("watchtower");
+            "#,
+            tenant = tenant_id.as_str(),
+            node = tenant_node.to_string(),
+        )
+        .build(&root)
+        .unwrap();
+        assert_eq!(scoped_rpc_node_id(&tenant_token).unwrap(), tenant_node);
+
+        let host_tenant_token = biscuit!(
+            r#"
+                tenant({tenant});
+                node({node});
+                write("watchtower");
+            "#,
+            tenant = tenant_id.as_str(),
+            node = NodeId::local().to_string(),
+        )
+        .build(&root)
+        .unwrap();
+        assert!(scoped_rpc_node_id(&host_tenant_token)
+            .unwrap_err()
+            .to_string()
+            .contains("host watchtower namespace"));
+
+        let tenant_without_node = biscuit!(
+            r#"
+                tenant({tenant});
+                write("watchtower");
+            "#,
+            tenant = tenant_id.as_str(),
+        )
+        .build(&root)
+        .unwrap();
+        assert!(scoped_rpc_node_id(&tenant_without_node)
+            .unwrap_err()
+            .to_string()
+            .contains("missing a node fact"));
+
+        let operator = biscuit!(r#"write("watchtower");"#).build(&root).unwrap();
+        assert_eq!(scoped_rpc_node_id(&operator).unwrap(), NodeId::local());
+    }
 
     #[test]
     fn test_biscuit_auth_uses_ten_millisecond_authorizer_limit() {
@@ -306,7 +709,42 @@ mod tests {
     }
 
     #[test]
-    fn test_biscuit_auth() {
+    fn test_extract_tenant_id_only_trusts_the_authority_block() {
+        let root = KeyPair::new();
+        let tenant_token = biscuit!(r#"tenant("u1");"#).build(&root).unwrap();
+        assert_eq!(
+            extract_tenant_id(&tenant_token).unwrap(),
+            Some(TenantId::new("u1").unwrap())
+        );
+
+        let public_token = biscuit!(r#"read("channels");"#).build(&root).unwrap();
+        assert_eq!(extract_tenant_id(&public_token).unwrap(), None);
+
+        let attenuated = public_token
+            .append(block!(r#"tenant("u1");"#))
+            .expect("append untrusted tenant fact");
+        assert_eq!(extract_tenant_id(&attenuated).unwrap(), None);
+    }
+
+    #[test]
+    fn test_extract_tenant_id_rejects_invalid_authority_facts() {
+        let root = KeyPair::new();
+        let invalid = biscuit!(r#"tenant("../u1");"#).build(&root).unwrap();
+        assert!(extract_tenant_id(&invalid).is_err());
+
+        let ambiguous = biscuit!(
+            r#"
+                tenant("u1");
+                tenant("u2");
+            "#
+        )
+        .build(&root)
+        .unwrap();
+        assert!(extract_tenant_id(&ambiguous).is_err());
+    }
+
+    #[test]
+    fn test_biscuit_auth_accepts_padded_and_unpadded_tokens() {
         let root = KeyPair::new();
 
         // auth
@@ -324,15 +762,15 @@ mod tests {
         .to_base64()
         .unwrap();
 
-        // check permission
-        assert!(auth.check_permission("send_payment", &token,).is_ok());
-        // write permission do not implies read
-        assert!(auth.check_permission("get_payment", &token).is_err());
-        assert!(auth.check_permission("list_peers", &token).is_ok());
-        assert!(auth.check_permission("connect_peer", &token).is_err());
-
-        // if not match any rule, it should be denied
-        assert!(auth.check_permission("unknown", &token).is_err());
+        for token in [token.as_str(), token.trim_end_matches('=')] {
+            assert!(auth.check_permission("send_payment", token).is_ok());
+            // Write permission does not imply read permission.
+            assert!(auth.check_permission("get_payment", token).is_err());
+            assert!(auth.check_permission("list_peers", token).is_ok());
+            assert!(auth.check_permission("connect_peer", token).is_err());
+            // Methods without a matching rule are denied.
+            assert!(auth.check_permission("unknown", token).is_err());
+        }
     }
 
     #[test]
@@ -412,6 +850,135 @@ mod tests {
         assert!(auth
             .check_permission("subscribe_store_changes", &internal_token)
             .is_ok());
+    }
+
+    #[test]
+    fn test_biscuit_auth_lsp_separates_read_and_write_methods() {
+        let root = KeyPair::new();
+        let auth = BiscuitAuth::from_pubkey(root.public().to_string()).unwrap();
+        let read_token = biscuit!(r#"read("lsp");"#)
+            .build(&root)
+            .unwrap()
+            .to_base64()
+            .unwrap();
+        let write_token = biscuit!(r#"write("lsp");"#)
+            .build(&root)
+            .unwrap()
+            .to_base64()
+            .unwrap();
+
+        let read_methods = [
+            "lsp_get_status",
+            "lsp_list_tenants",
+            "lsp_get_payment_delivery",
+        ];
+        let write_methods = [
+            "lsp_register_tenant",
+            "lsp_ensure_tenant",
+            "lsp_evict_tenant",
+        ];
+
+        for method in read_methods {
+            assert!(auth.check_permission(method, &read_token).is_ok());
+            assert!(auth.check_permission(method, &write_token).is_err());
+        }
+        for method in write_methods {
+            assert!(auth.check_permission(method, &write_token).is_ok());
+            assert!(auth.check_permission(method, &read_token).is_err());
+        }
+        for method in ["lsp_get_invoice", "lsp_get_payment"] {
+            assert!(
+                auth.get_rule(method).is_err(),
+                "{method} rule must be removed"
+            );
+        }
+    }
+
+    #[test]
+    fn test_biscuit_auth_channel_signing_separates_read_and_write() {
+        let root = KeyPair::new();
+        let auth = BiscuitAuth::from_pubkey(root.public().to_string()).unwrap();
+        let read_token = biscuit!(r#"read("channels");"#)
+            .build(&root)
+            .unwrap()
+            .to_base64()
+            .unwrap();
+        let write_token = biscuit!(r#"write("channels");"#)
+            .build(&root)
+            .unwrap()
+            .to_base64()
+            .unwrap();
+
+        assert!(auth
+            .check_permission("get_channel_signing_status", &read_token)
+            .is_ok());
+        assert!(auth
+            .check_permission("get_channel_signing_status", &write_token)
+            .is_err());
+        assert!(auth
+            .check_permission("submit_channel_signature", &write_token)
+            .is_ok());
+        assert!(auth
+            .check_permission("submit_channel_signature", &read_token)
+            .is_err());
+    }
+
+    #[test]
+    fn test_biscuit_auth_watchtower_signing_separates_read_and_write() {
+        let root = KeyPair::new();
+        let auth = BiscuitAuth::from_pubkey(root.public().to_string()).unwrap();
+        let read_token = biscuit!(r#"read("watchtower");"#)
+            .build(&root)
+            .unwrap()
+            .to_base64()
+            .unwrap();
+        let write_token = biscuit!(r#"write("watchtower");"#)
+            .build(&root)
+            .unwrap()
+            .to_base64()
+            .unwrap();
+        let channel_read_token = biscuit!(r#"read("channels");"#)
+            .build(&root)
+            .unwrap()
+            .to_base64()
+            .unwrap();
+        let channel_write_token = biscuit!(r#"write("channels");"#)
+            .build(&root)
+            .unwrap()
+            .to_base64()
+            .unwrap();
+        assert!(auth
+            .check_permission("get_watchtower_signing_status", &read_token)
+            .is_ok());
+        assert!(auth
+            .check_permission("get_watchtower_signing_status", &write_token)
+            .is_ok());
+        assert!(auth
+            .check_permission("get_watchtower_signing_status", &channel_read_token)
+            .is_ok());
+        assert!(auth
+            .check_permission("get_watchtower_signing_status", &channel_write_token)
+            .is_err());
+        assert!(auth
+            .check_permission("submit_watchtower_signature", &write_token)
+            .is_ok());
+        assert!(auth
+            .check_permission("submit_watchtower_signature", &read_token)
+            .is_err());
+        assert!(auth
+            .check_permission("submit_watchtower_signature", &channel_write_token)
+            .is_ok());
+        assert!(auth
+            .check_permission("submit_watchtower_signature", &channel_read_token)
+            .is_err());
+        let invoice_write_token = biscuit!(r#"write("invoices");"#)
+            .build(&root)
+            .unwrap()
+            .to_base64()
+            .unwrap();
+        assert!(auth
+            .check_permission("create_preimage", &invoice_write_token)
+            .is_err());
     }
 
     #[test]
@@ -620,5 +1187,120 @@ mod tests {
         let node_id = extract_node_id(&b).unwrap();
         assert!(!node_id.as_ref().is_empty());
         println!("node_id: {node_id:?}");
+    }
+
+    #[cfg(feature = "lsp")]
+    #[test]
+    fn test_runtime_lsp_disabled_rejects_tenant_token_but_allows_operator() {
+        let root = KeyPair::new();
+        let issuer = BiscuitTokenIssuer::from_private_key(
+            &root.private().to_prefixed_string(),
+            &root.public().to_string(),
+        )
+        .unwrap();
+        let tenant_id = TenantId::new("tenant-runtime-off").unwrap();
+        let node_id = NodeId::from_bytes(vec![9, 8, 7]);
+        let tenant_token = issuer
+            .issue_tenant_token(
+                &tenant_id,
+                &node_id,
+                crate::now_timestamp_as_millis_u64() / 1_000 + 3_600,
+                0,
+            )
+            .unwrap();
+        let operator_token = biscuit!(r#"write("watchtower");"#)
+            .build(&root)
+            .unwrap()
+            .to_base64()
+            .unwrap();
+
+        let auth = BiscuitAuth::from_pubkey(root.public().to_string())
+            .unwrap()
+            .with_lsp_enabled(false);
+        let err = auth
+            .check_permission("create_watch_channel", &tenant_token)
+            .err()
+            .expect("tenant token must be rejected when LSP is disabled");
+        assert!(
+            err.to_string()
+                .contains("hosted LSP service is not enabled"),
+            "{err}"
+        );
+        assert!(auth
+            .check_permission("create_watch_channel", &operator_token)
+            .is_ok());
+    }
+
+    #[cfg(feature = "lsp")]
+    #[test]
+    fn test_tenant_token_epoch_revocation() {
+        use crate::lsp::{HostedTenantRecord, TenantRegistry};
+
+        let (store, _dir) = crate::generate_store();
+        let registry = TenantRegistry::new(store);
+        let root = KeyPair::new();
+        let issuer = BiscuitTokenIssuer::from_private_key(
+            &root.private().to_prefixed_string(),
+            &root.public().to_string(),
+        )
+        .unwrap();
+        let tenant_id = TenantId::new("tenant-revoke").unwrap();
+        let tenant_pubkey = fiber_types::Privkey::from([7u8; 32]).pubkey();
+        let node_id = NodeId::from_bytes(tenant_pubkey.serialize().to_vec());
+        registry
+            .register(HostedTenantRecord {
+                tenant_id: tenant_id.clone(),
+                root_signer_pubkey: None,
+                tenant_pubkey,
+                created_at: 1,
+                token_epoch: 0,
+            })
+            .unwrap();
+        let expires = crate::now_timestamp_as_millis_u64() / 1_000 + 3_600;
+
+        let token_epoch_0 = issuer
+            .issue_tenant_token(&tenant_id, &node_id, expires, 0)
+            .unwrap();
+        let token_epoch_1 = issuer
+            .issue_tenant_token(&tenant_id, &node_id, expires, 1)
+            .unwrap();
+        // Legacy token without an explicit token_epoch fact defaults to epoch 0.
+        let legacy_token = biscuit!(
+            r#"
+            tenant("tenant-revoke");
+            write("invoices");
+            "#
+        )
+        .build(&root)
+        .unwrap()
+        .to_base64()
+        .unwrap();
+
+        let epochs: super::TenantTokenEpochs = Default::default();
+        let auth = BiscuitAuth::from_pubkey(root.public().to_string())
+            .unwrap()
+            .with_lsp_enabled(true)
+            .with_tenant_token_epochs(epochs.clone());
+
+        assert!(auth.check_permission("new_invoice", &token_epoch_0).is_ok());
+        assert!(auth.check_permission("new_invoice", &legacy_token).is_ok());
+
+        // Revoke in DB and update shared epochs map -> epoch 0 and legacy tokens are immediately rejected.
+        let new_epoch = registry.revoke_tenant_tokens(&tenant_id).unwrap();
+        assert_eq!(new_epoch, 1);
+        epochs.set(tenant_id, new_epoch);
+        assert!(auth
+            .check_permission("new_invoice", &token_epoch_0)
+            .err()
+            .expect("epoch 0 token must be revoked")
+            .to_string()
+            .contains("revoked"));
+        assert!(auth
+            .check_permission("new_invoice", &legacy_token)
+            .err()
+            .expect("legacy token must be revoked")
+            .to_string()
+            .contains("revoked"));
+        assert!(auth.check_permission("new_invoice", &token_epoch_1).is_ok());
     }
 }
