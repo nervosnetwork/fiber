@@ -5342,6 +5342,58 @@ where
         }
     }
 
+    async fn recover_persisted_payments(
+        &self,
+        myself: &FiberActorRef,
+        state: &mut FiberActorState<S, C>,
+        payment_hashes: HashSet<PaymentSessionKey>,
+    ) {
+        // Trigger hold tlc fulfill retry and timeout checks at startup.
+        self.retry_hold_tlc_sets(myself);
+        // Recover only channel-owned work and indexed attempts. Scanning payment
+        // history here makes every restart grow with the node's lifetime traffic.
+        for payment_hash in payment_hashes {
+            let Some(session) = self.store.get_payment_session(payment_hash) else {
+                continue;
+            };
+            if !session.status.is_final() || session.has_pending_payment_work(&self.store) {
+                myself
+                    .send_message(FiberActorMessage::new_command(
+                        FiberActorCommand::PaymentTlcUpdated(session.session_key()),
+                    ))
+                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+            } else {
+                // A crash may leave only the index after all work and the final
+                // result were committed. Retire that stale recovery entry.
+                if session.status == PaymentStatus::Failed {
+                    self.store.publish_payment_result(payment_hash);
+                }
+                self.store.clear_attempts_channel_index(payment_hash);
+            }
+            let Some(context) = session.request.trampoline_context.as_ref() else {
+                continue;
+            };
+            let upstream_pending = context.previous_tlcs.iter().any(|prev_tlc| {
+                self.store
+                    .get_channel_actor_state(&prev_tlc.prev_channel_id)
+                    .and_then(|channel| {
+                        channel
+                            .tlc_state
+                            .get(&TLCId::Received(prev_tlc.prev_tlc_id))
+                            .map(|tlc| tlc.removed_reason.is_none())
+                    })
+                    .unwrap_or(false)
+            });
+            if upstream_pending
+                && (session.status.is_final() || session.payment_preimage().is_some())
+            {
+                state
+                    .resolve_trampoline_upstream(myself.clone(), session.session_key(), None)
+                    .await;
+            }
+        }
+    }
+
     fn timeout_hold_tlc(
         &self,
         myself: FiberActorRef,
@@ -10607,15 +10659,17 @@ where
         myself: ActorRef<Self::Msg>,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        state.restore_persisted_offline_channels().await;
+        let payment_hashes = state.restore_persisted_offline_channels().await;
         myself.send_interval(CHECK_CHANNELS_INTERVAL, || {
             FiberActorMessage::new_command(FiberActorCommand::CheckChannels)
         });
         myself.send_interval(CHECK_CHANNELS_SHUTDOWN_INTERVAL, || {
             FiberActorMessage::new_command(FiberActorCommand::CheckChannelsShutdown)
         });
+        let fiber_myself = FiberActorRef::from_fiber(&myself);
         self.core
-            .retry_hold_tlc_sets(&FiberActorRef::from_fiber(&myself));
+            .recover_persisted_payments(&fiber_myself, state, payment_hashes)
+            .await;
         Ok(())
     }
 
@@ -11079,61 +11133,11 @@ where
             NetworkActorMessage::new_command(FiberActorCommand::CheckChannelsShutdown)
         });
 
-        // Trigger hold tlc fulfill retry and timeout checks at startup.
+        let fiber_myself = FiberActorRef::from_network(&myself);
         self.core
-            .retry_hold_tlc_sets(&FiberActorRef::from_network(&myself));
-        // Recover only channel-owned work and indexed attempts. Scanning payment
-        // history here makes every restart grow with the node's lifetime traffic.
-        for payment_hash in payment_hashes {
-            let Some(session) = self.core.store.get_payment_session(payment_hash) else {
-                continue;
-            };
-            if !session.status.is_final() || session.has_pending_payment_work(&self.core.store) {
-                myself
-                    .send_message(NetworkActorMessage::new_command(
-                        FiberActorCommand::PaymentTlcUpdated(session.session_key()),
-                    ))
-                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-            } else {
-                // A crash may leave only the index after all work and the final
-                // result were committed. Retire that stale recovery entry.
-                if session.status == PaymentStatus::Failed {
-                    self.core.store.publish_payment_result(payment_hash);
-                }
-                self.core.store.clear_attempts_channel_index(payment_hash);
-            }
-            let Some(context) = session.request.trampoline_context.as_ref() else {
-                continue;
-            };
-            let upstream_pending = context.previous_tlcs.iter().any(|prev_tlc| {
-                self.core
-                    .store
-                    .get_channel_actor_state(&prev_tlc.prev_channel_id)
-                    .and_then(|channel| {
-                        channel
-                            .tlc_state
-                            .get(&TLCId::Received(prev_tlc.prev_tlc_id))
-                            .map(|tlc| tlc.removed_reason.is_none())
-                    })
-                    .unwrap_or(false)
-            });
-            if upstream_pending
-                && (session.status.is_final() || session.payment_preimage().is_some())
-            {
-                state
-                    .fiber
-                    .resolve_trampoline_upstream(
-                        FiberActorRef::from_network(&myself),
-                        session.session_key(),
-                        None,
-                    )
-                    .await;
-            }
-        }
-        debug_event!(
-            FiberActorRef::from_network(&myself),
-            "network actor started"
-        );
+            .recover_persisted_payments(&fiber_myself, &mut state.fiber, payment_hashes)
+            .await;
+        debug_event!(fiber_myself, "network actor started");
         Ok(())
     }
 

@@ -3229,5 +3229,246 @@ async fn hosted_tenant_pays_hosted_tenant_across_two_lsps() {
 
     network.stop().await;
 }
+
+#[tokio::test]
+async fn hosted_tenant_restart_resumes_persisted_inflight_payment() {
+    use crate::fiber::graph::NetworkGraphStateStore;
+    use crate::fiber::payment::SendPaymentDataBuilder;
+    use crate::fiber_types::{AttemptStatus, PaymentHopData, PaymentSession};
+    use crate::tests::gen_rand_fiber_public_key;
+
+    init_tracing();
+
+    let public_t = NetworkNode::new_with_node_name("lsp-payment-recovery-public-t").await;
+    let root = tempdir().expect("temporary LSP directory");
+    let config = lsp_config(root.path().join("lsp"));
+    let ckb_config = CkbConfig {
+        base_dir: Some(root.path().join("ckb")),
+        rpc_url: "http://127.0.0.1:8114".to_string(),
+        udt_whitelist: None,
+        tx_tracing_polling_interval_ms: 4_000,
+        funding_tx_shell_builder: None,
+    };
+    let root_actor = get_test_root_actor().await;
+    let runtime_factory = Arc::new(FiberTenantRuntimeFactory::new(
+        public_t.signing_events.clone(),
+        config.clone(),
+        public_t.fiber_config.clone(),
+        CkbRpcClient::new(&ckb_config),
+        public_t.chain_actor.clone(),
+        public_t.network_actor.clone(),
+        public_t.store.clone(),
+        root_actor.get_cell(),
+        Script::default(),
+    ));
+    let root_signer = test_root_signer_for_name("payment-recovery-tenant");
+    let tenant_id = TenantId::from_root_signer_pubkey(&root_signer.pubkey());
+    let expected_tenant = runtime_factory
+        .provision(&tenant_id)
+        .expect("provision hosted tenant identity");
+
+    let lsp_actor = Actor::spawn_linked(
+        None,
+        LspService,
+        LspServiceArgs {
+            config,
+            public_node_id: public_t.pubkey,
+            public_network_actor: public_t.network_actor.clone(),
+            store: public_t.store.namespaced(NodeNamespace::lsp_metadata()),
+            runtime_factory,
+            signing_key: public_t.private_key.clone(),
+            token_issuer: super::test_token_issuer(),
+            watchtower_store: public_t.store.clone(),
+            signing_events: public_t.signing_events.clone(),
+        },
+        root_actor.get_cell(),
+    )
+    .await
+    .expect("start LSP service with production runtime factory")
+    .0;
+
+    let mut rpc_config = gen_rpc_config();
+    rpc_config.enabled_modules = vec!["lsp".to_string()];
+    let crate::rpc::server::RpcServer {
+        handle: rpc_handle,
+        http_address: rpc_addr,
+        ..
+    } = start_rpc(
+        rpc_config,
+        None,
+        None,
+        None,
+        None,
+        Some(lsp_actor.clone()),
+        public_t.store.clone(),
+        None,
+        None,
+        root_actor.get_cell(),
+        None,
+        public_t.signing_events.clone(),
+        #[cfg(debug_assertions)]
+        None,
+        #[cfg(debug_assertions)]
+        None,
+    )
+    .await
+    .expect("start LSP RPC server");
+    let client = HttpClientBuilder::default()
+        .build(format!("http://{rpc_addr}"))
+        .expect("build LSP RPC client");
+
+    register_authenticated_network_tenant(&lsp_actor, public_t.pubkey, &root_signer).await;
+
+    let ensured: crate::rpc::lsp::LspTenantStatus = client
+        .request(
+            "lsp_ensure_tenant",
+            rpc_params![LspTenantParams {
+                tenant_id: tenant_id.as_str().to_string(),
+            }],
+        )
+        .await
+        .expect("activate hosted tenant");
+    assert!(matches!(
+        ensured.runtime_status,
+        LspTenantRuntimeStatus::Active
+    ));
+    let tenant_rpc_context = ractor::call_t!(
+        lsp_actor,
+        |reply| LspServiceMessage::GetTenantRpcContext(tenant_id.clone(), reply),
+        5_000
+    )
+    .expect("get hosted tenant RPC context")
+    .expect("hosted tenant RPC context");
+    assert!(tenant_rpc_context
+        .fiber_actor
+        .get_name()
+        .expect("hosted tenant actor name")
+        .starts_with("HostedTenant "));
+
+    // Evict the hosted tenant so we can persist an in-flight payment that needs
+    // startup re-drive when HostedTenantActor restarts.
+    let evicted: crate::rpc::lsp::LspTenantStatus = client
+        .request(
+            "lsp_evict_tenant",
+            rpc_params![LspTenantParams {
+                tenant_id: tenant_id.as_str().to_string(),
+            }],
+        )
+        .await
+        .expect("evict hosted tenant");
+    assert!(matches!(
+        evicted.runtime_status,
+        LspTenantRuntimeStatus::Cold
+    ));
+
+    let tenant_store = public_t
+        .store
+        .namespaced(NodeNamespace::hosted_tenant(tenant_id.as_str()));
+    let payment_hash = gen_rand_sha256_hash();
+    let target = gen_rand_fiber_public_key();
+    let funding_hash = gen_rand_sha256_hash();
+    let mut session = PaymentSession {
+        request: SendPaymentDataBuilder::new(target, 1_000, payment_hash)
+            .max_fee_amount(Some(100))
+            .allow_mpp(true)
+            .max_parts(Some(2))
+            .build()
+            .expect("build payment request"),
+        status: PaymentStatus::Inflight,
+        last_error: None,
+        last_error_code: None,
+        try_limit: 3,
+        created_at: 0,
+        last_updated_at: 0,
+        cached_attempts: vec![],
+    };
+    let mut inflight_attempt = session.new_attempt(
+        1,
+        expected_tenant.tenant_pubkey,
+        target,
+        vec![
+            PaymentHopData {
+                amount: 500,
+                next_hop: Some(target),
+                funding_tx_hash: funding_hash,
+                ..Default::default()
+            },
+            PaymentHopData {
+                amount: 500,
+                ..Default::default()
+            },
+        ],
+    );
+    inflight_attempt.status = AttemptStatus::Inflight;
+    inflight_attempt.tried_times = 1;
+    let mut failed_attempt = session.new_attempt(
+        2,
+        expected_tenant.tenant_pubkey,
+        target,
+        vec![
+            PaymentHopData {
+                amount: 500,
+                next_hop: Some(target),
+                funding_tx_hash: funding_hash,
+                ..Default::default()
+            },
+            PaymentHopData {
+                amount: 500,
+                ..Default::default()
+            },
+        ],
+    );
+    failed_attempt.status = AttemptStatus::Failed;
+    failed_attempt.tried_times = 2;
+    session.append_attempt(inflight_attempt.clone());
+    session.append_attempt(failed_attempt.clone());
+    tenant_store.insert_payment_session(session);
+    tenant_store.insert_attempt(inflight_attempt);
+    tenant_store.insert_attempt(failed_attempt);
+
+    assert_eq!(
+        tenant_store.get_persisted_payment_status(payment_hash),
+        Some(PaymentStatus::Inflight)
+    );
+    assert_eq!(
+        tenant_store
+            .get_payment_session(payment_hash)
+            .expect("persisted inflight payment before restart")
+            .status,
+        PaymentStatus::Inflight
+    );
+
+    // Restart HostedTenantActor: post_start must re-drive the persisted Inflight
+    // payment via PaymentTlcUpdated so it reaches a final status instead of staying stuck.
+    let restarted: crate::rpc::lsp::LspTenantStatus = client
+        .request(
+            "lsp_ensure_tenant",
+            rpc_params![LspTenantParams {
+                tenant_id: tenant_id.as_str().to_string(),
+            }],
+        )
+        .await
+        .expect("restart hosted tenant");
+    assert!(matches!(
+        restarted.runtime_status,
+        LspTenantRuntimeStatus::Active
+    ));
+
+    wait_until_async_timeout(|| async {
+        tenant_store
+            .get_payment_session(payment_hash)
+            .is_some_and(|session| session.status == PaymentStatus::Failed)
+    })
+    .await;
+
+    let final_session = tenant_store
+        .get_payment_session(payment_hash)
+        .expect("recovered payment session");
+    assert_eq!(final_session.status, PaymentStatus::Failed);
+
+    rpc_handle.stop().expect("stop LSP RPC server");
+    rpc_handle.stopped().await;
+    lsp_actor.stop(Some("integration test complete".to_string()));
+}
 #[path = "same_hash.rs"]
 mod same_hash;

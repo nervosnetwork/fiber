@@ -4325,6 +4325,9 @@ where
                 state
                     .update_close_transaction_confirmed(tx_hash, force, close_by_us)
                     .await?;
+                let signing_update = self.signing_events.prepare(state);
+                self.store.insert_channel_actor_state(state.clone());
+                signing_update.publish();
                 self.finalize_closed_retryable_tlc_operations(myself, state)
                     .await;
                 debug_event!(self.network, "ChannelClosed");
@@ -5374,7 +5377,15 @@ where
         state.ephemeral_config = args.ephemeral_config;
         state.ephemeral_config.external_funding = external_funding_runtime;
         state.ephemeral_config.is_internal_channel = is_internal_channel;
-        if let Some((_, request)) = state.signing_context.awaiting_signature() {
+        if state.is_closed() {
+            if state.signing_context.cancel_request().is_some() {
+                state.pending_messages = Default::default();
+                state.deferred_peer_tlc_updates.clear();
+                let signing_update = self.signing_events.prepare(&state);
+                self.store.insert_channel_actor_state((*state).clone());
+                signing_update.publish();
+            }
+        } else if let Some((_, request)) = state.signing_context.awaiting_signature() {
             if state.signature_tlc_deadline_reached(now_timestamp_as_millis_u64()) {
                 self.force_close_expired_signature(&myself, &mut state)
                     .await?;
@@ -7750,6 +7761,11 @@ impl ChannelActorState {
             );
             self.state = new_state;
             self.needs_backup = true;
+        }
+        if matches!(self.state, ChannelState::Closed(_)) {
+            self.signing_context.cancel_request();
+            self.pending_messages = Default::default();
+            self.deferred_peer_tlc_updates.clear();
         }
         if matches!(
             self.state,
@@ -10454,6 +10470,9 @@ impl ChannelActorState {
             debug!("Channel closed with cooperative close");
             ChannelState::Closed(CloseFlags::COOPERATIVE)
         };
+        self.signing_context.cancel_request();
+        self.pending_messages = Default::default();
+        self.deferred_peer_tlc_updates.clear();
         self.update_state(closed_state);
         self.shutdown_transaction_hash.replace(tx_hash);
         // Recover the immutable snapshot from the confirmed transaction. Current TLC
@@ -14265,6 +14284,12 @@ where
         } = notification;
         if state.channel_signer.is_local() || channel_id != state.id {
             return Err(invalid("External signature channel/signer mismatch"));
+        }
+        if state.is_closed() {
+            return Err(invalid(format!(
+                "Cannot apply external signature to closed channel {}",
+                state.get_id()
+            )));
         }
         let signature = signature.map_err(invalid)?;
         let receipt = LastAppliedChannelSignature {

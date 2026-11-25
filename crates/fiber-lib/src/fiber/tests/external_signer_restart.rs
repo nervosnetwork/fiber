@@ -4609,3 +4609,362 @@ async fn test_tenant_opening_restart_reconciles_split_temp_id_records() {
     })
     .await;
 }
+
+#[tokio::test]
+async fn test_remote_force_close_cancels_pending_signature_rejects_submission_and_restarts_cleanly()
+{
+    Box::pin(async {
+        use crate::fiber::channel::{
+            ChannelActor, ChannelActorStateStore, ChannelEphemeralConfig, ChannelEvent,
+            ChannelInitializationOperation, ChannelInitializationParameter,
+        };
+        use crate::fiber::channel_signer::SignerNotification;
+        use crate::fiber::network::FiberActorEvent;
+        use crate::fiber::{FiberActorMessage, FiberActorRef};
+        use crate::signing::notifications::{SigningChange, SigningScope};
+        use fiber_types::{
+            ChannelState, CloseFlags, NextChannelSignerMaterial, SignatureRequestId,
+        };
+        use ractor::{Actor, RpcReplyPort};
+
+        init_tracing();
+        let (_restartable, signer) = RestartableExternalSigner::create().await;
+        let ([mut tenant, mut public_node], channel_id) =
+            setup_restartable_external_channel(false, &signer).await;
+
+        let inbound_payment = public_node
+            .send_payment(SendPaymentCommand {
+                target_pubkey: Some(tenant.pubkey),
+                amount: Some(10_000),
+                keysend: Some(true),
+                max_fee_rate: Some(1000),
+                final_tlc_expiry_delta: Some(MIN_TLC_EXPIRY_DELTA + 120_000),
+                ..Default::default()
+            })
+            .await
+            .expect("start inbound payment");
+        approve_fixture_keysend(
+            &signer,
+            &public_node,
+            inbound_payment.payment_hash,
+            10_000,
+            true,
+        )
+        .await;
+
+        let last_applied_submission = std::sync::Arc::new(parking_lot::Mutex::new(None));
+        wait_until_async_timeout(|| {
+            let tenant_ref = &tenant;
+            let signer_ref = &signer;
+            let last_applied_slot = std::sync::Arc::clone(&last_applied_submission);
+            async move {
+                let status = get_signing_status(tenant_ref, channel_id)
+                    .await
+                    .unwrap()
+                    .status;
+                if let ChannelSigningStatus::SignatureRequired { transition, .. } = &status {
+                    if *transition == ChannelSigningTransition::SendRevokeAndAck {
+                        return true;
+                    }
+                    let submission = prepare_hosted_signature(signer_ref, channel_id, status).await;
+                    assert_eq!(
+                        submit_signature(tenant_ref, submission.clone())
+                            .await
+                            .unwrap(),
+                        SubmitChannelSignatureResult::Applied
+                    );
+                    *last_applied_slot.lock() = Some(submission);
+                }
+                false
+            }
+        })
+        .await;
+        let prev_submission = last_applied_submission
+            .lock()
+            .take()
+            .expect("CompleteReceivedCommitment submission applied");
+
+        let pending_status = get_signing_status(&tenant, channel_id)
+            .await
+            .unwrap()
+            .status;
+        assert!(matches!(
+            pending_status,
+            ChannelSigningStatus::SignatureRequired {
+                transition: ChannelSigningTransition::SendRevokeAndAck,
+                ..
+            }
+        ));
+        let pending_submission = prepare_hosted_signature(&signer, channel_id, pending_status).await;
+        tenant.stop().await;
+        public_node.stop().await;
+
+        let to_notification =
+            |submission: &SubmitChannelSignatureParams,
+             rpc_reply: Option<RpcReplyPort<Result<fiber_types::SubmitSignatureOutcome, String>>>| {
+                let material = submission.next_material.clone().unwrap();
+                SignerNotification::ChannelSignatureReady {
+                    channel_id,
+                    request_id: SignatureRequestId(submission.request_id.into()),
+                    signature: Ok(musig2::PartialSignature::from_slice(
+                        &submission.partial_signature,
+                    )
+                    .unwrap()),
+                    next_material: Some(NextChannelSignerMaterial {
+                        v2_nonces: material
+                            .v2_nonces
+                            .iter()
+                            .map(|n| musig2::PubNonce::from_bytes(n).unwrap())
+                            .collect(),
+                        commitment_points: material
+                            .commitment_points
+                            .iter()
+                            .map(|(n, p)| (*n, (*p).try_into().unwrap()))
+                            .collect(),
+                        next_commitment_point: material
+                            .next_commitment_point
+                            .map(|p| p.try_into().unwrap()),
+                        next_commitment_nonce: material
+                            .next_commitment_nonce
+                            .map(|n| musig2::PubNonce::from_bytes(&n).unwrap()),
+                        next_revocation_nonce: material
+                            .next_revocation_nonce
+                            .map(|n| musig2::PubNonce::from_bytes(&n).unwrap()),
+                    }),
+                    rpc_reply,
+                }
+            };
+
+        let mut state = tenant.get_channel_actor_state(channel_id);
+        let deadline = state.pending_tlc_signature_deadline().unwrap();
+        assert!(state.signing_context.is_awaiting_signature());
+
+        let (sender, mut messages) = tokio::sync::mpsc::unbounded_channel();
+        let (network, network_task) = Actor::spawn(None, DeadlineNetworkProbe, sender)
+            .await
+            .unwrap();
+        let network_ref = FiberActorRef::from_network(&network);
+        state.network = Some(network_ref.clone());
+
+        let mut signing_changes = tenant
+            .signing_events
+            .hub
+            .subscribe(SigningScope::Channel(None));
+        let channel = ChannelActor::new(
+            tenant.pubkey,
+            public_node.pubkey,
+            network_ref.clone(),
+            tenant.store.clone(),
+            None,
+        )
+        .with_signing_events(tenant.signing_events.channels(None));
+        let (myself, actor_task) = Actor::spawn(None, DeadlineChannelProbe, ()).await.unwrap();
+
+        // Snapshot a copy with an accepted signature before remote force-close so we can
+        // also verify pre_start recovery of a closed channel carrying a stale accepted request.
+        let mut stale_accepted_state = state.clone();
+        assert!(channel
+            .validate_and_checkpoint_signer_notification(
+                &myself,
+                &mut stale_accepted_state,
+                to_notification(&pending_submission, None),
+                deadline.saturating_sub(1),
+            )
+            .await
+            .unwrap()
+            .is_some());
+        assert!(stale_accepted_state.signing_context.accepted_signature().is_some());
+        // Restore the pre-checkpoint state into the store before testing remote force-close.
+        tenant.store.insert_channel_actor_state(state.clone());
+
+        // 1. Remote force-close confirmation must cancel the pending external signing request
+        // and publish NoSignatureRequired on signing_events.
+        let close_tx_hash = ckb_types::H256([0xAB; 32]);
+        channel
+            .handle_event(
+                &myself,
+                &mut state,
+                ChannelEvent::ClosingTransactionConfirmed(close_tx_hash.clone(), true, false),
+            )
+            .await
+            .expect("remote force-close confirmation succeeds");
+        assert_eq!(
+            state.state,
+            ChannelState::Closed(
+                CloseFlags::UNCOOPERATIVE_REMOTE | CloseFlags::WAITING_ONCHAIN_SETTLEMENT
+            )
+        );
+        assert!(
+            !state.signing_context.is_awaiting_signature(),
+            "remote force-close must cancel pending signing request"
+        );
+        assert_eq!(
+            crate::rpc::channel::to_rpc_channel_signing_status(&state).unwrap(),
+            ChannelSigningStatus::NoSignatureRequired
+        );
+        let persisted_after_close = tenant.store.get_channel_actor_state(&channel_id).unwrap();
+        assert!(persisted_after_close.is_closed());
+        assert_eq!(
+            crate::rpc::channel::to_rpc_channel_signing_status(&persisted_after_close).unwrap(),
+            ChannelSigningStatus::NoSignatureRequired
+        );
+        let signing_event = tokio::time::timeout(Duration::from_secs(5), signing_changes.recv())
+            .await
+            .expect("signing event published on remote force-close")
+            .expect("signing event channel open");
+        match signing_event.as_ref() {
+            SigningChange::Channel {
+                channel_id: event_channel_id,
+                status,
+            } => {
+                assert_eq!(*event_channel_id, channel_id);
+                assert_eq!(
+                    status.as_ref().unwrap(),
+                    &ChannelSigningStatus::NoSignatureRequired
+                );
+            }
+            other => panic!("unexpected signing event: {other:?}"),
+        }
+
+        // 2. Submitting either the cancelled pending signature or replaying a previously applied
+        // signature must be rejected once the channel is closed.
+        for submission in [&pending_submission, &prev_submission] {
+            let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+            let err = channel
+                .handle_signer_notification(
+                    &myself,
+                    &mut state,
+                    to_notification(submission, Some(RpcReplyPort::from(reply_tx))),
+                )
+                .await
+                .expect_err("closed channel must reject signer notification");
+            assert!(
+                err.to_string().contains("closed channel"),
+                "unexpected error: {err}"
+            );
+            let rpc_err = reply_rx
+                .await
+                .expect("rpc reply delivered")
+                .expect_err("rpc reply must be Err for closed channel");
+            assert!(
+                rpc_err.contains("closed channel"),
+                "unexpected rpc error: {rpc_err}"
+            );
+        }
+
+        // 3a. Restarting the cleanly closed channel actor succeeds.
+        let (restored_actor, restored_handle) = Actor::spawn(
+            None,
+            ChannelActor::new(
+                tenant.pubkey,
+                public_node.pubkey,
+                network_ref.clone(),
+                tenant.store.clone(),
+                None,
+            )
+            .with_signing_events(tenant.signing_events.channels(None)),
+            ChannelInitializationParameter {
+                operation: ChannelInitializationOperation::RestoreOfflineChannel(channel_id),
+                ephemeral_config: ChannelEphemeralConfig::default(),
+                private_key: tenant.private_key.clone(),
+            },
+        )
+        .await
+        .expect("closed channel actor must restore cleanly");
+        restored_actor.stop(None);
+        restored_handle.await.unwrap();
+
+        // 3b. Restarting a persisted closed channel that still carried a stale accepted signature
+        // (both past and before the TLC safety deadline) must cancel the stale request cleanly in
+        // pre_start without invoking force_close_expired_signature or resume_external_v2.
+        for tlc_expiry in [0u64, u64::MAX] {
+            let mut closed_with_stale_request = stale_accepted_state.clone();
+            closed_with_stale_request.state = ChannelState::Closed(
+                CloseFlags::UNCOOPERATIVE_REMOTE | CloseFlags::WAITING_ONCHAIN_SETTLEMENT,
+            );
+            closed_with_stale_request.shutdown_transaction_hash = Some(close_tx_hash.clone());
+            for tlc in &mut closed_with_stale_request.tlc_state.received_tlcs.tlcs {
+                tlc.expiry = tlc_expiry;
+            }
+            assert!(closed_with_stale_request
+                .signing_context
+                .is_awaiting_signature());
+            assert!(closed_with_stale_request
+                .signing_context
+                .accepted_signature()
+                .is_some());
+            tenant
+                .store
+                .insert_channel_actor_state(closed_with_stale_request);
+
+            let (restored_actor, restored_handle) = Actor::spawn(
+                None,
+                ChannelActor::new(
+                    tenant.pubkey,
+                    public_node.pubkey,
+                    network_ref.clone(),
+                    tenant.store.clone(),
+                    None,
+                )
+                .with_signing_events(tenant.signing_events.channels(None)),
+                ChannelInitializationParameter {
+                    operation: ChannelInitializationOperation::RestoreOfflineChannel(channel_id),
+                    ephemeral_config: ChannelEphemeralConfig::default(),
+                    private_key: tenant.private_key.clone(),
+                },
+            )
+            .await
+            .expect("closed channel with stale accepted signature must start cleanly");
+
+            let cleaned = tenant.store.get_channel_actor_state(&channel_id).unwrap();
+            assert!(cleaned.is_closed());
+            assert!(!cleaned.signing_context.is_awaiting_signature());
+            assert!(cleaned.signing_context.accepted_signature().is_none());
+            assert_eq!(
+                crate::rpc::channel::to_rpc_channel_signing_status(&cleaned).unwrap(),
+                ChannelSigningStatus::NoSignatureRequired
+            );
+            let event = tokio::time::timeout(Duration::from_secs(5), signing_changes.recv())
+                .await
+                .expect("pre_start publishes NoSignatureRequired when cancelling stale request")
+                .expect("signing event channel open");
+            assert!(matches!(
+                event.as_ref(),
+                SigningChange::Channel {
+                    channel_id: event_channel_id,
+                    status: Ok(ChannelSigningStatus::NoSignatureRequired),
+                } if *event_channel_id == channel_id
+            ));
+
+            while let Ok(msg) = messages.try_recv() {
+                assert!(
+                    !matches!(
+                        msg,
+                        NetworkActorMessage::Fiber(FiberActorMessage::Event(
+                            FiberActorEvent::ClosingTransactionPending(..)
+                        )) | NetworkActorMessage::Fiber(FiberActorMessage::Command(
+                            FiberActorCommand::SendFiberMessage(
+                                crate::fiber::network::FiberMessageWithTarget {
+                                    message: crate::fiber::types::FiberMessage::ChannelNormalOperation(
+                                        crate::fiber::types::FiberChannelMessage::RevokeAndAckV2(_)
+                                    ),
+                                    ..
+                                }
+                            )
+                        ))
+                    ),
+                    "pre_start on closed channel must not force-close or send RevokeAndAckV2: {msg:?}"
+                );
+            }
+
+            restored_actor.stop(None);
+            restored_handle.await.unwrap();
+        }
+
+        myself.stop(None);
+        network.stop(None);
+        actor_task.await.unwrap();
+        network_task.await.unwrap();
+    })
+    .await;
+}
