@@ -130,6 +130,7 @@ live channel after the upgraded node has signed new commitments.
 * [RPC Documentation](./crates/fiber-lib/src/rpc/README.md)
 * [P2P Message Protocol](./docs/specs/p2p-message.md)
 * [Invoice Protocol](./docs/specs/payment-invoice.md)
+* [Hosted LSP](./docs/lsp.md)
 
 **We are in an actively developing stage, don't hesitate to [report issues](https://github.com/nervosnetwork/fiber/issues) or ask for help in the [channel of the Nervos dev community](https://discord.gg/BF9AJ4fzs6).**
 
