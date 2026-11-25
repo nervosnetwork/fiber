@@ -9234,7 +9234,6 @@ impl ChannelActorState {
                             self.watch_channel_keys(),
                             settlement_data,
                             self.channel_features,
-                            self.get_local_shutdown_script(),
                         ),
                     ))
                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);
@@ -12589,7 +12588,6 @@ where
                         state.watch_channel_keys(),
                         settlement.clone(),
                         state.channel_features,
-                        state.get_local_shutdown_script(),
                     ),
                 ))
                 .expect(ASSUME_NETWORK_ACTOR_ALIVE);

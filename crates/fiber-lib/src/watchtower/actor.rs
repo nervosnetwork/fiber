@@ -302,7 +302,7 @@ fn run_periodic_check<S>(
     let now_ms = crate::now_timestamp_as_millis_u64();
     // Expire pending and signed external requests past WATCHTOWER_HOLD_MS without
     // extending their original TTL, and arm per-node retry backoff on expiry.
-    sync_external_fee_holds(events, &store, &channels, now_ms);
+    expire_external_signing_requests(events, &store, &channels, now_ms);
     // Not the cells an opening put in its funding, nor those of this watchtower's own
     // transactions still in the pool (`held_cells`).
     if let Err(err) = crate::ckb::held_cells::lock_held(&mut cell_collector, now_ms) {
@@ -592,7 +592,7 @@ fn expire_requests<T: ExpirableWatchtowerRequest>(
 
 /// Expires pending or unbroadcast signed external signing requests whose TTL window
 /// (`WATCHTOWER_HOLD_MS`) has elapsed and arms per-channel/per-node retry backoff.
-pub(crate) fn sync_external_fee_holds<S: WatchtowerStore>(
+pub(crate) fn expire_external_signing_requests<S: WatchtowerStore>(
     events: &crate::signing::SigningEvents,
     store: &S,
     channels: &[(NodeId, ChannelData)],
@@ -2615,82 +2615,117 @@ fn build_settlement_tx<S: WatchtowerStore>(
             "settlement min capacity",
         )
         .and_then(|amount| checked_add_u64(amount, fee, "settlement min capacity"))?;
-        let min_total_capacity =
-            required_min_capacity.saturating_sub(commitment_cell.output.capacity.value());
+        const MAX_LOCAL_SETTLEMENT_FEE_COLLECT_ROUNDS: usize = 64;
+        let mut seen_outpoints = HashSet::from([OutPoint::from(commitment_cell.out_point.clone())]);
+        let mut inputs_capacity = commitment_cell.output.capacity.value();
+        let mut next_min_total_capacity =
+            required_min_capacity.saturating_sub(inputs_capacity).max(1);
         let mut query = CellQueryOptions::new_lock(fee_provider_lock_script);
         query.script_search_mode = Some(SearchMode::Exact);
         query.secondary_script_len_range = Some(ValueRangeOption::new_exact(0));
         query.data_len_range = Some(ValueRangeOption::new_exact(0));
-        if min_total_capacity > 0 {
-            query.min_total_capacity = min_total_capacity;
-        }
-        let (cells, _total_capacity) = cell_collector.collect_live_cells(&query, true)?;
-        let mut inputs_capacity = commitment_cell.output.capacity.value();
-        for cell in cells {
-            let input_capacity: u64 = cell.output.capacity().unpack();
-            inputs_capacity = checked_add_u64(
-                inputs_capacity,
-                input_capacity,
-                "settlement inputs capacity",
-            )?;
-            tx_builder = tx_builder.input(
-                CellInput::new_builder()
-                    .previous_output(cell.out_point)
-                    .since(fee_input_since)
-                    .build(),
-            );
-            let tx_size =
-                u64::try_from(tx_builder.clone().build().data().serialized_size_in_block())
-                    .map_err(|_| {
-                        ArithmeticError::new("transaction size does not fit into u64".to_string())
-                    })?;
-            let fee = fee_calculator.fee(tx_size);
-            let required_capacity = checked_add_u64(
+
+        for _ in 0..MAX_LOCAL_SETTLEMENT_FEE_COLLECT_ROUNDS {
+            query.min_total_capacity = next_min_total_capacity;
+            let (cells, _total_capacity) = cell_collector.collect_live_cells(&query, true)?;
+            let mut added_new_cell = false;
+            let mut last_required_capacity = required_min_capacity;
+            for cell in cells {
+                if !seen_outpoints.insert(cell.out_point.clone()) {
+                    continue;
+                }
+                added_new_cell = true;
+                let input_capacity: u64 = cell.output.capacity().unpack();
+                inputs_capacity = checked_add_u64(
+                    inputs_capacity,
+                    input_capacity,
+                    "settlement inputs capacity",
+                )?;
+                tx_builder = tx_builder.input(
+                    CellInput::new_builder()
+                        .previous_output(cell.out_point)
+                        .since(fee_input_since)
+                        .build(),
+                );
+                let tx_size =
+                    u64::try_from(tx_builder.clone().build().data().serialized_size_in_block())
+                        .map_err(|_| {
+                            ArithmeticError::new(
+                                "transaction size does not fit into u64".to_string(),
+                            )
+                        })?;
+                let fee = fee_calculator.fee(tx_size);
+                let required_capacity = checked_add_u64(
+                    change_output_occupied_capacity,
+                    outputs_capacity,
+                    "settlement required capacity",
+                )
+                .and_then(|amount| checked_add_u64(amount, fee, "settlement required capacity"))?;
+                last_required_capacity = required_capacity;
+                if inputs_capacity >= required_capacity {
+                    let new_change_output =
+                        change_output
+                            .as_builder()
+                            .capacity(
+                                checked_sub_u64(
+                                    inputs_capacity,
+                                    outputs_capacity,
+                                    "change capacity",
+                                )
+                                .and_then(|amount| {
+                                    checked_sub_u64(amount, fee, "change capacity")
+                                })?,
+                            )
+                            .build();
+                    let outputs = if two_parties_all_settled {
+                        vec![settlement_output, new_change_output]
+                    } else {
+                        vec![new_commitment_output, settlement_output, new_change_output]
+                    };
+                    let outputs_data = if two_parties_all_settled {
+                        vec![settlement_output_data, Bytes::default()]
+                    } else {
+                        vec![
+                            new_commitment_output_data,
+                            settlement_output_data,
+                            Bytes::default(),
+                        ]
+                    };
+                    let tx = tx_builder
+                        .set_outputs(outputs)
+                        .set_outputs_data(outputs_data)
+                        .build();
+                    return build_signed_settlement_tx(
+                        events,
+                        store,
+                        self_node_id,
+                        channel_data.channel_id,
+                        tx,
+                        key_purpose,
+                        unlock.with_preimage,
+                        unlock_key,
+                        signer,
+                        None,
+                        None,
+                    );
+                }
+            }
+            if !added_new_cell {
+                break;
+            }
+            let next_fee = fee_calculator.fee(tx_size_with_extra_inputs(&tx_builder, 1)?);
+            let next_required_capacity = checked_add_u64(
                 change_output_occupied_capacity,
                 outputs_capacity,
-                "settlement required capacity",
+                "settlement next required capacity",
             )
-            .and_then(|amount| checked_add_u64(amount, fee, "settlement required capacity"))?;
-            if inputs_capacity >= required_capacity {
-                let new_change_output = change_output
-                    .as_builder()
-                    .capacity(
-                        checked_sub_u64(inputs_capacity, outputs_capacity, "change capacity")
-                            .and_then(|amount| checked_sub_u64(amount, fee, "change capacity"))?,
-                    )
-                    .build();
-                let outputs = if two_parties_all_settled {
-                    vec![settlement_output, new_change_output]
-                } else {
-                    vec![new_commitment_output, settlement_output, new_change_output]
-                };
-                let outputs_data = if two_parties_all_settled {
-                    vec![settlement_output_data, Bytes::default()]
-                } else {
-                    vec![
-                        new_commitment_output_data,
-                        settlement_output_data,
-                        Bytes::default(),
-                    ]
-                };
-                let tx = tx_builder
-                    .set_outputs(outputs)
-                    .set_outputs_data(outputs_data)
-                    .build();
-                return build_signed_settlement_tx(
-                    events,
-                    store,
-                    self_node_id,
-                    channel_data.channel_id,
-                    tx,
-                    key_purpose,
-                    unlock.with_preimage,
-                    unlock_key,
-                    signer,
-                    None,
-                    None,
-                );
-            }
+            .and_then(|amount| {
+                checked_add_u64(amount, next_fee, "settlement next required capacity")
+            })?;
+            next_min_total_capacity = next_required_capacity
+                .max(last_required_capacity)
+                .saturating_sub(inputs_capacity)
+                .max(1);
         }
 
         Err(Box::new(RpcError::Other(anyhow!("Not enough capacity"))))

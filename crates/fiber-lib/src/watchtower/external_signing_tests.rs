@@ -1188,7 +1188,7 @@ fn external_pending_request_expires_after_ttl_and_enforces_backoff() {
 
     // Mid-TTL sync must NOT renew created_at_ms or drop the request.
     let mid_ttl = created_at_ms + crate::ckb::held_cells::WATCHTOWER_HOLD_MS / 2;
-    crate::watchtower::actor::sync_external_fee_holds(
+    crate::watchtower::actor::expire_external_signing_requests(
         &fixture.events,
         &fixture.store,
         &channels,
@@ -1212,7 +1212,7 @@ fn external_pending_request_expires_after_ttl_and_enforces_backoff() {
 
     // Past TTL: unsigned request must expire and arm backoff.
     let expired_at = created_at_ms + crate::ckb::held_cells::WATCHTOWER_HOLD_MS;
-    crate::watchtower::actor::sync_external_fee_holds(
+    crate::watchtower::actor::expire_external_signing_requests(
         &fixture.events,
         &fixture.store,
         &channels,
@@ -1281,7 +1281,7 @@ fn external_pending_request_expires_after_ttl_and_enforces_backoff() {
             Ok::<_, std::convert::Infallible>(())
         })
         .unwrap();
-    crate::watchtower::actor::sync_external_fee_holds(
+    crate::watchtower::actor::expire_external_signing_requests(
         &fixture.events,
         &fixture.store,
         &channels,
@@ -2190,10 +2190,27 @@ fn external_udt_external_funding_template_tx_tlc_and_low_excess_balance_flow() {
             .set_witnesses(vec![])
             .build()
             .data();
+        let mut mutated_w0_body = funded_tx.witnesses().get(0).unwrap().raw_data().to_vec();
+        // Flip a non-signature byte in the 72-byte balance section (keeps valid V2 witness layout
+        // and all-zero 65-byte signature slot so only digest binding of witness[0] catches it).
+        let htlc_count = mutated_w0_body[17] as usize;
+        mutated_w0_body[18 + htlc_count * 97] ^= 1;
+        let mutated_w0_body_tx = funded_tx
+            .clone()
+            .into_view()
+            .as_advanced_builder()
+            .set_witnesses(vec![
+                mutated_w0_body.pack(),
+                funded_tx.witnesses().get(1).unwrap(),
+                funded_tx.witnesses().get(2).unwrap(),
+            ])
+            .build()
+            .data();
         for bad_retry in [
             diff_witness_tx.clone(),
             bad_w0_sig_tx.clone(),
             empty_witnesses_tx.clone(),
+            mutated_w0_body_tx.clone(),
         ] {
             assert!(fixture
                 .submit_with_tx(request_id, valid_sig, bad_retry)
@@ -2242,12 +2259,203 @@ fn external_udt_external_funding_template_tx_tlc_and_low_excess_balance_flow() {
                 .unwrap(),
             SubmitWatchtowerSignatureResult::AlreadyApplied
         );
-        for bad_retry in [diff_witness_tx, bad_w0_sig_tx, empty_witnesses_tx] {
+        for bad_retry in [
+            diff_witness_tx,
+            bad_w0_sig_tx,
+            empty_witnesses_tx,
+            mutated_w0_body_tx,
+        ] {
             assert!(fixture
                 .submit_with_tx(request_id, valid_sig, bad_retry)
                 .is_err());
         }
+
+        // 7. Oversized submission is rejected by bounds check even for an unknown request_id.
+        let oversized_tx = TransactionBuilder::default()
+            .witness(vec![0u8; fiber_types::MAX_EXTERNAL_FUNDING_WATCHTOWER_TX_BYTES + 1].pack())
+            .build()
+            .data();
+        let err = fixture
+            .submit_with_tx(Hash256::from([0xfe; 32]), valid_sig, oversized_tx)
+            .expect_err("oversized tx must fail bounds check before pending lookup");
+        assert!(err.message().contains("exceeds maximum size"), "{err}");
     }
+}
+
+#[test]
+fn local_udt_settlement_keeps_collecting_when_three_cells_raise_fee_above_estimate() {
+    #[derive(Clone)]
+    struct ThresholdCollector {
+        available: Vec<LiveCell>,
+        calls: usize,
+    }
+
+    #[async_trait::async_trait]
+    impl CellCollector for ThresholdCollector {
+        async fn collect_live_cells_async(
+            &mut self,
+            query: &CellQueryOptions,
+            apply_changes: bool,
+        ) -> Result<(Vec<LiveCell>, u64), CellCollectorError> {
+            self.calls += 1;
+            let mut selected = Vec::new();
+            let mut total = 0u64;
+            let mut remaining = Vec::new();
+            for cell in std::mem::take(&mut self.available) {
+                if total < query.min_total_capacity {
+                    let cap: u64 = cell.output.capacity().unpack();
+                    total += cap;
+                    selected.push(cell);
+                } else {
+                    remaining.push(cell);
+                }
+            }
+            if apply_changes {
+                self.available = remaining;
+            } else {
+                selected.extend(remaining);
+                self.available = selected.clone();
+            }
+            Ok((selected, total))
+        }
+
+        fn lock_cell(&mut self, _: OutPoint, _: u64) -> Result<(), CellCollectorError> {
+            Ok(())
+        }
+        fn apply_tx(&mut self, _: Transaction, _: u64) -> Result<(), CellCollectorError> {
+            Ok(())
+        }
+        fn reset(&mut self) {}
+    }
+
+    let udt_script = test_udt_script();
+    let mut fixture = Fixture::with_features(false, false, false, true, ChannelFeatures::V2);
+    let settlement_data = fixture.channel.local_settlement_data.clone();
+    fixture
+        .store
+        .remove_watch_channel(fixture.node_id.clone(), fixture.channel.channel_id);
+    fixture.store.insert_watch_channel(
+        fixture.node_id.clone(),
+        fixture.channel.channel_id,
+        Some(udt_script.clone()),
+        WatchChannelKeys {
+            local_settlement: SettlementKey::local(fixture.base_key.clone()),
+            remote_settlement: fixture.channel.remote_settlement_key,
+            local_funding: fixture.channel.local_funding_pubkey,
+            remote_funding: fixture.channel.remote_funding_pubkey,
+        },
+        settlement_data,
+        ChannelFeatures::V2,
+    );
+    fixture.channel = fixture
+        .store
+        .get_watch_channel(&fixture.node_id, &fixture.channel.channel_id)
+        .expect("channel");
+    let output: CellOutput = fixture.cell.output.clone().into();
+    fixture.cell.output = output
+        .as_builder()
+        .type_(Some(udt_script).pack())
+        .capacity(25_000_000_000u64)
+        .build()
+        .into();
+    fixture.cell.output_data = Some(ckb_jsonrpc_types::JsonBytes::from_vec(
+        240_000_000_000u128.to_le_bytes().to_vec(),
+    ));
+
+    // Probe the exact initial shortfall requested by local UDT TLC settlement using a 1-round spy.
+    #[derive(Clone, Default)]
+    struct SpyCollector {
+        first_min_total_capacity: u64,
+        lock: Option<Script>,
+    }
+    #[async_trait::async_trait]
+    impl CellCollector for SpyCollector {
+        async fn collect_live_cells_async(
+            &mut self,
+            query: &CellQueryOptions,
+            _: bool,
+        ) -> Result<(Vec<LiveCell>, u64), CellCollectorError> {
+            if self.first_min_total_capacity == 0 {
+                self.first_min_total_capacity = query.min_total_capacity;
+                self.lock = Some(query.primary_script.clone());
+            }
+            Ok((vec![], 0))
+        }
+        fn lock_cell(&mut self, _: OutPoint, _: u64) -> Result<(), CellCollectorError> {
+            Ok(())
+        }
+        fn apply_tx(&mut self, _: Transaction, _: u64) -> Result<(), CellCollectorError> {
+            Ok(())
+        }
+        fn reset(&mut self) {}
+    }
+
+    let mut spy = SpyCollector::default();
+    assert!(fixture.build_with_collector(200_000, &mut spy).is_err());
+    let shortfall = spy.first_min_total_capacity;
+    let lock = spy.lock.expect("fee provider lock");
+    assert!(shortfall > 0);
+
+    // Construct 3 cells that sum to `shortfall` EXACTLY (the 2-input fee estimate), so adding
+    // the 3rd input raises the actual fee by 1 CellInput (~44B) above the estimate; a 4th cell
+    // is available to cover the delta.
+    let c1 = shortfall / 3;
+    let c2 = shortfall / 3;
+    let c3 = shortfall - c1 - c2;
+    let c4 = 6_100_000_000u64;
+    let make_cell = |seed: u8, cap: u64| LiveCell {
+        output: CellOutput::new_builder()
+            .capacity(cap)
+            .lock(lock.clone())
+            .build(),
+        output_data: Default::default(),
+        out_point: OutPoint::new(Byte32::from([seed; 32]), 0),
+        block_number: 0,
+        tx_index: 0,
+    };
+
+    let mut collector = ThresholdCollector {
+        available: vec![
+            make_cell(0xa1, c1),
+            make_cell(0xa2, c2),
+            make_cell(0xa3, c3),
+            make_cell(0xa4, c4),
+        ],
+        calls: 0,
+    };
+    let tx = fixture
+        .build_with_collector(200_000, &mut collector)
+        .expect("builder must keep collecting the 4th cell after 3 cells raise actual fee")
+        .expect("signed local UDT settlement tx");
+    assert_eq!(collector.calls, 2);
+    assert_eq!(tx.inputs().len(), 5); // 1 commitment input + 4 fee inputs
+
+    // Repeating collector that ignores `apply_changes` must terminate cleanly (no infinite loop).
+    #[derive(Clone)]
+    struct RepeatingSmallCollector(LiveCell);
+    #[async_trait::async_trait]
+    impl CellCollector for RepeatingSmallCollector {
+        async fn collect_live_cells_async(
+            &mut self,
+            _: &CellQueryOptions,
+            _: bool,
+        ) -> Result<(Vec<LiveCell>, u64), CellCollectorError> {
+            let cap: u64 = self.0.output.capacity().unpack();
+            Ok((vec![self.0.clone()], cap))
+        }
+        fn lock_cell(&mut self, _: OutPoint, _: u64) -> Result<(), CellCollectorError> {
+            Ok(())
+        }
+        fn apply_tx(&mut self, _: Transaction, _: u64) -> Result<(), CellCollectorError> {
+            Ok(())
+        }
+        fn reset(&mut self) {}
+    }
+    let mut repeating = RepeatingSmallCollector(make_cell(0xb1, c1));
+    let err = fixture
+        .build_with_collector(200_000, &mut repeating)
+        .expect_err("repeating collector must terminate cleanly instead of looping forever");
+    assert!(err.to_string().contains("Not enough capacity"), "{err}");
 }
 
 #[test]
@@ -2296,7 +2504,7 @@ fn external_funding_watchtower_request_never_touches_operator_held_cells() {
 
     // Syncing holds before and after TTL expiry must neither lock unheld_utxo nor release operator_utxo.
     let channels = fixture.store.get_watch_channels_with_nodes();
-    crate::watchtower::actor::sync_external_fee_holds(
+    crate::watchtower::actor::expire_external_signing_requests(
         &fixture.events,
         &fixture.store,
         &channels,
@@ -2316,7 +2524,7 @@ fn external_funding_watchtower_request_never_touches_operator_held_cells() {
             Ok::<_, std::convert::Infallible>(())
         })
         .unwrap();
-    crate::watchtower::actor::sync_external_fee_holds(
+    crate::watchtower::actor::expire_external_signing_requests(
         &fixture.events,
         &fixture.store,
         &channels,
@@ -2466,7 +2674,7 @@ fn external_funding_scan_race_with_submit_preserves_accepted_funded_tx() {
 fn external_funding_eviction_clears_last_applied_while_confirmed_spend_preserves_it() {
     let payout_lock = test_custom_payout_lock();
     // Modes:
-    //   0: TTL expiration (`sync_external_fee_holds`) -> clears last_applied
+    //   0: TTL expiration (`expire_external_signing_requests`) -> clears last_applied
     //   1: unconfirmed dead-input pruning (`evict_dead_fee_signing_requests`) -> clears last_applied
     //   2: broadcast failure (`evict_failed_signed_settlement_tx`) -> clears last_applied
     //   3: confirmed spend (`prune_spent_signing_requests`) then dead-input check -> preserves last_applied
@@ -2496,7 +2704,7 @@ fn external_funding_eviction_clears_last_applied_while_confirmed_spend_preserves
                 let expired_at = crate::now_timestamp_as_millis_u64()
                     + crate::ckb::held_cells::WATCHTOWER_HOLD_MS
                     + 10_000;
-                crate::watchtower::actor::sync_external_fee_holds(
+                crate::watchtower::actor::expire_external_signing_requests(
                     &fixture.events,
                     &fixture.store,
                     &channels,

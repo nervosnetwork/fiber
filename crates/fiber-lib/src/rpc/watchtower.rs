@@ -564,6 +564,9 @@ where
             .try_into()
             .map_err(|_| rpc_error("watchtower signature must be 65 bytes"))?;
         let submitted_tx: ckb_types::packed::Transaction = params.signed_transaction.into();
+        fiber_types::validate_external_funding_watchtower_tx_bounds(&submitted_tx)
+            .map_err(rpc_error)?;
+        let submitted_tx_hash = fiber_types::external_funding_watchtower_tx_hash(&submitted_tx);
         let signing_scope = self.signing_events.watchtower(&node_id);
         let mut signing_update = signing_scope.prepare_update();
         let result = self
@@ -575,8 +578,6 @@ where
                 let WatchtowerSignerState::External(external) = state else {
                     return Err(rpc_error("watched channel does not use an external signer"));
                 };
-                let submitted_tx_hash =
-                    fiber_types::external_funding_watchtower_tx_hash(&submitted_tx);
                 if let Some(existing) = external.signed_signatures.get(&request_id) {
                     if existing.signature == signature
                         && submitted_tx_hash

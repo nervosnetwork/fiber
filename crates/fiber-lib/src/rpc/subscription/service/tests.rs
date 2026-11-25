@@ -219,7 +219,6 @@ async fn watchtower_visibility_and_removal_use_only_memory_events() {
 #[cfg(feature = "watchtower")]
 #[tokio::test]
 async fn watchtower_subscription_replays_pending_external_funding_request() {
-    use crate::watchtower::WatchtowerStore;
     use ckb_types::{
         core::TransactionBuilder,
         packed::{CellInput, OutPoint},
@@ -230,6 +229,8 @@ async fn watchtower_subscription_replays_pending_external_funding_request() {
         ChannelFeatures, OnchainKeyPurpose, OnchainSigningContent, PendingWatchtowerRequest,
         Privkey, SettlementData, SettlementKey, WatchChannelKeys, WatchtowerSignerState,
     };
+
+    use crate::watchtower::WatchtowerStore;
 
     let dir = tempfile::tempdir().unwrap();
     let store = open_store(dir.path()).unwrap();

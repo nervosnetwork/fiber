@@ -1527,8 +1527,10 @@ Subscribe to a topic and return an ID for subsequent notifications and cancellat
 
  Signing subscriptions always send currently pending requests when established,
  then send status changes, including transitions to no pending request. Initial
- requests use the same `SignatureRequired` status and notification format as live
- requests. There is no separate completion marker or option to enable this replay.
+ requests use the same pending status and notification format as live requests
+ (`SignatureRequired` for `channel_signing` and `ExternalFundingRequired` for
+ `watchtower_signing`). There is no separate completion marker or option to enable
+ this replay.
  The initial read is ordered with writes in the selected topic and authorized
  scope, so live updates follow it without a gap. Database reads happen only
  during subscription setup; live filtering and deduplication use memory.

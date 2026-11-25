@@ -468,6 +468,49 @@ fn is_absolute_timestamp_since(raw_since: u64) -> bool {
     (raw_since >> 56) == 0x40
 }
 
+/// Enforce byte-size and item-count bounds on an externally funded watchtower transaction
+/// before acquiring signer locks or hashing its contents.
+pub fn validate_external_funding_watchtower_tx_bounds(tx: &Transaction) -> Result<(), String> {
+    use ckb_types::prelude::Entity;
+
+    if tx.as_slice().len() > MAX_EXTERNAL_FUNDING_WATCHTOWER_TX_BYTES {
+        return Err(format!(
+            "externally funded watchtower transaction exceeds maximum size ({MAX_EXTERNAL_FUNDING_WATCHTOWER_TX_BYTES} bytes)"
+        ));
+    }
+    let raw = tx.raw();
+    let inputs_len = raw.inputs().len();
+    if inputs_len > MAX_EXTERNAL_FUNDING_WATCHTOWER_TX_ITEMS {
+        return Err(format!(
+            "externally funded watchtower transaction exceeds maximum inputs ({MAX_EXTERNAL_FUNDING_WATCHTOWER_TX_ITEMS}), got {inputs_len}"
+        ));
+    }
+    let outputs_len = raw.outputs().len();
+    if outputs_len > MAX_EXTERNAL_FUNDING_WATCHTOWER_TX_ITEMS {
+        return Err(format!(
+            "externally funded watchtower transaction exceeds maximum outputs ({MAX_EXTERNAL_FUNDING_WATCHTOWER_TX_ITEMS}), got {outputs_len}"
+        ));
+    }
+    if outputs_len != raw.outputs_data().len() {
+        return Err(
+            "externally funded watchtower transaction outputs and outputs_data length mismatch"
+                .to_string(),
+        );
+    }
+    if raw.cell_deps().len() > MAX_EXTERNAL_FUNDING_WATCHTOWER_TX_ITEMS {
+        return Err(format!(
+            "externally funded watchtower transaction exceeds maximum cell_deps ({MAX_EXTERNAL_FUNDING_WATCHTOWER_TX_ITEMS})"
+        ));
+    }
+    let witnesses_len = tx.witnesses().len();
+    if witnesses_len > MAX_EXTERNAL_FUNDING_WATCHTOWER_TX_ITEMS {
+        return Err(format!(
+            "externally funded watchtower transaction exceeds maximum witnesses ({MAX_EXTERNAL_FUNDING_WATCHTOWER_TX_ITEMS}), got {witnesses_len}"
+        ));
+    }
+    Ok(())
+}
+
 /// Validate `witness[0]` of a retried externally funded watchtower transaction submission.
 ///
 /// Requires `witness[0]` to be present, parse as a single-unlock V2 settlement witness, and carry
@@ -547,11 +590,7 @@ pub fn validate_and_normalize_external_funding_watchtower_tx(
 ) -> Result<Transaction, String> {
     use ckb_types::prelude::*;
 
-    if submitted.as_slice().len() > MAX_EXTERNAL_FUNDING_WATCHTOWER_TX_BYTES {
-        return Err(format!(
-            "externally funded watchtower transaction exceeds maximum size ({MAX_EXTERNAL_FUNDING_WATCHTOWER_TX_BYTES} bytes)"
-        ));
-    }
+    validate_external_funding_watchtower_tx_bounds(submitted)?;
     let template_raw = template.raw();
     let submitted_raw = submitted.raw();
     if submitted_raw.version() != template_raw.version() {
@@ -583,17 +622,6 @@ pub fn validate_and_normalize_external_funding_watchtower_tx(
     if !(template_outputs_len..=MAX_EXTERNAL_FUNDING_WATCHTOWER_TX_ITEMS).contains(&outputs_len) {
         return Err(format!(
             "externally funded watchtower transaction must have between {template_outputs_len} and {MAX_EXTERNAL_FUNDING_WATCHTOWER_TX_ITEMS} outputs, got {outputs_len}"
-        ));
-    }
-    if outputs_len != submitted_raw.outputs_data().len() {
-        return Err(
-            "externally funded watchtower transaction outputs and outputs_data length mismatch"
-                .to_string(),
-        );
-    }
-    if submitted_raw.cell_deps().len() > MAX_EXTERNAL_FUNDING_WATCHTOWER_TX_ITEMS {
-        return Err(format!(
-            "externally funded watchtower transaction exceeds maximum cell_deps ({MAX_EXTERNAL_FUNDING_WATCHTOWER_TX_ITEMS})"
         ));
     }
     let witnesses_len = submitted.witnesses().len();

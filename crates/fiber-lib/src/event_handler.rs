@@ -45,7 +45,6 @@ pub async fn forward_event_to_client<T: WatchtowerRpcClient + Sync>(
             keys,
             settlement_data,
             channel_features,
-            _local_shutdown_script,
         ) => {
             let (local_settlement_key, local_settlement_key_pubkey) =
                 keys.local_settlement.to_parts();
@@ -169,7 +168,6 @@ pub fn forward_event_to_watchtower_store<S: crate::watchtower::WatchtowerStore>(
             keys,
             settlement_data,
             commitment_contract_features,
-            _local_shutdown_script,
         ) => {
             let signing_scope = events.watchtower(&node_id);
             let signing_update = signing_scope.prepare_created(channel_id);
@@ -282,16 +280,10 @@ mod tests {
 
     #[test]
     fn remote_tx_complete_without_a_secret_is_an_external_watch_channel() {
-        use ckb_types::{
-            packed::Script,
-            prelude::{Builder, Entity, Pack},
-        };
-
         let (store, _dir) = crate::generate_store();
         let node_id = tenant_node_id();
         let channel_id = Hash256::from([0x11; 32]);
         let local_settlement_pubkey = Privkey::from(&[1; 32]).pubkey();
-        let payout_lock_script = Script::new_builder().args([0xab_u8; 20].pack()).build();
         forward_event_to_watchtower_store(
             &Default::default(),
             NetworkServiceEvent::RemoteTxComplete(
@@ -310,7 +302,6 @@ mod tests {
                     tlcs: Vec::new(),
                 },
                 fiber_types::ChannelFeatures::V2,
-                payout_lock_script.clone(),
             ),
             &store,
             node_id.clone(),
