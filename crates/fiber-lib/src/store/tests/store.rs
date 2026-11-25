@@ -1221,6 +1221,10 @@ fn test_store_watchtower_superseded_preserved_and_cleared_on_revocation() {
         .unwrap();
     revocation.commitment_number = 2;
     store.update_revocation(node_id.clone(), channel_id, revocation, extra.clone());
+    // A delayed write for the revoked round must not recreate it.
+    store
+        .update_pending_remote_settlement(node_id.clone(), channel_id, 2, retained[1].clone())
+        .unwrap();
     assert_eq!(
         store.get_superseded_remote_settlements(&node_id, &channel_id),
         vec![retained[0].clone()]

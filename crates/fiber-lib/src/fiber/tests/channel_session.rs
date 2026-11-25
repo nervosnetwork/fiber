@@ -6724,8 +6724,8 @@ async fn test_v2_recovery_replays_updates_before_regenerated_cs() {
 }
 
 #[tokio::test]
-async fn test_v2_resign_budget_preserves_outgoing() {
-    let (a, _b, id) = create_nodes_with_established_channel(100000000000, 11800000000, false).await;
+async fn test_v2_resign_budget_requests_force_close_and_preserves_outgoing() {
+    let (a, b, id) = create_nodes_with_established_channel(100000000000, 11800000000, false).await;
     let mut state = a.get_channel_actor_state(id);
     let (cs, original) = state.prepare_outgoing_v2(false).unwrap();
     for i in 1..fiber_types::MAX_SETTLEMENT_VARIANTS {
@@ -6752,10 +6752,29 @@ async fn test_v2_resign_budget_preserves_outgoing() {
         .unwrap();
     tlc.status = TlcStatus::Inbound(InboundTlcStatus::AnnounceWaitPrevAck);
     state.tlc_state.add_received_tlc(tlc);
+    state.tlc_state.waiting_ack = true;
+    state.resigning_outgoing_v2 = true;
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let (network, task) = Actor::spawn(None, CaptureNetwork, captured.clone())
+        .await
+        .unwrap();
+    state.network = Some(network.clone().into());
+    let actor = ChannelActor::new(a.pubkey, b.pubkey, network.clone(), a.store.clone(), None);
+    let myself = a.get_channel_actor(id).await.unwrap();
     assert!(matches!(
-        state.prepare_outgoing_v2_with_replace(false, true),
+        actor
+            .handle_commitment_signed_command(&myself, &mut state)
+            .await,
         Err(ProcessingChannelError::SettlementVariantsExhausted)
     ));
+    capture_barrier(&network, id).await;
+    assert!(captured.lock().unwrap().iter().any(|m| matches!(m,
+        FiberActorMessage::Command(FiberActorCommand::ControlFiberChannel(
+            ChannelCommandWithId { channel_id, command: ChannelCommand::Shutdown(command, _) }
+        )) if *channel_id == id && command.force
+    )));
+    network.stop(None);
+    task.await.unwrap();
     let outgoing = state.session.outgoing.as_ref().unwrap();
     assert_eq!(outgoing.funding.public_nonce, same.funding_nonce);
     assert_eq!(outgoing.settlement, original);
@@ -6765,6 +6784,86 @@ async fn test_v2_resign_budget_preserves_outgoing() {
         state.session.superseded_settlements.last(),
         Some(&(cs.commitment_number, original))
     );
+}
+
+#[tokio::test]
+async fn test_v2_recovery_replays_superseded_settlement_until_its_round_is_revoked() {
+    let (a, b, id) = create_nodes_with_established_channel(100000000000, 11800000000, false).await;
+    let mut sender = a.get_channel_actor_state(id);
+    let mut owner = b.get_channel_actor_state(id);
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let (network, task) = Actor::spawn(None, CaptureNetwork, captured.clone())
+        .await
+        .unwrap();
+    sender.network = Some(network.clone().into());
+    owner.network = Some(network.clone().into());
+    let actor = ChannelActor::new(a.pubkey, b.pubkey, network.clone(), a.store.clone(), None);
+    let peer = ChannelActor::new(b.pubkey, a.pubkey, network.clone(), b.store.clone(), None);
+    let (myself, handle) = Actor::spawn(None, NoopChannelActor, ()).await.unwrap();
+    let acknowledge =
+        |from: &mut ChannelActorState, to: &mut ChannelActorState, cs: &CommitmentSignedV2| {
+            from.tlc_state.waiting_ack = true;
+            let verified = to.stage_incoming_v2(cs, false).unwrap();
+            let (_, _, ack) = to.accept_commitment_v2(cs, false, verified).unwrap();
+            to.tlc_state.update_for_commitment_signed();
+            let ack = ack.unwrap();
+            let verified = from.stage_ack_v2(&ack).unwrap();
+            from.accept_ack_v2(&myself, &ack, verified)
+                .unwrap()
+                .unwrap();
+        };
+
+    // The opposite direction commits a TLC before our first CS is acknowledged.
+    let (first, old) = sender.prepare_outgoing_v2(false).unwrap();
+    let n = first.commitment_number;
+    sender.tlc_state.waiting_ack = true;
+    peer.add_tlc_update(&mut owner, &retry_batch_add(42, 2000))
+        .unwrap();
+    let TlcReplayUpdate::Add(add) = &owner.pending_replay_updates[0] else {
+        panic!("expected add")
+    };
+    actor
+        .handle_add_tlc_peer_message(&mut sender, add.clone())
+        .unwrap();
+    let (crossed, _) = owner.prepare_outgoing_v2(false).unwrap();
+    acknowledge(&mut owner, &mut sender, &crossed);
+
+    let (replacement, current) = sender
+        .prepare_outgoing_v2_with_replace(false, true)
+        .unwrap();
+    assert_eq!(replacement.commitment_number, n);
+    assert_ne!(old, current);
+    acknowledge(&mut sender, &mut owner, &replacement);
+    assert_eq!(
+        sender.session.superseded_settlements,
+        vec![(n, old.clone())]
+    );
+
+    a.store.insert_channel_actor_state_for_test(sender);
+    let mut sender = a.store.get_channel_actor_state(&id).unwrap();
+    sender.network = Some(network.clone().into());
+    sender.mark_reestablishing_offline();
+    capture_barrier(&network, id).await;
+    captured.lock().unwrap().clear();
+    actor
+        .reestablish_v2(&myself, &mut sender, owner.reestablish_message_v2())
+        .await
+        .unwrap();
+    capture_barrier(&network, id).await;
+    assert!(captured.lock().unwrap().iter().any(|m| matches!(m,
+        FiberActorMessage::Notification(NetworkServiceEvent::LocalCommitmentSigned(channel_id, number, snapshot))
+        if *channel_id == id && *number == n && snapshot == &old
+    )));
+
+    let (next, _) = sender.prepare_outgoing_v2(false).unwrap();
+    assert_eq!(next.commitment_number, n + 1);
+    acknowledge(&mut sender, &mut owner, &next);
+    assert!(sender.session.superseded_settlements.is_empty());
+
+    myself.stop(None);
+    handle.await.unwrap();
+    network.stop(None);
+    task.await.unwrap();
 }
 
 #[tokio::test]
