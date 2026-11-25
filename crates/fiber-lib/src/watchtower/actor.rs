@@ -2376,6 +2376,7 @@ mod tests {
         preimages: Mutex<Vec<(NodeId, Hash256, Hash256)>>,
         registered_features: Mutex<Vec<ChannelFeatures>>,
         channels_gate: Option<(mpsc::Sender<()>, Mutex<mpsc::Receiver<()>>)>,
+        timer_after_release: Option<(tokio::runtime::Handle, mpsc::Sender<Result<(), String>>)>,
     }
 
     impl TestWatchtowerStore {
@@ -2402,6 +2403,22 @@ mod tests {
                     .expect("lock release gate")
                     .recv()
                     .expect("release periodic check");
+            }
+            if let Some((runtime, result)) = &self.timer_after_release {
+                // The CKB SDK's synchronous RPC uses Handle::block_on from this blocking
+                // worker. Polling a timer this way after runtime shutdown reproduces the
+                // Tokio panic reported in #1778 without relying on network timing.
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    runtime.block_on(tokio::time::sleep(std::time::Duration::from_millis(1)));
+                }))
+                .map_err(|panic| {
+                    panic
+                        .downcast_ref::<String>()
+                        .cloned()
+                        .or_else(|| panic.downcast_ref::<&str>().map(ToString::to_string))
+                        .unwrap_or_else(|| "unknown panic".to_string())
+                });
+                result.send(outcome).expect("send timer result");
             }
             vec![]
         }
@@ -2540,6 +2557,60 @@ mod tests {
             .expect("periodic check exited")
             .expect("shutdown task completed");
         assert!(!running.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn shutdown_does_not_poll_watchtower_timer_after_runtime_stops() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("build runtime");
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (timer_tx, timer_rx) = mpsc::channel();
+        let store = TestWatchtowerStore {
+            channels_gate: Some((started_tx, Mutex::new(release_rx))),
+            timer_after_release: Some((runtime.handle().clone(), timer_tx)),
+            ..Default::default()
+        };
+        let tracker = TaskTracker::new();
+        let cancellation = CancellationToken::new();
+        let signer = LocalSigner::new(SecretKey::from_slice(&[1u8; 32]).expect("secret key"));
+        let _enter = runtime.enter();
+        spawn_periodic_check(
+            store,
+            signer,
+            "http://127.0.0.1:8114".to_string(),
+            Arc::new(AtomicBool::new(true)),
+            tracker.clone(),
+            cancellation.clone(),
+        );
+        drop(_enter);
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("periodic check reached store");
+
+        cancellation.cancel();
+        tracker.close();
+        let wait_finished = runtime.block_on(async {
+            tokio::time::timeout(std::time::Duration::from_millis(100), tracker.wait())
+                .await
+                .is_ok()
+        });
+        if wait_finished {
+            // An untracked worker lets shutdown finish now. The delayed timer poll then
+            // hits Tokio's runtime-is-shutdown assertion.
+            runtime.shutdown_timeout(std::time::Duration::from_millis(10));
+            release_tx.send(()).expect("release periodic check");
+        } else {
+            release_tx.send(()).expect("release periodic check");
+            runtime.block_on(tracker.wait());
+            drop(runtime);
+        }
+        let timer_result = timer_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("timer poll completed");
+        assert!(timer_result.is_ok(), "timer panicked: {timer_result:?}");
     }
 
     #[test]
