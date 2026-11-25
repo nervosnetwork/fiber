@@ -26,6 +26,7 @@ use molecule::prelude::Entity;
 use ractor::{Actor, ActorProcessingErr, ActorRef};
 use secp256k1::{Message, SecretKey, SECP256K1};
 use strum::AsRefStr;
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{debug, error, info, warn};
 
 use crate::{
@@ -44,6 +45,7 @@ use crate::{
         OnChainTlcSettlement, TrackedSettlementTlc,
     },
     now_timestamp_as_millis_u64,
+    tasks::{new_tokio_cancellation_token, new_tokio_task_tracker},
     utils::{
         actor::ActorHandleLogGuard,
         arithmetic::{
@@ -67,8 +69,6 @@ pub const DEFAULT_WATCHTOWER_CHECK_INTERVAL_SECONDS: u64 = 60;
 
 pub struct WatchtowerActor<S> {
     store: S,
-    // a node_id represent the watchtower itself
-    node_id: NodeId,
 }
 
 const ACTOR_HANDLE_WARN_THRESHOLD_MS: u64 = 15_000;
@@ -100,8 +100,7 @@ pub(crate) fn build_settlement_transaction(
 
 impl<S: WatchtowerStore> WatchtowerActor<S> {
     pub fn new(store: S) -> Self {
-        let node_id = NodeId::local();
-        Self { store, node_id }
+        Self { store }
     }
 }
 
@@ -238,23 +237,43 @@ where
                 }
                 // Spawn the periodic check task
                 let store = self.store.clone();
-                let node_id = self.node_id.clone();
                 let rpc_url = state.config.rpc_url.clone();
                 let periodic_check_running = state.periodic_check_running.clone();
                 let signer = state.signer.clone();
-                tokio::task::spawn_blocking(move || {
-                    // Use RAII guard to ensure flag is reset even on panic
-                    let _guard = PeriodicCheckGuard(periodic_check_running);
-                    info!("PeriodicCheck started");
-                    let start = now_timestamp_as_millis_u64();
-                    run_periodic_check(store, node_id, signer, rpc_url);
-                    let elapsed = now_timestamp_as_millis_u64().saturating_sub(start);
-                    info!("PeriodicCheck finished elapsed: {}ms", elapsed);
-                });
+                spawn_periodic_check(
+                    store,
+                    signer,
+                    rpc_url,
+                    periodic_check_running,
+                    new_tokio_task_tracker(),
+                    new_tokio_cancellation_token(),
+                );
             }
         }
         Ok(())
     }
+}
+
+fn spawn_periodic_check<S>(
+    store: S,
+    signer: LocalSigner,
+    rpc_url: String,
+    periodic_check_running: Arc<AtomicBool>,
+    tracker: TaskTracker,
+    cancellation: CancellationToken,
+) where
+    S: WatchtowerStore + Send + Sync + 'static,
+{
+    // The synchronous CKB client uses this runtime for its RPCs. Keep it alive until the
+    // blocking check exits, including when shutdown starts during a request.
+    tracker.spawn_blocking(move || {
+        let _guard = PeriodicCheckGuard(periodic_check_running);
+        info!("PeriodicCheck started");
+        let start = now_timestamp_as_millis_u64();
+        run_periodic_check(store, signer, rpc_url, &cancellation);
+        let elapsed = now_timestamp_as_millis_u64().saturating_sub(start);
+        info!("PeriodicCheck finished elapsed: {}ms", elapsed);
+    });
 }
 
 /// RAII guard to ensure `periodic_check_running` is reset even if the task panics
@@ -266,10 +285,17 @@ impl Drop for PeriodicCheckGuard {
     }
 }
 
-fn run_periodic_check<S>(store: S, _node_id: NodeId, signer: LocalSigner, rpc_url: String)
-where
+fn run_periodic_check<S>(
+    store: S,
+    signer: LocalSigner,
+    rpc_url: String,
+    cancellation: &CancellationToken,
+) where
     S: WatchtowerStore + Send + Sync + 'static,
 {
+    if cancellation.is_cancelled() {
+        return;
+    }
     // Each cell it picks is held at once, so an opening cannot pick it meanwhile (`held_cells`).
     let mut cell_collector = crate::ckb::held_cells::TakingCollector::new(
         new_default_cell_collector(&rpc_url),
@@ -291,6 +317,9 @@ where
     })
     .expect("create ckb rpc client should not fail");
     for (channel_node_id, channel_data) in store.get_watch_channels_with_nodes() {
+        if cancellation.is_cancelled() {
+            break;
+        }
         let tx_hash = match crate::ckb::client::find_first_input_tx_hash(
             &ckb_client,
             &channel_data_funding_tx_lock(&channel_data),
@@ -2332,7 +2361,7 @@ fn mul(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use std::sync::{mpsc, Mutex};
 
     use ckb_types::{core::ScriptHashType, packed::Byte32, prelude::*};
     use fiber_types::TLCId;
@@ -2346,6 +2375,7 @@ mod tests {
         settlements: Mutex<Vec<(Hash256, TLCId, OnChainTlcSettlement)>>,
         preimages: Mutex<Vec<(NodeId, Hash256, Hash256)>>,
         registered_features: Mutex<Vec<ChannelFeatures>>,
+        channels_gate: Option<(mpsc::Sender<()>, Mutex<mpsc::Receiver<()>>)>,
     }
 
     impl TestWatchtowerStore {
@@ -2365,6 +2395,14 @@ mod tests {
 
     impl WatchtowerStore for TestWatchtowerStore {
         fn get_watch_channels_with_nodes(&self) -> Vec<(NodeId, ChannelData)> {
+            if let Some((started, release)) = &self.channels_gate {
+                started.send(()).expect("signal periodic check started");
+                release
+                    .lock()
+                    .expect("lock release gate")
+                    .recv()
+                    .expect("release periodic check");
+            }
             vec![]
         }
 
@@ -2460,6 +2498,61 @@ mod tests {
                     (id == channel_id && *stored_tlc_id == tlc_id).then(|| settlement.clone())
                 })
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_waits_for_running_periodic_check() {
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let store = TestWatchtowerStore {
+            channels_gate: Some((started_tx, Mutex::new(release_rx))),
+            ..Default::default()
+        };
+        let tracker = TaskTracker::new();
+        let cancellation = CancellationToken::new();
+        let running = Arc::new(AtomicBool::new(true));
+        let signer = LocalSigner::new(SecretKey::from_slice(&[1u8; 32]).expect("secret key"));
+
+        spawn_periodic_check(
+            store,
+            signer,
+            "http://127.0.0.1:8114".to_string(),
+            running.clone(),
+            tracker.clone(),
+            cancellation.clone(),
+        );
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("periodic check reached store");
+
+        cancellation.cancel();
+        tracker.close();
+        let mut shutdown = tokio::spawn(async move { tracker.wait().await });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), &mut shutdown)
+                .await
+                .is_err(),
+            "shutdown must wait for the in-flight check"
+        );
+        release_tx.send(()).expect("release periodic check");
+        tokio::time::timeout(std::time::Duration::from_secs(5), shutdown)
+            .await
+            .expect("periodic check exited")
+            .expect("shutdown task completed");
+        assert!(!running.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn cancelled_periodic_check_does_not_start_rpc() {
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        let signer = LocalSigner::new(SecretKey::from_slice(&[1u8; 32]).expect("secret key"));
+        run_periodic_check(
+            TestWatchtowerStore::default(),
+            signer,
+            "not-a-url".to_string(),
+            &cancellation,
+        );
     }
 
     fn commitment_lock_prefix() -> Script {
