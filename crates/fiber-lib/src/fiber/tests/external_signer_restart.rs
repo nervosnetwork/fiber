@@ -4444,8 +4444,30 @@ async fn test_tenant_opening_restart_reconciles_split_temp_id_records() {
         tenant
             .store
             .put_tenant_channel_opening(TenantChannelOpening {
-                command: command_b,
+                command: command_b.clone(),
                 channel_id: temp_id_b,
+                result: None,
+                terminated: false,
+            });
+
+        // Also seed an orphaned non-final WaitingForPeer opening (no ChannelActorState):
+        // restart must fail its open record and delete the orphaned TenantChannelOpening so it
+        // cannot deadlock watchtower admission quota after recovery.
+        let orphan_id = Hash256::from([0x9d; 32]);
+        tenant
+            .store
+            .insert_channel_open_record(ChannelOpenRecord::new(
+                orphan_id,
+                peer.pubkey,
+                command_b.funding_amount,
+            ));
+        let mut orphan_command = command_b;
+        orphan_command.external_channel_signer = None;
+        tenant
+            .store
+            .put_tenant_channel_opening(TenantChannelOpening {
+                command: orphan_command,
+                channel_id: orphan_id,
                 result: None,
                 terminated: false,
             });
@@ -4467,6 +4489,21 @@ async fn test_tenant_opening_restart_reconciles_split_temp_id_records() {
                 .expect("failed temp opening not moved onto earlier closed channel")
                 .channel_id,
             temp_id_b
+        );
+        assert!(
+            tenant
+                .store
+                .get_tenant_channel_opening(&orphan_id)
+                .is_none(),
+            "orphaned non-final opening must be deleted on restart"
+        );
+        assert_eq!(
+            tenant
+                .store
+                .get_channel_open_record(&orphan_id)
+                .expect("orphaned open record retained as Failed")
+                .status,
+            ChannelOpeningStatus::Failed
         );
     })
     .await;

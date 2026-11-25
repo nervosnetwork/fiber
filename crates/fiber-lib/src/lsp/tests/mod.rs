@@ -4282,3 +4282,781 @@ fn settling_delivery_only_upgrades_failure_to_proven_success() {
     assert!(!failure.check_next_valid(&LspPaymentDeliveryStatus::Deferred));
     assert!(!success.check_next_valid(&LspPaymentDeliveryStatus::Deferred));
 }
+
+#[cfg(feature = "watchtower")]
+#[tokio::test]
+async fn over_quota_hosted_channel_online_is_not_marked_ready_and_cannot_receive_payments() {
+    use crate::fiber::channel::{
+        ChannelActorState, ChannelActorStateStore, ChannelOpenRecordStore, TenantChannelOpening,
+    };
+    use crate::fiber::network::OpenChannelWithExternalFundingCommand;
+    use crate::store::sample::StoreSample;
+    use crate::watchtower::WatchtowerStore;
+
+    let root = tempdir().expect("temporary directory");
+    let mut config = lsp_config(root.path().join("lsp"));
+    config.max_watch_channels_per_tenant = 1;
+    config.max_watch_channels = 2;
+    let store = open_lsp_store(&config);
+    let manager = LspPaymentDeliveryManager::new(store.clone());
+    let dispatches = Arc::new(AtomicUsize::new(0));
+    let lsp_key = Privkey::from(&[9; 32]);
+    let tenant_key = Privkey::from(&[1; 32]);
+    let service = start_test_lsp_service(
+        store.clone(),
+        config.clone(),
+        Arc::new(FakeRuntimeFactory::new(Arc::new(AtomicUsize::new(0)))),
+        lsp_key.clone(),
+        dispatches.clone(),
+        Arc::new(AtomicUsize::new(0)),
+    )
+    .await;
+    let tenant_id =
+        register_authenticated_test_tenant(&service, &lsp_key, &test_root_signer()).await;
+    let payment_hash = Hash256::from([0x99; 32]);
+    register_test_invoice(&service, tenant_id.clone(), &tenant_key, payment_hash).await;
+    let tenant = HostedTenantRecord {
+        tenant_id: tenant_id.clone(),
+        root_signer_pubkey: None,
+        tenant_pubkey: tenant_key.pubkey(),
+        created_at: 42,
+        token_epoch: 0,
+    };
+    let node_id = crate::lsp::tenant_watchtower_node_id(&tenant.tenant_pubkey);
+    let tenant_store = store.namespaced(NodeNamespace::hosted_tenant(tenant_id.as_str()));
+
+    let ch_watched = Hash256::from([0x61; 32]);
+    let ch_over_quota = Hash256::from([0x62; 32]);
+    for (seed, channel_id) in [(111u64, ch_watched), (112u64, ch_over_quota)] {
+        let mut channel = ChannelActorState::samples(seed).remove(0);
+        channel.id = channel_id;
+        channel.remote_pubkey = tenant.tenant_pubkey;
+        channel.remote_channel_public_keys = Some(channel.local_channel_public_keys.clone());
+        channel.funding_udt_type_script = None;
+        store.insert_channel_actor_state(channel.clone());
+        tenant_store.insert_channel_actor_state(channel);
+    }
+
+    // Admission quota passes before any watched channel or opening exists.
+    ractor::call!(service, |reply| {
+        LspServiceMessage::CheckTenantWatchtowerChannelQuota(tenant_id.clone(), reply)
+    })
+    .unwrap()
+    .expect("first channel fits within quota");
+
+    // An in-flight unwatched TenantChannelOpening (with active open record) consumes a quota slot.
+    let open_command = OpenChannelWithExternalFundingCommand {
+        pubkey: lsp_key.pubkey(),
+        funding_amount: 100_000_000_000,
+        public: false,
+        shutdown_script: Script::default(),
+        funding_lock_script: Script::default(),
+        funding_lock_script_cell_deps: Vec::new(),
+        funding_udt_type_script: None,
+        commitment_fee_rate: None,
+        commitment_delay_epoch: None,
+        funding_fee_rate: None,
+        tlc_expiry_delta: None,
+        tlc_min_value: None,
+        tlc_fee_proportional_millionths: None,
+        max_tlc_value_in_flight: None,
+        max_tlc_number_in_flight: None,
+        external_channel_signer: None,
+    };
+    tenant_store.insert_channel_open_record(fiber_types::ChannelOpenRecord::new(
+        ch_watched,
+        lsp_key.pubkey(),
+        open_command.funding_amount,
+    ));
+    tenant_store.put_tenant_channel_opening(TenantChannelOpening {
+        command: open_command.clone(),
+        channel_id: ch_watched,
+        result: None,
+        terminated: false,
+    });
+    let pending_err = ractor::call!(service, |reply| {
+        LspServiceMessage::CheckTenantWatchtowerChannelQuota(tenant_id.clone(), reply)
+    })
+    .unwrap()
+    .expect_err("in-flight unwatched opening must count toward tenant watchtower quota");
+    assert!(pending_err.contains("quota exceeded"), "{pending_err}");
+    tenant_store.delete_tenant_channel_opening(&ch_watched);
+    tenant_store.delete_channel_open_record(&ch_watched);
+
+    // Bring ch_watched online -> creates watch row #1, binds channel, marks ready.
+    service
+        .send_message(LspServiceMessage::TenantChannelOnline(
+            tenant.tenant_pubkey,
+            ch_watched,
+        ))
+        .unwrap();
+    ractor::call!(service, LspServiceMessage::GetStatus).unwrap();
+    assert!(store.get_watch_channel(&node_id, &ch_watched).is_some());
+
+    // Admission quota now rejects opening a 2nd channel for this tenant.
+    let quota_err = ractor::call!(service, |reply| {
+        LspServiceMessage::CheckTenantWatchtowerChannelQuota(tenant_id.clone(), reply)
+    })
+    .unwrap()
+    .expect_err("second channel must be rejected by watchtower admission quota");
+    assert!(quota_err.contains("quota exceeded"), "{quota_err}");
+
+    // Take ch_watched offline and buffer a payment while no channel is online.
+    service
+        .send_message(LspServiceMessage::TenantChannelOffline(
+            tenant.tenant_pubkey,
+            ch_watched,
+        ))
+        .unwrap();
+    ractor::call!(service, LspServiceMessage::GetStatus).unwrap();
+
+    let request =
+        hosted_forwarding_request(&tenant, payment_hash, crate::now_timestamp_as_millis_u64());
+    assert_eq!(
+        ractor::call!(service, |reply| {
+            LspServiceMessage::AcceptTrampolineDelivery(request.clone(), reply)
+        })
+        .unwrap()
+        .unwrap(),
+        DeliveryDecision::Buffered,
+    );
+    let delivery = manager
+        .get_by_payment_hash(&payment_hash)
+        .unwrap()
+        .expect("buffered delivery");
+    assert_eq!(dispatches.load(Ordering::SeqCst), 0);
+
+    // Now bring ch_over_quota online: watchtower registration fails quota, so it must NOT
+    // be bound, must NOT be marked ready, and must NOT wake or receive the pending payment.
+    service
+        .send_message(LspServiceMessage::TenantChannelOnline(
+            tenant.tenant_pubkey,
+            ch_over_quota,
+        ))
+        .unwrap();
+    ractor::call!(service, LspServiceMessage::GetStatus).unwrap();
+    assert!(store.get_watch_channel(&node_id, &ch_over_quota).is_none());
+
+    let tenants = ractor::call!(service, LspServiceMessage::ListTenants)
+        .unwrap()
+        .unwrap();
+    let status = tenants
+        .into_iter()
+        .find(|t| t.record.tenant_id == tenant_id)
+        .expect("tenant status");
+    assert!(
+        !status
+            .channels
+            .iter()
+            .any(|ch| ch.channel.channel_id == ch_over_quota),
+        "over-quota unwatched channel must not be bound for delivery"
+    );
+
+    // Even an explicit ResumeDelivery must NOT dispatch onto the unwatched channel.
+    service
+        .send_message(LspServiceMessage::ResumeDelivery(delivery.key()))
+        .unwrap();
+    ractor::call!(service, LspServiceMessage::GetStatus).unwrap();
+    assert_eq!(
+        dispatches.load(Ordering::SeqCst),
+        0,
+        "pending payment must never dispatch onto an over-quota unwatched channel"
+    );
+    let still_waiting = manager.get(&delivery.key()).unwrap().unwrap();
+    assert_eq!(still_waiting.private_channel_id, ch_watched);
+    assert_ne!(still_waiting.status, LspPaymentDeliveryStatus::InFlight);
+
+    // Even if ch_over_quota was pre-bound in registry before quota tightened, bringing it
+    // online still refuses to mark it ready or dispatch deliveries to it.
+    TenantRegistry::new(store.clone())
+        .bind_channel(&tenant_id, ch_over_quota, None)
+        .unwrap();
+    service
+        .send_message(LspServiceMessage::TenantChannelOnline(
+            tenant.tenant_pubkey,
+            ch_over_quota,
+        ))
+        .unwrap();
+    ractor::call!(service, LspServiceMessage::GetStatus).unwrap();
+    service
+        .send_message(LspServiceMessage::ResumeDelivery(delivery.key()))
+        .unwrap();
+    ractor::call!(service, LspServiceMessage::GetStatus).unwrap();
+    assert_eq!(
+        dispatches.load(Ordering::SeqCst),
+        0,
+        "pre-bound over-quota unwatched channel must still not become ready or receive payments"
+    );
+    let tenants = ractor::call!(service, LspServiceMessage::ListTenants)
+        .unwrap()
+        .unwrap();
+    let status = tenants
+        .into_iter()
+        .find(|t| t.record.tenant_id == tenant_id)
+        .expect("tenant status");
+    assert!(
+        !status
+            .channels
+            .iter()
+            .any(|ch| ch.channel.channel_id == ch_over_quota && ch.online),
+        "pre-bound over-quota channel must remain offline/not ready"
+    );
+
+    service.stop_and_wait(None, None).await.unwrap();
+}
+
+#[cfg(feature = "watchtower")]
+#[tokio::test]
+async fn hosted_channel_admission_quota_releases_closed_channels_enforces_global_pending_and_blocks_rpc_bypasses(
+) {
+    use crate::fiber::channel::{
+        derive_temp_channel_id_from_tlc_key, ChannelActorState, ChannelActorStateStore,
+        ChannelOpenRecordStore, TenantChannelOpening,
+    };
+    use crate::fiber::network::OpenChannelWithExternalFundingCommand;
+    use crate::rpc::channel::{
+        to_rpc_channel_open_signer_material, ChannelRpcServer, ChannelRpcServerImpl,
+        OpenChannelParams, OpenChannelWithExternalFundingParams,
+    };
+    use crate::rpc::tenant::AuthenticatedTenant;
+    use crate::store::sample::StoreSample;
+    use crate::watchtower::WatchtowerStore;
+    use fiber_json_types::{
+        ChannelOpenSignerMaterial as JsonChannelOpenSignerMaterial,
+        OpenChannelWithExternalFundingResult,
+    };
+    use fiber_types::{
+        ChannelBasePublicKeys, ChannelOpenRecord, ChannelOpenSignerMaterial, ChannelOpeningStatus,
+        ChannelState, CloseFlags,
+    };
+    use jsonrpsee::Extensions;
+    use musig2::SecNonce;
+
+    struct QuotaTestTenantActor;
+
+    #[async_trait]
+    impl Actor for QuotaTestTenantActor {
+        type Msg = NetworkActorMessage;
+        type State = ();
+        type Arguments = ();
+
+        async fn pre_start(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            _args: Self::Arguments,
+        ) -> Result<Self::State, ActorProcessingErr> {
+            Ok(())
+        }
+
+        async fn handle(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            message: Self::Msg,
+            _state: &mut Self::State,
+        ) -> Result<(), ActorProcessingErr> {
+            match message {
+                NetworkActorMessage::Fiber(FiberActorMessage::Command(
+                    FiberActorCommand::HasLiveChannel(_, reply),
+                )) => {
+                    let _ = reply.send(false);
+                }
+                NetworkActorMessage::Fiber(FiberActorMessage::Command(
+                    FiberActorCommand::OpenTenantChannel { .. }
+                    | FiberActorCommand::OpenChannel(_, _),
+                )) => {
+                    panic!("over-quota channel open must be rejected before reaching tenant actor");
+                }
+                _ => {}
+            }
+            Ok(())
+        }
+    }
+
+    struct QuotaTestRuntimeFactory {
+        store: Store,
+        public_node_id: fiber_types::Pubkey,
+        tenant_pubkey: fiber_types::Pubkey,
+    }
+
+    #[async_trait]
+    impl TenantRuntimeFactory for QuotaTestRuntimeFactory {
+        fn provision(&self, tenant_id: &TenantId) -> Result<HostedTenantRecord, String> {
+            Ok(HostedTenantRecord {
+                tenant_id: tenant_id.clone(),
+                root_signer_pubkey: None,
+                tenant_pubkey: self.tenant_pubkey,
+                created_at: 42,
+                token_epoch: 0,
+            })
+        }
+
+        async fn start(&self, record: &HostedTenantRecord) -> Result<HostedTenantRuntime, String> {
+            let actor = Actor::spawn(None, QuotaTestTenantActor, ())
+                .await
+                .map_err(|error| error.to_string())?
+                .0;
+            let tenant_store = self
+                .store
+                .namespaced(NodeNamespace::hosted_tenant(record.tenant_id.as_str()));
+            let rpc_context = crate::rpc::tenant::HostedTenantRpcContext {
+                tenant_id: record.tenant_id.clone(),
+                public_node_id: self.public_node_id,
+                fiber_actor: crate::fiber::FiberActorRef::from_network(&actor),
+                store: tenant_store,
+                config: crate::FiberConfig::default(),
+            };
+            Ok(
+                HostedTenantRuntime::network_backed(record.tenant_pubkey, actor)
+                    .with_rpc_context(rpc_context),
+            )
+        }
+    }
+
+    let root = tempdir().expect("temporary directory");
+    let mut config = lsp_config(root.path().join("lsp"));
+    config.max_watch_channels_per_tenant = 1;
+    config.max_watch_channels = 2;
+    let store = open_lsp_store(&config);
+    let lsp_key = Privkey::from(&[9; 32]);
+    let tenant_key = Privkey::from(&[1; 32]);
+    let service = start_test_lsp_service(
+        store.clone(),
+        config.clone(),
+        Arc::new(QuotaTestRuntimeFactory {
+            store: store.clone(),
+            public_node_id: lsp_key.pubkey(),
+            tenant_pubkey: tenant_key.pubkey(),
+        }),
+        lsp_key.clone(),
+        Arc::new(AtomicUsize::new(0)),
+        Arc::new(AtomicUsize::new(0)),
+    )
+    .await;
+    let tenant_id =
+        register_authenticated_test_tenant(&service, &lsp_key, &test_root_signer()).await;
+    let node_id = crate::lsp::tenant_watchtower_node_id(&tenant_key.pubkey());
+    let tenant_store = store.namespaced(NodeNamespace::hosted_tenant(tenant_id.as_str()));
+
+    let make_signer_material =
+        |seed: u8| -> (ChannelOpenSignerMaterial, JsonChannelOpenSignerMaterial) {
+            let base_keys = ChannelBasePublicKeys {
+                funding_pubkey: Privkey::from(&[seed; 32]).pubkey(),
+                tlc_base_key: Privkey::from(&[seed.wrapping_add(1); 32]).pubkey(),
+            };
+            let nonce = |offset: u8| {
+                SecNonce::build([seed.wrapping_add(offset); 32])
+                    .build()
+                    .public_nonce()
+            };
+            let internal = ChannelOpenSignerMaterial {
+                base_public_keys: base_keys,
+                v2_nonces: vec![nonce(2), nonce(3)],
+                first_commitment_point: Privkey::from(&[seed.wrapping_add(4); 32]).pubkey(),
+                second_commitment_point: Privkey::from(&[seed.wrapping_add(5); 32]).pubkey(),
+                commitment_nonce: nonce(6),
+                next_commitment_nonce: nonce(7),
+                revocation_nonce: nonce(8),
+                channel_announcement_nonce: None,
+            };
+            let json = to_rpc_channel_open_signer_material(&internal);
+            (internal, json)
+        };
+
+    // 1. Open and watch ch1, then close ch1 and remove its watchtower row while
+    //    TenantChannelOpening + ChannelOpenRecord(ChannelReady) remain persisted.
+    //    Closing ch1 must release its quota slot (never leak pending_unwatched).
+    let ch1 = Hash256::from([0x71; 32]);
+    let mut state1 = ChannelActorState::samples(201).remove(0);
+    state1.id = ch1;
+    state1.remote_pubkey = tenant_key.pubkey();
+    state1.remote_channel_public_keys = Some(state1.local_channel_public_keys.clone());
+    state1.funding_udt_type_script = None;
+    store.insert_channel_actor_state(state1.clone());
+    tenant_store.insert_channel_actor_state(state1.clone());
+
+    let (mat1, _) = make_signer_material(10);
+    let mut ready_record = ChannelOpenRecord::new(ch1, lsp_key.pubkey(), 100_000_000_000);
+    ready_record.update_status(ChannelOpeningStatus::ChannelReady);
+    tenant_store.insert_channel_open_record(ready_record);
+    tenant_store.put_tenant_channel_opening(TenantChannelOpening {
+        command: OpenChannelWithExternalFundingCommand {
+            pubkey: lsp_key.pubkey(),
+            funding_amount: 100_000_000_000,
+            public: false,
+            shutdown_script: Script::default(),
+            funding_lock_script: Script::default(),
+            funding_lock_script_cell_deps: Vec::new(),
+            funding_udt_type_script: None,
+            commitment_fee_rate: None,
+            commitment_delay_epoch: None,
+            funding_fee_rate: None,
+            tlc_expiry_delta: None,
+            tlc_min_value: None,
+            tlc_fee_proportional_millionths: None,
+            max_tlc_value_in_flight: None,
+            max_tlc_number_in_flight: None,
+            external_channel_signer: Some(mat1),
+        },
+        channel_id: ch1,
+        result: None,
+        terminated: false,
+    });
+    service
+        .send_message(LspServiceMessage::TenantChannelOnline(
+            tenant_key.pubkey(),
+            ch1,
+        ))
+        .unwrap();
+    ractor::call!(service, LspServiceMessage::GetStatus).unwrap();
+    assert!(store.get_watch_channel(&node_id, &ch1).is_some());
+
+    // Close ch1 and remove watchtower row.
+    state1.state = ChannelState::Closed(CloseFlags::COOPERATIVE);
+    tenant_store.insert_channel_actor_state(state1);
+    assert!(store.remove_watch_channel(node_id.clone(), ch1));
+    ractor::call!(service, |reply| {
+        LspServiceMessage::CheckTenantWatchtowerChannelQuota(tenant_id.clone(), reply)
+    })
+    .unwrap()
+    .expect("closing a watched channel must release its watchtower quota slot");
+
+    // 1b. A cold/restarted tenant with an orphaned WaitingForPeer opening (no ChannelActorState,
+    //     result: None) must NOT deadlock its own quota=1 admission check.
+    let cold_orphan_id = Hash256::from([0x79; 32]);
+    tenant_store.insert_channel_open_record(ChannelOpenRecord::new(
+        cold_orphan_id,
+        lsp_key.pubkey(),
+        100_000_000_000,
+    ));
+    tenant_store.put_tenant_channel_opening(TenantChannelOpening {
+        command: OpenChannelWithExternalFundingCommand {
+            pubkey: lsp_key.pubkey(),
+            funding_amount: 100_000_000_000,
+            public: false,
+            shutdown_script: Script::default(),
+            funding_lock_script: Script::default(),
+            funding_lock_script_cell_deps: Vec::new(),
+            funding_udt_type_script: None,
+            commitment_fee_rate: None,
+            commitment_delay_epoch: None,
+            funding_fee_rate: None,
+            tlc_expiry_delta: None,
+            tlc_min_value: None,
+            tlc_fee_proportional_millionths: None,
+            max_tlc_value_in_flight: None,
+            max_tlc_number_in_flight: None,
+            external_channel_signer: None,
+        },
+        channel_id: cold_orphan_id,
+        result: None,
+        terminated: false,
+    });
+    ractor::call!(service, |reply| {
+        LspServiceMessage::CheckTenantWatchtowerChannelQuota(tenant_id.clone(), reply)
+    })
+    .unwrap()
+    .expect("orphaned pre-state opening on cold tenant must not deadlock quota=1");
+    tenant_store.delete_tenant_channel_opening(&cold_orphan_id);
+    tenant_store.delete_channel_open_record(&cold_orphan_id);
+
+    // 2. Fill the tenant's 1-channel quota with ch2 and exercise direct RPC admission checks.
+    let ch2 = Hash256::from([0x72; 32]);
+    let mut state2 = ChannelActorState::samples(202).remove(0);
+    state2.id = ch2;
+    state2.remote_pubkey = tenant_key.pubkey();
+    state2.remote_channel_public_keys = Some(state2.local_channel_public_keys.clone());
+    state2.funding_udt_type_script = None;
+    store.insert_channel_actor_state(state2.clone());
+    tenant_store.insert_channel_actor_state(state2);
+    service
+        .send_message(LspServiceMessage::TenantChannelOnline(
+            tenant_key.pubkey(),
+            ch2,
+        ))
+        .unwrap();
+    ractor::call!(service, LspServiceMessage::GetStatus).unwrap();
+    assert!(store.get_watch_channel(&node_id, &ch2).is_some());
+
+    let (public_actor, _) = Actor::spawn(None, BusyNetworkActor, ()).await.unwrap();
+    let rpc = ChannelRpcServerImpl::new(public_actor.clone(), store.clone())
+        .with_lsp_actor(Some(service.clone()));
+    let mut ext = Extensions::new();
+    ext.insert(AuthenticatedTenant(tenant_id.clone()));
+
+    // 2a. `open_channel` rejects when watchtower quota is full.
+    let err = ChannelRpcServer::open_channel(
+        &rpc,
+        &ext,
+        OpenChannelParams {
+            pubkey: lsp_key.pubkey().into(),
+            funding_amount: 100_000_000_000,
+            public: Some(false),
+            one_way: None,
+            funding_udt_type_script: None,
+            shutdown_script: None,
+            commitment_delay_epoch: None,
+            commitment_fee_rate: None,
+            funding_fee_rate: None,
+            tlc_expiry_delta: None,
+            tlc_min_value: None,
+            tlc_fee_proportional_millionths: None,
+            max_tlc_value_in_flight: None,
+            max_tlc_number_in_flight: None,
+        },
+    )
+    .await
+    .err()
+    .expect("open_channel must enforce watchtower quota for hosted tenants");
+    assert!(err.to_string().contains("quota exceeded"), "{err}");
+
+    // 2b. `open_channel_with_external_funding` rejects a new opening when quota is full.
+    let (_, json_new) = make_signer_material(20);
+    let err = ChannelRpcServer::open_channel_with_external_funding(
+        &rpc,
+        &ext,
+        OpenChannelWithExternalFundingParams {
+            pubkey: lsp_key.pubkey().into(),
+            funding_amount: 100_000_000_000,
+            public: Some(false),
+            funding_udt_type_script: None,
+            shutdown_script: Script::default().into(),
+            funding_lock_script: Script::default().into(),
+            funding_lock_script_cell_deps: Some(Vec::new()),
+            commitment_delay_epoch: None,
+            commitment_fee_rate: None,
+            funding_fee_rate: None,
+            tlc_expiry_delta: None,
+            tlc_min_value: None,
+            tlc_fee_proportional_millionths: None,
+            max_tlc_value_in_flight: None,
+            max_tlc_number_in_flight: None,
+            external_channel_signer: Some(json_new),
+        },
+    )
+    .await
+    .expect_err("new external-funding open must reject when watchtower quota is full");
+    assert!(err.to_string().contains("quota exceeded"), "{err}");
+
+    // 2c. A Failed opening (even with cached `result.is_some()` and surviving ChannelActorState)
+    //     must NOT bypass watchtower admission quota via `is_existing_opening_retry`.
+    let (mat_failed, json_failed) = make_signer_material(30);
+    let failed_id = derive_temp_channel_id_from_tlc_key(&mat_failed.base_public_keys.tlc_base_key);
+    let mut failed_state = ChannelActorState::samples(203).remove(0);
+    failed_state.id = failed_id;
+    tenant_store.insert_channel_actor_state(failed_state);
+    let mut failed_record = ChannelOpenRecord::new(failed_id, lsp_key.pubkey(), 100_000_000_000);
+    failed_record.fail("funding failed".to_string());
+    tenant_store.insert_channel_open_record(failed_record);
+    tenant_store.put_tenant_channel_opening(TenantChannelOpening {
+        command: OpenChannelWithExternalFundingCommand {
+            pubkey: lsp_key.pubkey(),
+            funding_amount: 100_000_000_000,
+            public: false,
+            shutdown_script: Script::default(),
+            funding_lock_script: Script::default(),
+            funding_lock_script_cell_deps: Vec::new(),
+            funding_udt_type_script: None,
+            commitment_fee_rate: None,
+            commitment_delay_epoch: None,
+            funding_fee_rate: None,
+            tlc_expiry_delta: None,
+            tlc_min_value: None,
+            tlc_fee_proportional_millionths: None,
+            max_tlc_value_in_flight: None,
+            max_tlc_number_in_flight: None,
+            external_channel_signer: Some(mat_failed),
+        },
+        channel_id: failed_id,
+        result: Some(OpenChannelWithExternalFundingResult {
+            channel_id: failed_id.into(),
+            unsigned_funding_tx: Default::default(),
+            opening_context: None,
+        }),
+        terminated: false,
+    });
+    let err = ChannelRpcServer::open_channel_with_external_funding(
+        &rpc,
+        &ext,
+        OpenChannelWithExternalFundingParams {
+            pubkey: lsp_key.pubkey().into(),
+            funding_amount: 100_000_000_000,
+            public: Some(false),
+            funding_udt_type_script: None,
+            shutdown_script: Script::default().into(),
+            funding_lock_script: Script::default().into(),
+            funding_lock_script_cell_deps: Some(Vec::new()),
+            commitment_delay_epoch: None,
+            commitment_fee_rate: None,
+            funding_fee_rate: None,
+            tlc_expiry_delta: None,
+            tlc_min_value: None,
+            tlc_fee_proportional_millionths: None,
+            max_tlc_value_in_flight: None,
+            max_tlc_number_in_flight: None,
+            external_channel_signer: Some(json_failed),
+        },
+    )
+    .await
+    .expect_err("failed opening must not bypass watchtower quota");
+    assert!(err.to_string().contains("quota exceeded"), "{err}");
+
+    // 2d. An orphaned opening (`WaitingForPeer` open record, no ChannelActorState, no live actor)
+    //     must NOT bypass watchtower admission quota either.
+    let (mat_orphan, json_orphan) = make_signer_material(40);
+    let orphan_id = derive_temp_channel_id_from_tlc_key(&mat_orphan.base_public_keys.tlc_base_key);
+    tenant_store.insert_channel_open_record(ChannelOpenRecord::new(
+        orphan_id,
+        lsp_key.pubkey(),
+        100_000_000_000,
+    ));
+    tenant_store.put_tenant_channel_opening(TenantChannelOpening {
+        command: OpenChannelWithExternalFundingCommand {
+            pubkey: lsp_key.pubkey(),
+            funding_amount: 100_000_000_000,
+            public: false,
+            shutdown_script: Script::default(),
+            funding_lock_script: Script::default(),
+            funding_lock_script_cell_deps: Vec::new(),
+            funding_udt_type_script: None,
+            commitment_fee_rate: None,
+            commitment_delay_epoch: None,
+            funding_fee_rate: None,
+            tlc_expiry_delta: None,
+            tlc_min_value: None,
+            tlc_fee_proportional_millionths: None,
+            max_tlc_value_in_flight: None,
+            max_tlc_number_in_flight: None,
+            external_channel_signer: Some(mat_orphan),
+        },
+        channel_id: orphan_id,
+        result: None,
+        terminated: false,
+    });
+    let err = ChannelRpcServer::open_channel_with_external_funding(
+        &rpc,
+        &ext,
+        OpenChannelWithExternalFundingParams {
+            pubkey: lsp_key.pubkey().into(),
+            funding_amount: 100_000_000_000,
+            public: Some(false),
+            funding_udt_type_script: None,
+            shutdown_script: Script::default().into(),
+            funding_lock_script: Script::default().into(),
+            funding_lock_script_cell_deps: Some(Vec::new()),
+            commitment_delay_epoch: None,
+            commitment_fee_rate: None,
+            funding_fee_rate: None,
+            tlc_expiry_delta: None,
+            tlc_min_value: None,
+            tlc_fee_proportional_millionths: None,
+            max_tlc_value_in_flight: None,
+            max_tlc_number_in_flight: None,
+            external_channel_signer: Some(json_orphan),
+        },
+    )
+    .await
+    .expect_err("orphaned opening must not bypass watchtower quota");
+    assert!(err.to_string().contains("quota exceeded"), "{err}");
+
+    public_actor.stop(None);
+    service.stop_and_wait(None, None).await.unwrap();
+
+    // 3. Global `max_channels_total` must include `pending_unwatched` across tenants:
+    //    with `max_watch_channels_per_tenant = 2, max_watch_channels = 2`,
+    //    Tenant A has 1 watched channel and Tenant B has 1 pending unwatched opening
+    //    => `channels_total (1) + pending_total (1) >= 2` rejects Tenant B's 2nd open.
+    let root2 = tempdir().expect("temporary directory");
+    let mut config2 = lsp_config(root2.path().join("lsp"));
+    config2.max_watch_channels_per_tenant = 2;
+    config2.max_watch_channels = 2;
+    let store2 = open_lsp_store(&config2);
+    let tenant_b_root = Privkey::from(&[0x55; 32]);
+    let expected_tenant_b_id = TenantId::from_root_signer_pubkey(&tenant_b_root.pubkey());
+    let service2 = start_test_lsp_service(
+        store2.clone(),
+        config2,
+        Arc::new(
+            FakeRuntimeFactory::new(Arc::new(AtomicUsize::new(0)))
+                .with_protocol_secret(expected_tenant_b_id, 2),
+        ),
+        lsp_key.clone(),
+        Arc::new(AtomicUsize::new(0)),
+        Arc::new(AtomicUsize::new(0)),
+    )
+    .await;
+    let tenant_a_id =
+        register_authenticated_test_tenant(&service2, &lsp_key, &test_root_signer()).await;
+    let tenant_b_id = register_authenticated_test_tenant(&service2, &lsp_key, &tenant_b_root).await;
+
+    let ch_a = Hash256::from([0x81; 32]);
+    let mut state_a = ChannelActorState::samples(210).remove(0);
+    state_a.id = ch_a;
+    state_a.remote_pubkey = tenant_key.pubkey();
+    state_a.remote_channel_public_keys = Some(state_a.local_channel_public_keys.clone());
+    store2.insert_channel_actor_state(state_a.clone());
+    store2
+        .namespaced(NodeNamespace::hosted_tenant(tenant_a_id.as_str()))
+        .insert_channel_actor_state(state_a);
+    service2
+        .send_message(LspServiceMessage::TenantChannelOnline(
+            tenant_key.pubkey(),
+            ch_a,
+        ))
+        .unwrap();
+    ractor::call!(service2, LspServiceMessage::GetStatus).unwrap();
+
+    // Put an orphaned pre-state opening for cold Tenant B first: it must not consume global quota.
+    let ch_b_pending = Hash256::from([0x82; 32]);
+    let tenant_b_store = store2.namespaced(NodeNamespace::hosted_tenant(tenant_b_id.as_str()));
+    tenant_b_store.insert_channel_open_record(ChannelOpenRecord::new(
+        ch_b_pending,
+        lsp_key.pubkey(),
+        100_000_000_000,
+    ));
+    tenant_b_store.put_tenant_channel_opening(TenantChannelOpening {
+        command: OpenChannelWithExternalFundingCommand {
+            pubkey: lsp_key.pubkey(),
+            funding_amount: 100_000_000_000,
+            public: false,
+            shutdown_script: Script::default(),
+            funding_lock_script: Script::default(),
+            funding_lock_script_cell_deps: Vec::new(),
+            funding_udt_type_script: None,
+            commitment_fee_rate: None,
+            commitment_delay_epoch: None,
+            funding_fee_rate: None,
+            tlc_expiry_delta: None,
+            tlc_min_value: None,
+            tlc_fee_proportional_millionths: None,
+            max_tlc_value_in_flight: None,
+            max_tlc_number_in_flight: None,
+            external_channel_signer: None,
+        },
+        channel_id: ch_b_pending,
+        result: None,
+        terminated: false,
+    });
+    ractor::call!(service2, |reply| {
+        LspServiceMessage::CheckTenantWatchtowerChannelQuota(tenant_b_id.clone(), reply)
+    })
+    .unwrap()
+    .expect("orphaned pre-state opening on cold tenant must not consume global quota");
+
+    // Once Tenant B has a persisted ChannelActorState for the unwatched opening, global quota
+    // must count it (`channels_total (1) + pending_total (1) >= 2`).
+    let mut state_b_pending = ChannelActorState::samples(211).remove(0);
+    state_b_pending.id = ch_b_pending;
+    state_b_pending.remote_pubkey = lsp_key.pubkey();
+    tenant_b_store.insert_channel_actor_state(state_b_pending);
+
+    let global_err = ractor::call!(service2, |reply| {
+        LspServiceMessage::CheckTenantWatchtowerChannelQuota(tenant_b_id.clone(), reply)
+    })
+    .unwrap()
+    .expect_err("global quota must account for pending unwatched openings");
+    assert!(
+        global_err.contains("global watchtower channel quota exceeded"),
+        "{global_err}"
+    );
+    service2.stop_and_wait(None, None).await.unwrap();
+}

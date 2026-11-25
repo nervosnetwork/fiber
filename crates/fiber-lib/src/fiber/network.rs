@@ -1293,6 +1293,8 @@ pub enum FiberActorCommand {
         SubmitChannelSignatureCommand,
         RpcReplyPort<Result<fiber_types::SubmitSignatureOutcome, String>>,
     ),
+    /// Check whether a channel actor is currently live in memory.
+    HasLiveChannel(Hash256, RpcReplyPort<bool>),
     #[cfg(any(test, feature = "bench"))]
     GetChannelActor(Hash256, RpcReplyPort<Option<ActorRef<ChannelActorMessage>>>),
     // Send an onion packet to the next hop. The `PeeledPaymentOnionPacket::current` contains
@@ -3433,6 +3435,9 @@ where
                         Some(reply),
                     ),
                 ))?;
+            }
+            FiberActorCommand::HasLiveChannel(channel_id, reply) => {
+                let _ = reply.send(state.channels.contains_key(&channel_id));
             }
             #[cfg(any(test, feature = "bench"))]
             FiberActorCommand::GetChannelActor(channel_id, reply) => {
@@ -9579,6 +9584,35 @@ where
     async fn restore_persisted_offline_channels(&mut self) -> HashSet<PaymentSessionKey> {
         for mut opening in self.store.list_tenant_channel_openings() {
             self.reconcile_split_tenant_opening(&mut opening);
+            if !opening.terminated
+                && opening.result.is_none()
+                && !self.channels.contains_key(&opening.channel_id)
+                && self
+                    .store
+                    .get_channel_actor_state(&opening.channel_id)
+                    .is_none()
+            {
+                let open_record = self.store.get_channel_open_record(&opening.channel_id);
+                let is_final_record = open_record.as_ref().is_some_and(|record| {
+                    matches!(
+                        record.status,
+                        ChannelOpeningStatus::ChannelReady | ChannelOpeningStatus::Failed
+                    )
+                });
+                if !is_final_record {
+                    if let Some(mut record) = open_record {
+                        record.fail(format!(
+                            "[Channel {}] Tenant channel opening interrupted before funding",
+                            opening.channel_id
+                        ));
+                        self.store.insert_channel_open_record(record);
+                    }
+                    self.pending_external_funding_replies
+                        .remove(&opening.channel_id);
+                    self.store
+                        .delete_tenant_channel_opening(&opening.channel_id);
+                }
+            }
         }
         let mut payment_hashes = self.store.reconcile_attempts_channel_index();
         for (pubkey, channel_id, _channel_state) in self.store.get_channel_states(None) {

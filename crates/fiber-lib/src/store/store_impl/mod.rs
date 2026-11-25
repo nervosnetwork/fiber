@@ -2574,6 +2574,34 @@ impl Store {
         counts.initialized = true;
     }
 
+    fn check_watch_channel_quota_counts(
+        counts: &WatchtowerQuotaCounts,
+        node_id: &NodeId,
+        pending_node: usize,
+        pending_total: usize,
+        quotas: &crate::lsp_config::WatchtowerQuotas,
+    ) -> Result<(), String> {
+        let node_count = counts
+            .channels_per_node
+            .get(node_id)
+            .copied()
+            .unwrap_or(0)
+            .saturating_add(pending_node);
+        if node_count >= quotas.max_channels_per_node {
+            return Err(format!(
+                "watchtower channel quota exceeded for node (max {})",
+                quotas.max_channels_per_node
+            ));
+        }
+        if counts.channels_total.saturating_add(pending_total) >= quotas.max_channels_total {
+            return Err(format!(
+                "global watchtower channel quota exceeded (max {})",
+                quotas.max_channels_total
+            ));
+        }
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn insert_watch_channel_inner(
         &self,
@@ -2641,19 +2669,7 @@ impl Store {
         let mut counts = self.watchtower_quota_counts.lock();
         if let Some(quotas) = quotas {
             self.ensure_watchtower_quota_counts_initialized(&mut counts);
-            let node_count = counts.channels_per_node.get(&node_id).copied().unwrap_or(0);
-            if node_count >= quotas.max_channels_per_node {
-                return Err(format!(
-                    "watchtower channel quota exceeded for node (max {})",
-                    quotas.max_channels_per_node
-                ));
-            }
-            if counts.channels_total >= quotas.max_channels_total {
-                return Err(format!(
-                    "global watchtower channel quota exceeded (max {})",
-                    quotas.max_channels_total
-                ));
-            }
+            Self::check_watch_channel_quota_counts(&counts, &node_id, 0, 0, quotas)?;
         }
         batch.commit();
         counts.inc_channel(&node_id);
@@ -2776,6 +2792,24 @@ impl WatchtowerStore for Store {
             channel_features,
             payout_lock_script,
             Some(quotas),
+        )
+    }
+
+    fn check_watch_channel_quota_with_pending(
+        &self,
+        node_id: &NodeId,
+        pending_node: usize,
+        pending_total: usize,
+        quotas: &crate::lsp_config::WatchtowerQuotas,
+    ) -> Result<(), String> {
+        let mut counts = self.watchtower_quota_counts.lock();
+        self.ensure_watchtower_quota_counts_initialized(&mut counts);
+        Self::check_watch_channel_quota_counts(
+            &counts,
+            node_id,
+            pending_node,
+            pending_total,
+            quotas,
         )
     }
 

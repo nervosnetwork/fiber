@@ -70,6 +70,19 @@ pub trait WatchtowerStore {
             payout_lock_script,
         ))
     }
+    /// Check whether inserting one additional watched channel for `node_id` (given
+    /// `pending_node` / `pending_total` in-flight unwatched openings) would fit within
+    /// the configured per-node and global quotas without mutating the store.
+    fn check_watch_channel_quota_with_pending(
+        &self,
+        _node_id: &NodeId,
+        _pending_node: usize,
+        _pending_total: usize,
+        _quotas: &crate::lsp_config::WatchtowerQuotas,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
     /// Stop monitoring a channel. Returns false if removal is refused for a live channel.
     fn remove_watch_channel(&self, node_id: NodeId, channel_id: Hash256) -> bool;
 
