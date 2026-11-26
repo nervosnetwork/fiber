@@ -1492,6 +1492,52 @@ async fn test_sync_node_announcement_on_startup() {
 }
 
 #[tokio::test]
+async fn test_node_info_graph_sync_status() {
+    init_tracing();
+
+    let mut node = NetworkNode::new_with_node_name("graph-sync-status").await;
+    assert_eq!(node.node_info().await.synced_to_graph, Some(false));
+
+    let mut peer = NetworkNode::new_with_node_name("graph-sync-peer").await;
+    node.connect_to(&mut peer).await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if node.node_info().await.synced_to_graph == Some(true) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("active graph sync completes");
+
+    node.network_actor
+        .send_message(NetworkActorMessage::new_command(
+            PublicNetworkCommand::DisconnectPeer(
+                peer.pubkey,
+                PeerDisconnectReason::Requested,
+                None,
+            ),
+        ))
+        .expect("node alive");
+    peer.expect_event(|event| match event {
+        NetworkServiceEvent::PeerDisConnected(pubkey, _) => pubkey == &node.pubkey,
+        _ => false,
+    })
+    .await;
+    assert_eq!(node.node_info().await.synced_to_graph, Some(true));
+}
+
+#[tokio::test]
+async fn test_node_info_graph_sync_disabled() {
+    let config = NetworkNodeConfigBuilder::new()
+        .fiber_config_updater(|config| config.sync_network_graph = Some(false))
+        .build();
+    let node = NetworkNode::new_with_config(config).await;
+    assert_eq!(node.node_info().await.synced_to_graph, None);
+}
+
+#[tokio::test]
 async fn test_disconnected_finished_active_sync_peer_releases_budget() {
     init_tracing();
 

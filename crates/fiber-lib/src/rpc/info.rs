@@ -79,6 +79,7 @@ impl InfoRpcServerImpl {
             channel_count: response.channel_count,
             pending_channel_count: response.pending_channel_count,
             peers_count: response.peers_count,
+            synced_to_graph: response.synced_to_graph,
             udt_cfg_infos: response.udt_cfg_infos.into(),
         })
     }
