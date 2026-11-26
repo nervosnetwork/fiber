@@ -536,7 +536,7 @@ where
         {
             return Err(rpc_error("watched channel not found"));
         }
-        let (_, _, node_retry_after_ms) = self.store.watchtower_fee_hold_stats(&node_id);
+        let (_, _, node_retry_after_ms) = self.store.watchtower_external_signing_stats(&node_id);
         let status = to_rpc_watchtower_signing_status_with_backoff(
             self.store.get_watchtower_signer(&node_id, &channel_id),
             node_retry_after_ms,

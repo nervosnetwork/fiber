@@ -533,12 +533,12 @@ fn check_watch_channel<S: WatchtowerStore>(
     }
 }
 
-/// Maximum concurrent fee-holding external signing requests (pending + signed) per channel.
-const MAX_PENDING_FEE_REQUESTS_PER_CHANNEL: usize = 4;
-/// Maximum concurrent fee-holding external signing requests (pending + signed) per node/tenant.
-const MAX_PENDING_FEE_REQUESTS_PER_NODE: usize = 16;
-/// Maximum concurrent fee-holding external signing requests (pending + signed) globally across all nodes.
-const MAX_PENDING_FEE_REQUESTS_GLOBAL: usize = 64;
+/// Maximum concurrent external signing requests (pending + signed) per channel.
+const MAX_PENDING_EXTERNAL_SIGNING_REQUESTS_PER_CHANNEL: usize = 4;
+/// Maximum concurrent external signing requests (pending + signed) per node/tenant.
+const MAX_PENDING_EXTERNAL_SIGNING_REQUESTS_PER_NODE: usize = 16;
+/// Maximum concurrent external signing requests (pending + signed) globally across all nodes.
+const MAX_PENDING_EXTERNAL_SIGNING_REQUESTS_GLOBAL: usize = 64;
 /// Initial retry backoff (5 minutes) after an external watchtower request expires or fails broadcast.
 const WATCHTOWER_EXPIRED_BACKOFF_BASE_MS: u64 = 5 * 60 * 1000;
 /// Maximum retry backoff (60 minutes) after repeated expired or failed external requests.
@@ -2159,7 +2159,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
             }
             let now_ms = crate::now_timestamp_as_millis_u64();
             let channel_active = external.pending_requests.len() + external.signed_signatures.len();
-            if channel_active >= MAX_PENDING_FEE_REQUESTS_PER_CHANNEL {
+            if channel_active >= MAX_PENDING_EXTERNAL_SIGNING_REQUESTS_PER_CHANNEL {
                 warn!(
                     channel_id = %channel_data.channel_id,
                     channel_active,
@@ -2168,7 +2168,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
                 return Ok(None);
             }
             let (node_active, global_active, node_retry_after_ms) =
-                store.watchtower_fee_hold_stats(self_node_id);
+                store.watchtower_external_signing_stats(self_node_id);
             let effective_retry_after_ms = external.retry_after_ms.max(node_retry_after_ms);
             if now_ms < effective_retry_after_ms {
                 warn!(
@@ -2179,7 +2179,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
                 );
                 return Ok(None);
             }
-            if node_active >= MAX_PENDING_FEE_REQUESTS_PER_NODE {
+            if node_active >= MAX_PENDING_EXTERNAL_SIGNING_REQUESTS_PER_NODE {
                 warn!(
                     node_id = %self_node_id,
                     channel_id = %channel_data.channel_id,
@@ -2188,7 +2188,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
                 );
                 return Ok(None);
             }
-            if global_active >= MAX_PENDING_FEE_REQUESTS_GLOBAL {
+            if global_active >= MAX_PENDING_EXTERNAL_SIGNING_REQUESTS_GLOBAL {
                 warn!(
                     node_id = %self_node_id,
                     channel_id = %channel_data.channel_id,

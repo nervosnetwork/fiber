@@ -3184,7 +3184,7 @@ impl WatchtowerStore for Store {
             .unwrap_or(WatchtowerSignerState::Internal)
     }
 
-    fn watchtower_fee_hold_stats(&self, node_id: &NodeId) -> (usize, usize, u64) {
+    fn watchtower_external_signing_stats(&self, node_id: &NodeId) -> (usize, usize, u64) {
         let node_prefix = [&[WATCHTOWER_SIGNER_PREFIX], node_id.as_ref()].concat();
         let mut node_active = 0usize;
         let mut global_active = 0usize;

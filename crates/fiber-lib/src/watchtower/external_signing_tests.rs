@@ -1302,7 +1302,7 @@ fn external_pending_request_expires_after_ttl_and_enforces_backoff() {
 }
 
 #[test]
-fn external_fee_hold_caps_and_cross_channel_per_node_backoff() {
+fn external_signing_request_caps_and_cross_channel_per_node_backoff() {
     let fixture = Fixture::with_features(false, false, false, false, ChannelFeatures::V2);
     let now_ms = crate::now_timestamp_as_millis_u64();
 
@@ -1390,7 +1390,7 @@ fn external_fee_hold_caps_and_cross_channel_per_node_backoff() {
             &fixture.channel.channel_id
         ),
         2,
-        "per-channel cap (pending + signed == 4) must block new fee-holding requests"
+        "per-channel cap (pending + signed == 4) must block new external signing requests"
     );
 
     // Clear fixture channel state for subsequent checks.
@@ -1558,7 +1558,7 @@ fn external_fee_hold_caps_and_cross_channel_per_node_backoff() {
             &fixture.channel.channel_id
         ),
         1,
-        "once below global cap and outside own-node backoff, new fee-holding request succeeds"
+        "once below global cap and outside own-node backoff, new external signing request succeeds"
     );
 }
 

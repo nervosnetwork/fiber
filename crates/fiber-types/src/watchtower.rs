@@ -1338,7 +1338,6 @@ mod key_material_tests {
     fn build_template_and_funded(
         htlc_count: u8,
         with_preimage: bool,
-        required_expiry_since: Option<u64>,
         funding_since: u64,
     ) -> (Transaction, Transaction) {
         use ckb_types::core::{DepType, TransactionBuilder};
@@ -1401,7 +1400,6 @@ mod key_material_tests {
             .build()
             .data();
 
-        let _ = required_expiry_since;
         (template, funded)
     }
 
@@ -1412,8 +1410,7 @@ mod key_material_tests {
         use ckb_types::prelude::*;
 
         let expiry_since = settlement_timestamp_since(100_000);
-        let (template, funded) =
-            build_template_and_funded(1, false, Some(expiry_since), expiry_since);
+        let (template, funded) = build_template_and_funded(1, false, expiry_since);
         let sig = [0x55u8; 65];
 
         // 1. Valid timeout TLC with zero placeholder in witness[0] normalizes cleanly and preserves witness[1..].
@@ -1541,7 +1538,7 @@ mod key_material_tests {
 
         // 5. Non-timeout (preimage/balance) allows 1-input fee-from-payout AND 2-input funding,
         //    and rejects unexpected absolute timestamp `since`.
-        let (preimage_tmpl, preimage_funded_ok) = build_template_and_funded(1, true, None, 0);
+        let (preimage_tmpl, preimage_funded_ok) = build_template_and_funded(1, true, 0);
         assert!(validate_and_normalize_external_funding_watchtower_tx(
             &preimage_tmpl,
             &preimage_funded_ok,
@@ -1597,7 +1594,7 @@ mod key_material_tests {
             Some(&sig),
         )
         .is_ok());
-        let (_, preimage_funded_bad_since) = build_template_and_funded(1, true, None, expiry_since);
+        let (_, preimage_funded_bad_since) = build_template_and_funded(1, true, expiry_since);
         assert!(validate_and_normalize_external_funding_watchtower_tx(
             &preimage_tmpl,
             &preimage_funded_bad_since,
@@ -1727,7 +1724,47 @@ mod key_material_tests {
             .data();
         assert!(validate_external_funding_retry_witness_zero(&wrong_sig_w0, &sig).is_err());
 
-        // 7. Tampered inputs[0], outputs[0] (when template has 2 outputs), outputs_data[0], or witness[0] rejected.
+        // 7. Tampered inputs[0], outputs[0] (when template has 2 outputs), outputs_data[0],
+        //    witness[0], non-zero version, or non-empty header_deps rejected.
+        let bad_in0_outpoint = funded
+            .clone()
+            .into_view()
+            .as_advanced_builder()
+            .set_inputs(vec![
+                CellInput::new(OutPoint::new(Byte32::from([0x99; 32]), 0), 0),
+                funded.raw().inputs().get(1).unwrap(),
+            ])
+            .build()
+            .data();
+        assert!(validate_and_normalize_external_funding_watchtower_tx(
+            &template,
+            &bad_in0_outpoint,
+            Some(expiry_since),
+            Some(&sig),
+        )
+        .is_err());
+
+        let bad_in0_since = funded
+            .clone()
+            .into_view()
+            .as_advanced_builder()
+            .set_inputs(vec![
+                CellInput::new(
+                    funded.raw().inputs().get(0).unwrap().previous_output(),
+                    expiry_since,
+                ),
+                funded.raw().inputs().get(1).unwrap(),
+            ])
+            .build()
+            .data();
+        assert!(validate_and_normalize_external_funding_watchtower_tx(
+            &template,
+            &bad_in0_since,
+            Some(expiry_since),
+            Some(&sig),
+        )
+        .is_err());
+
         let bad_out0 = funded
             .clone()
             .into_view()
@@ -1742,6 +1779,55 @@ mod key_material_tests {
         assert!(validate_and_normalize_external_funding_watchtower_tx(
             &template,
             &bad_out0,
+            Some(expiry_since),
+            Some(&sig),
+        )
+        .is_err());
+
+        let bad_out_data0 = funded
+            .clone()
+            .into_view()
+            .as_advanced_builder()
+            .set_outputs_data(vec![
+                99u128.to_le_bytes().to_vec().pack(),
+                funded.raw().outputs_data().get(1).unwrap(),
+                funded.raw().outputs_data().get(2).unwrap(),
+            ])
+            .build()
+            .data();
+        assert!(validate_and_normalize_external_funding_watchtower_tx(
+            &template,
+            &bad_out_data0,
+            Some(expiry_since),
+            Some(&sig),
+        )
+        .is_err());
+
+        let bad_version = funded
+            .clone()
+            .into_view()
+            .as_advanced_builder()
+            .version(1u32)
+            .build()
+            .data();
+        assert!(validate_and_normalize_external_funding_watchtower_tx(
+            &template,
+            &bad_version,
+            Some(expiry_since),
+            Some(&sig),
+        )
+        .is_err());
+
+        let bad_header_deps = funded
+            .clone()
+            .into_view()
+            .as_advanced_builder()
+            .header_dep(Byte32::from([0xab; 32]))
+            .build()
+            .data();
+        assert!(validate_and_normalize_external_funding_watchtower_tx(
+            &template,
+            &bad_header_deps,
             Some(expiry_since),
             Some(&sig),
         )

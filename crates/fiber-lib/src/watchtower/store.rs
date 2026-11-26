@@ -171,7 +171,7 @@ pub trait WatchtowerStore {
 
     /// Return `(node_active_requests, global_active_requests, node_retry_after_ms)`
     /// across all external signer states without deserializing full `ChannelData` rows.
-    fn watchtower_fee_hold_stats(&self, node_id: &NodeId) -> (usize, usize, u64) {
+    fn watchtower_external_signing_stats(&self, node_id: &NodeId) -> (usize, usize, u64) {
         let mut node_active = 0usize;
         let mut global_active = 0usize;
         let mut node_retry_after_ms = 0u64;

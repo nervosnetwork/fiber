@@ -2,7 +2,7 @@
 //!
 //! These helpers keep `fiber-lsp-sdk` transport- and runtime-agnostic while giving
 //! wallet applications structured signals for watchtower channel/preimage quotas,
-//! fee-hold TTLs, and per-node retry backoff.
+//! pending signing request TTLs, and per-node retry backoff.
 
 use fiber_types::Hash256;
 use serde::{Deserialize, Serialize};
