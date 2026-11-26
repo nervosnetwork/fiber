@@ -50,14 +50,11 @@ script:post-response {
     throw new Error(`Final settlement capacity RPC failed: ${JSON.stringify(res.body)}`);
   }
   const deficit = BigInt(bru.getVar("NODE1_BALANCE")) - BigInt(capacity);
-  // An unknown root cell can be absent or spent by the first descendant.
-  // NODE1's remaining balance is returned by the LAST party unlock, after both
-  // preimage claims and NODE2's unlock. Indexed capacity excludes pool payouts.
-  // Keep the 9,000,000 transfer and original 5,000 fee budget as the predicate.
-  if (deficit >= BigInt(9000000) && deficit < BigInt(9005000)) {
-    bru.setVar("settlement_poll_iteration", undefined);
-    bru.setVar("settlement_poll_started_at", undefined);
-  } else {
+  // Either party can receive its payout first. NODE1's balance alone does not
+  // prove NODE2 has recovered its channel contribution; request 25 checks that.
+  // Indexed capacity excludes pool payouts. Keep the original fee budget.
+  // Keep the shared poll deadline until NODE2's balance has also arrived.
+  if (deficit < BigInt(9000000) || deficit >= BigInt(9005000)) {
     const iteration = bru.getVar("settlement_poll_iteration") + 1;
     const max = bru.getVar("settlement_poll_max");
     const elapsed = Date.now() - bru.getVar("settlement_poll_started_at");

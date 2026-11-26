@@ -35,6 +35,26 @@ script:pre-request {
   req.setBody(body);
 }
 
-assert {
-  Number(BigInt(res.body.result.capacity) - BigInt(bru.getVar("NODE2_BALANCE"))): gt 8995000
+script:post-response {
+  const capacity = res.body?.result?.capacity;
+  if (res.status !== 200 || res.body?.error || capacity === undefined) {
+    throw new Error(`NODE2 settlement capacity RPC failed: ${JSON.stringify(res.body)}`);
+  }
+  const gain = BigInt(capacity) - BigInt(bru.getVar("NODE2_BALANCE"));
+  if (gain > BigInt(8995000)) {
+    bru.setVar("settlement_poll_iteration", undefined);
+    bru.setVar("settlement_poll_started_at", undefined);
+  } else {
+    const iteration = bru.getVar("settlement_poll_iteration") + 1;
+    const max = bru.getVar("settlement_poll_max");
+    const elapsed = Date.now() - bru.getVar("settlement_poll_started_at");
+    const timeout = bru.getVar("settlement_poll_timeout_ms");
+    console.log(`NODE2 settlement poll ${iteration}/${max}: capacity=${capacity}, gain=${gain}, elapsed=${elapsed}ms`);
+    if (iteration >= max || elapsed >= timeout) {
+      throw new Error(`NODE2 settlement payout not indexed after ${iteration} polling attempts (max=${max}, elapsed=${elapsed}ms, timeout=${timeout}ms): capacity=${capacity}, gain=${gain}`);
+    }
+    bru.setVar("settlement_poll_iteration", iteration);
+    await new Promise(r => setTimeout(r, Math.min(1000, timeout - elapsed)));
+    bru.setNextRequest("generate a few blocks for final settlement tx committed");
+  }
 }
