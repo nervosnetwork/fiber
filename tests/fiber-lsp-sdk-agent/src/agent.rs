@@ -777,10 +777,19 @@ impl<R: FiberRpc, S: SignerStore> Agent<R, S> {
         channel_id: Hash256,
         status: WatchtowerSigningStatus,
     ) -> Result<()> {
-        if matches!(
-            status,
-            WatchtowerSigningStatus::NoSignatureRequired | WatchtowerSigningStatus::Backoff { .. }
-        ) {
+        let WatchtowerSigningStatus::ExternalFundingRequired {
+            content,
+            required_expiry_since,
+            ..
+        } = &status
+        else {
+            return Ok(());
+        };
+        if required_expiry_since.is_some() {
+            tracing::warn!(
+                channel_id = %format!("{channel_id:#x}"),
+                "skipping timeout TLC external-funding request: test agent does not carry an auxiliary wallet key"
+            );
             return Ok(());
         }
         let approval = self
@@ -792,18 +801,6 @@ impl<R: FiberRpc, S: SignerStore> Agent<R, S> {
             .chain
             .clone()
             .context("watchtower requires independent ChainVerifier")?;
-        let WatchtowerSigningStatus::ExternalFundingRequired {
-            content,
-            required_expiry_since,
-            ..
-        } = &status
-        else {
-            return Ok(());
-        };
-        anyhow::ensure!(
-            required_expiry_since.is_none(),
-            "test agent does not carry an auxiliary wallet key for timeout TLC external funding"
-        );
         let funded_tx = Self::fund_external_funding_template(
             &content.transaction.clone().into(),
             approval.destination.clone().into(),
@@ -1058,6 +1055,7 @@ impl<R: FiberRpc, S: SignerStore> Agent<R, S> {
                 funded_tx,
                 authorization,
                 chain,
+                now_ms(),
             )
             .await
             .map_err(|e| anyhow!("prepare external-funding watchtower: {e}"))?;
@@ -1066,7 +1064,7 @@ impl<R: FiberRpc, S: SignerStore> Agent<R, S> {
             ProcessOutcome::NeedConfirmation(pending) => {
                 let SubmitParams::Watchtower(params) = self
                     .session
-                    .confirm_external_funding_onchain(pending, chain)
+                    .confirm_external_funding_onchain(pending, chain, now_ms())
                     .await
                     .map_err(|e| anyhow!("confirm external-funding watchtower: {e}"))?
                 else {
@@ -2545,17 +2543,41 @@ mod tests {
             .await
             .expect("sign and submit external-funding watchtower tx");
 
-        let state = node.state();
-        assert_eq!(state.watchtower_submissions.len(), 1);
-        assert_eq!(state.watchtower_submissions[0].request_id, request_id);
-        assert_eq!(state.watchtower_submissions[0].signature.len(), 65);
-        assert_eq!(
-            ckb_types::packed::Transaction::from(
-                state.watchtower_submissions[0].signed_transaction.clone()
-            )
-            .raw()
-            .as_slice(),
-            funded_tx.raw().as_slice()
-        );
+        {
+            let state = node.state();
+            assert_eq!(state.watchtower_submissions.len(), 1);
+            assert_eq!(state.watchtower_submissions[0].request_id, request_id);
+            assert_eq!(state.watchtower_submissions[0].signature.len(), 65);
+            assert_eq!(
+                ckb_types::packed::Transaction::from(
+                    state.watchtower_submissions[0].signed_transaction.clone()
+                )
+                .raw()
+                .as_slice(),
+                funded_tx.raw().as_slice()
+            );
+        }
+
+        // An unsupported timeout TLC request (`required_expiry_since: Some(...)`) must be
+        // skipped gracefully with `Ok(())` so polling/subscription handling continues for other
+        // channels rather than aborting or reconnecting in a loop.
+        let timeout_status = WatchtowerSigningStatus::ExternalFundingRequired {
+            request_id: fiber_types::Hash256::from([0x98; 32]).into(),
+            content: fiber_json_types::OnchainSigningContent {
+                key_purpose: content.key_purpose,
+                transaction: template_tx.into(),
+            },
+            expires_at_ms: now_ms() + 1_800_000,
+            required_expiry_since: Some(fiber_types::watchtower::settlement_timestamp_since(
+                100_000,
+            )),
+        };
+        agent
+            .handle_watchtower_status(id, timeout_status)
+            .await
+            .expect(
+                "unsupported timeout TLC should be skipped without interrupting other channels",
+            );
+        assert_eq!(node.state().watchtower_submissions.len(), 1);
     }
 }

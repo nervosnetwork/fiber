@@ -665,19 +665,28 @@ async fn create_watch_channel_retry_does_not_publish_no_signature_required_while
 async fn submit_watchtower_signature_rejects_expired_and_accepts_fresh_request() {
     use ckb_types::core::TransactionBuilder;
     use ckb_types::packed::{Byte32, Bytes, CellInput, CellOutput, OutPoint};
-    use ckb_types::prelude::Pack;
+    use ckb_types::prelude::{Builder, Entity, Pack};
     use fiber_types::{OnchainKeyPurpose, OnchainSigningContent, WatchtowerSignerState};
 
     let template_tx = |seed: u8| {
         let mut witness = [0u8; 16 + 1 + 1 + 72 + 1 + 1 + 65];
         witness[16] = 0x01;
         witness[90] = 0xfe;
+        let lock = ckb_types::packed::Script::new_builder()
+            .code_hash(Byte32::from([0x77; 32]))
+            .args([seed; 20].pack())
+            .build();
         TransactionBuilder::default()
             .input(CellInput::new(
                 OutPoint::new(Byte32::from([seed; 32]), 0),
                 0,
             ))
-            .output(CellOutput::default())
+            .output(
+                CellOutput::new_builder()
+                    .lock(lock)
+                    .capacity(6_100_000_000u64)
+                    .build(),
+            )
             .output_data(Bytes::default())
             .witness(witness.as_slice().pack())
             .build()

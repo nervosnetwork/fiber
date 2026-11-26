@@ -90,7 +90,19 @@ impl PendingRequest {
         match self.kind {
             RequestKind::WatchtowerExternalFunding {
                 required_expiry_since,
+                ..
             } => required_expiry_since,
+            RequestKind::Channel => None,
+        }
+    }
+
+    /// Exclusive request expiry in Unix milliseconds when carried by an externally funded
+    /// watchtower request (`None` if unset/0 or not an external-funding watchtower request).
+    pub fn expires_at_ms(&self) -> Option<u64> {
+        match self.kind {
+            RequestKind::WatchtowerExternalFunding { expires_at_ms, .. } => {
+                (expires_at_ms != 0).then_some(expires_at_ms)
+            }
             RequestKind::Channel => None,
         }
     }
@@ -99,7 +111,10 @@ impl PendingRequest {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RequestKind {
     Channel,
-    WatchtowerExternalFunding { required_expiry_since: Option<u64> },
+    WatchtowerExternalFunding {
+        required_expiry_since: Option<u64>,
+        expires_at_ms: u64,
+    },
 }
 
 /// What the caller should do with a handled status.
@@ -552,6 +567,7 @@ impl<S: SignerStore> HostedSession<S> {
                     funded_tx,
                     auth,
                     chain,
+                    now_ms,
                 )
                 .await?
             }
@@ -761,19 +777,25 @@ impl<S: SignerStore> HostedSession<S> {
         funded_transaction: ckb_jsonrpc_types::Transaction,
         authorization: crate::OnchainSpendAuthorization,
         chain: &C,
+        now_ms: u64,
     ) -> Result<ProcessOutcome, SessionError> {
-        let (request_id, template, required_expiry_since) = match status {
+        let (request_id, template, expires_at_ms, required_expiry_since) = match status {
             WatchtowerSigningStatus::ExternalFundingRequired {
                 request_id,
                 content,
+                expires_at_ms,
                 required_expiry_since,
-                ..
-            } => (request_id, content, required_expiry_since),
+            } => (request_id, content, expires_at_ms, required_expiry_since),
             WatchtowerSigningStatus::NoSignatureRequired
             | WatchtowerSigningStatus::Backoff { .. } => {
                 return Ok(ProcessOutcome::Idle);
             }
         };
+        if expires_at_ms != 0 && now_ms >= expires_at_ms {
+            return Err(SessionError::Invalid(
+                "watchtower signing request has expired".into(),
+            ));
+        }
         let template_content = onchain_from_rpc(template);
         let funded_packed: ckb_types::packed::Transaction = funded_transaction.into();
         let normalized_funded = fiber_types::validate_and_normalize_external_funding_watchtower_tx(
@@ -798,24 +820,32 @@ impl<S: SignerStore> HostedSession<S> {
             settlement: None,
             kind: RequestKind::WatchtowerExternalFunding {
                 required_expiry_since,
+                expires_at_ms,
             },
         }))
     }
 
     /// Confirm an externally funded on-chain watchtower request (`pending.is_external_funding() == true`),
-    /// rechecking live chain inputs and maturity before signing `inputs[0]` and returning
-    /// [`SubmitWatchtowerSignatureParams`] carrying both `signature` and `signed_transaction`
-    /// (with all client funding inputs, cell_deps, outputs, and `witness[1..]` intact).
+    /// rechecking request expiry, live chain inputs, and maturity before signing `inputs[0]` and
+    /// returning [`SubmitWatchtowerSignatureParams`] carrying both `signature` and
+    /// `signed_transaction` (with all client funding inputs, cell_deps, outputs, and `witness[1..]`
+    /// intact).
     pub async fn confirm_external_funding_onchain<C: crate::ChainVerifier>(
         &self,
         pending: PendingRequest,
         chain: &C,
+        now_ms: u64,
     ) -> Result<SubmitParams, SessionError> {
-        match pending.kind {
-            RequestKind::WatchtowerExternalFunding { .. } => {}
+        let expires_at_ms = match pending.kind {
+            RequestKind::WatchtowerExternalFunding { expires_at_ms, .. } => expires_at_ms,
             RequestKind::Channel => {
                 return Err(SessionError::Invalid("expected watchtower request".into()));
             }
+        };
+        if expires_at_ms != 0 && now_ms >= expires_at_ms {
+            return Err(SessionError::Invalid(
+                "watchtower signing request has expired".into(),
+            ));
         }
         let crate::ChannelSigningContent::Onchain(onchain) = pending.prepared.content() else {
             return Err(SessionError::Invalid("expected on-chain content".into()));

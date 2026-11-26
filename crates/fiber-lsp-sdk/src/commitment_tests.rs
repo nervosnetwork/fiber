@@ -13,6 +13,8 @@ use musig2::{AggNonce, KeyAggContext};
 
 use crate::*;
 
+const CKB_SHANNON: u64 = 100_000_000;
+
 pub(crate) struct Fixture {
     pub root: RootSigner<MemoryStore>,
     pub signer: ChannelSigner<MemoryStore>,
@@ -20,6 +22,8 @@ pub(crate) struct Fixture {
     pub remote: InMemorySigner,
     pub funding: Transaction,
     pub parameters: CommitmentParameters,
+    pub udt: bool,
+    pub scale: u64,
 }
 
 impl Fixture {
@@ -45,6 +49,14 @@ impl Fixture {
     }
 
     pub async fn new(udt: bool) -> Self {
+        Self::new_with_scale(udt, 1).await
+    }
+
+    pub async fn new_ckb(udt: bool) -> Self {
+        Self::new_with_scale(udt, CKB_SHANNON).await
+    }
+
+    async fn new_with_scale(udt: bool, scale: u64) -> Self {
         let store = MemoryStore::default();
         let root = RootSigner::create(RootKey::import([42; 32]).unwrap(), store.clone())
             .await
@@ -67,7 +79,7 @@ impl Fixture {
             .input(CellInput::new(OutPoint::new([7; 32].pack(), 0), 0))
             .output(
                 CellOutput::new_builder()
-                    .capacity(1000u64)
+                    .capacity(1000u64 * scale)
                     .lock(lock)
                     .type_(type_script.pack())
                     .build(),
@@ -79,6 +91,7 @@ impl Fixture {
             })
             .build()
             .data();
+        let amount_scale = if udt { 1u128 } else { u128::from(scale) };
         let parameters = CommitmentParameters {
             remote_shutdown_script: Script::default(),
             remote_funding_key: remote.funding_key.pubkey(),
@@ -91,11 +104,11 @@ impl Fixture {
                 | ckb_types::core::EpochNumberWithFraction::new(1, 0, 1).full_value())
             .to_le_bytes(),
             epoch_duration_ms: 2000,
-            commitment_fee: 10,
-            local_amount: 400,
-            remote_amount: 600,
-            local_reserved_ckb_amount: if udt { 500 } else { 100 },
-            remote_reserved_ckb_amount: if udt { 500 } else { 100 },
+            commitment_fee: 10 * scale,
+            local_amount: 400 * amount_scale,
+            remote_amount: 600 * amount_scale,
+            local_reserved_ckb_amount: (if udt { 500 } else { 100 }) * scale,
+            remote_reserved_ckb_amount: (if udt { 500 } else { 100 }) * scale,
         };
         signer
             .approve_opening(
@@ -114,14 +127,24 @@ impl Fixture {
             remote,
             funding,
             parameters,
+            udt,
+            scale,
         }
     }
 
     pub fn opening(&self) -> SettlementData {
         SettlementData {
-            local_amount: 400,
-            remote_amount: 600,
+            local_amount: self.parameters.local_amount,
+            remote_amount: self.parameters.remote_amount,
             tlcs: vec![],
+        }
+    }
+
+    fn tlc_amount(&self) -> u128 {
+        if self.udt {
+            50
+        } else {
+            50 * u128::from(self.scale)
         }
     }
 
@@ -130,7 +153,7 @@ impl Fixture {
             payment_hash: HashAlgorithm::CkbHash.hash([9; 32]).into(),
             hash_algorithm: HashAlgorithm::CkbHash,
             inbound,
-            amount: 50,
+            amount: self.tlc_amount(),
             expires_at_ms: 10_000,
             min_tlc_expiry_delta_ms: 1000,
             max_tlc_expiry_ms: 100_000,
@@ -146,7 +169,7 @@ impl Fixture {
                 TLCId::Offered(4)
             },
             hash_algorithm: HashAlgorithm::CkbHash,
-            payment_amount: 50,
+            payment_amount: self.tlc_amount(),
             payment_hash: self.terms(inbound).payment_hash,
             expiry: 20_000,
             local_key: None,
@@ -160,8 +183,8 @@ impl Fixture {
 
     pub fn incoming(&self, for_remote: bool) -> SettlementData {
         SettlementData {
-            local_amount: 400,
-            remote_amount: 550,
+            local_amount: self.parameters.local_amount,
+            remote_amount: self.parameters.remote_amount - self.tlc_amount(),
             tlcs: vec![self.tlc(true, for_remote)],
         }
     }
@@ -229,7 +252,7 @@ impl Fixture {
                     .get(0)
                     .unwrap()
                     .as_builder()
-                    .capacity(990u64)
+                    .capacity(990u64 * self.scale)
                     .lock(lock)
                     .build(),
             )
@@ -1132,7 +1155,7 @@ impl Fixture {
                 .get(0)
                 .unwrap()
                 .as_builder()
-                .capacity(990u64)
+                .capacity(990u64 * self.scale)
                 .lock(Script::default())
                 .build(),
             output_data: self
@@ -1498,6 +1521,7 @@ async fn preimage_release_allows_newer_unrevoked_peer_state_with_same_tlc() {
     assert_eq!(reference.version, 2);
 }
 
+#[derive(Clone)]
 struct TestChain {
     outpoint: OutPoint,
     cell: VerifiedCell,
@@ -1560,7 +1584,7 @@ impl ChainVerifier for TestChain {
 
 #[tokio::test]
 async fn onchain_claim_checks_live_input_witness_destination_fee_and_maturity() {
-    let f = Fixture::new(false).await;
+    let f = Fixture::new_ckb(false).await;
     f.sign(false, 0, f.opening()).await;
     let record = f.signer.recovery_records().await.unwrap().remove(0);
     let source = record.transaction.raw().outputs().get(0).unwrap();
@@ -1590,7 +1614,7 @@ async fn onchain_claim_checks_live_input_witness_destination_fee_and_maturity() 
     let remainder = source
         .clone()
         .as_builder()
-        .capacity(590u64)
+        .capacity(590u64 * CKB_SHANNON)
         .lock(source.lock().as_builder().args(args.pack()).build())
         .build();
     let destination = Script::new_builder().args([42u8].pack()).build();
@@ -1607,7 +1631,7 @@ async fn onchain_claim_checks_live_input_witness_destination_fee_and_maturity() 
         .output_data(ckb_types::packed::Bytes::default())
         .output(
             CellOutput::new_builder()
-                .capacity(395u64)
+                .capacity(395u64 * CKB_SHANNON)
                 .lock(destination.clone())
                 .build(),
         )
@@ -1623,7 +1647,7 @@ async fn onchain_claim_checks_live_input_witness_destination_fee_and_maturity() 
         source: record.reference,
         destination,
         fee_sponsor_lock: None,
-        fee: 5,
+        fee: 5 * CKB_SHANNON,
         additional_inputs: vec![],
         cell_deps: vec![],
     };
@@ -1658,6 +1682,7 @@ async fn onchain_claim_checks_live_input_witness_destination_fee_and_maturity() 
                     content.transaction.clone().into(),
                     terms.clone(),
                     &chain,
+                    1_000,
                 )
                 .await
                 .unwrap()
@@ -1675,14 +1700,14 @@ async fn onchain_claim_checks_live_input_witness_destination_fee_and_maturity() 
                         .output
                         .clone()
                         .as_builder()
-                        .capacity(989u64)
+                        .capacity(989u64 * CKB_SHANNON)
                         .build()
                 }
                 _ => chain.cell.data = vec![1],
             }
             let before = f.store.snapshot().unwrap();
             assert!(session
-                .confirm_external_funding_onchain(pending, &chain)
+                .confirm_external_funding_onchain(pending, &chain, 1_000)
                 .await
                 .is_err());
             assert!(session
@@ -1691,7 +1716,8 @@ async fn onchain_claim_checks_live_input_witness_destination_fee_and_maturity() 
                     serde_json::from_slice(&wire).unwrap(),
                     content.transaction.clone().into(),
                     terms.clone(),
-                    &chain
+                    &chain,
+                    1_000,
                 )
                 .await
                 .is_err());
@@ -1737,8 +1763,20 @@ async fn onchain_claim_checks_live_input_witness_destination_fee_and_maturity() 
                     .lock(Script::default())
                     .build()
             }
-            1 => outputs[1] = outputs[1].clone().as_builder().capacity(394u64).build(),
-            2 => outputs[0] = outputs[0].clone().as_builder().capacity(589u64).build(),
+            1 => {
+                outputs[1] = outputs[1]
+                    .clone()
+                    .as_builder()
+                    .capacity(394u64 * CKB_SHANNON)
+                    .build()
+            }
+            2 => {
+                outputs[0] = outputs[0]
+                    .clone()
+                    .as_builder()
+                    .capacity(589u64 * CKB_SHANNON)
+                    .build()
+            }
             _ => {}
         }
         altered.transaction = tx
@@ -1968,7 +2006,7 @@ async fn cooperative_close_checks_exact_allocations_and_local_fee_approval() {
 #[tokio::test]
 async fn onchain_inbound_tlc_requires_exact_preimage_key_and_residual_state() {
     for udt in [false, true] {
-        let f = Fixture::new(udt).await;
+        let f = Fixture::new_ckb(udt).await;
         f.signer
             .authorize_invoice(f.terms(true), [9; 32].into())
             .await
@@ -2027,7 +2065,7 @@ async fn onchain_inbound_tlc_requires_exact_preimage_key_and_residual_state() {
         let remainder = source
             .clone()
             .as_builder()
-            .capacity(if udt { 990u64 } else { 940u64 })
+            .capacity((if udt { 990u64 } else { 940u64 }) * CKB_SHANNON)
             .lock(source.lock().as_builder().args(args.pack()).build())
             .build();
         let destination = Script::new_builder().args([42u8].pack()).build();
@@ -2037,7 +2075,7 @@ async fn onchain_inbound_tlc_requires_exact_preimage_key_and_residual_state() {
                 auxiliary.clone(),
                 VerifiedCell {
                     output: CellOutput::new_builder()
-                        .capacity(100u64)
+                        .capacity(100u64 * CKB_SHANNON)
                         .lock(destination.clone())
                         .build(),
                     data: vec![],
@@ -2068,7 +2106,7 @@ async fn onchain_inbound_tlc_requires_exact_preimage_key_and_residual_state() {
             })
             .output(
                 CellOutput::new_builder()
-                    .capacity(if udt { 95u64 } else { 45u64 })
+                    .capacity((if udt { 95u64 } else { 45u64 }) * CKB_SHANNON)
                     .type_(source.type_())
                     .lock(destination.clone())
                     .build(),
@@ -2091,7 +2129,7 @@ async fn onchain_inbound_tlc_requires_exact_preimage_key_and_residual_state() {
             source: record.reference,
             destination,
             fee_sponsor_lock: None,
-            fee: 5,
+            fee: 5 * CKB_SHANNON,
             additional_inputs: if udt { vec![auxiliary] } else { vec![] },
             cell_deps: vec![],
         };
@@ -2387,15 +2425,15 @@ impl ChainVerifier for DescendantChain {
 #[tokio::test]
 async fn timeout_then_descendant_settlement_rechecks_time_lineage_and_residual() {
     for features in [fiber_types::ChannelFeatures::V2] {
-        let f = Fixture::new(false).await;
+        let f = Fixture::new_ckb(false).await;
         f.signer.authorize_payment(f.terms(false)).await.unwrap();
         f.sign_with_features(false, 0, f.opening(), features).await;
         f.sign_with_features(
             false,
             1,
             SettlementData {
-                local_amount: 350,
-                remote_amount: 600,
+                local_amount: 350 * u128::from(CKB_SHANNON),
+                remote_amount: 600 * u128::from(CKB_SHANNON),
                 tlcs: vec![f.tlc(false, false)],
             },
             features,
@@ -2421,7 +2459,7 @@ async fn timeout_then_descendant_settlement_rechecks_time_lineage_and_residual()
                     auxiliary.clone(),
                     VerifiedCell {
                         output: CellOutput::new_builder()
-                            .capacity(100u64)
+                            .capacity(100u64 * CKB_SHANNON)
                             .lock(destination.clone())
                             .build(),
                         data: vec![],
@@ -2465,11 +2503,11 @@ async fn timeout_then_descendant_settlement_rechecks_time_lineage_and_residual()
                 u64::from_le_bytes(f.parameters.delay_epoch),
             ))
             .input(CellInput::new(auxiliary.clone(), (0x40u64 << 56) | 20))
-            .output(residual(&next, 940))
+            .output(residual(&next, 940 * CKB_SHANNON))
             .output_data(ckb_types::packed::Bytes::default())
             .output(
                 CellOutput::new_builder()
-                    .capacity(145u64)
+                    .capacity(145u64 * CKB_SHANNON)
                     .lock(destination.clone())
                     .build(),
             )
@@ -2487,7 +2525,7 @@ async fn timeout_then_descendant_settlement_rechecks_time_lineage_and_residual()
             source: record.reference,
             destination: destination.clone(),
             fee_sponsor_lock: None,
-            fee: 5,
+            fee: 5 * CKB_SHANNON,
             additional_inputs: vec![auxiliary],
             cell_deps: vec![],
         };
@@ -2541,11 +2579,11 @@ async fn timeout_then_descendant_settlement_rechecks_time_lineage_and_residual()
         final_body[1..37].fill(0);
         let descendant = TransactionBuilder::default()
             .input(CellInput::new(chain.chain.outpoint.clone(), 0))
-            .output(residual(&final_body, 590))
+            .output(residual(&final_body, 590 * CKB_SHANNON))
             .output_data(ckb_types::packed::Bytes::default())
             .output(
                 CellOutput::new_builder()
-                    .capacity(345u64)
+                    .capacity(345u64 * CKB_SHANNON)
                     .lock(destination)
                     .build(),
             )
@@ -2643,7 +2681,8 @@ async fn assert_onchain_rpc_rejected(
                 serde_json::from_slice(&wire).unwrap(),
                 content.transaction.clone().into(),
                 terms.clone(),
-                chain
+                chain,
+                1_000,
             )
             .await
             .is_err());
@@ -2728,7 +2767,7 @@ async fn signs_full_payment_hash_commitment_after_independent_validation() {
 async fn prepare_and_sign_onchain_accepts_separate_fee_sponsor_and_rejects_oversized_sponsor_change(
 ) {
     for udt in [false, true] {
-        let f = Fixture::new(udt).await;
+        let f = Fixture::new_ckb(udt).await;
         f.signer
             .authorize_invoice(f.terms(true), [9; 32].into())
             .await
@@ -2787,7 +2826,7 @@ async fn prepare_and_sign_onchain_accepts_separate_fee_sponsor_and_rejects_overs
         let remainder = source
             .clone()
             .as_builder()
-            .capacity(if udt { 990u64 } else { 940u64 })
+            .capacity((if udt { 990u64 } else { 940u64 }) * CKB_SHANNON)
             .lock(source.lock().as_builder().args(args.pack()).build())
             .build();
         let destination = Script::new_builder().args([42u8].pack()).build();
@@ -2797,7 +2836,7 @@ async fn prepare_and_sign_onchain_accepts_separate_fee_sponsor_and_rejects_overs
             auxiliary.clone(),
             VerifiedCell {
                 output: CellOutput::new_builder()
-                    .capacity(200u64)
+                    .capacity(200u64 * CKB_SHANNON)
                     .lock(sponsor_lock.clone())
                     .build(),
                 data: vec![],
@@ -2810,7 +2849,7 @@ async fn prepare_and_sign_onchain_accepts_separate_fee_sponsor_and_rejects_overs
         witness.extend_from_slice(&[0; 65]);
         witness.extend_from_slice(&[9; 32]);
         let payout_output = CellOutput::new_builder()
-            .capacity(if udt { 95u64 } else { 50u64 })
+            .capacity((if udt { 95u64 } else { 50u64 }) * CKB_SHANNON)
             .type_(source.type_())
             .lock(destination.clone())
             .build();
@@ -2819,7 +2858,7 @@ async fn prepare_and_sign_onchain_accepts_separate_fee_sponsor_and_rejects_overs
         } else {
             ckb_types::packed::Bytes::default()
         };
-        let sponsor_change_capacity = if udt { 100u64 } else { 195u64 };
+        let sponsor_change_capacity = (if udt { 100u64 } else { 195u64 }) * CKB_SHANNON;
         let sponsor_change = CellOutput::new_builder()
             .capacity(sponsor_change_capacity)
             .lock(sponsor_lock.clone())
@@ -2848,7 +2887,7 @@ async fn prepare_and_sign_onchain_accepts_separate_fee_sponsor_and_rejects_overs
             source: record.reference,
             destination: destination.clone(),
             fee_sponsor_lock: Some(sponsor_lock.clone()),
-            fee: 5,
+            fee: 5 * CKB_SHANNON,
             additional_inputs: vec![auxiliary.clone()],
             cell_deps: vec![],
         };
@@ -2877,11 +2916,15 @@ async fn prepare_and_sign_onchain_accepts_separate_fee_sponsor_and_rejects_overs
                 .as_advanced_builder()
                 .set_outputs(vec![
                     remainder.clone(),
-                    payout_output.clone().as_builder().capacity(49u64).build(),
+                    payout_output
+                        .clone()
+                        .as_builder()
+                        .capacity(49u64 * CKB_SHANNON)
+                        .build(),
                     sponsor_change
                         .clone()
                         .as_builder()
-                        .capacity(sponsor_change_capacity + 1)
+                        .capacity(sponsor_change_capacity + CKB_SHANNON)
                         .build(),
                 ])
                 .build()
@@ -2967,13 +3010,19 @@ async fn prepare_and_sign_onchain_accepts_separate_fee_sponsor_and_rejects_overs
                     u64::from_le_bytes(f.parameters.delay_epoch),
                 ))
                 .input(CellInput::new(auxiliary.clone(), 0))
-                .output(payout_output.clone().as_builder().capacity(95u64).build())
+                .output(
+                    payout_output
+                        .clone()
+                        .as_builder()
+                        .capacity(95u64 * CKB_SHANNON)
+                        .build(),
+                )
                 .output_data(1000u128.to_le_bytes().to_vec().pack())
                 .output(
                     sponsor_change
                         .clone()
                         .as_builder()
-                        .capacity(1090u64)
+                        .capacity(1090u64 * CKB_SHANNON)
                         .build(),
                 )
                 .output_data(ckb_types::packed::Bytes::default())
@@ -2984,7 +3033,7 @@ async fn prepare_and_sign_onchain_accepts_separate_fee_sponsor_and_rejects_overs
                 source: final_record.reference,
                 destination: destination.clone(),
                 fee_sponsor_lock: Some(sponsor_lock.clone()),
-                fee: 5,
+                fee: 5 * CKB_SHANNON,
                 additional_inputs: vec![auxiliary.clone()],
                 cell_deps: vec![],
             };
@@ -3558,7 +3607,7 @@ async fn external_funding_udt_tlc_watchtower_session_flow() {
     // Test both funding from `destination` (`fee_sponsor_lock: None`) and funding from a separate
     // wallet address (`fee_sponsor_lock: Some(custom_wallet_lock)`).
     for separate_wallet_lock in [false, true] {
-        let f = Fixture::new(true).await;
+        let f = Fixture::new_ckb(true).await;
         f.signer
             .authorize_invoice(f.terms(true), [9; 32].into())
             .await
@@ -3614,7 +3663,7 @@ async fn external_funding_udt_tlc_watchtower_session_flow() {
                 wallet_cell_outpoint.clone(),
                 VerifiedCell {
                     output: CellOutput::new_builder()
-                        .capacity(300u64)
+                        .capacity(300u64 * CKB_SHANNON)
                         .lock(wallet_funding_lock.clone())
                         .build(),
                     data: vec![],
@@ -3638,7 +3687,7 @@ async fn external_funding_udt_tlc_watchtower_session_flow() {
         let remainder = source
             .clone()
             .as_builder()
-            .capacity(990u64)
+            .capacity(990u64 * CKB_SHANNON)
             .lock(source.lock().as_builder().args(args.pack()).build())
             .build();
 
@@ -3659,7 +3708,7 @@ async fn external_funding_udt_tlc_watchtower_session_flow() {
             .output_data(950u128.to_le_bytes().to_vec().pack())
             .output(
                 CellOutput::new_builder()
-                    .capacity(142u64)
+                    .capacity(142u64 * CKB_SHANNON)
                     .type_(source.type_())
                     .lock(Script::default())
                     .build(),
@@ -3681,12 +3730,12 @@ async fn external_funding_udt_tlc_watchtower_session_flow() {
             .set_outputs(vec![
                 remainder.clone(),
                 CellOutput::new_builder()
-                    .capacity(142u64)
+                    .capacity(142u64 * CKB_SHANNON)
                     .type_(source.type_())
                     .lock(destination.clone())
                     .build(),
                 CellOutput::new_builder()
-                    .capacity(153u64) // 300 - 142 (UDT cell) - 5 (fee)
+                    .capacity(153u64 * CKB_SHANNON) // 300 - 142 (UDT cell) - 5 (fee)
                     .lock(wallet_funding_lock.clone())
                     .build(),
             ])
@@ -3722,7 +3771,7 @@ async fn external_funding_udt_tlc_watchtower_session_flow() {
             source: record.reference.clone(),
             destination: destination.clone(),
             fee_sponsor_lock: separate_wallet_lock.then_some(wallet_funding_lock.clone()),
-            fee: 5,
+            fee: 5 * CKB_SHANNON,
             additional_inputs: vec![wallet_cell_outpoint.clone()],
             cell_deps: vec![wallet_dep.clone()],
         };
@@ -3748,6 +3797,7 @@ async fn external_funding_udt_tlc_watchtower_session_flow() {
                 tampered_since_tx.into(),
                 authorization.clone(),
                 &chain,
+                1_000,
             )
             .await
             .is_err());
@@ -3761,6 +3811,7 @@ async fn external_funding_udt_tlc_watchtower_session_flow() {
                 funded_tx.clone().into(),
                 authorization,
                 &chain,
+                1_000,
             )
             .await
             .expect("prepare external-funding watchtower request")
@@ -3769,8 +3820,9 @@ async fn external_funding_udt_tlc_watchtower_session_flow() {
         };
         assert!(pending.is_external_funding());
         assert_eq!(pending.required_expiry_since(), None);
+        assert_eq!(pending.expires_at_ms(), Some(1_800_000));
         let SubmitParams::Watchtower(params) = session
-            .confirm_external_funding_onchain(pending, &chain)
+            .confirm_external_funding_onchain(pending, &chain, 1_000)
             .await
             .expect("confirm external-funding watchtower request")
         else {
@@ -3815,7 +3867,7 @@ async fn external_funding_status_result_handler_timeout_tlc_and_single_output_se
     // 1. Verify `handle_watchtower_status_result` + `WatchtowerEventHandler` notifications for
     //    Healthy, InBackoff, and PendingExternalFunding (1-output `two_parties_all_settled`),
     //    then test timeout TLC (`required_expiry_since = Some(...)`) end-to-end.
-    let f = Fixture::new(false).await;
+    let f = Fixture::new_ckb(false).await;
     f.sign(false, 0, f.opening()).await;
     f.sign(true, 0, f.opening()).await;
     let record = f
@@ -3903,7 +3955,7 @@ async fn external_funding_status_result_handler_timeout_tlc_and_single_output_se
 
     // 1b. Single-output `two_parties_all_settled` CKB settlement via `handle_watchtower_status_result`:
     //     simulate a successor commitment cell where the remote party already settled (`0xFF`),
-    //     leaving only local balance (`400`) in a 1-output template with `Script::default()` lock.
+    //     leaving only local balance (`400 CKB`) in a 1-output template with `Script::default()` lock.
     let body = fiber_types::settlement_data_to_witness(
         &record.settlement.data,
         false,
@@ -3920,7 +3972,7 @@ async fn external_funding_status_result_handler_timeout_tlc_and_single_output_se
     let single_party_cell = source
         .clone()
         .as_builder()
-        .capacity(400u64)
+        .capacity(400u64 * CKB_SHANNON)
         .lock(source.lock().as_builder().args(prev_args.pack()).build())
         .build();
     let single_outpoint = outpoint;
@@ -3942,7 +3994,7 @@ async fn external_funding_status_result_handler_timeout_tlc_and_single_output_se
         .input(CellInput::new(single_outpoint, 0))
         .output(
             CellOutput::new_builder()
-                .capacity(400u64)
+                .capacity(400u64 * CKB_SHANNON)
                 .lock(Script::default())
                 .build(),
         )
@@ -3955,7 +4007,7 @@ async fn external_funding_status_result_handler_timeout_tlc_and_single_output_se
         .into_view()
         .as_advanced_builder()
         .set_outputs(vec![CellOutput::new_builder()
-            .capacity(395u64)
+            .capacity(395u64 * CKB_SHANNON)
             .lock(destination.clone())
             .build()])
         .build()
@@ -3964,7 +4016,7 @@ async fn external_funding_status_result_handler_timeout_tlc_and_single_output_se
         source: record.reference.clone(),
         destination: destination.clone(),
         fee_sponsor_lock: None,
-        fee: 5,
+        fee: 5 * CKB_SHANNON,
         additional_inputs: vec![],
         cell_deps: vec![],
     };
@@ -4002,7 +4054,7 @@ async fn external_funding_status_result_handler_timeout_tlc_and_single_output_se
         }) if *ch == channel_id && *req == request_id
     ));
     let SubmitParams::Watchtower(single_params) = session
-        .confirm_external_funding_onchain(pending_single, &single_chain)
+        .confirm_external_funding_onchain(pending_single, &single_chain, 1_000)
         .await
         .expect("confirm single-output watchtower tx")
     else {
@@ -4015,18 +4067,18 @@ async fn external_funding_status_result_handler_timeout_tlc_and_single_output_se
 
     // 2. Timeout TLC (`required_expiry_since = Some(...)`): build a verified commitment with an
     //    offered TLC, verify `required_expiry_since` is propagated and enforced.
-    let f2 = Fixture::new(false).await;
+    let f2 = Fixture::new_ckb(false).await;
     f2.signer.authorize_payment(f2.terms(false)).await.unwrap();
     f2.sign(false, 0, f2.opening()).await;
     f2.sign(true, 0, f2.opening()).await;
     let outgoing_local = SettlementData {
-        local_amount: 350,
-        remote_amount: 600,
+        local_amount: 350 * u128::from(CKB_SHANNON),
+        remote_amount: 600 * u128::from(CKB_SHANNON),
         tlcs: vec![f2.tlc(false, false)],
     };
     let outgoing_remote = SettlementData {
-        local_amount: 350,
-        remote_amount: 600,
+        local_amount: 350 * u128::from(CKB_SHANNON),
+        remote_amount: 600 * u128::from(CKB_SHANNON),
         tlcs: vec![f2.tlc(false, true)],
     };
     f2.sign(false, 1, outgoing_local).await;
@@ -4056,7 +4108,7 @@ async fn external_funding_status_result_handler_timeout_tlc_and_single_output_se
             wallet_outpoint.clone(),
             VerifiedCell {
                 output: CellOutput::new_builder()
-                    .capacity(100u64)
+                    .capacity(100u64 * CKB_SHANNON)
                     .lock(destination.clone())
                     .build(),
                 data: vec![],
@@ -4079,7 +4131,7 @@ async fn external_funding_status_result_handler_timeout_tlc_and_single_output_se
     let tlc_remainder = tlc_source
         .clone()
         .as_builder()
-        .capacity(940u64)
+        .capacity(940u64 * CKB_SHANNON)
         .lock(tlc_source.lock().as_builder().args(tlc_args.pack()).build())
         .build();
     let mut tlc_witness = vec![16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0, 1];
@@ -4096,7 +4148,7 @@ async fn external_funding_status_result_handler_timeout_tlc_and_single_output_se
         .output_data(ckb_types::packed::Bytes::default())
         .output(
             CellOutput::new_builder()
-                .capacity(50u64)
+                .capacity(50u64 * CKB_SHANNON)
                 .lock(Script::default())
                 .build(),
         )
@@ -4112,7 +4164,7 @@ async fn external_funding_status_result_handler_timeout_tlc_and_single_output_se
         .set_outputs(vec![
             tlc_remainder,
             CellOutput::new_builder()
-                .capacity(145u64) // 50 TLC + 100 wallet - 5 fee
+                .capacity(145u64 * CKB_SHANNON) // 50 TLC + 100 wallet - 5 fee
                 .lock(destination.clone())
                 .build(),
         ])
@@ -4129,7 +4181,7 @@ async fn external_funding_status_result_handler_timeout_tlc_and_single_output_se
         source: tlc_record.reference.clone(),
         destination,
         fee_sponsor_lock: None,
-        fee: 5,
+        fee: 5 * CKB_SHANNON,
         additional_inputs: vec![wallet_outpoint],
         cell_deps: vec![],
     };
@@ -4144,6 +4196,86 @@ async fn external_funding_status_result_handler_timeout_tlc_and_single_output_se
         expires_at_ms: 1_800_000,
         required_expiry_since: Some(required_since),
     };
+    // 2a. Expired request deadline (`expires_at_ms`) is rejected before prompting and before confirming.
+    assert!(session2
+        .handle_external_funding_watchtower_status(
+            channel_id,
+            tlc_status.clone(),
+            tlc_funded.clone().into(),
+            tlc_auth.clone(),
+            &tlc_chain,
+            1_800_000,
+        )
+        .await
+        .is_err());
+
+    // 2b. First-absolute-timestamp-input rule in SDK onchain validator: if a malicious watchtower
+    //     advertises too low a `required_expiry_since`, two mature wallet inputs `[tlc_expiry - 1, tlc_expiry]`
+    //     must still be rejected because CommitmentLock inspects only the first absolute-timestamp input.
+    let low_advertised_since = fiber_types::watchtower::settlement_timestamp_since(10_000);
+    let second_wallet_outpoint = OutPoint::new([0x88u8; 32].pack(), 0);
+    let mut tlc_chain_two = tlc_chain.clone();
+    tlc_chain_two.extras.push((
+        second_wallet_outpoint.clone(),
+        VerifiedCell {
+            output: CellOutput::new_builder()
+                .capacity(100_000_000_000u64)
+                .lock(tlc_auth.destination.clone())
+                .build(),
+            data: vec![],
+        },
+    ));
+    let two_ts_inputs_tx = tlc_funded
+        .clone()
+        .into_view()
+        .as_advanced_builder()
+        .set_inputs(vec![
+            tlc_funded.raw().inputs().get(0).unwrap(),
+            CellInput::new(tlc_auth.additional_inputs[0].clone(), required_since - 1),
+            CellInput::new(second_wallet_outpoint.clone(), required_since),
+        ])
+        .set_outputs(vec![
+            tlc_funded.raw().outputs().get(0).unwrap(),
+            CellOutput::new_builder()
+                .capacity(
+                    Unpack::<u64>::unpack(&tlc_funded.raw().outputs().get(1).unwrap().capacity())
+                        + 100_000_000_000u64,
+                )
+                .lock(tlc_auth.destination.clone())
+                .build(),
+        ])
+        .build()
+        .data();
+    let two_ts_auth = OnchainSpendAuthorization {
+        additional_inputs: vec![
+            tlc_auth.additional_inputs[0].clone(),
+            second_wallet_outpoint,
+        ],
+        ..tlc_auth.clone()
+    };
+    let low_status = fiber_json_types::WatchtowerSigningStatus::ExternalFundingRequired {
+        request_id: request_id.into(),
+        content: match &tlc_status {
+            fiber_json_types::WatchtowerSigningStatus::ExternalFundingRequired {
+                content, ..
+            } => content.clone(),
+            _ => unreachable!(),
+        },
+        expires_at_ms: 1_800_000,
+        required_expiry_since: Some(low_advertised_since),
+    };
+    assert!(session2
+        .handle_external_funding_watchtower_status(
+            channel_id,
+            low_status,
+            two_ts_inputs_tx.into(),
+            two_ts_auth,
+            &tlc_chain_two,
+            1_000,
+        )
+        .await
+        .is_err());
+
     let mut handler2 = RecordingHandler::default();
     let (_, ProcessOutcome::NeedConfirmation(pending_tlc)) = session2
         .handle_watchtower_status_result(
@@ -4162,6 +4294,7 @@ async fn external_funding_status_result_handler_timeout_tlc_and_single_output_se
         panic!("expected NeedConfirmation for timeout TLC");
     };
     assert_eq!(pending_tlc.required_expiry_since(), Some(required_since));
+    assert_eq!(pending_tlc.expires_at_ms(), Some(1_800_000));
     assert!(matches!(
         handler2.updates.as_slice(),
         [WatchtowerHealthStatus::PendingExternalFunding {
@@ -4169,8 +4302,13 @@ async fn external_funding_status_result_handler_timeout_tlc_and_single_output_se
             ..
         }] if *since == required_since
     ));
+    // Confirming at or after `expires_at_ms` must be rejected before signing.
+    assert!(session2
+        .confirm_external_funding_onchain(pending_tlc.clone(), &tlc_chain, 1_800_000)
+        .await
+        .is_err());
     let SubmitParams::Watchtower(tlc_params) = session2
-        .confirm_external_funding_onchain(pending_tlc, &tlc_chain)
+        .confirm_external_funding_onchain(pending_tlc, &tlc_chain, 1_000)
         .await
         .expect("confirm timeout TLC watchtower tx")
     else {

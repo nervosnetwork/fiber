@@ -413,9 +413,9 @@ pub struct LastAppliedWatchtowerSignature {
     pub signed_transaction_hash: Hash256,
 }
 
-/// Locate the 65-byte signature slice `(start, end)` inside a V2 single-unlock
-/// `CommitmentLock` settlement witness (`witness[0]`).
-fn settlement_witness_signature_range(witness: &[u8]) -> Result<(usize, usize), String> {
+/// Parse a V2 single-unlock `CommitmentLock` settlement witness (`witness[0]`), returning
+/// `(htlc_count, unlock_type, with_preimage, sig_start, sig_end)`.
+fn parse_settlement_witness_unlock(witness: &[u8]) -> Result<(u8, u8, bool, usize, usize), String> {
     // Layout: 16B xudt placeholder + 1B unlock_count(0x01) + 1B htlc_count(N) +
     // N * 97B V2 HTLC scripts + 72B party balances + 1B unlock_type + 1B with_preimage +
     // 65B signature + optional 32B preimage.
@@ -428,7 +428,8 @@ fn settlement_witness_signature_range(witness: &[u8]) -> Result<(usize, usize), 
             witness[16]
         ));
     }
-    let htlc_count = witness[17] as usize;
+    let htlc_count_u8 = witness[17];
+    let htlc_count = htlc_count_u8 as usize;
     let unlock_offset = 18usize
         .checked_add(
             htlc_count
@@ -443,6 +444,7 @@ fn settlement_witness_signature_range(witness: &[u8]) -> Result<(usize, usize), 
     if witness.len() <= with_preimage_idx {
         return Err("commitment settlement witness is truncated before unlock".to_string());
     }
+    let unlock_type = witness[unlock_offset];
     let with_preimage = match witness[with_preimage_idx] {
         0 => false,
         1 => true,
@@ -461,6 +463,19 @@ fn settlement_witness_signature_range(witness: &[u8]) -> Result<(usize, usize), 
             witness.len()
         ));
     }
+    Ok((
+        htlc_count_u8,
+        unlock_type,
+        with_preimage,
+        sig_start,
+        sig_end,
+    ))
+}
+
+/// Locate the 65-byte signature slice `(start, end)` inside a V2 single-unlock
+/// `CommitmentLock` settlement witness (`witness[0]`).
+fn settlement_witness_signature_range(witness: &[u8]) -> Result<(usize, usize), String> {
+    let (_, _, _, sig_start, sig_end) = parse_settlement_witness_unlock(witness)?;
     Ok((sig_start, sig_end))
 }
 
@@ -574,10 +589,20 @@ pub fn external_funding_watchtower_tx_hash(tx: &Transaction) -> Hash256 {
 ///
 /// Templates have either 2 outputs (`[residual_commitment_output, payout_output]`) when the
 /// commitment cell continues on-chain, or 1 output (`[payout_output]`) when both parties are
-/// settled. When `required_expiry_since` is `None`, the client may pay fees directly out of the
-/// payout output (`inputs.len() == 1`) or attach extra wallet inputs (`inputs.len() >= 2`).
-/// When `required_expiry_since` is `Some(_)`, the client must include at least one funding input
-/// (`inputs.len() >= 2`) carrying an absolute timestamp `since >= required`.
+/// settled. All template `cell_deps` must be retained, every submitted output must satisfy CKB
+/// occupied capacity for its actual lock/type/data, every payout/change output must replace the
+/// template placeholder lock (`Script::default()`), and any template UDT payout type/amount must
+/// be preserved across the submitted payout outputs.
+///
+/// When `required_expiry_since` is `None`, the client may pay fees directly out of the payout
+/// output (`inputs.len() == 1`) or attach extra wallet inputs (`inputs.len() >= 2`); absolute
+/// timestamp `since` values (`0x40` prefix) are permitted on balance withdrawals with no pending
+/// TLCs (`unlock_type >= 0xFE && htlc_count == 0`) where the contract never inspects input
+/// timestamps, and rejected on unlocks where a timestamp could affect the contract path.
+/// When `required_expiry_since` is `Some(required)`, the client must attach at least one funding
+/// input (`inputs.len() >= 2`), and the **first** input carrying an absolute timestamp `since`
+/// (`0x40` prefix) must satisfy `since >= required` (matching
+/// `CommitmentLock::load_expiry_raw_since_value`).
 ///
 /// When `submitted_signature` is `Some(sig)`, `witness[0]` in `submitted` may contain either
 /// the all-zero placeholder or `sig` in its 65-byte signature slot. When `None` (pre-signing
@@ -600,6 +625,15 @@ pub fn validate_and_normalize_external_funding_watchtower_tx(
         return Err(
             "externally funded watchtower transaction must not include header_deps".to_string(),
         );
+    }
+    let submitted_deps: Vec<_> = submitted_raw.cell_deps().into_iter().collect();
+    for template_dep in template_raw.cell_deps() {
+        if !submitted_deps.contains(&template_dep) {
+            return Err(
+                "externally funded watchtower transaction must retain all template cell_deps"
+                    .to_string(),
+            );
+        }
     }
     let template_outputs_len = template_raw.outputs().len();
     if template_outputs_len != 1 && template_outputs_len != 2 {
@@ -659,7 +693,7 @@ pub fn validate_and_normalize_external_funding_watchtower_tx(
     // `outputs[0]` and `outputs_data[0]` must match the template verbatim. When `outputs.len() == 1`
     // (`two_parties_all_settled`), `outputs[0]` is the client's final payout and may be adjusted
     // for transaction fees.
-    if template_outputs_len == 2 {
+    let payout_start = if template_outputs_len == 2 {
         let template_output0 = template_raw
             .outputs()
             .get(0)
@@ -676,6 +710,122 @@ pub fn validate_and_normalize_external_funding_watchtower_tx(
                     .to_string(),
             );
         }
+        1usize
+    } else {
+        0usize
+    };
+
+    let template_payout_idx = template_outputs_len - 1;
+    let template_payout_output = template_raw
+        .outputs()
+        .get(template_payout_idx)
+        .ok_or_else(|| "template transaction is missing payout output".to_string())?;
+    let template_payout_udt = match template_payout_output.type_().to_opt() {
+        Some(udt_type) => {
+            let payout_data = template_raw
+                .outputs_data()
+                .get(template_payout_idx)
+                .ok_or_else(|| "template transaction is missing payout outputs_data".to_string())?
+                .raw_data();
+            let amount_bytes: [u8; 16] = payout_data
+                .get(..16)
+                .and_then(|s| s.try_into().ok())
+                .ok_or_else(|| {
+                    "template UDT payout outputs_data is shorter than 16 bytes".to_string()
+                })?;
+            Some((udt_type, u128::from_le_bytes(amount_bytes)))
+        }
+        None => None,
+    };
+
+    let default_lock = Script::default();
+    let mut funded_udt_total = 0u128;
+    for (i, output) in submitted_raw.outputs().into_iter().enumerate() {
+        let data = submitted_raw
+            .outputs_data()
+            .get(i)
+            .ok_or_else(|| {
+                format!("externally funded watchtower transaction is missing outputs_data[{i}]")
+            })?
+            .raw_data();
+        let capacity: u64 = output.capacity().unpack();
+        let data_cap = ckb_types::core::Capacity::bytes(data.len())
+            .map_err(|e| format!("output[{i}] data capacity overflow: {e}"))?;
+        let occupied = output
+            .occupied_capacity(data_cap)
+            .map_err(|e| format!("output[{i}] occupied capacity overflow: {e}"))?
+            .as_u64();
+        if capacity < occupied {
+            return Err(format!(
+                "externally funded watchtower transaction output[{i}] capacity ({capacity}) is below occupied capacity ({occupied})"
+            ));
+        }
+        if i >= payout_start {
+            if output.lock() == default_lock {
+                return Err(format!(
+                    "externally funded watchtower transaction output[{i}] must replace placeholder lock script"
+                ));
+            }
+            if let Some((ref udt_type, _)) = template_payout_udt {
+                if output.type_().to_opt().as_ref() == Some(udt_type) {
+                    let amount_bytes: [u8; 16] = data
+                        .get(..16)
+                        .and_then(|s| s.try_into().ok())
+                        .ok_or_else(|| {
+                            format!(
+                                "externally funded watchtower transaction UDT output[{i}] data is shorter than 16 bytes"
+                            )
+                        })?;
+                    funded_udt_total = funded_udt_total
+                        .checked_add(u128::from_le_bytes(amount_bytes))
+                        .ok_or_else(|| {
+                            "externally funded watchtower transaction UDT payout overflow"
+                                .to_string()
+                        })?;
+                }
+            }
+        }
+    }
+    if let Some((_, expected_udt_amount)) = template_payout_udt {
+        if funded_udt_total < expected_udt_amount {
+            return Err(format!(
+                "externally funded watchtower transaction UDT payout ({funded_udt_total}) is below template payout ({expected_udt_amount})"
+            ));
+        }
+    }
+
+    let template_w0 = template
+        .witnesses()
+        .get(0)
+        .ok_or_else(|| "template transaction is missing witness[0]".to_string())?;
+    let submitted_w0 = submitted
+        .witnesses()
+        .get(0)
+        .ok_or_else(|| "externally funded transaction is missing witness[0]".to_string())?;
+    let template_w0_bytes = template_w0.raw_data();
+    let submitted_w0_bytes = submitted_w0.raw_data();
+    let (htlc_count, unlock_type, _with_preimage, sig_start, sig_end) =
+        parse_settlement_witness_unlock(&template_w0_bytes)?;
+    if template_w0_bytes[sig_start..sig_end] != [0u8; 65] {
+        return Err("template witness[0] signature slot must be all-zero placeholder".to_string());
+    }
+    if submitted_w0_bytes.len() != template_w0_bytes.len()
+        || submitted_w0_bytes[..sig_start] != template_w0_bytes[..sig_start]
+        || submitted_w0_bytes[sig_end..] != template_w0_bytes[sig_end..]
+    {
+        return Err(
+            "externally funded watchtower transaction witness[0] does not match template unlock"
+                .to_string(),
+        );
+    }
+    let sig_slot = &submitted_w0_bytes[sig_start..sig_end];
+    let is_zero_placeholder = sig_slot == [0u8; 65].as_slice();
+    let matches_submitted_sig = submitted_signature.is_some_and(|sig| sig_slot == sig.as_slice());
+    if !is_zero_placeholder && !matches_submitted_sig {
+        return Err(
+            "externally funded watchtower transaction witness[0] signature slot must be zero placeholder or match submitted signature"
+                .to_string(),
+        );
     }
 
     // Mirror CommitmentLock::load_expiry_raw_since_value: first absolute-timestamp input since.
@@ -704,46 +854,17 @@ pub fn validate_and_normalize_external_funding_watchtower_tx(
             }
         }
         None => {
-            if first_abs_timestamp_since.is_some() {
+            // On balance withdrawals with no pending TLCs (`unlock_type >= 0xFE && htlc_count == 0`),
+            // CommitmentLock never inspects input absolute timestamps, so wallets may spend
+            // mature timestamp-locked funding cells.
+            let allow_timestamp_funding = unlock_type >= 0xFE && htlc_count == 0;
+            if !allow_timestamp_funding && first_abs_timestamp_since.is_some() {
                 return Err(
                     "externally funded non-timeout watchtower transaction must not carry an absolute timestamp since"
                         .to_string(),
                 );
             }
         }
-    }
-
-    let template_w0 = template
-        .witnesses()
-        .get(0)
-        .ok_or_else(|| "template transaction is missing witness[0]".to_string())?;
-    let submitted_w0 = submitted
-        .witnesses()
-        .get(0)
-        .ok_or_else(|| "externally funded transaction is missing witness[0]".to_string())?;
-    let template_w0_bytes = template_w0.raw_data();
-    let submitted_w0_bytes = submitted_w0.raw_data();
-    let (sig_start, sig_end) = settlement_witness_signature_range(&template_w0_bytes)?;
-    if template_w0_bytes[sig_start..sig_end] != [0u8; 65] {
-        return Err("template witness[0] signature slot must be all-zero placeholder".to_string());
-    }
-    if submitted_w0_bytes.len() != template_w0_bytes.len()
-        || submitted_w0_bytes[..sig_start] != template_w0_bytes[..sig_start]
-        || submitted_w0_bytes[sig_end..] != template_w0_bytes[sig_end..]
-    {
-        return Err(
-            "externally funded watchtower transaction witness[0] does not match template unlock"
-                .to_string(),
-        );
-    }
-    let sig_slot = &submitted_w0_bytes[sig_start..sig_end];
-    let is_zero_placeholder = sig_slot == [0u8; 65].as_slice();
-    let matches_submitted_sig = submitted_signature.is_some_and(|sig| sig_slot == sig.as_slice());
-    if !is_zero_placeholder && !matches_submitted_sig {
-        return Err(
-            "externally funded watchtower transaction witness[0] signature slot must be zero placeholder or match submitted signature"
-                .to_string(),
-        );
     }
 
     let mut normalized_witnesses = Vec::with_capacity(witnesses_len);
@@ -1335,6 +1456,24 @@ mod key_material_tests {
         w
     }
 
+    fn test_wallet_lock() -> Script {
+        use ckb_types::packed::Byte32;
+        use ckb_types::prelude::*;
+        Script::new_builder()
+            .code_hash(Byte32::from([0x33; 32]))
+            .args([0x11u8; 20].pack())
+            .build()
+    }
+
+    fn test_udt_type() -> Script {
+        use ckb_types::packed::Byte32;
+        use ckb_types::prelude::*;
+        Script::new_builder()
+            .code_hash(Byte32::from([0x44; 32]))
+            .args([0x22u8; 32])
+            .build()
+    }
+
     fn build_template_and_funded(
         htlc_count: u8,
         with_preimage: bool,
@@ -1346,15 +1485,27 @@ mod key_material_tests {
 
         let commitment_outpoint = OutPoint::new(Byte32::from([1u8; 32]), 0);
         let wallet_outpoint = OutPoint::new(Byte32::from([2u8; 32]), 1);
+        let wallet_lock = test_wallet_lock();
+        let udt_type = test_udt_type();
         let residual_out = CellOutput::new_builder()
             .capacity(28_400_000_000u64)
+            .type_(Some(udt_type.clone()).pack())
             .build();
         let residual_data = 100u128.to_le_bytes().to_vec().pack();
-        let udt_out = CellOutput::new_builder()
+        let template_udt_out = CellOutput::new_builder()
             .capacity(14_200_000_000u64)
+            .type_(Some(udt_type.clone()).pack())
+            .build();
+        let funded_udt_out = CellOutput::new_builder()
+            .lock(wallet_lock.clone())
+            .capacity(14_200_000_000u64)
+            .type_(Some(udt_type).pack())
             .build();
         let udt_data = 50u128.to_le_bytes().to_vec().pack();
-        let change_out = CellOutput::new_builder().capacity(6_000_000_000u64).build();
+        let change_out = CellOutput::new_builder()
+            .lock(wallet_lock)
+            .capacity(6_100_000_000u64)
+            .build();
         let w0 = build_template_witness(htlc_count, with_preimage, [0u8; 65]);
 
         let template = TransactionBuilder::default()
@@ -1367,7 +1518,7 @@ mod key_material_tests {
             .input(CellInput::new(commitment_outpoint.clone(), 0))
             .output(residual_out.clone())
             .output_data(residual_data.clone())
-            .output(udt_out.clone())
+            .output(template_udt_out)
             .output_data(udt_data.clone())
             .witness(w0.clone().pack())
             .build()
@@ -1390,7 +1541,7 @@ mod key_material_tests {
             .input(CellInput::new(wallet_outpoint, funding_since))
             .output(residual_out)
             .output_data(residual_data)
-            .output(udt_out)
+            .output(funded_udt_out)
             .output_data(udt_data)
             .output(change_out)
             .output_data(Bytes::default())
@@ -1536,7 +1687,47 @@ mod key_material_tests {
         )
         .is_err());
 
-        // 5. Non-timeout (preimage/balance) allows 1-input fee-from-payout AND 2-input funding,
+        // 4b. First-absolute-timestamp-input rule: [expiry - 1, expiry] fails while
+        //     [expiry, expiry - 1] succeeds (matching CommitmentLock::load_expiry_raw_since_value).
+        let second_wallet_outpoint = OutPoint::new(Byte32::from([3u8; 32]), 0);
+        let early_then_valid = funded
+            .clone()
+            .into_view()
+            .as_advanced_builder()
+            .set_inputs(vec![
+                funded.raw().inputs().get(0).unwrap(),
+                CellInput::new(OutPoint::new(Byte32::from([2u8; 32]), 1), expiry_since - 1),
+                CellInput::new(second_wallet_outpoint.clone(), expiry_since),
+            ])
+            .build()
+            .data();
+        assert!(validate_and_normalize_external_funding_watchtower_tx(
+            &template,
+            &early_then_valid,
+            Some(expiry_since),
+            Some(&sig),
+        )
+        .is_err());
+        let valid_then_early = funded
+            .clone()
+            .into_view()
+            .as_advanced_builder()
+            .set_inputs(vec![
+                funded.raw().inputs().get(0).unwrap(),
+                CellInput::new(OutPoint::new(Byte32::from([2u8; 32]), 1), expiry_since),
+                CellInput::new(second_wallet_outpoint, expiry_since - 1),
+            ])
+            .build()
+            .data();
+        assert!(validate_and_normalize_external_funding_watchtower_tx(
+            &template,
+            &valid_then_early,
+            Some(expiry_since),
+            Some(&sig),
+        )
+        .is_ok());
+
+        // 5. Non-timeout preimage TLC allows 1-input fee-from-payout AND 2-input funding,
         //    and rejects unexpected absolute timestamp `since`.
         let (preimage_tmpl, preimage_funded_ok) = build_template_and_funded(1, true, 0);
         assert!(validate_and_normalize_external_funding_watchtower_tx(
@@ -1546,7 +1737,9 @@ mod key_material_tests {
             Some(&sig),
         )
         .is_ok());
-        // 1-input fee deducted from payout output[1] (residual output[0] preserved).
+        // 1-input fee deducted from payout output[1] (residual output[0] preserved, placeholder lock replaced).
+        let wallet_lock = test_wallet_lock();
+        let udt_type = test_udt_type();
         let fee_from_payout = preimage_tmpl
             .clone()
             .into_view()
@@ -1554,7 +1747,9 @@ mod key_material_tests {
             .set_outputs(vec![
                 preimage_tmpl.raw().outputs().get(0).unwrap(),
                 CellOutput::new_builder()
-                    .capacity(14_199_999_000u64)
+                    .lock(wallet_lock.clone())
+                    .type_(Some(udt_type.clone()).pack())
+                    .capacity(14_299_999_000u64)
                     .build(),
             ])
             .build()
@@ -1566,8 +1761,15 @@ mod key_material_tests {
             Some(&sig),
         )
         .is_ok());
-        // 1-output `two_parties_all_settled` template allows deducting fee directly from outputs[0].
+        // 1-output `two_parties_all_settled` template allows deducting fee directly from outputs[0]
+        // once placeholder lock is replaced, and rejects leaving Script::default() in place.
         let final_tmpl = ckb_types::core::TransactionBuilder::default()
+            .cell_dep(
+                CellDep::new_builder()
+                    .out_point(OutPoint::new(Byte32::from([0x10; 32]), 0))
+                    .dep_type(DepType::DepGroup)
+                    .build(),
+            )
             .input(preimage_tmpl.raw().inputs().get(0).unwrap())
             .output(
                 CellOutput::new_builder()
@@ -1578,7 +1780,7 @@ mod key_material_tests {
             .witness(build_template_witness(0, false, [0u8; 65]).pack())
             .build()
             .data();
-        let final_fee_from_payout = final_tmpl
+        let final_placeholder_lock = final_tmpl
             .clone()
             .into_view()
             .as_advanced_builder()
@@ -1589,7 +1791,35 @@ mod key_material_tests {
             .data();
         assert!(validate_and_normalize_external_funding_watchtower_tx(
             &final_tmpl,
+            &final_placeholder_lock,
+            None,
+            Some(&sig),
+        )
+        .is_err());
+        let final_fee_from_payout = final_tmpl
+            .clone()
+            .into_view()
+            .as_advanced_builder()
+            .set_outputs(vec![CellOutput::new_builder()
+                .lock(wallet_lock.clone())
+                .capacity(19_999_999_000u64)
+                .build()])
+            .build()
+            .data();
+        assert!(validate_and_normalize_external_funding_watchtower_tx(
+            &final_tmpl,
             &final_fee_from_payout,
+            None,
+            Some(&sig),
+        )
+        .is_ok());
+        // Balance withdrawal with no pending TLCs (htlc_count == 0, unlock_type == 0xFE) allows
+        // a mature absolute-timestamp wallet funding input when required_expiry_since is None.
+        let (balance_tmpl, balance_funded_with_ts) =
+            build_template_and_funded(0, false, expiry_since);
+        assert!(validate_and_normalize_external_funding_watchtower_tx(
+            &balance_tmpl,
+            &balance_funded_with_ts,
             None,
             Some(&sig),
         )
@@ -1602,6 +1832,179 @@ mod key_material_tests {
             Some(&sig),
         )
         .is_err());
+
+        // 5a. Placeholder lock, missing template cell_deps, occupied capacity 1-shannon boundary,
+        //     and UDT payout preservation (burn vs split).
+        // Placeholder lock left on outputs[1] of a 2-output tx is rejected.
+        let placeholder_out1 = funded
+            .clone()
+            .into_view()
+            .as_advanced_builder()
+            .set_outputs(vec![
+                funded.raw().outputs().get(0).unwrap(),
+                CellOutput::new_builder()
+                    .type_(Some(udt_type.clone()).pack())
+                    .capacity(14_200_000_000u64)
+                    .build(),
+                funded.raw().outputs().get(2).unwrap(),
+            ])
+            .build()
+            .data();
+        assert!(validate_and_normalize_external_funding_watchtower_tx(
+            &template,
+            &placeholder_out1,
+            Some(expiry_since),
+            Some(&sig),
+        )
+        .is_err());
+
+        // Missing template cell_deps rejected.
+        let empty_deps = funded
+            .clone()
+            .into_view()
+            .as_advanced_builder()
+            .set_cell_deps(vec![])
+            .build()
+            .data();
+        assert!(validate_and_normalize_external_funding_watchtower_tx(
+            &template,
+            &empty_deps,
+            Some(expiry_since),
+            Some(&sig),
+        )
+        .is_err());
+
+        // Occupied capacity one-shannon boundary on a standard 20-byte-args lock (61 CKB = 6_100_000_000).
+        let exact_change = CellOutput::new_builder()
+            .lock(wallet_lock.clone())
+            .capacity(6_100_000_000u64)
+            .build();
+        let exact_occ = exact_change
+            .occupied_capacity(ckb_types::core::Capacity::bytes(0).unwrap())
+            .unwrap()
+            .as_u64();
+        assert_eq!(exact_occ, 6_100_000_000u64);
+        let under_occupied_final = final_tmpl
+            .clone()
+            .into_view()
+            .as_advanced_builder()
+            .set_outputs(vec![CellOutput::new_builder()
+                .lock(wallet_lock.clone())
+                .capacity(exact_occ - 1)
+                .build()])
+            .build()
+            .data();
+        assert!(validate_and_normalize_external_funding_watchtower_tx(
+            &final_tmpl,
+            &under_occupied_final,
+            None,
+            Some(&sig),
+        )
+        .is_err());
+        let exact_occupied_final = final_tmpl
+            .clone()
+            .into_view()
+            .as_advanced_builder()
+            .set_outputs(vec![CellOutput::new_builder()
+                .lock(wallet_lock.clone())
+                .capacity(exact_occ)
+                .build()])
+            .build()
+            .data();
+        assert!(validate_and_normalize_external_funding_watchtower_tx(
+            &final_tmpl,
+            &exact_occupied_final,
+            None,
+            Some(&sig),
+        )
+        .is_ok());
+
+        // UDT payout preservation on final 1-output template: dropping type/data (burn) rejected,
+        // underpaying rejected, splitting across two UDT outputs totaling template amount accepted.
+        let final_udt_tmpl = ckb_types::core::TransactionBuilder::default()
+            .cell_dep(
+                CellDep::new_builder()
+                    .out_point(OutPoint::new(Byte32::from([0x10; 32]), 0))
+                    .dep_type(DepType::DepGroup)
+                    .build(),
+            )
+            .input(preimage_tmpl.raw().inputs().get(0).unwrap())
+            .output(
+                CellOutput::new_builder()
+                    .type_(Some(udt_type.clone()).pack())
+                    .capacity(14_200_000_000u64)
+                    .build(),
+            )
+            .output_data(100u128.to_le_bytes().to_vec().pack())
+            .witness(build_template_witness(0, false, [0u8; 65]).pack())
+            .build()
+            .data();
+        let burned_udt = final_udt_tmpl
+            .clone()
+            .into_view()
+            .as_advanced_builder()
+            .set_outputs(vec![CellOutput::new_builder()
+                .lock(wallet_lock.clone())
+                .capacity(14_199_999_000u64)
+                .build()])
+            .set_outputs_data(vec![Bytes::default()])
+            .build()
+            .data();
+        assert!(validate_and_normalize_external_funding_watchtower_tx(
+            &final_udt_tmpl,
+            &burned_udt,
+            None,
+            Some(&sig),
+        )
+        .is_err());
+        let underpaid_udt = final_udt_tmpl
+            .clone()
+            .into_view()
+            .as_advanced_builder()
+            .set_outputs(vec![CellOutput::new_builder()
+                .lock(wallet_lock.clone())
+                .type_(Some(udt_type.clone()).pack())
+                .capacity(14_200_000_000u64)
+                .build()])
+            .set_outputs_data(vec![99u128.to_le_bytes().to_vec().pack()])
+            .build()
+            .data();
+        assert!(validate_and_normalize_external_funding_watchtower_tx(
+            &final_udt_tmpl,
+            &underpaid_udt,
+            None,
+            Some(&sig),
+        )
+        .is_err());
+        let split_udt = final_udt_tmpl
+            .clone()
+            .into_view()
+            .as_advanced_builder()
+            .set_outputs(vec![
+                CellOutput::new_builder()
+                    .lock(wallet_lock.clone())
+                    .type_(Some(udt_type.clone()).pack())
+                    .capacity(14_200_000_000u64)
+                    .build(),
+                CellOutput::new_builder()
+                    .lock(wallet_lock)
+                    .type_(Some(udt_type).pack())
+                    .capacity(14_200_000_000u64)
+                    .build(),
+            ])
+            .set_outputs_data(vec![
+                40u128.to_le_bytes().to_vec().pack(),
+                60u128.to_le_bytes().to_vec().pack(),
+            ])
+            .build()
+            .data();
+        assert!(validate_and_normalize_external_funding_watchtower_tx(
+            &final_udt_tmpl,
+            &split_udt,
+            None,
+            Some(&sig),
+        )
+        .is_ok());
 
         // 5b. Multi-input same-lock wallet omitting trailing empty witnesses (e.g. 3 inputs, 2 witnesses) is accepted.
         let multi_same_lock = funded
