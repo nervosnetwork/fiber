@@ -167,6 +167,45 @@ LSP if different. Explicit `trampoline_hops` override this inference. The
 public node's ordinary payments and ordinary trampoline forwarding continue
 to use the same payment data plane.
 
+For an invoice with a trampoline hint, the hosted payer's workflow is:
+
+```mermaid
+sequenceDiagram
+    participant W as Payer's client
+    participant API as Shared tenant RPC
+    participant U as Hosted payer U
+    participant T1 as Payer's Public T1
+    participant N as Fiber network
+    participant T2 as Payee's hinted LSP T2
+    participant R as Payee R
+
+    W->>API: send_payment(invoice) with tenant token
+    API->>U: Dispatch to authenticated tenant actor
+    U->>U: Create payment session and infer trampoline hops
+    U->>T1: Add TLC over private U-T1 channel
+    U-->>API: Initial payment status
+    API-->>W: Return initial status
+    alt Payee's hint is T1
+        T1->>R: Route or deliver payment to R
+        R-->>T1: Fulfill or fail
+    else Payee's hint is a different LSP
+        T1->>N: Forward toward T2
+        N->>T2: Forward payment
+        T2->>R: Route or deliver payment to R
+        R-->>T2: Fulfill or fail
+        T2-->>N: Return result
+        N-->>T1: Return result
+    end
+    T1-->>U: Fulfill or fail private-channel TLC
+    W->>API: get_payment(payment_hash)
+    API-->>W: Return updated payment status
+```
+
+The public Fiber network may contain multiple intermediate hops; `N` is not
+one specific node. If the payee is hosted, its LSP may buffer the final
+delivery as described below. For a non-hosted payee, the final hop follows
+ordinary Fiber routing. The result propagates back along the selected path.
+
 ## Receiving and buffering a payment
 
 The tenant calls the normal `new_invoice` RPC with its token. The Node signs
@@ -269,21 +308,21 @@ limits are:
 
 ```yaml
 services:
-  - fiber
-  - ckb
-  - rpc
-  - lsp
+  - fiber # Run Public T's Fiber node and payment/channel actors.
+  - ckb   # Connect to CKB for funding, chain events, and settlement.
+  - rpc   # Expose the authenticated operator and tenant RPC endpoints.
+  - lsp   # Start the hosted tenant and payment-delivery service.
 
 lsp:
-  token_ttl_secs: 2592000
-  max_active_tenants: 64
-  max_buffer_duration_ms: 604800000
-  max_pending_deliveries: 1024
-  max_pending_deliveries_per_tenant: 64
-  max_watch_channels_per_tenant: 64
-  max_watch_channels: 4096
-  max_watch_preimages_per_tenant: 256
-  max_watch_preimages: 16384
+  token_ttl_secs: 2592000 # Lifetime of newly issued tenant tokens: 30 days.
+  max_active_tenants: 64 # Maximum resident tenant actors at one time.
+  max_buffer_duration_ms: 604800000 # Operator cap on invoice buffering: 7 days.
+  max_pending_deliveries: 1024 # Maximum non-final deliveries across all tenants.
+  max_pending_deliveries_per_tenant: 64 # Maximum non-final deliveries for one tenant.
+  max_watch_channels_per_tenant: 64 # Maximum watchtower channel rows for one tenant/node.
+  max_watch_channels: 4096 # Maximum watchtower channel rows across all nodes.
+  max_watch_preimages_per_tenant: 256 # Maximum watched preimages for one tenant/node.
+  max_watch_preimages: 16384 # Maximum watched preimages across all nodes.
 ```
 
 These bounds protect runtime, pending-delivery, and watchtower capacity, but
