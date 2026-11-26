@@ -29,3 +29,5 @@ pub fn decode_as_new<TOld: serde::Serialize, TNew: serde::de::DeserializeOwned>(
 }
 
 include!(concat!(env!("OUT_DIR"), "/register_migrations.rs"));
+
+pub use mig_20261113_v2_only::{archive_v1_channels, V1ChannelArchiveSummary};

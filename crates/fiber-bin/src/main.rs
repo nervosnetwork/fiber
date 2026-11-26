@@ -39,6 +39,7 @@ use jsonrpsee::ws_client::{HeaderMap, HeaderValue};
 use ractor::{Actor, ActorRef};
 #[cfg(debug_assertions)]
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
@@ -47,6 +48,8 @@ use tokio::select;
 use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, error, info, info_span, trace};
 use tracing_subscriber::{field::MakeExt, fmt, fmt::format, EnvFilter};
+
+mod drop_v1_channel;
 
 const ASSUME_WATCHTOWER_ACTOR_ALIVE: &str = "watchtower actor must be alive";
 
@@ -101,6 +104,18 @@ pub fn main() -> Result<(), ExitMessage> {
         use nix::sys::stat::{umask, Mode};
 
         umask(Mode::from_bits_truncate(0o077));
+    }
+
+    if std::env::args_os().nth(1).as_deref() == Some(OsStr::new("drop-v1-channel")) {
+        let mut sub_args = Vec::new();
+        for arg in std::env::args_os().skip(2) {
+            sub_args.push(
+                arg.into_string()
+                    .map_err(|_| ExitMessage("subcommand arguments must be valid UTF-8".into()))?,
+            );
+        }
+        drop_v1_channel::run(sub_args.into_iter()).map_err(ExitMessage)?;
+        return Ok(());
     }
 
     let runtime = tokio::runtime::Builder::new_multi_thread()

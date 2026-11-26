@@ -5773,3 +5773,40 @@ fn test_move_channel_open_records_atomically_with_channel_actor_state() {
         final_id
     );
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_archive_v1_channel_before_open_store() {
+    use fiber_types_0100::sample::StoreSample;
+
+    let path = TempDir::new("test-archive-v1-before-open");
+    let id_bytes = {
+        let store = fiber_store::Store::open_db(path.as_ref()).expect("raw store");
+        store.put(
+            fiber_store::migration::MIGRATION_VERSION_KEY,
+            b"20260925120000",
+        );
+        let mut channel = fiber_types_0100::ChannelActorData::samples(1).remove(0);
+        channel.state = fiber_types_0100::ChannelState::AwaitingChannelReady(
+            fiber_types_0100::AwaitingChannelReadyFlags::empty(),
+        );
+        let id_bytes = <[u8; 32]>::try_from(channel.id.as_ref()).expect("channel id");
+        store.put(
+            [&[0u8][..], channel.id.as_ref()].concat(),
+            bincode::serialize(&channel).expect("encode V1 channel"),
+        );
+        id_bytes
+    };
+
+    let id = fiber_types::Hash256::from(id_bytes);
+    let summaries = crate::store::archive_v1_channels(path.as_ref(), &[id], true)
+        .expect("archive V1 channel before opening the store");
+    assert_eq!(summaries.len(), 1);
+    assert!(summaries[0].state.contains("AwaitingChannelReady"));
+
+    let store = open_store(path.as_ref()).expect("migration after archive");
+    assert!(
+        store.get_channel_actor_state(&id).is_none(),
+        "archived channel must not be loaded after migration"
+    );
+}

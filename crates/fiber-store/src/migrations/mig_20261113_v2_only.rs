@@ -387,6 +387,152 @@ fn legacy_closed(channel: &OldChannelActorData) -> bool {
         && channel.waiting_forward_tlc_tasks.is_empty()
 }
 
+/// Summary of a V1 channel selected for the pre-migration archive step.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct V1ChannelArchiveSummary {
+    /// Channel being archived.
+    pub channel_id: Hash256,
+    /// Debug representation of the V1 channel state.
+    pub state: String,
+    /// Funding transaction hash as `0x`-prefixed hex, when known.
+    pub funding_tx_hash: Option<String>,
+    /// Funding outpoint as `0x<hash>:<index>`, when known.
+    pub funding_outpoint: Option<String>,
+    /// Total number of active keys that will be archived.
+    pub archived_keys: usize,
+    /// Watchtower keys included in [`Self::archived_keys`].
+    pub watchtower_keys: usize,
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
+/// Archive the listed V1 channels so the V2-only migration can proceed.
+///
+/// This is an explicit, offline pre-migration step: it does not close the funding
+/// transaction and does not recover funds. Every removed key is copied under
+/// `ARCHIVED_V1_PREFIX` first. The database version must still be
+/// `RELEASED_VERSION`; run the normal migration afterwards.
+pub fn archive_v1_channels(
+    store: &dyn MigrationStore,
+    channel_ids: &[Hash256],
+    apply: bool,
+) -> Result<Vec<V1ChannelArchiveSummary>, String> {
+    let version = store
+        .get(MIGRATION_VERSION_KEY)
+        .ok_or_else(|| "database has no version; refusing to archive V1 channels".to_owned())?;
+    let version =
+        std::str::from_utf8(&version).map_err(|_| "Invalid database version".to_owned())?;
+    if version != RELEASED_VERSION {
+        return Err(format!(
+            "V1 archive must run before migration: expected database version {RELEASED_VERSION}, found {version}"
+        ));
+    }
+
+    let mut all_keys: Vec<Vec<u8>> = Vec::new();
+    let mut seen = HashSet::new();
+    let mut summaries = Vec::with_capacity(channel_ids.len());
+
+    for channel_id in channel_ids {
+        let actor = actor_key(channel_id);
+        let Some(record) = read_channel_record(store, &actor, version)? else {
+            return Err(format!("V1 channel {channel_id} not found"));
+        };
+        let ChannelRecord::Legacy(channel) = record else {
+            return Err(format!(
+                "Channel {channel_id} is not a V1 record; only V1 channels can be archived"
+            ));
+        };
+        if channel.id.as_ref() != channel_id.as_ref() {
+            return Err(format!(
+                "Channel record key does not match channel {channel_id}"
+            ));
+        }
+        if legacy_closed(&channel) {
+            return Err(format!(
+                "Channel {channel_id} is already safely closed; let the normal migration archive it"
+            ));
+        }
+
+        let mut keys = Vec::new();
+        let mut watchtower_keys = 0;
+        let mut add_key = |key: Vec<u8>| {
+            if store.get(&key).is_some() && seen.insert(key.clone()) {
+                keys.push(key);
+            }
+        };
+
+        add_key(actor.clone());
+        add_key(
+            [
+                &[PUBKEY_CHANNEL_ID_PREFIX],
+                channel.remote_pubkey.serialize().as_slice(),
+                channel.id.as_ref(),
+            ]
+            .concat(),
+        );
+        add_key([&[CHANNEL_SHUTDOWN_SETTLEMENT_PREFIX], channel.id.as_ref()].concat());
+        add_key([&[PENDING_COMMIT_DIFF_PREFIX], channel.id.as_ref()].concat());
+        add_key([&[CHANNEL_OPEN_RECORD_PREFIX], channel.id.as_ref()].concat());
+        let funding_outpoint = channel.funding_tx.as_ref().map(|tx| {
+            let hash = tx.calc_tx_hash();
+            let outpoint = OutPoint::new(hash.clone(), 0);
+            let key = [&[CHANNEL_OUTPOINT_CHANNEL_ID_PREFIX], outpoint.as_slice()].concat();
+            (hash, outpoint, key)
+        });
+        if let Some((_, _, key)) = &funding_outpoint {
+            if let Some(value) = store.get(key) {
+                let stored: OldHash256 = decode_exact(&value)?;
+                if stored != channel.id {
+                    return Err(format!(
+                        "Funding outpoint index for channel {channel_id} points to another channel"
+                    ));
+                }
+                add_key(key.clone());
+            }
+        }
+
+        for prefix in [
+            WATCHTOWER_CHANNEL_PREFIX,
+            WATCHTOWER_SUPERSEDED_SETTLEMENT_PREFIX,
+        ] {
+            // Only the local watchtower row has the released `[prefix, channel_id]`
+            // shape. Client-owned rows add a node id and must stay with the original
+            // watchtower service.
+            let key = [&[prefix], channel.id.as_ref()].concat();
+            if store.get(&key).is_some() && seen.insert(key.clone()) {
+                keys.push(key);
+                watchtower_keys += 1;
+            }
+        }
+
+        let archived_keys = keys.len();
+        all_keys.extend(keys);
+        summaries.push(V1ChannelArchiveSummary {
+            channel_id: *channel_id,
+            state: format!("{:?}", channel.state),
+            funding_tx_hash: funding_outpoint
+                .as_ref()
+                .map(|(hash, _, _)| format!("0x{}", hex_bytes(hash.as_slice()))),
+            funding_outpoint: funding_outpoint.as_ref().map(|(hash, outpoint, _)| {
+                let index: u32 = outpoint.index().unpack();
+                format!("0x{}:{}", hex_bytes(hash.as_slice()), index)
+            }),
+            archived_keys,
+            watchtower_keys,
+        });
+    }
+
+    archive(store, &all_keys, apply)?;
+    Ok(summaries)
+}
+
 fn immutable_key(key: &[u8]) -> Result<Vec<u8>, String> {
     let id = key
         .get(1..)

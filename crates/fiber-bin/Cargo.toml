@@ -9,9 +9,10 @@ name = "fnn"
 path = "src/main.rs"
 
 [features]
-default = ["fnn/rocksdb", "watchtower", "lsp"]
+default = ["rocksdb", "watchtower", "lsp"]
 debug-add-tlc = ["fnn/debug-add-tlc"]
 metrics = ["fnn/metrics"]
+rocksdb = ["fnn/rocksdb"]
 sqlite = ["fnn/sqlite", "watchtower"]
 lsp = ["fnn/lsp"]
 watchtower = ["fnn/watchtower"]
@@ -46,5 +47,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 nix = { version = "0.29", features = ["fs"] }
 
 [dev-dependencies]
-fiber-store = { path = "../fiber-store", features = ["rocksdb"] }
+bincode = "1.3.3"
+fiber-store = { path = "../fiber-store" }
+fiber-types-0100 = { package = "fiber-types", version = "=0.10.0-rc1", features = ["sample"] }
 tempfile = "3.10.1"

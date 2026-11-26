@@ -1,3 +1,4 @@
+use ckb_types::packed::{OutPoint, Transaction};
 use ckb_types::prelude::Entity;
 use fiber_types::channel_v2_validation::decode_and_validate_channel_actor_data_parts;
 use fiber_types::sample::StoreSample;
@@ -146,6 +147,202 @@ fn test_active_or_unsettled_v1_blocks_all_writes() {
         assert!(error.contains("old binary"), "{error}");
         assert_eq!(snapshot(&store), original);
     }
+}
+
+fn v1_awaiting(seed: u64) -> OldChannelActorData {
+    legacy(
+        seed,
+        OldChannelState::AwaitingChannelReady(fiber_types_0100::AwaitingChannelReadyFlags::empty()),
+    )
+}
+
+fn archive_id(channel: &OldChannelActorData) -> fiber_types::Hash256 {
+    fiber_types::Hash256::from(<[u8; 32]>::try_from(channel.id.as_ref()).expect("channel id"))
+}
+
+fn install_archive_fixture(
+    store: &crate::Store,
+    v1: &mut OldChannelActorData,
+) -> (Vec<Vec<u8>>, Vec<u8>) {
+    v1.funding_tx = Some(Transaction::default());
+    let actor = actor_key(&v1.id);
+    store.put(&actor, bincode::serialize(v1).unwrap());
+    let pubkey_index = [
+        &[PUBKEY_CHANNEL_ID_PREFIX],
+        v1.remote_pubkey.serialize().as_slice(),
+        v1.id.as_ref(),
+    ]
+    .concat();
+    store.put(&pubkey_index, bincode::serialize(&v1.state).unwrap());
+
+    let shutdown = [&[CHANNEL_SHUTDOWN_SETTLEMENT_PREFIX], v1.id.as_ref()].concat();
+    store.put(&shutdown, b"shutdown");
+    let pending = [&[super::PENDING_COMMIT_DIFF_PREFIX], v1.id.as_ref()].concat();
+    store.put(&pending, b"pending");
+
+    let opening = OldChannelOpenRecord {
+        channel_id: v1.id,
+        pubkey: v1.remote_pubkey,
+        is_acceptor: false,
+        status: OldChannelOpeningStatus::ChannelReady,
+        funding_amount: 1,
+        failure_detail: None,
+        created_at: 1,
+        last_updated_at: 1,
+        commitment_contract_features: fiber_types_0100::CommitmentContractFeatures::LEGACY,
+    };
+    let open_key = [&[CHANNEL_OPEN_RECORD_PREFIX], v1.id.as_ref()].concat();
+    store.put(&open_key, bincode::serialize(&opening).unwrap());
+
+    let funding_tx = v1.funding_tx.as_ref().expect("funding tx");
+    let outpoint = OutPoint::new(funding_tx.calc_tx_hash(), 0);
+    let outpoint_key = [&[CHANNEL_OUTPOINT_CHANNEL_ID_PREFIX], outpoint.as_slice()].concat();
+    store.put(&outpoint_key, bincode::serialize(&v1.id).unwrap());
+
+    let mut watch = super::OldChannelData::samples(130).remove(0);
+    watch.channel_id = v1.id;
+    watch.commitment_contract_features = fiber_types_0100::CommitmentContractFeatures::LEGACY;
+    let watch_key = [&[WATCHTOWER_CHANNEL_PREFIX], v1.id.as_ref()].concat();
+    let watch_encoded = bincode::serialize(&watch).unwrap();
+    store.put(&watch_key, &watch_encoded);
+    let superseded = [&[WATCHTOWER_SUPERSEDED_SETTLEMENT_PREFIX], v1.id.as_ref()].concat();
+    store.put(&superseded, b"superseded");
+
+    (
+        vec![
+            actor,
+            pubkey_index,
+            shutdown,
+            pending,
+            open_key,
+            outpoint_key,
+            watch_key,
+            superseded,
+        ],
+        watch_encoded,
+    )
+}
+
+#[test]
+fn test_archive_v1_awaiting_channel_ready_before_migration() {
+    let (_dir, store) = database();
+    let mut v1 = v1_awaiting(130);
+    let (keys, watch_encoded) = install_archive_fixture(&store, &mut v1);
+    let watch_key = keys[6].clone();
+
+    let before = snapshot(&store);
+    assert!(
+        migrate(&store).is_err(),
+        "the V1 channel must block migration"
+    );
+    assert_eq!(snapshot(&store), before, "preflight must not write");
+
+    let id = archive_id(&v1);
+    let dry = super::archive_v1_channels(&store, &[id], false).unwrap();
+    assert_eq!(dry.len(), 1);
+    assert!(dry[0].state.contains("AwaitingChannelReady"));
+    assert!(dry[0].funding_tx_hash.as_deref().unwrap().starts_with("0x"));
+    assert!(dry[0]
+        .funding_outpoint
+        .as_deref()
+        .unwrap()
+        .starts_with("0x"));
+    assert!(dry[0].funding_outpoint.as_deref().unwrap().ends_with(":0"));
+    assert_eq!(snapshot(&store), before, "dry run must not change records");
+
+    let applied = super::archive_v1_channels(&store, &[id], true).unwrap();
+    assert_eq!(applied[0].archived_keys, keys.len());
+    assert_eq!(applied[0].watchtower_keys, 2);
+    for key in &keys {
+        assert!(store.get(key).is_none(), "active key must be removed");
+        assert!(
+            store.get(archive_key(key)).is_some(),
+            "key must be archived"
+        );
+    }
+    assert_eq!(
+        store.get(archive_key(&watch_key)).unwrap(),
+        watch_encoded,
+        "watchtower bytes must be preserved"
+    );
+
+    migrate(&store).unwrap();
+}
+
+#[test]
+fn test_archive_v1_rejects_bad_version_non_v1_and_closed_channels() {
+    // Version guard.
+    let (_dir, store) = database();
+    let mut v1 = v1_awaiting(131);
+    install_archive_fixture(&store, &mut v1);
+    // Neither the released layout nor the migration target: without the version
+    // guard, channel_record would still decode the V1 value and archive it.
+    store.put(MIGRATION_VERSION_KEY, b"20260101000000");
+    let original = snapshot(&store);
+    assert!(super::archive_v1_channels(&store, &[archive_id(&v1)], true).is_err());
+    assert_eq!(snapshot(&store), original);
+
+    // Non-V1 record.
+    let (_dir, store) = database();
+    let v2 = sample(132);
+    store.put(actor_key(&v2.id), bincode::serialize(&v2).unwrap());
+    let original = snapshot(&store);
+    assert!(super::archive_v1_channels(&store, &[v2.id], true).is_err());
+    assert_eq!(snapshot(&store), original);
+
+    // Safely closed V1 record.
+    let (_dir, store) = database();
+    let closed = legacy(133, OldChannelState::Closed(OldCloseFlags::COOPERATIVE));
+    store.put(actor_key(&closed.id), bincode::serialize(&closed).unwrap());
+    let original = snapshot(&store);
+    assert!(super::archive_v1_channels(&store, &[archive_id(&closed)], true).is_err());
+    assert_eq!(snapshot(&store), original);
+}
+
+#[test]
+fn test_archive_v1_is_atomic_across_multiple_ids() {
+    let (_dir, store) = database();
+    let mut v1 = v1_awaiting(134);
+    install_archive_fixture(&store, &mut v1);
+    let actor = actor_key(&v1.id);
+    let missing = fiber_types::Hash256::from([9u8; 32]);
+    let original = snapshot(&store);
+    assert!(
+        super::archive_v1_channels(&store, &[archive_id(&v1), missing], true).is_err(),
+        "one bad id must reject the whole batch"
+    );
+    assert_eq!(snapshot(&store), original);
+    assert!(store.get(&actor).is_some());
+}
+
+#[test]
+fn test_archive_v1_leaves_client_watchtower_rows() {
+    let (_dir, store) = database();
+    let v1 = v1_awaiting(135);
+    let actor = actor_key(&v1.id);
+    store.put(&actor, bincode::serialize(&v1).unwrap());
+    let client_node = [7u8; 32];
+    let client_key = [
+        &[WATCHTOWER_CHANNEL_PREFIX],
+        client_node.as_slice(),
+        v1.id.as_ref(),
+    ]
+    .concat();
+    store.put(&client_key, b"client-owned");
+
+    let original = snapshot(&store);
+    super::archive_v1_channels(&store, &[archive_id(&v1)], true).unwrap();
+    assert!(store.get(&actor).is_none());
+    assert_eq!(
+        store.get(&client_key).unwrap(),
+        b"client-owned",
+        "client-owned watchtower rows must not be retired"
+    );
+    assert!(
+        migrate(&store).is_err(),
+        "client-owned protection still needs the original service"
+    );
+    assert_ne!(snapshot(&store), original);
 }
 
 #[test]

@@ -77,6 +77,14 @@ if [ "${1#-}" != "$1" ]; then
     set -- fnn "$@"
 fi
 
+# Management subcommands are not node startup. Run them without adding the node
+# -d/-c options or requiring FIBER_SECRET_KEY_PASSWORD.
+case "${1:-}:${2:-}" in
+    fnn:drop-v1-channel)
+        exec "$@"
+        ;;
+esac
+
 if [ "$1" = "fnn" ] && ! is_help_or_version "$@"; then
     base_dir=$(get_option_value "-d" "--dir" "$@" || true)
     if [ -z "$base_dir" ]; then
