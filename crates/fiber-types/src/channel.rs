@@ -2083,6 +2083,36 @@ pub struct ChannelMutableData {
     pub session: ChannelSessionV2,
 }
 
+/// Payment hashes of the TLCs and V2 remove effects a channel still records.
+fn pending_payment_hashes(
+    tlc_state: &TlcState,
+    session: &ChannelSessionV2,
+) -> std::collections::BTreeSet<Hash256> {
+    tlc_state
+        .all_tlcs()
+        .chain(session.remove_effects.iter().map(|(tlc, _)| tlc))
+        .map(|tlc| tlc.payment_hash)
+        .collect()
+}
+
+impl ChannelMutableData {
+    /// Payment hashes of the TLCs and V2 remove effects this channel still records.
+    ///
+    /// A preimage is kept while any channel lists its hash here.
+    pub fn pending_payment_hashes(&self) -> std::collections::BTreeSet<Hash256> {
+        pending_payment_hashes(&self.tlc_state, &self.session)
+    }
+}
+
+impl ChannelActorData {
+    /// Payment hashes of the TLCs and V2 remove effects this channel still records.
+    ///
+    /// A preimage is kept while any channel lists its hash here.
+    pub fn pending_payment_hashes(&self) -> std::collections::BTreeSet<Hash256> {
+        pending_payment_hashes(&self.tlc_state, &self.session)
+    }
+}
+
 impl ChannelActorData {
     /// Split the persisted view without cloning, for the two-record store layout.
     pub fn into_parts(self) -> (ChannelImmutableData, ChannelMutableData) {

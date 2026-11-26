@@ -12,6 +12,8 @@
 //! | 49           | Hash256              | SettlementData               |
 //! | 64           | Pubkey | Hash256     | ChannelState                |
 //! | 65           | OutPoint             | ChannelId                   |
+//! | 66           | Payment_hash | Hash256 | ()                        |
+//! | 67           | Hash256              | Vec<Payment_hash>           |
 //! | 96           | Cursor               | BroadcastMessage            |
 //! | 97           | BroadcastMessageID   | u64                         |
 //! | 192          | Hash256              | PaymentSession              |
@@ -36,6 +38,12 @@ pub const INVOICE_PREIMAGE_PREFIX: u8 = 35;
 pub const CHANNEL_SHUTDOWN_SETTLEMENT_PREFIX: u8 = 49;
 pub const PUBKEY_CHANNEL_ID_PREFIX: u8 = 64;
 pub const CHANNEL_OUTPOINT_CHANNEL_ID_PREFIX: u8 = 65;
+/// Index of channels that record a TLC or a V2 remove effect for a payment hash.
+/// Key: [PREFIX, payment_hash, channel_id], Value: ()
+pub const PAYMENT_HASH_CHANNEL_ID_PREFIX: u8 = 66;
+/// The payment hashes indexed for one channel, to update the index above.
+/// Key: [PREFIX, channel_id], Value: Vec<Hash256>, sorted
+pub const CHANNEL_PAYMENT_HASHES_PREFIX: u8 = 67;
 pub const BROADCAST_MESSAGE_PREFIX: u8 = 96;
 pub const BROADCAST_MESSAGE_TIMESTAMP_PREFIX: u8 = 97;
 pub const PAYMENT_SESSION_PREFIX: u8 = 192;
@@ -70,3 +78,21 @@ pub const CCH_ORDER_PREFIX: u8 = 232;
 pub const CCH_RECEIVE_BTC_ORDER_CREATION_PREFIX: u8 = 233;
 #[cfg(not(target_arch = "wasm32"))]
 pub const CCH_SEND_BTC_ORDER_CREATION_PREFIX: u8 = 234;
+
+/// Key of one `PAYMENT_HASH_CHANNEL_ID_PREFIX` row.
+pub fn payment_hash_channel_id_key(
+    payment_hash: &crate::Hash256,
+    channel_id: &crate::Hash256,
+) -> Vec<u8> {
+    [
+        &[PAYMENT_HASH_CHANNEL_ID_PREFIX][..],
+        payment_hash.as_ref(),
+        channel_id.as_ref(),
+    ]
+    .concat()
+}
+
+/// Key of the `CHANNEL_PAYMENT_HASHES_PREFIX` row of a channel.
+pub fn channel_payment_hashes_key(channel_id: &crate::Hash256) -> Vec<u8> {
+    [&[CHANNEL_PAYMENT_HASHES_PREFIX][..], channel_id.as_ref()].concat()
+}

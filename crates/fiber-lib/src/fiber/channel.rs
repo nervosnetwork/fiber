@@ -10593,31 +10593,21 @@ pub(crate) fn has_pending_tlc_for_payment_hash<S>(
 where
     S: ChannelActorStateStore,
 {
-    let has_matching_tlc = |state: &ChannelActorState| {
-        state
-            .tlc_state
-            .all_tlcs()
-            .any(|tlc| tlc.payment_hash == payment_hash)
-            || {
-                let session = &state.session;
-                session
-                    .remove_effects
-                    .iter()
-                    .any(|(tlc, _)| tlc.payment_hash == payment_hash)
-            }
-    };
+    // The current channel's in-memory state may be ahead of its stored state.
+    channel_has_pending_payment_hash(current_state, &payment_hash)
+        || store.other_channel_has_pending_payment_hash(&payment_hash, &current_state.get_id())
+}
 
-    if has_matching_tlc(current_state) {
-        return true;
-    }
-
-    let current_channel_id = current_state.get_id();
-    store
-        .get_channel_states(None)
-        .into_iter()
-        .filter(|(_, channel_id, _)| *channel_id != current_channel_id)
-        .filter_map(|(_, channel_id, _)| store.get_channel_actor_state(&channel_id))
-        .any(|state| has_matching_tlc(&state))
+fn channel_has_pending_payment_hash(state: &ChannelActorState, payment_hash: &Hash256) -> bool {
+    state
+        .tlc_state
+        .all_tlcs()
+        .any(|tlc| tlc.payment_hash == *payment_hash)
+        || state
+            .session
+            .remove_effects
+            .iter()
+            .any(|(tlc, _)| tlc.payment_hash == *payment_hash)
 }
 
 pub trait ChannelActorStateStore {
@@ -10678,6 +10668,19 @@ pub trait ChannelActorStateStore {
             .collect()
     }
     fn get_channel_states(&self, pubkey: Option<Pubkey>) -> Vec<(Pubkey, Hash256, ChannelState)>;
+    /// Whether a stored channel other than `channel_id` records a TLC or a V2 remove effect
+    /// with this payment hash. This default reads every stored channel.
+    fn other_channel_has_pending_payment_hash(
+        &self,
+        payment_hash: &Hash256,
+        channel_id: &Hash256,
+    ) -> bool {
+        self.get_channel_states(None)
+            .into_iter()
+            .filter(|(_, id, _)| id != channel_id)
+            .filter_map(|(_, id, _)| self.get_channel_actor_state(&id))
+            .any(|state| channel_has_pending_payment_hash(&state, payment_hash))
+    }
     fn get_active_channel_states(
         &self,
         pubkey: Option<Pubkey>,
