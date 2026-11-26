@@ -88,6 +88,44 @@ pub(crate) fn check_state() -> Result<(), JsValue> {
     }
 }
 
+/// Archive selected V1 channels before starting Fiber in the browser.
+///
+/// Call this before `fiber()`: the browser database is opened without the
+/// migration, the selected V1 records are archived, and the database channel is
+/// left open for the subsequent `fiber()` call to run the normal migration.
+/// This does not close funding transactions or recover funds.
+///
+/// This is an advanced entry point for a custom worker. The worker must call
+/// `set_shared_array` before this function and then call `fiber()`. The bundled
+/// `fiber-js` worker currently calls `fiber()` directly and does not expose this
+/// pre-migration step.
+#[wasm_bindgen]
+pub fn archive_v1_channels(
+    config: &str,
+    database_prefix: Option<String>,
+    channel_ids: Vec<String>,
+    apply: bool,
+) -> Result<JsValue, JsValue> {
+    let config = Config::parse_from_str(config, database_prefix);
+    let fiber_config = config
+        .fiber
+        .as_ref()
+        .ok_or_else(|| JsValue::from_str("fiber config is required but absent"))?;
+    let store_path = fiber_config.store_path();
+    let channel_ids = channel_ids
+        .iter()
+        .map(|id| {
+            id.parse::<fnn::fiber_types::Hash256>()
+                .map_err(|error| JsValue::from_str(&format!("invalid channel id {id:?}: {error}")))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let summaries = fnn::store::archive_v1_channels(&store_path, &channel_ids, apply)
+        .map_err(|error| JsValue::from_str(&error))?;
+    // Keep the browser DB channel open for the following fiber()/migration call.
+    serde_wasm_bindgen::to_value(&summaries)
+        .map_err(|error| JsValue::from_str(&format!("failed to encode summary: {error}")))
+}
+
 #[wasm_bindgen]
 pub async fn fiber(
     config: &str,
