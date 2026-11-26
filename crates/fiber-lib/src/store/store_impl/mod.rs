@@ -883,7 +883,14 @@ pub fn check_validate<P: AsRef<Path>>(path: P) -> Result<(), String> {
             INVOICE_PREIMAGE_PREFIX => {
                 check_deserialization::<()>(&value, "INVOICE_PREIMAGE_PREFIX", &mut errors);
             }
-            PUBKEY_CHANNEL_ID_PREFIX => {}
+            PUBKEY_CHANNEL_ID_PREFIX | PAYMENT_HASH_CHANNEL_ID_PREFIX => {}
+            CHANNEL_PAYMENT_HASHES_PREFIX => {
+                check_deserialization::<Vec<Hash256>>(
+                    &value,
+                    "CHANNEL_PAYMENT_HASHES_PREFIX",
+                    &mut errors,
+                );
+            }
             CHANNEL_OUTPOINT_CHANNEL_ID_PREFIX => {
                 check_deserialization::<Hash256>(
                     &value,
@@ -1713,6 +1720,24 @@ impl ChannelActorStateStore for Store {
                 (pubkey, channel_id.into(), state)
             })
             .collect()
+    }
+
+    fn other_channel_has_pending_payment_hash(
+        &self,
+        payment_hash: &Hash256,
+        channel_id: &Hash256,
+    ) -> bool {
+        let prefix = [&[PAYMENT_HASH_CHANNEL_ID_PREFIX][..], payment_hash.as_ref()].concat();
+        let take_prefix = prefix.clone();
+        // Two rows are enough: at most one of them is the excluded channel.
+        self.collect_iterator(
+            prefix,
+            IteratorDirection::Forward,
+            Box::new(move |key| key.starts_with(&take_prefix)),
+            2,
+        )
+        .into_iter()
+        .any(|kv| kv.key.get(33..) != Some(channel_id.as_ref()))
     }
 
     fn get_channel_state_by_outpoint(&self, outpoint: &OutPoint) -> Option<ChannelActorState> {

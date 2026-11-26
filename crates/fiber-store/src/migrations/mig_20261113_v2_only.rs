@@ -25,7 +25,7 @@ use fiber_types_0100::{
 };
 use serde::de::DeserializeOwned;
 
-use crate::migration::{Migration, MigrationStore, MIGRATION_VERSION_KEY};
+use crate::migration::{Migration, MigrationStore, LATEST_DB_VERSION, MIGRATION_VERSION_KEY};
 
 use super::decode_as_new;
 
@@ -468,6 +468,13 @@ fn scan(store: &dyn MigrationStore, apply: bool) -> Result<(), String> {
         return Ok(());
     };
     let version = std::str::from_utf8(&version).map_err(|_| "Invalid database version")?;
+    // Later migrations keep channel records in this layout, so a database at a later known
+    // version is still validated as the current epoch on every open.
+    let version = if (MIGRATION_DB_VERSION..=LATEST_DB_VERSION).contains(&version) {
+        MIGRATION_DB_VERSION
+    } else {
+        version
+    };
     if !(RELEASED_VERSION..=MIGRATION_DB_VERSION).contains(&version) {
         return Ok(());
     }

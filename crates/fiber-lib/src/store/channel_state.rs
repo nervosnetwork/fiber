@@ -5,24 +5,63 @@
 //! Bulk reads (`get_all_channel_states`, index scans) decode the prefix themselves and do not use
 //! the cache.
 
+use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use ckb_types::prelude::Entity;
 use fiber_store::backend::{BatchWriter, StorageBackend};
 use fiber_types::schema::{
-    CHANNEL_OUTPOINT_CHANNEL_ID_PREFIX, CHANNEL_SHUTDOWN_SETTLEMENT_PREFIX,
-    PUBKEY_CHANNEL_ID_PREFIX,
+    channel_payment_hashes_key, payment_hash_channel_id_key, CHANNEL_OUTPOINT_CHANNEL_ID_PREFIX,
+    CHANNEL_SHUTDOWN_SETTLEMENT_PREFIX, PUBKEY_CHANNEL_ID_PREFIX,
 };
 use fiber_types::{ChannelOpeningStatus, ChannelState, Hash256};
 
 use crate::fiber::channel::{ChannelActorState, ChannelOpenRecordStore};
 
 use super::store_impl::{
-    channel_immutable_key, channel_mutable_key, deserialize_channel_state_parts,
-    stage_channel_actor_state, stage_move_channel_open_records, Store,
+    channel_immutable_key, channel_mutable_key, deserialize_channel_state_parts, deserialize_from,
+    serialize_to_vec, stage_channel_actor_state, stage_move_channel_open_records, Store,
 };
 use super::NodeNamespace;
+
+/// Striped locks keyed by channel id. A channel state write reads the payment hashes indexed for
+/// the channel and commits the new ones with the state, so two writes of one channel must not
+/// interleave. The cache slot already serializes them when the cache is on; these also cover a
+/// store without a cache. One set per process, shared by every store and namespace, and kept out
+/// of `Store` so its size does not change.
+struct ChannelIndexLocks([parking_lot::Mutex<()>; 64]);
+
+static CHANNEL_INDEX_LOCKS: ChannelIndexLocks =
+    ChannelIndexLocks([const { parking_lot::const_mutex(()) }; 64]);
+
+impl ChannelIndexLocks {
+    fn stripe(&self, channel_id: &Hash256) -> usize {
+        channel_id.as_ref()[0] as usize % self.0.len()
+    }
+
+    fn lock(&self, channel_id: &Hash256) -> parking_lot::MutexGuard<'_, ()> {
+        self.0[self.stripe(channel_id)].lock()
+    }
+
+    /// Lock the stripes of two channels in a fixed order.
+    fn lock_pair(
+        &self,
+        a: &Hash256,
+        b: &Hash256,
+    ) -> (
+        parking_lot::MutexGuard<'_, ()>,
+        Option<parking_lot::MutexGuard<'_, ()>>,
+    ) {
+        let (a, b) = (self.stripe(a), self.stripe(b));
+        if a == b {
+            return (self.0[a].lock(), None);
+        }
+        let (first, second) = if a < b { (a, b) } else { (b, a) };
+        let first = self.0[first].lock();
+        (first, Some(self.0[second].lock()))
+    }
+}
 
 /// Key in the shared channel cache: physical stores can host multiple logical node namespaces
 /// (host + hosted tenants) that share identical channel IDs.
@@ -64,9 +103,42 @@ impl<'a> ChannelStates<'a> {
         }
     }
 
+    /// Stage the payment hash index rows that change a channel's indexed hashes to `new`.
+    /// The caller holds the channel's index lock until the batch commits.
+    fn stage_payment_hash_index(
+        &self,
+        batch: &mut impl BatchWriter,
+        channel_id: &Hash256,
+        new: &BTreeSet<Hash256>,
+    ) {
+        let key = channel_payment_hashes_key(channel_id);
+        let old: Vec<Hash256> = self
+            .store
+            .get(&key)
+            .map(|value| deserialize_from(value.as_ref(), "ChannelPaymentHashes"))
+            .unwrap_or_default();
+        if old.len() == new.len() && old.iter().eq(new.iter()) {
+            return;
+        }
+        for hash in old.iter().filter(|hash| !new.contains(hash)) {
+            batch.delete(payment_hash_channel_id_key(hash, channel_id));
+        }
+        for hash in new.iter().filter(|hash| old.binary_search(hash).is_err()) {
+            batch.put(payment_hash_channel_id_key(hash, channel_id), []);
+        }
+        if new.is_empty() {
+            batch.delete(key);
+        } else {
+            let hashes: Vec<Hash256> = new.iter().copied().collect();
+            batch.put(key, serialize_to_vec(&hashes, "ChannelPaymentHashes"));
+        }
+    }
+
     /// Write the channel records without touching the cache.
     fn write(&self, state: ChannelActorState, write_immutable: bool) {
+        let _index_guard = CHANNEL_INDEX_LOCKS.lock(&state.id);
         let mut batch = self.store.batch();
+        self.stage_payment_hash_index(&mut batch, &state.id, &state.pending_payment_hashes());
         stage_channel_actor_state(self.store, &mut batch, state, write_immutable);
         batch.commit();
     }
@@ -76,7 +148,9 @@ impl<'a> ChannelStates<'a> {
         let Some(existing) = existing else {
             return;
         };
+        let _index_guard = CHANNEL_INDEX_LOCKS.lock(id);
         let mut batch = self.store.batch();
+        self.stage_payment_hash_index(&mut batch, id, &BTreeSet::new());
         batch.delete(channel_mutable_key(id));
         batch.delete(channel_immutable_key(id));
         let remote_pubkey_bytes = existing.get_remote_pubkey().serialize();
@@ -206,7 +280,10 @@ impl<'a> ChannelStates<'a> {
         old_state: Option<&ChannelActorState>,
         state: ChannelActorState,
     ) {
+        let _index_guards = CHANNEL_INDEX_LOCKS.lock_pair(old_id, &state.id);
         let mut batch = self.store.batch();
+        self.stage_payment_hash_index(&mut batch, old_id, &BTreeSet::new());
+        self.stage_payment_hash_index(&mut batch, &state.id, &state.pending_payment_hashes());
         if let Some(old_state) = old_state {
             batch.delete(channel_mutable_key(old_id));
             batch.delete(channel_immutable_key(old_id));
