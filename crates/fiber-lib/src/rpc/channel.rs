@@ -35,6 +35,7 @@ use musig2::{PartialSignature, PubNonce};
 use ractor::{call, ActorRef};
 use std::cmp::Reverse;
 
+pub use fiber_json_types::channel::ChannelFeatures as JsonChannelFeatures;
 pub use fiber_json_types::{
     AbandonChannelParams, AcceptChannelParams, AcceptChannelResult, Channel, ChannelSigningStatus,
     ChannelState, GetChannelSigningStatusParams, GetChannelSigningStatusResult, Hash256, Htlc,
@@ -162,6 +163,7 @@ fn pending_accept_channel_to_rpc(pending: PendingAcceptChannel) -> Channel {
         channel_outpoint: None,
         pubkey: pending.pubkey.into(),
         funding_udt_type_script: pending.udt_type_script.map(Into::into),
+        channel_features: JsonChannelFeatures::default(),
         // Report as NegotiatingFunding since we're still awaiting local acceptance
         state: ChannelState::NegotiatingFunding(
             fiber_json_types::channel::NegotiatingFundingFlags(0),
@@ -694,6 +696,7 @@ where
                 channel_outpoint: state.get_funding_transaction_outpoint(),
                 pubkey: state.remote_pubkey.into(),
                 funding_udt_type_script: state.funding_udt_type_script.clone().map(Into::into),
+                channel_features: JsonChannelFeatures(state.channel_features.bits()),
                 state: rpc_state,
                 local_balance: state.get_local_balance(),
                 remote_balance: state.get_remote_balance(),
@@ -802,6 +805,7 @@ where
                     channel_outpoint: None,
                     pubkey: record.pubkey.into(),
                     funding_udt_type_script: None,
+                    channel_features: JsonChannelFeatures(record.channel_features.bits()),
                     state: synthetic_state,
                     local_balance,
                     remote_balance,

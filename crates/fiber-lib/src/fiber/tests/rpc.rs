@@ -496,6 +496,13 @@ async fn test_rpc_shutdown_channels() {
         .unwrap();
     eprintln!("List channels: {:#?}", list_channels);
     assert_eq!(list_channels.channels.len(), 2);
+    assert!(
+        list_channels
+            .channels
+            .iter()
+            .all(|channel| channel.channel_features.0 == 1),
+        "list_channels must report the V2 channel features"
+    );
     let channel_id = list_channels.channels[0].channel_id;
 
     let _res: () = node_0
