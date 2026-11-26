@@ -118,7 +118,6 @@ async fn pending_settlements_keep_newest_two_rounds_without_a_revocation_update(
         },
         snapshot(0),
         fiber_types::ChannelFeatures::V2,
-        None,
     );
 
     // Round 3 has two variants. Replaying either older round must not displace round 4.
