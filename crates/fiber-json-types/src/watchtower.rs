@@ -170,6 +170,10 @@ pub struct UpdateRevocationParams {
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
 pub struct UpdatePendingRemoteSettlementParams {
+    /// Commitment number of the signed remote settlement.
+    #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub commitment_number: u64,
     /// Channel ID
     pub channel_id: Hash256,
     /// Settlement data

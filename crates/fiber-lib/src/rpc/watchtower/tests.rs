@@ -74,6 +74,7 @@ async fn tenant_watch_channel_rejects_oversized_snapshot_without_writing() {
             .update_pending_remote_settlement(
                 ctx.clone(),
                 UpdatePendingRemoteSettlementParams {
+                    commitment_number: 2,
                     channel_id: channel.into(),
                     settlement_data: snapshot(255).into(),
                 },
@@ -84,7 +85,9 @@ async fn tenant_watch_channel_rejects_oversized_snapshot_without_writing() {
     }
     // Store writers must enforce the same boundary even without the RPC facade.
     store.update_local_settlement(node.clone(), channel, snapshot(255));
-    store.update_pending_remote_settlement(node.clone(), channel, snapshot(255));
+    assert!(store
+        .update_pending_remote_settlement(node.clone(), channel, 2, snapshot(255))
+        .is_err());
     let after = store.get_watch_channel(&node, &channel).unwrap();
     assert_eq!(after.local_settlement_data, before.local_settlement_data);
     assert_eq!(
@@ -111,6 +114,53 @@ async fn tenant_watch_channel_rejects_oversized_snapshot_without_writing() {
         err.message().contains("payout_lock_script args exceeds"),
         "{err}"
     );
+}
+
+#[tokio::test]
+async fn pending_settlements_keep_newest_two_rounds_without_a_revocation_update() {
+    let (store, _dir) = generate_store();
+    let server = WatchtowerRpcServerImpl::new(store.clone());
+    let node = NodeId::local();
+    let channel = Hash256::from([4; 32]);
+    let ctx = RpcContext {
+        node_id: node.to_string(),
+        tenant_scoped: false,
+    };
+    store.insert_watch_channel(
+        node.clone(),
+        channel,
+        None,
+        WatchChannelKeys {
+            local_settlement: SettlementKey::external(Privkey::from([1; 32]).pubkey()),
+            remote_settlement: Privkey::from([2; 32]).pubkey(),
+            local_funding: Privkey::from([5; 32]).pubkey(),
+            remote_funding: Privkey::from([6; 32]).pubkey(),
+        },
+        snapshot(0),
+        fiber_types::ChannelFeatures::V2,
+        None,
+    );
+
+    // Round 3 has two variants. Replaying either older round must not displace round 4.
+    for (number, count) in [(2, 1), (3, 2), (3, 3), (4, 4), (2, 1), (3, 2)] {
+        server
+            .update_pending_remote_settlement(
+                ctx.clone(),
+                UpdatePendingRemoteSettlementParams {
+                    channel_id: channel.into(),
+                    commitment_number: number,
+                    settlement_data: snapshot(count).into(),
+                },
+            )
+            .await
+            .unwrap();
+    }
+    let row = store.get_watch_channel(&node, &channel).unwrap();
+    assert_eq!(row.pending_remote_settlement_data, snapshot(4));
+    assert!(row.revocation_data.is_none());
+    let history = store.get_superseded_remote_settlements(&node, &channel);
+    assert_eq!(history.len(), 2);
+    assert!(history.contains(&snapshot(2)) && history.contains(&snapshot(3)));
 }
 
 #[tokio::test]

@@ -477,8 +477,13 @@ where
             .map_err(|e: String| rpc_error(e))?;
         validate_update_signing_keys(&self.store, &node_id, &channel_id, &settlement_data)?;
         self.store
-            .update_pending_remote_settlement(node_id, channel_id, settlement_data);
-        Ok(())
+            .update_pending_remote_settlement(
+                node_id,
+                channel_id,
+                params.commitment_number,
+                settlement_data,
+            )
+            .map_err(rpc_error)
     }
 
     async fn update_local_settlement(

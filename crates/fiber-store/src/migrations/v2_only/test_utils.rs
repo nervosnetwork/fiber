@@ -36,7 +36,8 @@ pub(super) fn to_released_settlement(
 }
 
 fn to_released_session(session: fiber_types::ChannelSessionV2) -> ReleasedChannelSessionV2Wire {
-    let wire: CurrentChannelSessionV2Wire = decode_as_new(session).unwrap();
+    let (wire, _): (CurrentChannelSessionV2Wire, Vec<(u64, fiber_types::SettlementData)>) =
+        decode_as_new(session).unwrap();
     ChannelSessionV2Wire {
         own: wire.own,
         own_retired: wire.own_retired,

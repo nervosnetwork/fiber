@@ -46,6 +46,7 @@ pub(crate) fn new_public_session(
         bootstrap_settlement: None,
         remove_effects: Vec::new(),
         closing: None,
+        superseded_settlements: vec![],
     }
 }
 

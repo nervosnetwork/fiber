@@ -75,6 +75,7 @@ fn sample_v2(seed: u64) -> ChannelActorData {
         bootstrap_settlement: None,
         remove_effects: vec![],
         closing: None,
+        superseded_settlements: vec![],
     };
 
     ChannelActorData {

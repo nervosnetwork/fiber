@@ -1601,7 +1601,7 @@ pub enum NetworkServiceEvent {
     RemoteCommitmentSigned(Pubkey, Hash256, TransactionView, SettlementData),
     // We have signed a valid commitment transaction, and the other party may use
     // the signature we sent to them to create a complete commitment transaction
-    LocalCommitmentSigned(Hash256, SettlementData),
+    LocalCommitmentSigned(Hash256, u64, SettlementData),
     // Preimage is created for the payment hash, the first Hash256 is the payment hash,
     // and the second Hash256 is the preimage.
     PreimageCreated(Hash256, Hash256),

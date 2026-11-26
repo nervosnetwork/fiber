@@ -1657,6 +1657,7 @@ Update pending remote settlement
 
 ##### Params
 
+* `commitment_number` - <em>`u64`</em>, Commitment number of the signed remote settlement.
 * `channel_id` - <em>[Hash256](#type-hash256)</em>, Channel ID
 * `settlement_data` - <em>[SettlementData](#type-settlementdata)</em>, Settlement data
 

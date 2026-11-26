@@ -317,7 +317,8 @@ fn convert_released_session(
             .collect::<Result<Vec<_>, _>>()?,
         closing: old.closing,
     };
-    decode_as_new(current)
+    // Bincode tuples append fields without changing the released session prefix.
+    decode_as_new((current, Vec::<(u64, fiber_types::SettlementData)>::new()))
 }
 
 fn released_channel(

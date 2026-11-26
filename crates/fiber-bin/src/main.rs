@@ -798,10 +798,11 @@ fn forward_event_to_actor(
                 ))
                 .expect(ASSUME_WATCHTOWER_ACTOR_ALIVE);
         }
-        NetworkServiceEvent::LocalCommitmentSigned(channel_id, settlement_data) => {
+        NetworkServiceEvent::LocalCommitmentSigned(channel_id, number, settlement_data) => {
             watchtower_actor
                 .send_message(WatchtowerMessage::UpdatePendingRemoteSettlement(
                     channel_id,
+                    number,
                     settlement_data,
                 ))
                 .expect(ASSUME_WATCHTOWER_ACTOR_ALIVE);

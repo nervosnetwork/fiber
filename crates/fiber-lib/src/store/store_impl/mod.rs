@@ -941,6 +941,14 @@ pub fn check_validate<P: AsRef<Path>>(path: P) -> Result<(), String> {
                 );
             }
             #[cfg(feature = "watchtower")]
+            WATCHTOWER_NUMBERED_SETTLEMENT_PREFIX if split_schema => {
+                check_deserialization::<NumberedSettlements>(
+                    &value,
+                    "numbered settlements",
+                    &mut errors,
+                );
+            }
+            #[cfg(feature = "watchtower")]
             WATCHTOWER_SUPERSEDED_SETTLEMENT_PREFIX if split_schema => {
                 check_deserialization::<Vec<SettlementData>>(
                     &value,
@@ -1276,7 +1284,76 @@ impl Store {
 }
 
 #[cfg(feature = "watchtower")]
+type NumberedSettlements = std::collections::BTreeMap<u64, Vec<SettlementData>>;
+
+#[cfg(feature = "watchtower")]
+fn settlement_key(prefix: u8, node: &NodeId, channel: &Hash256) -> Vec<u8> {
+    [&[prefix], node.as_ref(), channel.as_ref()].concat()
+}
+
+#[cfg(feature = "watchtower")]
+fn superseded_settlements(
+    db: &impl StorageBackend,
+    node: &NodeId,
+    channel: &Hash256,
+) -> Vec<SettlementData> {
+    let mut legacy: Vec<SettlementData> = db
+        .get(settlement_key(
+            WATCHTOWER_SUPERSEDED_SETTLEMENT_PREFIX,
+            node,
+            channel,
+        ))
+        .map(|v| deserialize_from(&v, "legacy settlements"))
+        .unwrap_or_default();
+    if let Some(bytes) = db.get(settlement_key(
+        WATCHTOWER_NUMBERED_SETTLEMENT_PREFIX,
+        node,
+        channel,
+    )) {
+        let mut numbered: NumberedSettlements = deserialize_from(&bytes, "numbered settlements");
+        // The latest round's last entry is already in ChannelData's pending slot.
+        if let Some(mut latest) = numbered.last_entry() {
+            latest.get_mut().pop();
+        }
+        legacy.extend(numbered.into_values().flatten());
+    }
+    legacy
+}
+
+#[cfg(feature = "watchtower")]
 impl Store {
+    fn numbered_settlements(
+        &self,
+        key: &[u8],
+        node: &NodeId,
+        channel: &ChannelData,
+        batch: &mut StoreBatch,
+    ) -> NumberedSettlements {
+        if let Some(bytes) = self.get(key) {
+            return deserialize_from(&bytes, "numbered settlements");
+        }
+        // Old rows have no round metadata. Keep their last two slots with the legacy candidates.
+        let legacy_key = settlement_key(
+            WATCHTOWER_SUPERSEDED_SETTLEMENT_PREFIX,
+            node,
+            &channel.channel_id,
+        );
+        let mut legacy: Vec<SettlementData> = self
+            .get(&legacy_key)
+            .map(|v| deserialize_from(&v, "legacy settlements"))
+            .unwrap_or_default();
+        for slot in [
+            &channel.remote_settlement_data,
+            &channel.pending_remote_settlement_data,
+        ] {
+            if !legacy.contains(slot) {
+                legacy.push(slot.clone());
+            }
+        }
+        batch.put(legacy_key, serialize_to_vec(&legacy, "legacy settlements"));
+        NumberedSettlements::new()
+    }
+
     fn tlc_on_chain_settled_key(node_id: &NodeId, channel_id: &Hash256, tlc_id: TLCId) -> Vec<u8> {
         let (direction, id) = match tlc_id {
             TLCId::Offered(id) => (0u8, id),
@@ -1885,16 +1962,7 @@ impl ChannelActorStateStore for Store {
         let Some(node_id) = self.local_watchtower_node_id(channel_id) else {
             return Vec::new();
         };
-        let key = [
-            &[WATCHTOWER_SUPERSEDED_SETTLEMENT_PREFIX],
-            node_id.as_ref(),
-            channel_id.as_ref(),
-        ]
-        .concat();
-        self.inner
-            .get(&key)
-            .map(|value| deserialize_from(&value, "WATCHTOWER_SUPERSEDED_SETTLEMENT_PREFIX"))
-            .unwrap_or_default()
+        superseded_settlements(&self.inner, &node_id, channel_id)
     }
 }
 
@@ -2667,6 +2735,10 @@ impl Store {
         let mut batch = self.batch();
         batch.put(key, value);
         batch.put(
+            settlement_key(WATCHTOWER_NUMBERED_SETTLEMENT_PREFIX, &node_id, &channel_id),
+            serialize_to_vec(&NumberedSettlements::new(), "numbered settlements"),
+        );
+        batch.put(
             signer_key,
             serialize_to_vec(&signer_state, "WatchtowerSignerState"),
         );
@@ -2889,6 +2961,11 @@ impl WatchtowerStore for Store {
         let mut batch = self.batch();
         batch.delete(key);
         batch.delete(signer_key);
+        batch.delete(settlement_key(
+            WATCHTOWER_NUMBERED_SETTLEMENT_PREFIX,
+            &node_id,
+            &channel_id,
+        ));
         batch.delete(
             [
                 &[WATCHTOWER_SUPERSEDED_SETTLEMENT_PREFIX],
@@ -2949,18 +3026,16 @@ impl WatchtowerStore for Store {
             {
                 return;
             }
+            let key = settlement_key(WATCHTOWER_NUMBERED_SETTLEMENT_PREFIX, &node_id, &channel_id);
+            let mut batch = self.batch();
+            let mut snapshots =
+                self.numbered_settlements(&key, &node_id, &channel_data, &mut batch);
+            snapshots.retain(|n, _| *n > revocation_data.commitment_number);
+            batch.put(key, serialize_to_vec(&snapshots, "numbered settlements"));
             channel_data.remote_settlement_data = remote_settlement_data;
             channel_data.revocation_data = Some(revocation_data);
-            let superseded_key = [
-                &[WATCHTOWER_SUPERSEDED_SETTLEMENT_PREFIX],
-                node_id.as_ref(),
-                channel_id.as_ref(),
-            ]
-            .concat();
-            let mut batch = self.batch();
             let kv = KeyValue::WatchtowerChannel(node_id, channel_id, channel_data);
             batch.put(kv.key(), kv.value());
-            batch.delete(superseded_key);
             batch.commit();
         } else {
             tracing::warn!(
@@ -2975,79 +3050,48 @@ impl WatchtowerStore for Store {
         &self,
         node_id: NodeId,
         channel_id: Hash256,
-        pending_remote_settlement_data: SettlementData,
-    ) {
+        number: u64,
+        settlement: SettlementData,
+    ) -> Result<(), String> {
         let lock = self.watchtower_write_lock(&node_id);
         let _guard = lock.lock();
-        let key = [
-            &[WATCHTOWER_CHANNEL_PREFIX],
-            node_id.as_ref(),
-            channel_id.as_ref(),
-        ]
-        .concat();
-        let superseded_key = [
-            &[WATCHTOWER_SUPERSEDED_SETTLEMENT_PREFIX],
-            node_id.as_ref(),
-            channel_id.as_ref(),
-        ]
-        .concat();
-        if let Some(mut channel_data) = self
-            .get(key)
-            .map(|v| deserialize_from::<ChannelData>(v.as_ref(), "ChannelData"))
+        let mut channel = self
+            .get_watch_channel(&node_id, &channel_id)
+            .ok_or_else(|| "watch channel not found".to_string())?;
+        settlement.validate_signing_keys(channel.local_settlement_key.is_none())?;
+        if channel
+            .revocation_data
+            .as_ref()
+            .is_some_and(|r| number <= r.commitment_number)
         {
-            if let Err(error) = pending_remote_settlement_data
-                .validate_signing_keys(channel_data.local_settlement_key.is_none())
-            {
-                tracing::error!(%channel_id, %error, "invalid pending settlement signing keys");
-                return;
-            }
-            // A replay of a snapshot we already hold must not rotate anything.
-            if pending_remote_settlement_data == channel_data.pending_remote_settlement_data
-                || pending_remote_settlement_data == channel_data.remote_settlement_data
-            {
-                return;
-            }
-            // `remote_settlement_data` is the peer's latest unrevoked commitment and must stay
-            // selectable even after a same-number re-sign. Keep each replaced pending snapshot
-            // in a separate bounded list instead of rotating the remote slot.
-            let previous = std::mem::replace(
-                &mut channel_data.pending_remote_settlement_data,
-                pending_remote_settlement_data,
-            );
-            let keep_previous = previous != channel_data.remote_settlement_data;
-            let mut batch = self.batch();
-            let kv = KeyValue::WatchtowerChannel(node_id, channel_id, channel_data);
-            batch.put(kv.key(), kv.value());
-            if keep_previous {
-                const MAX_SUPERSEDED: usize = 32;
-                let mut superseded: Vec<SettlementData> = self
-                    .get(superseded_key.clone())
-                    .map(|value| {
-                        deserialize_from(value.as_ref(), "WATCHTOWER_SUPERSEDED_SETTLEMENT_PREFIX")
-                    })
-                    .unwrap_or_default();
-                let mut changed = false;
-                if !superseded.contains(&previous) {
-                    if superseded.len() < MAX_SUPERSEDED {
-                        superseded.push(previous);
-                        changed = true;
-                    } else {
-                        tracing::warn!(
-                            %channel_id,
-                            max = MAX_SUPERSEDED,
-                            "superseded remote settlement snapshot cap reached; preserving earliest unrevoked snapshots"
-                        );
-                    }
-                }
-                if changed {
-                    batch.put(
-                        superseded_key,
-                        serialize_to_vec(&superseded, "WATCHTOWER_SUPERSEDED_SETTLEMENT_PREFIX"),
-                    );
-                }
-            }
-            batch.commit();
+            return Ok(());
         }
+        let key = settlement_key(WATCHTOWER_NUMBERED_SETTLEMENT_PREFIX, &node_id, &channel_id);
+        let mut batch = self.batch();
+        let mut snapshots = self.numbered_settlements(&key, &node_id, &channel, &mut batch);
+        let latest = snapshots.last_key_value().is_none_or(|(n, _)| number >= *n);
+        let round = snapshots.entry(number).or_default();
+        if round.last() == Some(&settlement) {
+            return Ok(());
+        }
+        if let Some(index) = round.iter().position(|s| s == &settlement) {
+            round.remove(index);
+        } else if round.len() >= fiber_types::MAX_SETTLEMENT_VARIANTS {
+            return Err("watch channel settlement budget exhausted".to_string());
+        }
+        round.push(settlement.clone());
+        // A missed revocation must not prevent retention of a newer signed round.
+        if snapshots.len() > 2 {
+            snapshots.pop_first();
+        }
+        if latest {
+            channel.pending_remote_settlement_data = settlement;
+            let kv = KeyValue::WatchtowerChannel(node_id, channel_id, channel);
+            batch.put(kv.key(), kv.value());
+        }
+        batch.put(key, serialize_to_vec(&snapshots, "numbered settlements"));
+        batch.commit();
+        Ok(())
     }
 
     fn get_superseded_remote_settlements(
@@ -3055,16 +3099,7 @@ impl WatchtowerStore for Store {
         node_id: &NodeId,
         channel_id: &Hash256,
     ) -> Vec<SettlementData> {
-        self.get(
-            [
-                &[WATCHTOWER_SUPERSEDED_SETTLEMENT_PREFIX],
-                node_id.as_ref(),
-                channel_id.as_ref(),
-            ]
-            .concat(),
-        )
-        .map(|value| deserialize_from(value.as_ref(), "WATCHTOWER_SUPERSEDED_SETTLEMENT_PREFIX"))
-        .unwrap_or_default()
+        superseded_settlements(self, node_id, channel_id)
     }
 
     fn update_local_settlement(

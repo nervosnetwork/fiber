@@ -13688,7 +13688,7 @@ async fn test_reproduce_acceptor_restart_race_in_external_funding() {
         .expect_event(|event| {
             matches!(
                 event,
-                NetworkServiceEvent::LocalCommitmentSigned(id, _) if *id == channel_id
+                NetworkServiceEvent::LocalCommitmentSigned(id, _, _) if *id == channel_id
             )
         })
         .await;

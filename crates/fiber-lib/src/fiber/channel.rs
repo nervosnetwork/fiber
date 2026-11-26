@@ -1213,7 +1213,8 @@ where
         error: &ProcessingChannelError,
     ) -> TlcErr {
         let error_code = match error {
-            ProcessingChannelError::AwaitingExternalSignature => {
+            ProcessingChannelError::SettlementVariantsExhausted
+            | ProcessingChannelError::AwaitingExternalSignature => {
                 TlcErrorCode::TemporaryChannelFailure
             }
             ProcessingChannelError::PeelingOnionPacketError(_) => TlcErrorCode::InvalidOnionPayload,
@@ -6000,6 +6001,8 @@ pub type ProcessingChannelResult<T = ()> = Result<T, ProcessingChannelError>;
 
 #[derive(Error, Debug, Clone)]
 pub enum ProcessingChannelError {
+    #[error("Commitment settlement variant budget exhausted")]
+    SettlementVariantsExhausted,
     #[error("Awaiting external V2 signature")]
     AwaitingExternalSignature,
     #[error("Invalid state: {0}")]
@@ -11235,6 +11238,18 @@ impl ChannelActorState {
             .clone()
             .ok_or_else(|| invalid("Missing remote V2 commitment nonce"))?;
         let (transaction, settlement) = self.build_commitment_tx_and_settlement_data(true)?;
+        if let Some(previous) = &session.outgoing {
+            if previous.funding.number == number && previous.settlement != settlement {
+                let history = &mut session.superseded_settlements;
+                history.retain(|(n, data)| *n != number || *data != settlement);
+                if history.iter().filter(|(n, _)| *n == number).count()
+                    >= fiber_types::MAX_SETTLEMENT_VARIANTS - 1
+                {
+                    return Err(ProcessingChannelError::SettlementVariantsExhausted);
+                }
+                history.push((number, previous.settlement.clone()));
+            }
+        }
         let mut funding = self.allocate_v2(
             *self.get_remote_funding_pubkey(),
             number,
@@ -11700,6 +11715,9 @@ impl ChannelActorState {
             output,
             output_data,
         };
+        session
+            .superseded_settlements
+            .retain(|(n, _)| *n > revocation.commitment_number);
         session.revocation_effect = Some((revocation.clone(), settlement.clone()));
         self.session = session;
         Ok(Some((revocation, settlement)))
@@ -12592,17 +12610,25 @@ where
                 ))
                 .expect(ASSUME_NETWORK_ACTOR_ALIVE);
         }
+        for (number, settlement) in &session.superseded_settlements {
+            self.publish_remote_settlement(state.id, *number, settlement.clone());
+        }
         if let Some(outgoing) = &session.outgoing {
-            self.network
-                .send_message(FiberActorMessage::new_notification(
-                    NetworkServiceEvent::LocalCommitmentSigned(
-                        state.id,
-                        outgoing.settlement.clone(),
-                    ),
-                ))
-                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+            self.publish_remote_settlement(
+                state.id,
+                outgoing.funding.number,
+                outgoing.settlement.clone(),
+            );
         }
         self.publish_usable_local_commitment_v2(state);
+    }
+
+    fn publish_remote_settlement(&self, id: Hash256, number: u64, settlement: SettlementData) {
+        self.network
+            .send_message(FiberActorMessage::new_notification(
+                NetworkServiceEvent::LocalCommitmentSigned(id, number, settlement),
+            ))
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
     }
 
     fn publish_usable_local_commitment_v2(&self, state: &ChannelActorState) {
@@ -12721,6 +12747,10 @@ where
         }
         let (request, settlement) =
             match state.prepare_outgoing_v2_with_replace(flags.is_some(), replacing_outgoing) {
+                Err(ProcessingChannelError::SettlementVariantsExhausted) => {
+                    self.notify_network_actor_shutdown_me(state);
+                    return Err(ProcessingChannelError::SettlementVariantsExhausted);
+                }
                 Err(ProcessingChannelError::AwaitingExternalSignature) => {
                     self.checkpoint_external_wait(state);
                     return Ok(());
@@ -12749,11 +12779,7 @@ where
                 }
             });
         }
-        self.network
-            .send_message(FiberActorMessage::new_notification(
-                NetworkServiceEvent::LocalCommitmentSigned(state.id, settlement),
-            ))
-            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        self.publish_remote_settlement(state.id, request.commitment_number, settlement);
         state.send_message_to_peer(FiberMessage::commitment_signed_v2(request));
         if let ChannelState::SigningCommitment(flags) = state.state {
             state.maybe_transfer_to_tx_signatures(flags)?;
