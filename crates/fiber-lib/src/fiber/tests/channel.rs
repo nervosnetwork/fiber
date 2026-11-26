@@ -7170,6 +7170,47 @@ async fn test_connect_to_peers_with_mutual_channel_on_restart_1() {
 }
 
 #[tokio::test]
+async fn test_reestablish_does_not_resend_announcement_signatures_on_a_ready_channel() {
+    init_tracing();
+
+    // A ready public channel has both announcement signatures. Recovery must
+    // not send ours again: a v0.10.1 peer takes a late AnnouncementSignatures
+    // on a ready channel as a new ChannelReady and moves both commitment numbers.
+    let (mut node_a, mut node_b, channel_id, _) =
+        NetworkNode::new_2_nodes_with_established_channel(100000000000, 11800000000, true).await;
+    for node in [&node_a, &node_b] {
+        let state = node.get_channel_actor_state(channel_id);
+        assert_eq!(state.state, ChannelState::ChannelReady);
+        let info = state.public_channel_info.as_ref().expect("public channel");
+        assert!(info.local_channel_announcement_signature.is_some());
+        assert!(info.remote_channel_announcement_signature.is_some());
+    }
+    let late_signature = vec!["Ignored AnnouncementSignatures on a ready channel".to_string()];
+    node_b.add_unexpected_events(late_signature).await;
+
+    for _ in 0..2 {
+        node_a.restart().await;
+        node_a
+            .expect_event(
+                |event| matches!(event, NetworkServiceEvent::PeerConnected(id, _addr) if id == &node_b.pubkey),
+            )
+            .await;
+        node_a
+            .expect_debug_event("Reestablished channel in ChannelReady")
+            .await;
+        node_b
+            .expect_debug_event("Reestablished channel in ChannelReady")
+            .await;
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        node_b.get_triggered_unexpected_events().await,
+        Vec::<String>::new(),
+        "node A sent AnnouncementSignatures again on a ready channel"
+    );
+}
+
+#[tokio::test]
 async fn test_reestablished_channel_ready_notification_is_not_delayed() {
     init_tracing();
 
