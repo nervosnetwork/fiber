@@ -1,6 +1,6 @@
 // Run with: node --test tests/bruno/e2e/watchtower/force-close-preimage-multiple/settlement-poll.test.cjs
-// Execute the real Bruno hooks against a small chain/indexer model. In the CI
-// trace the root is already spent while NODE1's last payout is still in the pool.
+// Execute the real Bruno hooks against a small chain/indexer model. Either
+// party's channel payout may be indexed before the other's.
 const assert = require('node:assert/strict');
 const { readFileSync } = require('node:fs');
 const { join } = require('node:path');
@@ -23,8 +23,10 @@ const requests = files.map(file => {
     assertions: source.match(/assert \{\n([\s\S]*?)\n\}/)?.[1] || '',
   };
 });
+const node2BalanceRequestName = requests[3].name;
 
 async function run({ confirms = true, indexerLag = 0, payout = 10090998905n,
+                     node2PayoutAfterMines = 0,
                      max = 8, timeout = 120000, rpcError = false } = {}) {
   const baseline = 500000000000000000n;
   const vars = new Map(Object.entries({
@@ -68,7 +70,9 @@ async function run({ confirms = true, indexerLag = 0, payout = 10090998905n,
       const visible = committed && capacityReads++ >= indexerLag;
       const capacity = body.params[0].script.args === 'node1'
         ? baseline - 10100000464n + (visible ? payout : 0n)
-        : baseline + 8999600n; // NODE2 has already received both TLCs and its unlock.
+        // NODE2 may have claimed both TLCs but still be waiting for its 100 CKB
+        // channel contribution to return in a later settlement transaction.
+        : baseline + 8999600n - (mines < node2PayoutAfterMines ? 10000000000n : 0n);
       context.res.body = rpcError ? { error: { code: -1, message: 'indexer unavailable' } }
         : { result: { capacity: `0x${capacity.toString(16)}` } };
     }
@@ -92,14 +96,26 @@ async function run({ confirms = true, indexerLag = 0, payout = 10090998905n,
 test('spent root plus pending final payout must mine before either balance assertion', async () => {
   const result = await run();
   assert.ok(result.mines >= 3);
-  assert.equal(result.finalAssertions, 2);
+  assert.equal(result.finalAssertions, 1);
+  assert.ok(result.trace.includes(node2BalanceRequestName));
   assert.equal(result.vars.get('settlement_poll_iteration'), undefined);
 });
 
 test('waits for the indexer to expose the committed payout', async () => {
   const result = await run({ indexerLag: 2 });
   assert.ok(result.mines >= 5);
-  assert.equal(result.finalAssertions, 2);
+  assert.equal(result.finalAssertions, 1);
+});
+
+test('waits for NODE2 channel funds after NODE1 has settled', async () => {
+  const result = await run({ node2PayoutAfterMines: 5 });
+  assert.ok(result.mines >= 5);
+  assert.ok(result.trace.filter(name => name === node2BalanceRequestName).length > 1);
+});
+
+test('missing NODE2 payout fails at the shared poll limit', async () => {
+  await assert.rejects(run({ node2PayoutAfterMines: Infinity, max: 4 }),
+    /NODE2 settlement payout not indexed after 4 polling attempts.*gain=-9991000400/);
 });
 
 test('never-confirming final payout fails at the attempt cap with capacity diagnostics', async () => {
