@@ -797,15 +797,22 @@ impl<R: FiberRpc, S: SignerStore> Agent<R, S> {
             .get(&format!("{channel_id:#x}"))
             .context("watchtower request requires local authorization")?
             .clone();
+        let Some(funded_tx) = Self::fund_external_funding_template(
+            &content.transaction.clone().into(),
+            approval.destination.clone().into(),
+            approval.max_fee,
+        )?
+        else {
+            tracing::warn!(
+                channel_id = %format!("{channel_id:#x}"),
+                "skipping watchtower external-funding request needing auxiliary top-up: test agent does not carry an auxiliary wallet key"
+            );
+            return Ok(());
+        };
         let (chain, deps) = self
             .chain
             .clone()
             .context("watchtower requires independent ChainVerifier")?;
-        let funded_tx = Self::fund_external_funding_template(
-            &content.transaction.clone().into(),
-            approval.destination.clone().into(),
-            approval.max_fee,
-        )?;
         let funded_content = fiber_json_types::OnchainSigningContent {
             key_purpose: content.key_purpose,
             transaction: funded_tx.clone().into(),
@@ -837,7 +844,7 @@ impl<R: FiberRpc, S: SignerStore> Agent<R, S> {
         template: &ckb_types::packed::Transaction,
         destination: ckb_types::packed::Script,
         max_fee: u64,
-    ) -> Result<ckb_types::packed::Transaction> {
+    ) -> Result<Option<ckb_types::packed::Transaction>> {
         let mut outputs: Vec<_> = template.raw().outputs().into_iter().collect();
         let payout_idx = outputs
             .len()
@@ -860,9 +867,9 @@ impl<R: FiberRpc, S: SignerStore> Agent<R, S> {
             fee <= max_fee,
             "required watchtower fee ({fee}) exceeds local max_fee ({max_fee})"
         );
-        let adjusted_capacity = payout_capacity
-            .checked_sub(fee)
-            .context("payout output capacity smaller than fee")?;
+        let Some(adjusted_capacity) = payout_capacity.checked_sub(fee) else {
+            return Ok(None);
+        };
         let payout_data_len = template
             .raw()
             .outputs_data()
@@ -872,20 +879,21 @@ impl<R: FiberRpc, S: SignerStore> Agent<R, S> {
         let min_capacity = outputs[payout_idx]
             .occupied_capacity(ckb_types::core::Capacity::bytes(payout_data_len)?)?
             .as_u64();
-        anyhow::ensure!(
-            adjusted_capacity >= min_capacity,
-            "payout output capacity ({adjusted_capacity}) is below occupied capacity ({min_capacity})"
-        );
+        if adjusted_capacity < min_capacity {
+            return Ok(None);
+        }
         outputs[payout_idx] = outputs[payout_idx]
             .clone()
             .as_builder()
             .capacity(adjusted_capacity)
             .build();
-        Ok(with_destination
-            .as_advanced_builder()
-            .set_outputs(outputs)
-            .build()
-            .data())
+        Ok(Some(
+            with_destination
+                .as_advanced_builder()
+                .set_outputs(outputs)
+                .build()
+                .data(),
+        ))
     }
 
     async fn watchtower_authorization<C: ChainVerifier>(
@@ -2480,7 +2488,8 @@ mod tests {
             )
             .is_err()
         );
-        // Rejects payout outputs that would drop below occupied capacity after fee deduction.
+        // Returns Ok(None) when payout output would drop below occupied capacity after fee
+        // deduction (expected auxiliary top-up shortfall rather than a fatal agent error).
         let mut tiny_outputs: Vec<_> = template_tx.raw().outputs().into_iter().collect();
         tiny_outputs[1] = tiny_outputs[1]
             .clone()
@@ -2500,7 +2509,8 @@ mod tests {
                 authorization.destination.clone(),
                 10_000,
             )
-            .is_err()
+            .expect("expected top-up shortfall should return Ok(None)")
+            .is_none()
         );
 
         let approval = WatchtowerApproval {
@@ -2514,7 +2524,8 @@ mod tests {
                 authorization.destination,
                 approval.max_fee,
             )
-            .expect("fund template from payout");
+            .expect("fund template from payout")
+            .expect("payout should be self-fundable");
         let funded_content = fiber_json_types::OnchainSigningContent {
             key_purpose: content.key_purpose,
             transaction: funded_tx.clone().into(),
@@ -2524,7 +2535,7 @@ mod tests {
             .watchtower_authorization(
                 id,
                 &funded_content,
-                approval,
+                approval.clone(),
                 &chain,
                 vec![],
                 &empty_udt_deps,
@@ -2578,6 +2589,26 @@ mod tests {
             .expect(
                 "unsupported timeout TLC should be skipped without interrupting other channels",
             );
+        assert_eq!(node.state().watchtower_submissions.len(), 1);
+
+        // A small CKB or UDT payout needing an auxiliary wallet top-up must also be left pending
+        // with `Ok(())` so `poll_once` and subscription handling continue servicing other channels.
+        agent
+            .watchtower_approvals
+            .insert(format!("{id:#x}"), approval);
+        let topup_status = WatchtowerSigningStatus::ExternalFundingRequired {
+            request_id: fiber_types::Hash256::from([0x97; 32]).into(),
+            content: fiber_json_types::OnchainSigningContent {
+                key_purpose: content.key_purpose,
+                transaction: tiny_template.into(),
+            },
+            expires_at_ms: now_ms() + 1_800_000,
+            required_expiry_since: None,
+        };
+        agent
+            .handle_watchtower_status(id, topup_status)
+            .await
+            .expect("payout needing top-up should be skipped without interrupting other channels");
         assert_eq!(node.state().watchtower_submissions.len(), 1);
     }
 }

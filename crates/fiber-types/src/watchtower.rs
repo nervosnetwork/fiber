@@ -391,12 +391,40 @@ impl WatchtowerExternalSignerState {
         self.pending_requests.is_empty() && self.signed_signatures.is_empty()
     }
 
+    /// Return the highest-priority pending request for RPC status and subscription replay:
+    /// prefer self-fundable plain-CKB payouts (> 61 CKB, no expiry input required), then any
+    /// non-timeout claim (`required_expiry_since.is_none()`), then larger CKB payout capacity,
+    /// breaking ties deterministically by lowest `request_id`.
     pub fn first_pending(&self) -> Option<(Hash256, &PendingWatchtowerRequest)> {
         self.pending_requests
             .iter()
-            .next()
+            .max_by(|(id_a, req_a), (id_b, req_b)| {
+                pending_request_priority(req_a)
+                    .cmp(&pending_request_priority(req_b))
+                    .then_with(|| id_b.cmp(id_a))
+            })
             .map(|(id, req)| (*id, req))
     }
+}
+
+fn pending_request_priority(req: &PendingWatchtowerRequest) -> (bool, bool, u64) {
+    use ckb_types::prelude::Unpack;
+
+    const STANDARD_SECP256K1_MIN_CAPACITY: u64 = 6_100_000_000;
+    let no_expiry_required = req.required_expiry_since.is_none();
+    let outputs = req.content.transaction.raw().outputs();
+    let payout = outputs
+        .len()
+        .checked_sub(1)
+        .and_then(|idx| outputs.get(idx));
+    let payout_capacity = payout
+        .as_ref()
+        .map(|o| Unpack::<u64>::unpack(&o.capacity()))
+        .unwrap_or(0);
+    let is_plain_ckb = payout.is_some_and(|o| o.type_().is_none());
+    let self_fundable =
+        no_expiry_required && is_plain_ckb && payout_capacity > STANDARD_SECP256K1_MIN_CAPACITY;
+    (self_fundable, no_expiry_required, payout_capacity)
 }
 
 /// Receipt for one applied watchtower signature.
@@ -470,6 +498,12 @@ fn parse_settlement_witness_unlock(witness: &[u8]) -> Result<(u8, u8, bool, usiz
         sig_start,
         sig_end,
     ))
+}
+
+/// Return whether a V2 single-unlock `CommitmentLock` settlement witness (`witness[0]`)
+/// carries a 32-byte preimage (`with_preimage == true`).
+pub fn settlement_witness_with_preimage(witness: &[u8]) -> Result<bool, String> {
+    parse_settlement_witness_unlock(witness).map(|(_, _, with_preimage, _, _)| with_preimage)
 }
 
 /// Locate the 65-byte signature slice `(start, end)` inside a V2 single-unlock
@@ -596,9 +630,10 @@ pub fn external_funding_watchtower_tx_hash(tx: &Transaction) -> Hash256 {
 ///
 /// When `required_expiry_since` is `None`, the client may pay fees directly out of the payout
 /// output (`inputs.len() == 1`) or attach extra wallet inputs (`inputs.len() >= 2`); absolute
-/// timestamp `since` values (`0x40` prefix) are permitted on balance withdrawals with no pending
-/// TLCs (`unlock_type >= 0xFE && htlc_count == 0`) where the contract never inspects input
-/// timestamps, and rejected on unlocks where a timestamp could affect the contract path.
+/// timestamp `since` values (`0x40` prefix) are permitted on balance withdrawals
+/// (`unlock_type >= 0xFE`, with or without already-expired TLCs in the witness) where the contract
+/// never inspects input timestamps, and rejected on unlocks where a timestamp could affect the
+/// contract path.
 /// When `required_expiry_since` is `Some(required)`, the client must attach at least one funding
 /// input (`inputs.len() >= 2`), and the **first** input carrying an absolute timestamp `since`
 /// (`0x40` prefix) must satisfy `since >= required` (matching
@@ -626,7 +661,15 @@ pub fn validate_and_normalize_external_funding_watchtower_tx(
             "externally funded watchtower transaction must not include header_deps".to_string(),
         );
     }
-    let submitted_deps: Vec<_> = submitted_raw.cell_deps().into_iter().collect();
+    let mut submitted_deps =
+        std::collections::HashSet::with_capacity(submitted_raw.cell_deps().len());
+    for dep in submitted_raw.cell_deps() {
+        if !submitted_deps.insert(dep) {
+            return Err(
+                "externally funded watchtower transaction contains duplicate cell_deps".to_string(),
+            );
+        }
+    }
     for template_dep in template_raw.cell_deps() {
         if !submitted_deps.contains(&template_dep) {
             return Err(
@@ -804,7 +847,7 @@ pub fn validate_and_normalize_external_funding_watchtower_tx(
         .ok_or_else(|| "externally funded transaction is missing witness[0]".to_string())?;
     let template_w0_bytes = template_w0.raw_data();
     let submitted_w0_bytes = submitted_w0.raw_data();
-    let (htlc_count, unlock_type, _with_preimage, sig_start, sig_end) =
+    let (_htlc_count, unlock_type, _with_preimage, sig_start, sig_end) =
         parse_settlement_witness_unlock(&template_w0_bytes)?;
     if template_w0_bytes[sig_start..sig_end] != [0u8; 65] {
         return Err("template witness[0] signature slot must be all-zero placeholder".to_string());
@@ -854,10 +897,10 @@ pub fn validate_and_normalize_external_funding_watchtower_tx(
             }
         }
         None => {
-            // On balance withdrawals with no pending TLCs (`unlock_type >= 0xFE && htlc_count == 0`),
-            // CommitmentLock never inspects input absolute timestamps, so wallets may spend
-            // mature timestamp-locked funding cells.
-            let allow_timestamp_funding = unlock_type >= 0xFE && htlc_count == 0;
+            // On balance withdrawals (`unlock_type >= 0xFE`, even when already-expired TLCs
+            // remain in the witness), CommitmentLock never inspects input absolute timestamps,
+            // so wallets may spend mature timestamp-locked funding cells.
+            let allow_timestamp_funding = unlock_type >= 0xFE;
             if !allow_timestamp_funding && first_abs_timestamp_since.is_some() {
                 return Err(
                     "externally funded non-timeout watchtower transaction must not carry an absolute timestamp since"
@@ -1824,6 +1867,42 @@ mod key_material_tests {
             Some(&sig),
         )
         .is_ok());
+        // Balance withdrawal with an expired TLC still present in witness (htlc_count == 1,
+        // unlock_type == 0xFE) must ALSO allow a mature absolute-timestamp wallet funding input.
+        let mut balance_with_expired_tlc_w = vec![
+            16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0,    // xudt placeholder
+            0x01, // unlock_count = 1
+            0x01, // htlc_count = 1 (expired TLC retained in witness)
+        ];
+        balance_with_expired_tlc_w.extend(std::iter::repeat_n(0x11u8, 97));
+        balance_with_expired_tlc_w.extend(std::iter::repeat_n(0x22u8, 72));
+        balance_with_expired_tlc_w.push(0xfe); // balance unlock_type
+        balance_with_expired_tlc_w.push(0x00); // with_preimage = false
+        balance_with_expired_tlc_w.extend_from_slice(&[0u8; 65]);
+        let balance_with_expired_tmpl = balance_tmpl
+            .clone()
+            .into_view()
+            .as_advanced_builder()
+            .set_witnesses(vec![balance_with_expired_tlc_w.clone().pack()])
+            .build()
+            .data();
+        let balance_with_expired_funded = balance_funded_with_ts
+            .clone()
+            .into_view()
+            .as_advanced_builder()
+            .set_witnesses(vec![
+                balance_with_expired_tlc_w.pack(),
+                balance_funded_with_ts.witnesses().get(1).unwrap(),
+            ])
+            .build()
+            .data();
+        assert!(validate_and_normalize_external_funding_watchtower_tx(
+            &balance_with_expired_tmpl,
+            &balance_with_expired_funded,
+            None,
+            Some(&sig),
+        )
+        .is_ok());
         let (_, preimage_funded_bad_since) = build_template_and_funded(1, true, expiry_since);
         assert!(validate_and_normalize_external_funding_watchtower_tx(
             &preimage_tmpl,
@@ -1873,6 +1952,24 @@ mod key_material_tests {
             Some(&sig),
         )
         .is_err());
+
+        // Duplicate cell_deps rejected before consuming the request (CKB DuplicateCellDeps).
+        let template_dep = template.raw().cell_deps().get(0).unwrap();
+        let dup_deps = funded
+            .clone()
+            .into_view()
+            .as_advanced_builder()
+            .cell_dep(template_dep)
+            .build()
+            .data();
+        let dup_err = validate_and_normalize_external_funding_watchtower_tx(
+            &template,
+            &dup_deps,
+            Some(expiry_since),
+            Some(&sig),
+        )
+        .expect_err("duplicate cell_deps must be rejected");
+        assert!(dup_err.contains("duplicate cell_deps"), "{dup_err}");
 
         // Occupied capacity one-shannon boundary on a standard 20-byte-args lock (61 CKB = 6_100_000_000).
         let exact_change = CellOutput::new_builder()
@@ -2288,5 +2385,51 @@ mod key_material_tests {
             Some(&sig),
         )
         .is_err());
+    }
+
+    #[test]
+    fn first_pending_prefers_self_fundable_claim_over_lower_id_timeout() {
+        use ckb_types::core::TransactionBuilder;
+        use ckb_types::prelude::*;
+
+        let make_req = |payout_capacity: u64, required_expiry_since: Option<u64>| {
+            let tx = TransactionBuilder::default()
+                .output(CellOutput::new_builder().capacity(payout_capacity).build())
+                .output_data(ckb_types::packed::Bytes::default())
+                .build()
+                .data();
+            PendingWatchtowerRequest {
+                content: crate::channel_signer::OnchainSigningContent {
+                    key_purpose: crate::channel_signer::OnchainKeyPurpose::Settlement,
+                    transaction: tx,
+                },
+                created_at_ms: 1_000,
+                required_expiry_since,
+            }
+        };
+
+        let timeout_id = Hash256::from([0x01; 32]);
+        let small_id = Hash256::from([0x02; 32]);
+        let self_fundable_id = Hash256::from([0xff; 32]);
+        let mut state = WatchtowerExternalSignerState::default();
+        state.pending_requests.insert(
+            timeout_id,
+            make_req(10_000_000_000, Some(settlement_timestamp_since(100_000))),
+        );
+        state
+            .pending_requests
+            .insert(small_id, make_req(5_100_000_000, None));
+        state
+            .pending_requests
+            .insert(self_fundable_id, make_req(20_000_000_000, None));
+
+        // Even though `self_fundable_id` > `timeout_id`, the self-fundable CKB claim must be exposed.
+        assert_eq!(
+            state.first_pending().map(|(id, _)| id),
+            Some(self_fundable_id)
+        );
+        state.pending_requests.remove(&self_fundable_id);
+        // Without a self-fundable claim, non-timeout still precedes a lower-ID timeout claim.
+        assert_eq!(state.first_pending().map(|(id, _)| id), Some(small_id));
     }
 }

@@ -507,6 +507,7 @@ async fn tenant_watchtower_rpc_rejects_secrets_and_cross_tenant_signatures() {
     let mut owner_events = subscribe_signing(&owner_ws, SubscriptionTopic::WatchtowerSigning).await;
     let mut other_events = subscribe_signing(&other_ws, SubscriptionTopic::WatchtowerSigning).await;
 
+    use ckb_types::prelude::*;
     // This test checks authenticated routing only; the watchtower actor tests
     // cover generating and applying requests from real settlement transactions.
     let mut witness = [0u8; 16 + 1 + 1 + 72 + 1 + 1 + 65];
@@ -517,14 +518,37 @@ async fn tenant_watchtower_rpc_rejects_secrets_and_cross_tenant_signatures() {
             ckb_types::packed::OutPoint::new(ckb_types::prelude::Pack::pack(&[0x11u8; 32]), 0),
             0,
         ))
-        .output(ckb_types::packed::CellOutput::default())
+        .output(
+            ckb_types::packed::CellOutput::new_builder()
+                .capacity(100_000_000_000u64)
+                .build(),
+        )
         .output_data(ckb_types::packed::Bytes::default())
         .witness(ckb_types::prelude::Pack::pack(witness.as_slice()))
         .build()
         .data();
+    let payout_lock = ckb_types::packed::Script::new_builder()
+        .code_hash(ckb_types::prelude::Pack::pack(&[0x22u8; 32]))
+        .hash_type(ckb_types::core::ScriptHashType::Type)
+        .args(ckb_types::prelude::Pack::pack([0x33u8; 20].as_slice()))
+        .build();
+    let signed_tx = tx
+        .clone()
+        .into_view()
+        .as_advanced_builder()
+        .set_outputs(vec![ckb_types::packed::CellOutput::new_builder()
+            .lock(payout_lock)
+            .capacity(99_999_990_000u64)
+            .build()])
+        .build()
+        .data();
     let content = OnchainSigningContent {
         key_purpose: OnchainKeyPurpose::Settlement,
-        transaction: tx.clone(),
+        transaction: tx,
+    };
+    let funded_content = OnchainSigningContent {
+        key_purpose: OnchainKeyPurpose::Settlement,
+        transaction: signed_tx.clone(),
     };
     let request_id = Hash256::from([0x88; 32]);
     let mut external = WatchtowerExternalSignerState::default();
@@ -581,10 +605,10 @@ async fn tenant_watchtower_rpc_rejects_secrets_and_cross_tenant_signatures() {
     let submission = SubmitWatchtowerSignatureParams {
         channel_id: channel_id.into(),
         request_id: request_id.into(),
-        signature: crate::watchtower::sign_onchain_request(&key, &content)
+        signature: crate::watchtower::sign_onchain_request(&key, &funded_content)
             .unwrap()
             .to_vec(),
-        signed_transaction: tx.into(),
+        signed_transaction: signed_tx.into(),
     };
     let err = other
         .request::<SubmitWatchtowerSignatureResult, _>(

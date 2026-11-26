@@ -1050,7 +1050,7 @@ pub enum WatchtowerSigningStatus {
         #[serde_as(as = "U64Hex")]
         #[schemars(schema_with = "schema_as_uint_hex")]
         expires_at_ms: u64,
-        /// Optional absolute timestamp `since` required on a funding input for a timeout TLC unlock.
+        /// Optional absolute timestamp `since` required on the first absolute-timestamp input (`since >> 56 == 0x40`) for a timeout TLC unlock.
         #[serde_as(as = "Option<U64Hex>")]
         #[schemars(schema_with = "schema_as_uint_hex_optional")]
         #[serde(default, skip_serializing_if = "Option::is_none")]

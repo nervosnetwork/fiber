@@ -426,6 +426,13 @@ fn check_watch_channel<S: WatchtowerStore>(
                                         if revocation_data.commitment_number
                                             >= commitment_number =>
                                     {
+                                        expire_channel_pending_external_signing_requests(
+                                            events,
+                                            store,
+                                            &channel_node_id,
+                                            &channel_data.channel_id,
+                                            now_ms,
+                                        );
                                         match ckb_client.get_live_cell(
                                             first_commitment_tx_out_point.clone().into(),
                                             false,
@@ -605,6 +612,38 @@ fn expire_requests<T: ExpirableWatchtowerRequest>(
         }
     });
     expired
+}
+
+/// Expires obsolete unsigned `pending_requests` whose TTL window (`WATCHTOWER_HOLD_MS`) has
+/// elapsed without touching `signed_signatures` or arming tenant backoff (used on the revocation
+/// path where the watchtower sweeps the revoked commitment directly).
+pub(crate) fn expire_channel_pending_external_signing_requests<S: WatchtowerStore>(
+    events: &crate::signing::SigningEvents,
+    store: &S,
+    node: &NodeId,
+    channel_id: &Hash256,
+    now_ms: u64,
+) {
+    if !matches!(
+        store.get_watchtower_signer(node, channel_id),
+        fiber_types::WatchtowerSignerState::External(_)
+    ) {
+        return;
+    }
+    let scope = events.watchtower(node);
+    let mut notification = scope.prepare_update();
+    store
+        .update_watchtower_signer(node, channel_id, |state| {
+            if let fiber_types::WatchtowerSignerState::External(ext) = state {
+                let expired_pending = expire_requests(&mut ext.pending_requests, now_ms);
+                if !expired_pending.is_empty() {
+                    notification.watchtower_state(*channel_id, state);
+                }
+            }
+            Ok::<_, std::convert::Infallible>(())
+        })
+        .expect("infallible signer update");
+    notification.publish();
 }
 
 /// Expires pending or unbroadcast signed external signing requests whose TTL window
@@ -1383,6 +1422,24 @@ fn evict_dead_fee_signing_requests<S: WatchtowerStore>(
     notification.publish();
 }
 
+/// Whether a CKB `send_transaction` JSON-RPC error code definitively rejects this signed
+/// transaction (as opposed to already-in-mempool or a transient node/pool error such as
+/// `PoolIsFull`, `MaxAncestorsCountLimit`, or `InternalError`).
+fn is_definitive_send_tx_rpc_rejection(code: i64) -> bool {
+    matches!(
+        code,
+        -301       // TransactionFailedToResolve
+        | -302     // TransactionFailedToVerify
+        | -1102    // PoolRejectedTransactionByOutputsValidator
+        | -1104    // PoolRejectedTransactionByMinFeeRate
+        | -1105    // PoolRejectedTransactionBySizeLimit
+        | -1108    // PoolRejectedMalformedTransaction
+        | -1110    // PoolRejectedTransactionByMaxFeeLimit
+        | -1111    // PoolRejectedRBF
+        | -32602 // InvalidParams
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn handle_external_settlement_send_error<S: WatchtowerStore>(
     events: &crate::signing::SigningEvents,
@@ -1398,7 +1455,7 @@ fn handle_external_settlement_send_error<S: WatchtowerStore>(
         ckb_sdk::RpcError::Rpc(e) if e.code.code() == -1107 => {
             tracing::debug!("Settlement tx {:#x} already in mempool", tx.hash());
         }
-        ckb_sdk::RpcError::Rpc(_) => {
+        ckb_sdk::RpcError::Rpc(e) if is_definitive_send_tx_rpc_rejection(e.code.code()) => {
             // Definitive CKB RPC rejection: evict the signed request, clear `last_applied`,
             // and arm retry backoff.
             let failed_raw = tx.data().raw();
@@ -1413,16 +1470,16 @@ fn handle_external_settlement_send_error<S: WatchtowerStore>(
             error!("Failed to send settlement tx: {:?}, error: {:?}", tx, err);
         }
         _ => {
-            // Transport/timeout error: the CKB node may have accepted the transaction before the
-            // response failed. Reconcile by tx hash and retain `signed_signatures` + `last_applied`
-            // until a definitive rejection, confirmation, or TTL expiry resolves it.
+            // Retryable RPC error (e.g. PoolIsFull / InternalError) or transport/timeout error:
+            // retain `signed_signatures` + `last_applied` and retry on the next scan until a
+            // definitive rejection, confirmation, or TTL expiry resolves it.
             let tx_hash: ckb_types::H256 = tx.hash().unpack();
             match get_tx_status(&tx_hash) {
                 Ok(Some(Status::Committed | Status::Proposed | Status::Pending)) => {
                     tracing::info!(
                         channel_id = %channel_id,
                         tx_hash = %tx_hash,
-                        "Settlement tx observed on CKB node after transport error; retaining receipt"
+                        "Settlement tx observed on CKB node after retryable send error; retaining receipt"
                     );
                 }
                 _ => {
@@ -1430,7 +1487,7 @@ fn handle_external_settlement_send_error<S: WatchtowerStore>(
                         channel_id = %channel_id,
                         tx_hash = %tx_hash,
                         error = ?err,
-                        "Settlement tx broadcast result unknown after transport error; retaining signed request"
+                        "Settlement tx broadcast deferred after retryable error; retaining signed request"
                     );
                 }
             }
@@ -1473,31 +1530,21 @@ fn classify_dead_fee_signing_requests(
 ) -> (HashSet<OutPoint>, HashSet<Hash256>) {
     let mut confirmed_spent_inputs = HashSet::new();
     let mut dead_fee_only = HashSet::new();
-    for (id, content) in external
+    for (id, content, from_signed) in external
         .pending_requests
         .iter()
-        .map(|(id, req)| (*id, &req.content))
+        .map(|(id, req)| (*id, &req.content, false))
         .chain(
             external
                 .signed_signatures
                 .iter()
-                .map(|(id, req)| (*id, &req.content)),
+                .map(|(id, req)| (*id, &req.content, true)),
         )
     {
         let mut inputs = content.transaction.raw().inputs().into_iter();
         let Some(commitment_input) = inputs.next() else {
             continue;
         };
-        let fee_input_confirmed_spent = inputs.any(|input| {
-            classify_outpoint_liveness(
-                &input.previous_output(),
-                &mut get_live_cell,
-                &mut get_tx_status,
-            ) == OutpointLiveness::ConfirmedSpent
-        });
-        if !fee_input_confirmed_spent {
-            continue;
-        }
         let commitment_outpoint = commitment_input.previous_output();
         match classify_outpoint_liveness(
             &commitment_outpoint,
@@ -1507,11 +1554,29 @@ fn classify_dead_fee_signing_requests(
             OutpointLiveness::ConfirmedSpent => {
                 confirmed_spent_inputs.insert(commitment_outpoint);
             }
-            OutpointLiveness::Live => {
-                dead_fee_only.insert(id);
-            }
             OutpointLiveness::Unknown => {
-                // Skip eviction when commitment cell status is unknown so we never falsely clear `last_applied`.
+                // If `inputs[0]` was not reported live and its parent lookup was inconclusive,
+                // check whether the signed settlement tx itself is already `Committed` before
+                // TTL expiry can clear `last_applied`.
+                if from_signed {
+                    let signed_tx_hash: ckb_types::H256 =
+                        content.transaction.calc_tx_hash().unpack();
+                    if matches!(get_tx_status(&signed_tx_hash), Ok(Some(Status::Committed))) {
+                        confirmed_spent_inputs.insert(commitment_outpoint);
+                    }
+                }
+            }
+            OutpointLiveness::Live => {
+                let fee_input_confirmed_spent = inputs.any(|input| {
+                    classify_outpoint_liveness(
+                        &input.previous_output(),
+                        &mut get_live_cell,
+                        &mut get_tx_status,
+                    ) == OutpointLiveness::ConfirmedSpent
+                });
+                if fee_input_confirmed_spent {
+                    dead_fee_only.insert(id);
+                }
             }
         }
     }
@@ -1916,12 +1981,78 @@ fn build_settlement_tx<S: WatchtowerStore>(
     let fee_provider_lock_script =
         get_script_by_contract(Contract::Secp256k1Lock, signer.pubkey_hash());
     let external_signer = channel_data.local_settlement_key.is_none();
+    if external_signer {
+        // Broadcast any already-accepted signed settlement for this live commitment cell before
+        // ranking new claims, so an offline wallet's valid signature is not stranded if a higher-
+        // priority claim (e.g. a larger preimage) becomes eligible between submit and broadcast.
+        let commitment_outpoint = OutPoint::from(commitment_cell.out_point.clone());
+        if let fiber_types::WatchtowerSignerState::External(external) =
+            store.get_watchtower_signer(self_node_id, &channel_data.channel_id)
+        {
+            if let Some((&signed_id, signed)) =
+                external.signed_signatures.iter().find(|(_, signed)| {
+                    signed
+                        .content
+                        .transaction
+                        .raw()
+                        .inputs()
+                        .get(0)
+                        .is_some_and(|input| input.previous_output() == commitment_outpoint)
+                        && channel_data
+                            .expected_onchain_pubkey(&signed.content.key_purpose)
+                            .is_ok_and(|pk| {
+                                super::verify_onchain_signature(
+                                    &pk,
+                                    &signed.content,
+                                    &signed.signature,
+                                )
+                                .is_ok()
+                            })
+                })
+            {
+                let with_preimage = signed
+                    .content
+                    .transaction
+                    .witnesses()
+                    .get(0)
+                    .ok_or_else(|| anyhow!("signed watchtower tx missing witness[0]"))
+                    .and_then(|w| {
+                        fiber_types::watchtower::settlement_witness_with_preimage(
+                            w.raw_data().as_ref(),
+                        )
+                        .map_err(|e| anyhow!(e))
+                    });
+                match with_preimage {
+                    Ok(with_preimage) => {
+                        if let Some(tx) = apply_existing_signed_settlement_tx(
+                            events,
+                            store,
+                            self_node_id,
+                            channel_data.channel_id,
+                            signed_id,
+                            &signed.content,
+                            with_preimage,
+                        )? {
+                            return Ok(Some(tx));
+                        }
+                    }
+                    Err(err) => {
+                        warn!(
+                            channel_id = %channel_data.channel_id,
+                            request_id = %signed_id,
+                            "ignoring malformed signed watchtower witness: {err}"
+                        );
+                    }
+                }
+            }
+        }
+    }
     let is_udt_channel = channel_data.funding_udt_type_script.is_some();
+    const STANDARD_SECP256K1_MIN_CAPACITY: u128 = 6_100_000_000;
     // Rank eligible TLC candidates for externally funded channels so a wallet without spare cells
     // can claim a self-fundable CKB preimage payout (> 61 CKB standard secp256k1 cell floor)
     // instead of starving behind a smaller or timeout TLC that requires an auxiliary wallet input.
     let tlc_candidate_priority = |with_preimage: bool, amount: u128| -> (bool, u128) {
-        const STANDARD_SECP256K1_MIN_CAPACITY: u128 = 6_100_000_000;
         let self_fundable =
             !is_udt_channel && with_preimage && amount > STANDARD_SECP256K1_MIN_CAPACITY;
         (self_fundable, amount)
@@ -1968,13 +2099,20 @@ fn build_settlement_tx<S: WatchtowerStore>(
                             )
                         } else {
                             let mut pending_tlcs_count = sw.pending_htlcs.len();
+                            let mut all_tlcs_expired = true;
                             let mut unlock_option: Option<(Unlock, u128, Option<Privkey>)> = None;
                             let mut best_priority: Option<(bool, u128)> = None;
                             for (i, tlc) in sw.pending_htlcs.iter().enumerate() {
                                 let expiry = match tlc.absolute_expiry() {
                                     Some(expiry) => expiry,
-                                    None => continue,
+                                    None => {
+                                        all_tlcs_expired = false;
+                                        continue;
+                                    }
                                 };
+                                if current_time <= expiry {
+                                    all_tlcs_expired = false;
+                                }
 
                                 let candidate = if tlc.is_offered() {
                                     if current_time > expiry {
@@ -2028,7 +2166,14 @@ fn build_settlement_tx<S: WatchtowerStore>(
                                 }
                             }
 
-                            if unlock_option.is_none() && pending_tlcs_count == 0 {
+                            let self_fundable_balance_beats_tlc = external_signer
+                                && !is_udt_channel
+                                && all_tlcs_expired
+                                && sw.settlement_local_amount > STANDARD_SECP256K1_MIN_CAPACITY
+                                && best_priority.is_none_or(|(self_fundable, _)| !self_fundable);
+                            if (unlock_option.is_none() && pending_tlcs_count == 0)
+                                || self_fundable_balance_beats_tlc
+                            {
                                 unlock_option = Some((
                                     Unlock {
                                         unlock_type: 0xFF,
@@ -2069,13 +2214,20 @@ fn build_settlement_tx<S: WatchtowerStore>(
                         )
                     } else {
                         let mut pending_tlcs_count = sw.pending_htlcs.len();
+                        let mut all_tlcs_expired = true;
                         let mut unlock_option: Option<(Unlock, u128, Option<Privkey>)> = None;
                         let mut best_priority: Option<(bool, u128)> = None;
                         for (i, tlc) in sw.pending_htlcs.iter().enumerate() {
                             let expiry = match tlc.absolute_expiry() {
                                 Some(expiry) => expiry,
-                                None => continue,
+                                None => {
+                                    all_tlcs_expired = false;
+                                    continue;
+                                }
                             };
+                            if current_time <= expiry {
+                                all_tlcs_expired = false;
+                            }
 
                             let candidate = if !tlc.is_offered() {
                                 if current_time > expiry {
@@ -2128,7 +2280,14 @@ fn build_settlement_tx<S: WatchtowerStore>(
                             }
                         }
 
-                        if unlock_option.is_none() && pending_tlcs_count == 0 {
+                        let self_fundable_balance_beats_tlc = external_signer
+                            && !is_udt_channel
+                            && all_tlcs_expired
+                            && sw.settlement_remote_amount > STANDARD_SECP256K1_MIN_CAPACITY
+                            && best_priority.is_none_or(|(self_fundable, _)| !self_fundable);
+                        if (unlock_option.is_none() && pending_tlcs_count == 0)
+                            || self_fundable_balance_beats_tlc
+                        {
                             unlock_option = Some((
                                 Unlock {
                                     unlock_type: 0xFE,
@@ -2173,6 +2332,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
                 return Ok(None);
             }
             let mut pending_tlcs_count = settlement_data.tlcs.len();
+            let mut all_tlcs_expired = true;
             let mut unlock_option: Option<(
                 Unlock,
                 u128,
@@ -2181,6 +2341,9 @@ fn build_settlement_tx<S: WatchtowerStore>(
             )> = None;
             let mut best_priority: Option<(bool, u128)> = None;
             for (i, tlc) in settlement_data.tlcs.iter().enumerate() {
+                if current_time <= tlc.expiry {
+                    all_tlcs_expired = false;
+                }
                 let candidate = match (tlc.tlc_id.is_offered(), for_remote) {
                     (true, true) | (false, false) => {
                         let delay = mul(delay_epoch, 2, 3).ok_or_else(|| {
@@ -2257,10 +2420,18 @@ fn build_settlement_tx<S: WatchtowerStore>(
                 }
             }
 
-            if unlock_option.is_none() && pending_tlcs_count == 0 {
-                if cell_header_epoch.to_rational() + delay_epoch.to_rational()
-                    > current_epoch.to_rational()
-                {
+            let full_delay_matured = cell_header_epoch.to_rational() + delay_epoch.to_rational()
+                <= current_epoch.to_rational();
+            let self_fundable_balance_beats_tlc = external_signer
+                && !is_udt_channel
+                && full_delay_matured
+                && all_tlcs_expired
+                && settlement_data.local_amount > STANDARD_SECP256K1_MIN_CAPACITY
+                && best_priority.is_none_or(|(self_fundable, _)| !self_fundable);
+            if (unlock_option.is_none() && pending_tlcs_count == 0)
+                || self_fundable_balance_beats_tlc
+            {
+                if !full_delay_matured {
                     debug!(
                         "Commitment cell: {:?} is not ready to settle local",
                         commitment_cell.out_point.tx_hash
@@ -3087,24 +3258,19 @@ fn build_signed_settlement_tx<S: WatchtowerStore>(
                                 }
                                 return Ok(None);
                             }
+                            external.pending_requests.remove(&request_id);
+                            if external
+                                .last_applied
+                                .as_ref()
+                                .is_some_and(|a| a.request_id == request_id)
+                            {
+                                external.last_applied = None;
+                            }
+                            signing_update.watchtower_state(channel_id, state);
                         }
-
-                        external.pending_requests.insert(
-                            request_id,
-                            PendingWatchtowerRequest {
-                                content: awaiting,
-                                created_at_ms: now_ms,
-                                required_expiry_since,
-                            },
-                        );
-                        if external
-                            .last_applied
-                            .as_ref()
-                            .is_some_and(|a| a.request_id == request_id)
-                        {
-                            external.last_applied = None;
-                        }
-                        signing_update.watchtower_state(channel_id, state);
+                        // The previously observed request_id disappeared before we acquired the
+                        // write lock (e.g. concurrent expiry or channel remove + re-register).
+                        // Never resurrect a retired request ID; let a fresh scan issue a new one.
                         return Ok(None);
                     }
 
