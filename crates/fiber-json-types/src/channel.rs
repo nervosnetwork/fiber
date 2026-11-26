@@ -2,7 +2,7 @@
 
 use crate::define_rpc_flags;
 use crate::schema_helpers::*;
-use crate::serde_utils::{EntityHex, Hash256, Pubkey, SliceHex, U128Hex, U32Hex, U64Hex};
+use crate::serde_utils::{EntityHex, Hash256, Pubkey, SliceHex, U128Hex, U32Hex, U64Hex, U8Hex};
 use ckb_jsonrpc_types::{CellDep, EpochNumberWithFraction, Script, Transaction};
 use ckb_types::packed::CellOutput;
 use ckb_types::packed::OutPoint;
@@ -454,6 +454,21 @@ pub enum ChannelState {
     Stale,
 }
 
+/// Channel features. Only "0x1" (V2 with full payment hashes) is supported.
+#[serde_as]
+#[derive(Copy, Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct ChannelFeatures(
+    #[serde_as(as = "U8Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub u8,
+);
+
+impl Default for ChannelFeatures {
+    fn default() -> Self {
+        Self(1)
+    }
+}
+
 /// The channel data structure.
 #[serde_as]
 #[derive(Clone, Serialize, Deserialize, Debug, JsonSchema)]
@@ -476,6 +491,8 @@ pub struct Channel {
     pub pubkey: Pubkey,
     /// The UDT type script of the channel
     pub funding_udt_type_script: Option<Script>,
+    /// Channel feature bitmap selected when the channel was opened.
+    pub channel_features: ChannelFeatures,
     /// The state of the channel
     pub state: ChannelState,
     /// The local balance of the channel

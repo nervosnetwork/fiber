@@ -1836,6 +1836,7 @@ The channel data structure.
 * `channel_outpoint` - <em>`Option<OutPoint>`</em>, The outpoint of the channel
 * `pubkey` - <em>[Pubkey](#type-pubkey)</em>, The public key of the channel counterparty.
 * `funding_udt_type_script` - <em>`Option<Script>`</em>, The UDT type script of the channel
+* `channel_features` - <em>[ChannelFeatures](#type-channelfeatures)</em>, Channel feature bitmap selected when the channel was opened.
 * `state` - <em>[ChannelState](#type-channelstate)</em>, The state of the channel
 * `local_balance` - <em>`u128`</em>, The local balance of the channel
 * `offered_tlc_balance` - <em>`u128`</em>, The offered balance of the channel

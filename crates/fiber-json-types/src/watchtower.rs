@@ -2,27 +2,14 @@
 
 use crate::invoice::HashAlgorithm;
 use crate::schema_helpers::*;
-use crate::serde_utils::{EntityHex, Hash256, Privkey, Pubkey, SliceHex, U128Hex, U64Hex, U8Hex};
+use crate::serde_utils::{EntityHex, Hash256, Privkey, Pubkey, SliceHex, U128Hex, U64Hex};
 use ckb_jsonrpc_types::Script;
 use ckb_types::packed::{Bytes, CellOutput};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 
-/// Channel features. Only "0x1" (V2 with full payment hashes) is supported.
-#[serde_as]
-#[derive(Copy, Clone, Debug, Serialize, Deserialize, JsonSchema)]
-pub struct ChannelFeatures(
-    #[serde_as(as = "U8Hex")]
-    #[schemars(schema_with = "schema_as_uint_hex")]
-    pub u8,
-);
-
-impl Default for ChannelFeatures {
-    fn default() -> Self {
-        Self(1)
-    }
-}
+pub use crate::channel::ChannelFeatures;
 
 /// The id of a TLC, it can be either offered or received.
 #[serde_as]
