@@ -19,8 +19,8 @@ use crate::fiber::network::{
     buffered_trampoline_upstream_status, BufferedTrampolineUpstreamStatus,
 };
 use crate::fiber::onchain_tlc_reconcile::{
-    collect_onchain_confirmed_payer_tlcs, collect_onchain_excluded_tlcs,
-    collect_onchain_fulfilled_tlcs, collect_onchain_payer_failures,
+    collect_onchain_confirmed_payer_tlcs, collect_onchain_excluded_fulfilled_tlcs,
+    collect_onchain_excluded_tlcs, collect_onchain_fulfilled_tlcs, collect_onchain_payer_failures,
     collect_onchain_received_timeout_settled_tlcs, collect_onchain_timeout_settled_tlcs,
     confirm_onchain_payer_fulfill, has_unresolved_onchain_tlcs, onchain_fulfilled_preimage,
     OnChainConfirmedPayerTlc, OnChainTimeoutTlcRole, OnChainTlcSettlement,
@@ -3551,7 +3551,16 @@ where
         // avoids applying the same payer outcome twice in one reconciliation pass.
         let confirmed_payer_tlcs = collect_onchain_confirmed_payer_tlcs(state, &self.store);
         // Collect first so we don't borrow `tlc_state` across the state mutations and message sends.
-        let fulfilled = collect_onchain_fulfilled_tlcs(state, &self.store);
+        let mut fulfilled = collect_onchain_fulfilled_tlcs(state, &self.store);
+        let excluded_fulfilled = collect_onchain_excluded_fulfilled_tlcs(state, &self.store);
+        for tlc in excluded_fulfilled {
+            if !fulfilled
+                .iter()
+                .any(|existing| existing.tlc_id == tlc.tlc_id)
+            {
+                fulfilled.push(tlc);
+            }
+        }
 
         let has_fulfilled = !fulfilled.is_empty();
 
@@ -3590,9 +3599,16 @@ where
                                 },
                             ))
                             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                        payer_effects_applied = false;
                     } else {
                         self.store.insert_preimage(tlc.payment_hash, tlc.preimage);
-                        state.tlc_state.set_offered_tlc_removed(id, fulfill.clone());
+                        if state
+                            .tlc_state
+                            .get(&tlc.tlc_id)
+                            .is_some_and(|existing| existing.removed_reason.is_none())
+                        {
+                            state.tlc_state.set_offered_tlc_removed(id, fulfill.clone());
+                        }
                         if let Some(attempt_id) = tlc.attempt_id {
                             state.notify_payment_hash_v2(tlc.payment_hash);
                             let confirmed = OnChainConfirmedPayerTlc {
@@ -3610,6 +3626,8 @@ where
                             } else {
                                 payer_effects_applied = false;
                             }
+                        } else if let Some(existing) = state.tlc_state.get_mut(&tlc.tlc_id) {
+                            existing.applied_flags.insert(AppliedFlags::REMOVE);
                         }
                     }
                 }

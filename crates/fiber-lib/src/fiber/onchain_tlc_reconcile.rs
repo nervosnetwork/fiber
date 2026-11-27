@@ -516,22 +516,18 @@ pub(crate) fn confirm_onchain_payer_fulfill(
     true
 }
 
-/// Offered updates excluded by a confirmed force close can no longer be paid on this channel.
-/// A missing snapshot or the synthetic zero-valued revocation scope is not exclusion evidence.
-pub(crate) fn collect_onchain_excluded_tlcs(
+fn verified_non_revoked_shutdown_record(
     state: &ChannelActorState,
     store: &impl ChannelActorStateStore,
-) -> Vec<OnChainTimeoutSettledTlc> {
+) -> Option<fiber_types::ShutdownSettlementRecord> {
     // This state is entered only after the force-close transaction is confirmed.
     // Together with its verified snapshot it proves exclusion, independently of
     // whether the peer has withdrawn its remaining commitment balance cells.
     if !state.is_waiting_onchain_settlement() {
-        return vec![];
+        return None;
     }
     // A missing or mismatched shutdown snapshot cannot prove exclusion.
-    let Some(record) = state.load_shutdown_settlement_record(store) else {
-        return vec![];
-    };
+    let record = state.load_shutdown_settlement_record(store)?;
     // Zero amounts identify the synthetic revocation scope, not a real snapshot.
     if (record.settlement_data.local_amount == 0 && record.settlement_data.remote_amount == 0)
         // Revocation data describes the peer's commitments, never our local commitment.
@@ -543,31 +539,55 @@ pub(crate) fn collect_onchain_excluded_tlcs(
                 })
             }))
     {
-        return vec![];
+        return None;
     }
+    Some(record)
+}
+
+fn settlement_record_includes_tlc(
+    record: &fiber_types::ShutdownSettlementRecord,
+    tlc_id: TLCId,
+) -> bool {
+    record.settlement_data.tlcs.iter().any(|included| {
+        let local_id = if record.for_remote {
+            included.tlc_id
+        } else {
+            included.tlc_id.flip()
+        };
+        local_id == tlc_id
+    })
+}
+
+/// Offered updates excluded by a confirmed force close can no longer be paid on this channel.
+/// A missing snapshot or the synthetic zero-valued revocation scope is not exclusion evidence.
+pub(crate) fn collect_onchain_excluded_tlcs(
+    state: &ChannelActorState,
+    store: &impl ChannelActorStateStore,
+) -> Vec<OnChainTimeoutSettledTlc> {
+    let Some(record) = verified_non_revoked_shutdown_record(state, store) else {
+        return vec![];
+    };
     state
         .tlc_state
         .offered_tlcs
         .tlcs
         .iter()
         .filter(|tlc| {
-            // Only uncommitted outgoing updates are candidates for this failure path.
-            tlc.outbound_status() == OutboundTlcStatus::LocalAnnounced
-                // Do not apply failure again to a TLC already being removed.
-                && tlc.removed_reason.is_none()
-                // A confirmed removal has no remaining effects to reconcile here.
+            // A confirmed or already-applied removal has no remaining effects to reconcile here.
+            !tlc.applied_flags.contains(AppliedFlags::REMOVE)
                 && tlc.removed_confirmed_at.is_none()
+                && (
+                    // Uncommitted outgoing adds excluded from the confirmed commitment cannot pay.
+                    (tlc.outbound_status() == OutboundTlcStatus::LocalAnnounced
+                        && tlc.removed_reason.is_none())
+                        // Peer-failed removals already folded out of the confirmed commitment
+                        // refunded our balance on-chain; finish delivering the failure locally.
+                        || matches!(tlc.removed_reason, Some(RemoveTlcReason::RemoveTlcFail(_)))
+                )
         })
         .filter(|tlc| {
             // Included TLCs must follow normal on-chain resolution, even if LocalAnnounced.
-            !record.settlement_data.tlcs.iter().any(|included| {
-                let local_id = if record.for_remote {
-                    included.tlc_id
-                } else {
-                    included.tlc_id.flip()
-                };
-                local_id == tlc.tlc_id
-            })
+            !settlement_record_includes_tlc(&record, tlc.tlc_id)
         })
         .map(|tlc| OnChainTimeoutSettledTlc {
             upstream_tlc_key: tlc.upstream_tlc_key,
@@ -587,6 +607,45 @@ pub(crate) fn collect_onchain_excluded_tlcs(
                     attempt_id: tlc.attempt_id,
                 },
             },
+        })
+        .collect()
+}
+
+/// Offered fulfillments already folded into a confirmed commitment's balances before the
+/// off-chain remove handshake finished must still settle upstream or notify the payer.
+pub(crate) fn collect_onchain_excluded_fulfilled_tlcs(
+    state: &ChannelActorState,
+    store: &impl ChannelActorStateStore,
+) -> Vec<OnChainFulfilledTlc> {
+    let Some(record) = verified_non_revoked_shutdown_record(state, store) else {
+        return vec![];
+    };
+    state
+        .tlc_state
+        .offered_tlcs
+        .tlcs
+        .iter()
+        .filter(|tlc| {
+            !tlc.applied_flags.contains(AppliedFlags::REMOVE)
+                && tlc.removed_confirmed_at.is_none()
+                && !settlement_record_includes_tlc(&record, tlc.tlc_id)
+        })
+        .filter_map(|tlc| {
+            let Some(RemoveTlcReason::RemoveTlcFulfill(fulfill)) = &tlc.removed_reason else {
+                return None;
+            };
+            if Hash256::from(tlc.hash_algorithm.hash(fulfill.payment_preimage)) != tlc.payment_hash
+            {
+                return None;
+            }
+            Some(OnChainFulfilledTlc {
+                upstream_tlc_key: tlc.upstream_tlc_key,
+                tlc_id: tlc.tlc_id,
+                forwarding_tlc: tlc.forwarding_tlc,
+                payment_hash: tlc.payment_hash,
+                attempt_id: tlc.attempt_id,
+                preimage: fulfill.payment_preimage,
+            })
         })
         .collect()
 }

@@ -39,7 +39,8 @@ use crate::fiber::network::{
     FiberActorCommand, FiberActorEvent, FiberActorMessage, FiberActorRef, NetworkActorMessage,
 };
 use crate::fiber::onchain_tlc_reconcile::{
-    can_reconcile_onchain_fulfillment, collect_onchain_fulfilled_tlcs,
+    can_reconcile_onchain_fulfillment, collect_onchain_excluded_fulfilled_tlcs,
+    collect_onchain_excluded_tlcs, collect_onchain_fulfilled_tlcs,
     collect_onchain_received_timeout_settled_tlcs, collect_onchain_timeout_settled_tlcs,
     has_unresolved_onchain_tlcs, has_unresolved_onchain_tlcs_for_snapshot, parse_commitment_lock,
     recover_shutdown_settlement_data_with_superseded, resolve_onchain_tlc,
@@ -5014,4 +5015,84 @@ async fn test_excluded_forwarded_tlc_relays_before_balance_settlement() {
     ] {
         assert_excluded_tlc_relays_failure_before_finalization(close_flag, false).await;
     }
+}
+
+#[test]
+fn test_excluded_remove_wait_prev_ack_offered_tlcs_remain_reconcilable() {
+    let store = MockStore::new();
+    let channel_id = gen_rand_sha256_hash();
+    let fail_hash = gen_rand_sha256_hash();
+    let mut failed_tlc = tlc_info(
+        TLCId::Offered(0),
+        TlcStatus::Outbound(OutboundTlcStatus::RemoveWaitPrevAck),
+        fail_hash,
+        HashAlgorithm::CkbHash,
+    );
+    failed_tlc.attempt_id = Some(1);
+    failed_tlc.removed_reason = Some(RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+        TlcErr::new(TlcErrorCode::TemporaryChannelFailure),
+        &TEST_SHARED_SECRET,
+    )));
+    failed_tlc.applied_flags = AppliedFlags::empty();
+    failed_tlc.removed_confirmed_at = None;
+
+    let mut state = closed_state_with_offered_local_announced(
+        channel_id,
+        CloseFlags::UNCOOPERATIVE_LOCAL | CloseFlags::WAITING_ONCHAIN_SETTLEMENT,
+        failed_tlc.clone(),
+    );
+
+    let preimage = gen_rand_sha256_hash();
+    let fulfill_hash = HashAlgorithm::Sha256.hash(preimage).into();
+    let mut fulfilled_tlc = failed_tlc;
+    fulfilled_tlc.tlc_id = TLCId::Offered(1);
+    fulfilled_tlc.payment_hash = fulfill_hash;
+    fulfilled_tlc.hash_algorithm = HashAlgorithm::Sha256;
+    fulfilled_tlc.attempt_id = Some(2);
+    fulfilled_tlc.removed_reason = Some(RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+        payment_preimage: preimage,
+    }));
+    state.tlc_state.offered_tlcs.tlcs.push(fulfilled_tlc);
+
+    // Confirmed local commitment already folded both removals out of the TLC list.
+    install_unit_snapshot(
+        &mut state,
+        &store,
+        false,
+        SettlementData {
+            local_amount: 100_000,
+            remote_amount: 100_000,
+            tlcs: vec![],
+        },
+    );
+
+    let excluded_fails = collect_onchain_excluded_tlcs(&state, &store);
+    assert_eq!(excluded_fails.len(), 1);
+    assert_eq!(excluded_fails[0].tlc_id, TLCId::Offered(0));
+    assert_eq!(excluded_fails[0].payment_hash, fail_hash);
+
+    let excluded_fulfills = collect_onchain_excluded_fulfilled_tlcs(&state, &store);
+    assert_eq!(excluded_fulfills.len(), 1);
+    assert_eq!(excluded_fulfills[0].tlc_id, TLCId::Offered(1));
+    assert_eq!(excluded_fulfills[0].preimage, preimage);
+
+    state
+        .tlc_state
+        .get_mut(&TLCId::Offered(0))
+        .unwrap()
+        .applied_flags
+        .insert(AppliedFlags::REMOVE);
+    assert!(collect_onchain_excluded_tlcs(&state, &store).is_empty());
+    assert_eq!(
+        collect_onchain_excluded_fulfilled_tlcs(&state, &store).len(),
+        1
+    );
+
+    state
+        .tlc_state
+        .get_mut(&TLCId::Offered(1))
+        .unwrap()
+        .applied_flags
+        .insert(AppliedFlags::REMOVE);
+    assert!(collect_onchain_excluded_fulfilled_tlcs(&state, &store).is_empty());
 }

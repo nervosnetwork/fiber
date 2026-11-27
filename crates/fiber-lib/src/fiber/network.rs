@@ -100,8 +100,8 @@ use crate::fiber::delivery::{DeliveryDispatchError, TrampolineForwardingRequest}
 use crate::fiber::fee::{check_open_channel_parameters, check_tlc_delta_with_epochs};
 use crate::fiber::gossip::{GossipConfig, GossipService, SubscribableGossipMessageStore};
 use crate::fiber::onchain_tlc_reconcile::{
-    collect_onchain_confirmed_payer_tlcs, collect_onchain_excluded_tlcs,
-    collect_onchain_fulfilled_tlcs, collect_onchain_payer_failures,
+    collect_onchain_confirmed_payer_tlcs, collect_onchain_excluded_fulfilled_tlcs,
+    collect_onchain_excluded_tlcs, collect_onchain_fulfilled_tlcs, collect_onchain_payer_failures,
     collect_onchain_received_timeout_settled_tlcs, collect_onchain_timeout_settled_tlcs,
     confirm_onchain_payer_fulfill, has_unresolved_onchain_tlcs, onchain_fulfilled_preimage,
     recover_shutdown_settlement_data_with_superseded, verify_and_select_settlement_data,
@@ -5094,10 +5094,16 @@ where
             }
         }
 
-        // Resolve fulfilled TLCs only from confirmed channel-scoped on-chain settlement records.
+        // Resolve fulfilled TLCs only from confirmed channel-scoped on-chain settlement records,
+        // plus offered TLCs whose off-chain fulfillment was already folded into the confirmed
+        // commitment balances before `AppliedFlags::REMOVE` was applied.
         // Forwarded offered TLCs relay upstream before the downstream channel is marked removed;
         // source payments and payee invoices are completed locally.
-        let fulfilled = collect_onchain_fulfilled_tlcs(actor_state, &self.store);
+        let mut fulfilled = collect_onchain_fulfilled_tlcs(actor_state, &self.store);
+        fulfilled.extend(collect_onchain_excluded_fulfilled_tlcs(
+            actor_state,
+            &self.store,
+        ));
         let mut invoice_hashes = Vec::new();
         for tlc in fulfilled {
             match tlc.tlc_id {
@@ -5117,12 +5123,19 @@ where
                                 reason: fulfill,
                             },
                         );
+                        payer_effects_applied = false;
                     } else {
                         self.store.insert_preimage(tlc.payment_hash, tlc.preimage);
-                        actor_state
+                        if actor_state
                             .tlc_state
-                            .set_offered_tlc_removed(id, fulfill.clone());
-                        actor_state_changed = true;
+                            .get(&tlc.tlc_id)
+                            .is_some_and(|existing| existing.removed_reason.is_none())
+                        {
+                            actor_state
+                                .tlc_state
+                                .set_offered_tlc_removed(id, fulfill.clone());
+                            actor_state_changed = true;
+                        }
                         if let Some(attempt_id) = tlc.attempt_id {
                             updated_payments.insert(tlc.session_key());
                             if let Err(err) = self
@@ -5141,17 +5154,22 @@ where
                                     tlc.tlc_id, channel_id, err
                                 );
                                 payer_effects_applied = false;
-                            } else {
-                                confirm_onchain_payer_fulfill(
-                                    actor_state,
-                                    OnChainConfirmedPayerTlc {
-                                        upstream_tlc_key: tlc.upstream_tlc_key,
-                                        tlc_id: tlc.tlc_id,
-                                        payment_hash: tlc.payment_hash,
-                                        attempt_id,
-                                        preimage: tlc.preimage,
-                                    },
-                                );
+                            } else if confirm_onchain_payer_fulfill(
+                                actor_state,
+                                OnChainConfirmedPayerTlc {
+                                    upstream_tlc_key: tlc.upstream_tlc_key,
+                                    tlc_id: tlc.tlc_id,
+                                    payment_hash: tlc.payment_hash,
+                                    attempt_id,
+                                    preimage: tlc.preimage,
+                                },
+                            ) {
+                                actor_state_changed = true;
+                            }
+                        } else if let Some(existing) = actor_state.tlc_state.get_mut(&tlc.tlc_id) {
+                            if !existing.applied_flags.contains(AppliedFlags::REMOVE) {
+                                existing.applied_flags.insert(AppliedFlags::REMOVE);
+                                actor_state_changed = true;
                             }
                         }
                     }
