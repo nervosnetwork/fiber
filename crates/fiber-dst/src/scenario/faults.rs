@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, ensure, Context, Result};
 use fnn::fiber::channel::{ChannelActorMessage, ChannelCommand};
-use fnn::fiber::{ChannelState, Hash256, NetworkActorCommand, PaymentStatus};
+use fnn::fiber::{ChannelState, FiberActorCommand, Hash256, PaymentStatus};
 use fnn::simulation::{ChainEndpoint, ChainFault, DiskFault};
 use ractor::ActorRef;
 use rand::{rngs::StdRng, Rng, SeedableRng};
@@ -157,7 +157,7 @@ impl Driver {
         .inject(&mut self.runtime)?;
         let payment = self.start_payment(from, amount)?;
         let check = self.runtime.request(target, |reply| {
-            NetworkActorCommand::CheckChannelShutdown(*channel, reply)
+            FiberActorCommand::CheckChannelShutdown(*channel, reply)
         })?;
         self.reply("request CKB shutdown query", check)?;
         self.until(
@@ -274,7 +274,7 @@ impl Driver {
         channel: Hash256,
     ) -> Result<ActorRef<ChannelActorMessage>> {
         let mut receiver = self.runtime.request(node, |reply| {
-            NetworkActorCommand::GetChannelActor(channel, reply)
+            FiberActorCommand::GetChannelActor(channel, reply)
         })?;
         self.until("live channel actor", |_| receive(&mut receiver))?
             .context("channel actor is missing")
@@ -318,7 +318,7 @@ impl Driver {
         let mut control = request_status(&healthy)?;
         let network_control = self
             .runtime
-            .request(target, NetworkActorCommand::GetInflightPaymentCount)?;
+            .request(target, FiberActorCommand::GetInflightPaymentCount)?;
         self.reply("unaffected network on the same node", network_control)?;
         self.until("unaffected channel handles its request", |_| {
             receive(&mut control)

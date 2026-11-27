@@ -4,7 +4,7 @@ use anyhow::{ensure, Context, Result};
 use fnn::fiber::channel::{ChannelCommand, ChannelCommandWithId, ShutdownCommand};
 use fnn::fiber::config::DEFAULT_FINAL_TLC_EXPIRY_DELTA;
 use fnn::fiber::payment::SendPaymentWithRouterCommand;
-use fnn::fiber::{ChannelState, Hash256, NetworkActorCommand, NetworkActorMessage, PaymentStatus};
+use fnn::fiber::{ChannelState, FiberActorCommand, Hash256, NetworkActorMessage, PaymentStatus};
 use fnn::fiber_types::{CloseFlags, HashAlgorithm, NodeId, RouterHop};
 use fnn::invoice::{CkbInvoiceStatus, Currency, InvoiceBuilder, InvoiceStore};
 use fnn::simulation::{slow_mailbox, ChainEndpoint, ChainFault};
@@ -26,7 +26,7 @@ impl Driver {
             NAMES[closer], NAMES[peer]
         ));
         let reply = self.runtime.request(closer, |reply| {
-            NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+            FiberActorCommand::ControlFiberChannel(ChannelCommandWithId {
                 channel_id: channel,
                 command: ChannelCommand::Shutdown(
                     ShutdownCommand {
@@ -51,7 +51,7 @@ impl Driver {
             }))
         })?;
         let check = self.runtime.request(peer, |reply| {
-            NetworkActorCommand::CheckChannelShutdown(channel, reply)
+            FiberActorCommand::CheckChannelShutdown(channel, reply)
         })?;
         self.reply("peer queries force close on chain", check)?;
         self.until("peer observes the same confirmed force close", |s| {
@@ -118,13 +118,13 @@ impl Driver {
             })?;
         let invoice_string = invoice.to_string();
         let mut reply = self.runtime.request(payee, |reply| {
-            NetworkActorCommand::AddInvoice(invoice, None, reply)
+            FiberActorCommand::AddInvoice(invoice, None, reply)
         })?;
         self.until("hold invoice recorded", |_| {
             receive(&mut reply)?.transpose().map_err(Into::into)
         })?;
         let reply = self.runtime.request(payer, |reply| {
-            NetworkActorCommand::SendPaymentWithRouter(
+            FiberActorCommand::SendPaymentWithRouter(
                 SendPaymentWithRouterCommand {
                     invoice: Some(invoice_string),
                     router: vec![RouterHop {
@@ -310,7 +310,7 @@ impl Driver {
 
     fn reveal_preimage(&mut self, payee: usize, payment: Hash256, preimage: Hash256) -> Result<()> {
         let mut reply = self.runtime.request(payee, |reply| {
-            NetworkActorCommand::SettleInvoice(payment, preimage, reply)
+            FiberActorCommand::SettleInvoice(payment, preimage, reply)
         })?;
         self.until("preimage recorded after force close", |_| {
             receive(&mut reply)?.transpose().map_err(Into::into)
@@ -444,7 +444,7 @@ impl Driver {
                 let actor = &slot.node.as_ref().expect("available node").actor;
                 crate::host::send(
                     actor,
-                    NetworkActorMessage::new_command(NetworkActorCommand::CheckChannelsShutdown),
+                    NetworkActorMessage::new_command(FiberActorCommand::CheckChannelsShutdown),
                 )?;
             }
         }

@@ -74,6 +74,7 @@ pub(super) fn allocate_nonce(
             NoncePurposeV2::Commitment => 0,
             NoncePurposeV2::Revocation => 1,
             NoncePurposeV2::Closing => 2,
+            NoncePurposeV2::ChannelAnnouncement => 3,
         };
         let mut context = channel_id.as_ref().to_vec();
         context.extend_from_slice(&owner.serialize());

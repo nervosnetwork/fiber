@@ -4,7 +4,7 @@ use std::rc::Rc;
 use anyhow::{ensure, Context, Result};
 use fnn::fiber::channel::{ChannelActorState, ChannelActorStateStore};
 use fnn::fiber::network::{AcceptChannelCommand, AcceptChannelResponse, OpenChannelCommand};
-use fnn::fiber::{ChannelState, Hash256, NetworkActorCommand};
+use fnn::fiber::{ChannelState, FiberActorCommand, Hash256};
 use fnn::fiber_types::schema::CHANNEL_ACTOR_STATE_PREFIX;
 use fnn::simulation;
 use fnn::store::Store;
@@ -234,7 +234,7 @@ impl Driver {
     ) -> Result<Hash256> {
         let payee = self.runtime.peers[b];
         let reply = self.runtime.request(a, |reply| {
-            NetworkActorCommand::OpenChannel(
+            FiberActorCommand::OpenChannel(
                 OpenChannelCommand {
                     pubkey: payee,
                     funding_amount: amount,
@@ -271,7 +271,7 @@ impl Driver {
         amount: u128,
     ) -> Result<oneshot::Receiver<Result<AcceptChannelResponse, String>>> {
         self.runtime.request(b, |reply| {
-            NetworkActorCommand::AcceptChannel(
+            FiberActorCommand::AcceptChannel(
                 AcceptChannelCommand {
                     temp_channel_id: temporary,
                     funding_amount: amount,

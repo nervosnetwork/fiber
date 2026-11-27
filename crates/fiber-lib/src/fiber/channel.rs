@@ -715,10 +715,12 @@ where
                 // the funding tx. Persist the channel and its opening records under the
                 // final channel id atomically before publishing either event so
                 // reconnect/restart can still route later messages without stranding records.
-                let signing_update = self.signing_events.prepare(state);
-                self.store.move_channel_actor_state(&old_id, state.clone());
-                signing_update.publish_removed(old_id);
-                signing_update.publish();
+                {
+                    let signing_update = self.signing_events.prepare(state);
+                    self.store.move_channel_actor_state(&old_id, state.clone());
+                    signing_update.publish_removed(old_id);
+                    signing_update.publish();
+                }
                 #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
                 crate::simulation::after_channel_id_rewrite(state.get_local_pubkey(), old_id).await;
 

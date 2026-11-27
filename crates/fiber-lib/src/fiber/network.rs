@@ -10010,10 +10010,7 @@ where
                 // deletes it. Replay the normal cleanup if a crash interrupted that step.
                 self.network
                     .send_message(FiberActorMessage::new_event(
-                        FiberActorEvent::ChannelActorStopped(
-                            channel_id,
-                            StopReason::AbortFunding,
-                        ),
+                        FiberActorEvent::ChannelActorStopped(channel_id, StopReason::AbortFunding),
                     ))
                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                 continue;
@@ -10195,6 +10192,17 @@ where
                     }
                 }
             }
+        }
+        let failed_channels = self
+            .to_be_accepted_channels
+            .map
+            .iter()
+            .filter(|(_, (peer_pubkey, _))| *peer_pubkey == pubkey)
+            .map(|(channel_id, _)| *channel_id)
+            .collect::<Vec<_>>();
+        for channel_id in failed_channels {
+            self.store.delete_channel_open_record(&channel_id);
+            self.to_be_accepted_channels.remove(&channel_id);
         }
     }
 

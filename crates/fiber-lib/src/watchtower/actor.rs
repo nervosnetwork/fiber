@@ -435,41 +435,37 @@ async fn check_watch_channel_on_chain<S: WatchtowerStore>(
     channel_data: ChannelData,
     now_ms: u64,
 ) {
-    let tx_hash = match find_funding_spend(
-        ckb_client,
-        &channel_data_funding_tx_lock(&channel_data),
-    )
-    .await
-    {
-        Ok(Some(tx_hash)) => tx_hash,
-        Ok(None) => {
-            // Channel funding tx is not yet indexed as spent; reconcile any confirmed signed
-            // receipts before expiring stale external requests (e.g. if indexer is rebuilding
-            // after a restart past TTL). Zero RPCs when no requests are active.
-            reconcile_and_expire_external_signing_requests_on_chain(
-                events,
-                ckb_client,
-                store,
-                &channel_node_id,
-                &channel_data.channel_id,
-                &HashSet::new(),
-                now_ms,
-            )
-            .await;
-            return;
-        }
-        Err(err) => {
-            error!("Failed to get transactions: {:?}", err);
-            expire_channel_pending_external_signing_requests(
-                events,
-                store,
-                &channel_node_id,
-                &channel_data.channel_id,
-                now_ms,
-            );
-            return;
-        }
-    };
+    let tx_hash =
+        match find_funding_spend(ckb_client, &channel_data_funding_tx_lock(&channel_data)).await {
+            Ok(Some(tx_hash)) => tx_hash,
+            Ok(None) => {
+                // Channel funding tx is not yet indexed as spent; reconcile any confirmed signed
+                // receipts before expiring stale external requests (e.g. if indexer is rebuilding
+                // after a restart past TTL). Zero RPCs when no requests are active.
+                reconcile_and_expire_external_signing_requests_on_chain(
+                    events,
+                    ckb_client,
+                    store,
+                    &channel_node_id,
+                    &channel_data.channel_id,
+                    &HashSet::new(),
+                    now_ms,
+                )
+                .await;
+                return;
+            }
+            Err(err) => {
+                error!("Failed to get transactions: {:?}", err);
+                expire_channel_pending_external_signing_requests(
+                    events,
+                    store,
+                    &channel_node_id,
+                    &channel_data.channel_id,
+                    now_ms,
+                );
+                return;
+            }
+        };
     match ckb_client.get_transaction(tx_hash.clone()).await {
         Ok(Some(tx_with_status)) => {
             if tx_with_status.tx_status.status != Status::Committed {
@@ -1984,13 +1980,13 @@ async fn handle_external_settlement_send_error_on_chain<S: WatchtowerStore>(
             live_cells.insert(outpoint.clone(), status);
         }
         let parent_hash: ckb_types::H256 = outpoint.tx_hash().unpack();
-        if !tx_statuses.contains_key(&parent_hash) {
+        if let std::collections::hash_map::Entry::Vacant(entry) = tx_statuses.entry(parent_hash) {
             let status = ckb_client
-                .get_transaction(parent_hash.clone())
+                .get_transaction(entry.key().clone())
                 .await
                 .map(|opt| opt.map(|resp| resp.tx_status.status))
                 .map_err(|_| ());
-            tx_statuses.insert(parent_hash, status);
+            entry.insert(status);
         }
     }
     handle_external_settlement_send_error(
@@ -2505,25 +2501,30 @@ async fn reconcile_and_expire_external_signing_requests_on_chain<S: WatchtowerSt
                     live_cells.insert(outpoint.clone(), status);
                 }
                 let parent_hash: ckb_types::H256 = outpoint.tx_hash().unpack();
-                if !tx_statuses.contains_key(&parent_hash) {
+                if let std::collections::hash_map::Entry::Vacant(entry) =
+                    tx_statuses.entry(parent_hash)
+                {
                     let status = client
-                        .get_transaction(parent_hash.clone())
+                        .get_transaction(entry.key().clone())
                         .await
                         .map(|opt| opt.map(|resp| resp.tx_status.status))
                         .map_err(|_| ());
-                    tx_statuses.insert(parent_hash, status);
+                    entry.insert(status);
                 }
             }
         }
         for signed in external.signed_signatures.values() {
-            let signed_tx_hash: ckb_types::H256 = signed.content.transaction.calc_tx_hash().unpack();
-            if !tx_statuses.contains_key(&signed_tx_hash) {
+            let signed_tx_hash: ckb_types::H256 =
+                signed.content.transaction.calc_tx_hash().unpack();
+            if let std::collections::hash_map::Entry::Vacant(entry) =
+                tx_statuses.entry(signed_tx_hash)
+            {
                 let status = client
-                    .get_transaction(signed_tx_hash.clone())
+                    .get_transaction(entry.key().clone())
                     .await
                     .map(|opt| opt.map(|resp| resp.tx_status.status))
                     .map_err(|_| ());
-                tx_statuses.insert(signed_tx_hash, status);
+                entry.insert(status);
             }
         }
     }

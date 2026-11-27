@@ -40,7 +40,7 @@ use strum::{AsRefStr, EnumString};
 /// a replacement hashlock. Ordinary payments and ordinary trampoline forwarding
 /// leave [`PaymentSessionKey::upstream_tlc_key`] absent. Distinguishing incoming
 /// TLCs does not by itself implement aggregation of multiple upstream MPP parts.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 pub struct UpstreamTlcKey {
     /// Public node's incoming channel for the held upstream TLC.
     pub incoming_channel_id: Hash256,
@@ -51,7 +51,7 @@ pub struct UpstreamTlcKey {
 /// A hashlock is not an execution identity: independent payments may share it.
 /// Ordinary payments retain their hash-only identity; hosted forwarding is scoped
 /// to its incoming TLC so replay resumes the same execution.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 pub struct PaymentSessionKey {
     /// The actual hashlock, unchanged in invoices, onions and channel messages.
     pub payment_hash: Hash256,

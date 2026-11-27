@@ -325,11 +325,11 @@ fn tx_abort_while_syncing_cleans_up_funding_and_allows_retry() {
 #[test]
 fn random_workload_reconciles_a_force_close_and_times_out_the_onchain_tlc() {
     let options = ["--payments", "32", "--phases", "5", "--chaos"];
-    let trace = run_random("5", &options);
-    let channel = "Hash256(0xc6d81b0a10a3d75a68c7832f3d15fd3599599de69ee1fe88eb359ee9bec4ea2e)";
-    let payment = "0xaa8572262e7e762062ebc8fb92cdf347b724be14d6185e715d804fbce3e3cd68";
+    let trace = run_random("14", &options);
+    let channel = "Hash256(0xaf6235d802873849bd6e022432f4db58110a6d03e6365626f4904d827bf8fc05)";
+    let payment = "0x28301a784c490cd9657113a93bb5b6b6501752c9df817dc126fabe20bbcc604e";
     assert!(trace.contains("advance virtual Unix clock"));
-    for node in ["B", "D"] {
+    for node in ["G", "A"] {
         let timeout = format!("swarm audited TLC timeout node={node}");
         assert!(trace.lines().any(|line| {
             line.contains(&timeout) && line.contains(channel) && line.contains(payment)
@@ -338,7 +338,7 @@ fn random_workload_reconciles_a_force_close_and_times_out_the_onchain_tlc() {
     assert!(trace.contains(&format!("swarm audited close channel={channel}")));
     let audit = trace
         .lines()
-        .find(|line| line.contains("swarm audit Direct B->E") && line.contains(payment))
+        .find(|line| line.contains("swarm audit Direct A->G") && line.contains(payment))
         .expect("audit the payment whose TLC timed out on chain");
     assert!(
         audit.contains("status=Some(Failed) shards=0 delivered=0"),
@@ -346,7 +346,7 @@ fn random_workload_reconciles_a_force_close_and_times_out_the_onchain_tlc() {
     );
     assert!(trace.contains("random reconciled workload=32"));
     assert!(trace.contains("recovery_probes=4"));
-    assert_eq!(trace, run_random("5", &options));
+    assert_eq!(trace, run_random("14", &options));
 }
 
 #[test]

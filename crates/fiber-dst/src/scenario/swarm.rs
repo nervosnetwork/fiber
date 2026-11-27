@@ -6,7 +6,7 @@ use fnn::fiber::config::DEFAULT_HOLD_TLC_TIMEOUT;
 use fnn::fiber::graph::NetworkGraphStateStore;
 use fnn::fiber::network::SendPaymentResponse;
 use fnn::fiber::payment::{PaymentSessionExt, SendPaymentCommand};
-use fnn::fiber::{Hash256, NetworkActorCommand, PaymentSession, PaymentStatus, Privkey};
+use fnn::fiber::{FiberActorCommand, Hash256, PaymentSession, PaymentStatus, Privkey};
 use fnn::invoice::{Currency, InvoiceBuilder, InvoiceStore};
 use fnn::simulation;
 use rand::{rngs::StdRng, Rng, SeedableRng};
@@ -213,7 +213,7 @@ impl Driver {
                     && self.runtime.node_available(order.from)
                 {
                     let reply = self.runtime.request(order.from, |reply| {
-                        NetworkActorCommand::SendPayment(
+                        FiberActorCommand::SendPayment(
                             SendPaymentCommand {
                                 invoice: Some(payment.invoice.clone()),
                                 max_parts: Some(if order.kind == Kind::Mpp { 2 } else { 1 }),

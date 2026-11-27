@@ -10,8 +10,8 @@ use fnn::fiber::gossip::GossipMessageUpdates;
 use fnn::fiber::graph::NetworkGraphStateStore;
 use fnn::fiber::payment::PaymentSessionExt;
 use fnn::fiber::{
-    ChannelConnectivityState, ChannelState, Hash256, NetworkActorCommand, NetworkActorEvent,
-    NetworkActorMessage, PaymentStatus, Privkey, Pubkey,
+    ChannelConnectivityState, ChannelState, FiberActorCommand, Hash256, NetworkActorMessage,
+    PaymentStatus, Privkey, Pubkey, PublicNetworkEvent,
 };
 use fnn::simulation::{self, ChainFaultHit, SimulatedChain, SimulatedChainAccess, SimulatedDisk};
 use fnn::store::{open_store_with_migration, Store};
@@ -222,7 +222,7 @@ impl Harness {
                 if let Some(node) = &slot.node {
                     send(
                         &node.actor,
-                        NetworkActorMessage::new_event(NetworkActorEvent::GossipMessageUpdates(
+                        NetworkActorMessage::new_event(PublicNetworkEvent::GossipMessageUpdates(
                             GossipMessageUpdates::new(broadcasts.clone()),
                         )),
                     )?;
@@ -247,7 +247,7 @@ impl Harness {
     pub(crate) fn request<T>(
         &self,
         node: usize,
-        command: impl FnOnce(RpcReplyPort<T>) -> NetworkActorCommand,
+        command: impl FnOnce(RpcReplyPort<T>) -> FiberActorCommand,
     ) -> Result<oneshot::Receiver<T>> {
         let (reply, receiver) = oneshot::channel();
         let nodes = self.nodes.borrow();

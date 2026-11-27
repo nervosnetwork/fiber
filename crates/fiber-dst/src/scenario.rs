@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use fnn::fiber::payment::SendPaymentCommand;
-use fnn::fiber::{Hash256, NetworkActorCommand};
+use fnn::fiber::{FiberActorCommand, Hash256};
 use fnn::simulation;
 use tokio::sync::oneshot;
 
@@ -260,9 +260,9 @@ impl Driver {
     }
 
     fn pay(&mut self, from: usize, command: SendPaymentCommand) -> Result<Hash256> {
-        let reply = self.runtime.request(from, |reply| {
-            NetworkActorCommand::SendPayment(command, reply)
-        })?;
+        let reply = self
+            .runtime
+            .request(from, |reply| FiberActorCommand::SendPayment(command, reply))?;
         Ok(self.reply("send payment", reply)?.payment_hash)
     }
 
@@ -271,7 +271,7 @@ impl Driver {
         loop {
             let count = self
                 .runtime
-                .request(from, NetworkActorCommand::GetInflightPaymentCount)?;
+                .request(from, FiberActorCommand::GetInflightPaymentCount)?;
             if self.reply("payment actor cleanup", count)? == 0 {
                 break;
             }

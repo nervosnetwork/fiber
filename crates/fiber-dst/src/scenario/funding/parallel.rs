@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use anyhow::{ensure, Context, Result};
 use fnn::fiber::config::DEFAULT_FINAL_TLC_EXPIRY_DELTA;
 use fnn::fiber::payment::SendPaymentWithRouterCommand;
-use fnn::fiber::{ChannelState, Hash256, NetworkActorCommand, PaymentStatus};
+use fnn::fiber::{ChannelState, FiberActorCommand, Hash256, PaymentStatus};
 use fnn::fiber_types::{CloseFlags, RouterHop};
 use fnn::simulation::{BatchTarget, ChainEndpoint, ChainFault, DiskFault};
 
@@ -356,7 +356,7 @@ impl Driver {
             .and_then(|state| state.get_funding_transaction_outpoint())
             .context("probe channel has no funding outpoint")?;
         let reply = self.runtime.request(edge.sender, |reply| {
-            NetworkActorCommand::SendPaymentWithRouter(
+            FiberActorCommand::SendPaymentWithRouter(
                 SendPaymentWithRouterCommand {
                     keysend: Some(true),
                     router: vec![RouterHop {

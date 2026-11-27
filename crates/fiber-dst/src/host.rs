@@ -12,8 +12,8 @@ use std::time::Duration;
 use anyhow::{anyhow, bail, Context, Result};
 use fnn::fiber::types::{BroadcastMessageWithTimestamp, FiberChannelMessage, FiberMessage};
 use fnn::fiber::{
-    FeatureVector, FiberConfig, NetworkActorCommand, NetworkActorEvent, NetworkActorMessage,
-    NetworkServiceEvent, Privkey, Pubkey,
+    FeatureVector, FiberActorCommand, FiberConfig, NetworkActorMessage, NetworkServiceEvent,
+    Privkey, Pubkey, PublicNetworkEvent,
 };
 use fnn::fiber_types::Hash256;
 use fnn::simulation::{
@@ -375,7 +375,7 @@ impl Host {
             let (activate_reader, reader_gate) = oneshot::channel();
             let setup = async {
                 ractor::call!(actor, |reply| NetworkActorMessage::new_command(
-                    NetworkActorCommand::RegisterSimulatedPeer {
+                    FiberActorCommand::RegisterSimulatedPeer {
                         pubkey: peer.key,
                         sender: SimulatedPeerSender::new(outbox, peer.control.blocked.clone()),
                         features: features.clone(),
@@ -385,7 +385,7 @@ impl Host {
                 .map_err(|error| anyhow!(error.to_string()))?
                 .map_err(|error| anyhow!(error))?;
                 ractor::call!(actor, |reply| NetworkActorMessage::new_command(
-                    NetworkActorCommand::ActivateSimulatedPeer(peer.key, reply)
+                    FiberActorCommand::ActivateSimulatedPeer(peer.key, reply)
                 ))
                 .map_err(|error| anyhow!(error.to_string()))?
                 .map_err(|error| anyhow!(error))
@@ -419,7 +419,7 @@ impl Host {
             // to send can process this unregister before the next registration.
             send(
                 actor,
-                NetworkActorMessage::new_command(NetworkActorCommand::UnregisterSimulatedPeer(
+                NetworkActorMessage::new_command(FiberActorCommand::UnregisterSimulatedPeer(
                     peer.key,
                 )),
             )?;
@@ -472,7 +472,7 @@ impl Host {
                 );
                 send(
                     actor,
-                    NetworkActorMessage::new_event(NetworkActorEvent::FiberMessage(
+                    NetworkActorMessage::new_event(PublicNetworkEvent::FiberMessage(
                         peer.key, message, None,
                     )),
                 )?;

@@ -150,40 +150,6 @@ pub(crate) fn new_shutdown_tx_search_key(funding_lock_script: &Script) -> Search
     }
 }
 
-/// Paginate the CKB indexer to find the first transaction whose `io_type` is
-/// `CellType::Input` for the given funding lock script. Returns `None` if no
-/// such transaction exists.
-#[cfg(all(not(target_arch = "wasm32"), any(feature = "watchtower", test)))]
-pub(crate) fn find_first_input_tx_hash(
-    client: &ckb_sdk::CkbRpcClient,
-    funding_lock_script: &Script,
-) -> Result<Option<H256>, anyhow::Error> {
-    let search_key = new_shutdown_tx_search_key(funding_lock_script);
-
-    const PAGE_SIZE: u32 = 100;
-    let mut after_cursor: Option<JsonBytes> = None;
-    loop {
-        let txs = client
-            .get_transactions(
-                search_key.clone(),
-                Order::Desc,
-                PAGE_SIZE.into(),
-                after_cursor,
-            )
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-
-        if txs.objects.is_empty() {
-            return Ok(None);
-        }
-
-        if let Some(tx_hash) = first_input_tx_hash(&txs.objects) {
-            return Ok(Some(tx_hash));
-        }
-
-        after_cursor = Some(txs.last_cursor.clone());
-    }
-}
-
 async fn find_first_input_tx_hash_async(
     client: &ckb_sdk::CkbRpcAsyncClient,
     funding_lock_script: &Script,

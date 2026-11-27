@@ -132,6 +132,7 @@ impl Tower {
         let module = WatchtowerRpcServerImpl::new(store).into_rpc();
         let context = json!(RpcContext {
             node_id: NodeId::local().to_string(),
+            tenant_scoped: false,
         });
         let listener = TcpListener::bind(("0.0.0.0", RPC_PORT)).await?;
         let mut requests = JoinSet::new();
@@ -186,26 +187,14 @@ impl Tower {
 pub(crate) fn persist_event(event: &NetworkServiceEvent, store: &Store) {
     let node = NodeId::local();
     match event {
-        NetworkServiceEvent::RemoteTxComplete(
-            _,
-            channel,
-            udt,
-            local_key,
-            remote_key,
-            local_funding,
-            remote_funding,
-            settlement,
-            _,
-        ) => {
+        NetworkServiceEvent::RemoteTxComplete(_, channel, udt, keys, settlement, features) => {
             store.insert_watch_channel(
                 node,
                 *channel,
                 udt.clone(),
-                local_key.clone(),
-                *remote_key,
-                *local_funding,
-                *remote_funding,
+                keys.clone(),
                 settlement.clone(),
+                *features,
             );
         }
         NetworkServiceEvent::ChannelClosed(_, channel, _)
@@ -216,8 +205,9 @@ pub(crate) fn persist_event(event: &NetworkServiceEvent, store: &Store) {
         NetworkServiceEvent::RevokeAndAckReceived(_, channel, revocation, settlement) => {
             store.update_revocation(node, *channel, revocation.clone(), settlement.clone());
         }
-        NetworkServiceEvent::LocalCommitmentSigned(channel, settlement) => {
-            store.update_pending_remote_settlement(node, *channel, settlement.clone());
+        NetworkServiceEvent::LocalCommitmentSigned(channel, number, settlement) => {
+            let _ =
+                store.update_pending_remote_settlement(node, *channel, *number, settlement.clone());
         }
         NetworkServiceEvent::RemoteCommitmentSigned(_, channel, _, settlement) => {
             store.update_local_settlement(node, *channel, settlement.clone());
