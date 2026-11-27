@@ -20,6 +20,7 @@ pub struct SettleTlcSetCommand<'s, S> {
     is_hold_tlc_set: bool,
     allow_received_invoice: bool,
     excluded_tlcs: HashSet<(Hash256, u64)>,
+    in_flight_fulfills: HashSet<(Hash256, u64)>,
     tlcs: Vec<TlcSettlementContext>,
     store: &'s S,
 }
@@ -94,6 +95,22 @@ where
         channel_tlc_ids: Vec<(Hash256, u64)>,
         store: &'s S,
     ) -> Self {
+        Self::new_immediate_tlc_set_with_in_flight(
+            payment_hash,
+            channel_tlc_ids,
+            store,
+            false,
+            &HashSet::new(),
+        )
+    }
+
+    pub fn new_immediate_tlc_set_with_in_flight(
+        payment_hash: Hash256,
+        channel_tlc_ids: Vec<(Hash256, u64)>,
+        store: &'s S,
+        allow_received_invoice: bool,
+        in_flight_fulfills: &HashSet<(Hash256, u64)>,
+    ) -> Self {
         let tlcs: Vec<_> = channel_tlc_ids
             .into_iter()
             .filter_map(|(channel_id, tlc_id)| make_sttlement_context(channel_id, tlc_id, store))
@@ -103,8 +120,9 @@ where
             tlcs,
             store,
             is_hold_tlc_set: false,
-            allow_received_invoice: false,
+            allow_received_invoice,
             excluded_tlcs: HashSet::new(),
+            in_flight_fulfills: in_flight_fulfills.clone(),
         }
     }
 
@@ -134,6 +152,7 @@ where
             is_hold_tlc_set: true,
             allow_received_invoice,
             excluded_tlcs: excluded_tlcs.clone(),
+            in_flight_fulfills: HashSet::new(),
         }
     }
 
@@ -226,7 +245,9 @@ where
                 {
                     continue;
                 }
-                let is_fulfilling = include_already_fulfilled && is_tlc_fulfilling(&state, tlc);
+                let is_fulfilling = include_already_fulfilled
+                    && (is_tlc_fulfilling(&state, tlc)
+                        || self.in_flight_fulfills.contains(&(channel_id, tlc.id())));
                 let is_closed_claimable = if awaiting_onchain
                     && matches!(
                         tlc.status,
@@ -373,7 +394,7 @@ where
                 }
             }
             CkbInvoiceStatus::Received => {
-                if self.is_hold_tlc_set {
+                if self.is_hold_tlc_set || self.allow_received_invoice {
                     Ok(())
                 } else {
                     Err(TlcErrorCode::HoldTlcTimeout)

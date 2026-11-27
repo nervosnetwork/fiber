@@ -3280,8 +3280,14 @@ where
                 if !is_invoice_fulfilled(&invoice, std::iter::once(tlc)) {
                     continue;
                 }
-                // Hold invoices stay pending until the preimage-reveal path settles stored hold TLCs.
-                if self.store.get_invoice_status(&payment_hash) != Some(CkbInvoiceStatus::Open) {
+                // Hold/MPP invoices with stored hold TLCs stay on the hold-set settlement path.
+                // Immediate single-path invoices can also be left in `Received` if the payee
+                // crashed after marking the invoice `Received` and before persisting
+                // `RemoveTlc(Fulfill)` on the channel.
+                let status = self.store.get_invoice_status(&payment_hash);
+                let can_recover_immediate_received = status == Some(CkbInvoiceStatus::Received)
+                    && self.store.get_payment_hold_tlcs(payment_hash).is_empty();
+                if status != Some(CkbInvoiceStatus::Open) && !can_recover_immediate_received {
                     continue;
                 }
 

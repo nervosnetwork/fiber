@@ -5595,7 +5595,34 @@ where
         payment_hash: Hash256,
         channel_tlc_ids: Vec<(Hash256, u64)>,
     ) {
-        let settle_command = SettleTlcSetCommand::new(payment_hash, channel_tlc_ids, &self.store);
+        let settle_command = if channel_tlc_ids.is_empty() {
+            SettleTlcSetCommand::new_hold_tlc_set(payment_hash, &self.store)
+        } else {
+            let channel_tlc_ids: Vec<_> = channel_tlc_ids
+                .into_iter()
+                .filter(|key| !state.pending_remove_tlcs.contains_key(key))
+                .collect();
+            if channel_tlc_ids.is_empty() {
+                return;
+            }
+            let in_flight_fulfills: HashSet<(Hash256, u64)> = state
+                .pending_remove_tlcs
+                .iter()
+                .filter(|(_, kind)| matches!(kind, PendingRemoveTlcKind::Fulfill))
+                .map(|(key, _)| *key)
+                .collect();
+            let allow_received_invoice = self.store.get_invoice_status(&payment_hash)
+                == Some(CkbInvoiceStatus::Received)
+                && self.store.get_preimage(&payment_hash).is_some()
+                && self.store.get_payment_hold_tlcs(payment_hash).is_empty();
+            SettleTlcSetCommand::new_immediate_tlc_set_with_in_flight(
+                payment_hash,
+                channel_tlc_ids,
+                &self.store,
+                allow_received_invoice,
+                &in_flight_fulfills,
+            )
+        };
 
         self.apply_tlc_settlements(myself, state, settle_command.run(), None);
     }

@@ -2121,3 +2121,57 @@ fn test_hold_mpp_counts_closed_awaiting_onchain_part_and_settles_open_part() {
     assert_eq!(settlements_onchain_fulfilled[0].channel_id(), ch_open);
     assert!(is_fulfill_settlement(&settlements_onchain_fulfilled[0]));
 }
+
+#[test]
+fn test_immediate_received_invoice_crash_recovery_and_in_flight_dedup() {
+    use std::collections::HashSet;
+
+    let preimage = Hash256::from([0x77; 32]);
+    let payment_hash = Hash256::from(HashAlgorithm::CkbHash.hash(preimage));
+    let ch1 = Hash256::from([0x11; 32]);
+    let ch2 = Hash256::from([0x22; 32]);
+    let ch1_state = create_test_channel_state_with_tlc(ch1, 0, 1000, payment_hash, None);
+    let ch2_state = create_test_channel_state_with_tlc(ch2, 0, 1000, payment_hash, None);
+
+    // Simulate payee crash after marking a single-path non-hold invoice `Received`,
+    // before `ChannelActor` persisted `RemoveTlc(Fulfill)` (and with no `payment_hold_tlcs`).
+    let store_orphaned = MockStore::new()
+        .with_invoice(
+            create_test_invoice(payment_hash, Some(1000), false),
+            CkbInvoiceStatus::Received,
+        )
+        .with_preimage(payment_hash, preimage)
+        .with_channel_state(ch1_state);
+    let recovered = SettleTlcSetCommand::new_immediate_tlc_set_with_in_flight(
+        payment_hash,
+        vec![(ch1, 0)],
+        &store_orphaned,
+        true,
+        &HashSet::new(),
+    )
+    .run();
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(recovered[0].channel_id(), ch1);
+    assert!(is_fulfill_settlement(&recovered[0]));
+
+    // If channel 1 already has an in-flight `RemoveTlc(Fulfill)` in NetworkActor (not yet
+    // persisted to channel 1's store), a concurrent duplicate TLC on channel 2 must be rejected
+    // rather than double-settling the non-MPP invoice.
+    let store_concurrent = store_orphaned.with_channel_state(ch2_state);
+    let mut in_flight_fulfills = HashSet::new();
+    in_flight_fulfills.insert((ch1, 0));
+    let duplicate = SettleTlcSetCommand::new_immediate_tlc_set_with_in_flight(
+        payment_hash,
+        vec![(ch2, 0)],
+        &store_concurrent,
+        true,
+        &in_flight_fulfills,
+    )
+    .run();
+    assert_eq!(duplicate.len(), 1);
+    assert_eq!(duplicate[0].channel_id(), ch2);
+    assert_eq!(
+        get_error_code(&duplicate[0]),
+        Some(TlcErrorCode::HoldTlcTimeout)
+    );
+}
