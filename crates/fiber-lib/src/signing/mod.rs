@@ -172,21 +172,36 @@ impl<'a> SigningUpdate<'a> {
     }
 
     /// Capture the final signer projection inside a successful read/modify/write.
-    #[cfg(feature = "watchtower")]
+    #[cfg(all(test, feature = "watchtower"))]
     pub(crate) fn watchtower_state(
         &mut self,
         id: Hash256,
         state: &fiber_types::WatchtowerSignerState,
     ) {
+        self.watchtower_state_with_backoff(id, state, 0);
+    }
+
+    /// Capture the final signer projection with effective tenant-wide backoff after persistence.
+    #[cfg(feature = "watchtower")]
+    pub(crate) fn watchtower_state_with_backoff(
+        &mut self,
+        id: Hash256,
+        state: &fiber_types::WatchtowerSignerState,
+        node_retry_after_ms: u64,
+    ) {
         #[cfg(not(target_arch = "wasm32"))]
         if self.write.observed() {
             self.change = Some(notifications::SigningChange::WatchtowerUpdated {
                 channel_id: id,
-                status: crate::rpc::watchtower::to_rpc_watchtower_signing_status(state.clone()),
+                status: crate::rpc::watchtower::to_rpc_watchtower_signing_status_with_backoff(
+                    state.clone(),
+                    node_retry_after_ms,
+                    crate::now_timestamp_as_millis_u64(),
+                ),
             });
         }
         #[cfg(target_arch = "wasm32")]
-        let _ = (id, state);
+        let _ = (id, state, node_retry_after_ms);
     }
 
     /// Notify the old ID during a committed channel-ID migration, under the same lock.

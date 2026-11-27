@@ -1083,6 +1083,11 @@ pub struct SubmitWatchtowerSignatureParams {
     pub signature: Vec<u8>,
     /// Client-funded transaction carrying client `cell_deps`, optional `inputs[1..]`,
     /// payout/change outputs, and `witness[1..]`.
+    ///
+    /// Callers performing idempotent retries after a lost response must persist and replay the
+    /// exact `signed_transaction` (including client funding `witness[1..]`) together with the
+    /// same `signature`; re-signing funding inputs with fresh nonces changes
+    /// `signed_transaction_hash` and is rejected as a mismatch.
     pub signed_transaction: Transaction,
 }
 
@@ -1092,7 +1097,12 @@ pub struct SubmitWatchtowerSignatureParams {
 pub enum SubmitWatchtowerSignatureResult {
     /// The signature was verified and the watchtower resumed.
     Applied,
-    /// The same signature was already applied for this request.
+    /// The same `signature` and `signed_transaction` were already applied for this request.
+    ///
+    /// To receive `AlreadyApplied` on an idempotent retry after a lost response, callers must
+    /// persist and replay the exact previously submitted `signed_transaction` (including client
+    /// funding `witness[1..]`) along with the same `signature`; re-signing funding inputs with
+    /// fresh nonces changes `signed_transaction_hash` and is rejected as a mismatch.
     AlreadyApplied,
 }
 

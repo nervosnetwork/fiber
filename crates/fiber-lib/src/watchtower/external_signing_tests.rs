@@ -3251,7 +3251,7 @@ fn external_dead_fee_classifier_distinguishes_live_spent_and_unknown_inputs() {
     }
 
     // 3. Confirmed-spent fee input (get_live_cell="unknown" AND parent tx Committed) while commitment
-    //    is live -> classified as dead_fee_only (evict + clear last_applied).
+    //    is live and signed tx is NOT committed -> classified as dead_fee_only (evict + clear last_applied).
     let (confirmed, dead) = classify_dead_fee_signing_requests(
         &external,
         |op| {
@@ -3261,7 +3261,13 @@ fn external_dead_fee_classifier_distinguishes_live_spent_and_unknown_inputs() {
                 Ok("live".to_string())
             }
         },
-        |_| Ok(Some(Status::Committed)),
+        |hash| {
+            if *hash == fee_tx_hash || *hash == commitment_tx_hash {
+                Ok(Some(Status::Committed))
+            } else {
+                Ok(None)
+            }
+        },
     );
     assert!(confirmed.is_empty());
     assert_eq!(dead, HashSet::from([req_id]));
@@ -3279,6 +3285,79 @@ fn external_dead_fee_classifier_distinguishes_live_spent_and_unknown_inputs() {
             }
         },
     );
+    assert_eq!(confirmed, HashSet::from([commitment_outpoint.clone()]));
+    assert!(dead.is_empty());
+
+    // 5. TOCTOU race: commitment_outpoint returns "live" on the first lookup, then a block
+    //    confirms the settlement before fee_input is checked (fee_input is ConfirmedSpent and
+    //    signed_tx_hash is Committed) -> must classify as confirmed_spent_inputs (NOT dead_fee_only)
+    //    so last_applied is preserved.
+    let signed_tx_hash: ckb_types::H256 = external.signed_signatures[&req_id]
+        .content
+        .transaction
+        .calc_tx_hash()
+        .unpack();
+    let mut commitment_checks = 0usize;
+    let (confirmed, dead) = classify_dead_fee_signing_requests(
+        &external,
+        |op| {
+            if *op == commitment_outpoint {
+                commitment_checks += 1;
+                if commitment_checks == 1 {
+                    Ok("live".to_string())
+                } else {
+                    Ok("unknown".to_string())
+                }
+            } else {
+                Ok("unknown".to_string())
+            }
+        },
+        |hash| {
+            if *hash == fee_tx_hash || *hash == signed_tx_hash || *hash == commitment_tx_hash {
+                Ok(Some(Status::Committed))
+            } else {
+                Ok(None)
+            }
+        },
+    );
+    assert_eq!(confirmed, HashSet::from([commitment_outpoint.clone()]));
+    assert!(dead.is_empty());
+
+    // 5b. Non-signed TOCTOU race: commitment_outpoint transitions from "live" on first lookup to
+    //     ConfirmedSpent on recheck after fee_input is ConfirmedSpent -> still confirmed_spent_inputs.
+    let mut pending_only = fiber_types::WatchtowerExternalSignerState::default();
+    pending_only.pending_requests.insert(
+        req_id,
+        fiber_types::PendingWatchtowerRequest {
+            content: external.signed_signatures[&req_id].content.clone(),
+            created_at_ms: 1_000,
+            required_expiry_since: None,
+        },
+    );
+    let mut pending_commitment_checks = 0usize;
+    let (confirmed, dead) = classify_dead_fee_signing_requests(
+        &pending_only,
+        |op| {
+            if *op == commitment_outpoint {
+                pending_commitment_checks += 1;
+                if pending_commitment_checks == 1 {
+                    Ok("live".to_string())
+                } else {
+                    Ok("unknown".to_string())
+                }
+            } else {
+                Ok("unknown".to_string())
+            }
+        },
+        |hash| {
+            if *hash == fee_tx_hash || *hash == commitment_tx_hash {
+                Ok(Some(Status::Committed))
+            } else {
+                Ok(None)
+            }
+        },
+    );
+    assert_eq!(pending_commitment_checks, 2);
     assert_eq!(confirmed, HashSet::from([commitment_outpoint]));
     assert!(dead.is_empty());
 }
@@ -3381,6 +3460,7 @@ fn external_broadcast_transport_error_retains_receipt_while_rpc_rejection_evicts
         &built,
         &timeout_err,
         now_ms,
+        |_| Ok("live".to_string()),
         |_| Ok(Some(Status::Pending)),
     );
     // 2. Transport/timeout error where tx lookup also returns None/unknown -> still retain for next scan.
@@ -3392,6 +3472,7 @@ fn external_broadcast_transport_error_retains_receipt_while_rpc_rejection_evicts
         &built,
         &timeout_err,
         now_ms,
+        |_| Ok("live".to_string()),
         |_| Ok(None),
     );
     match fixture
@@ -3409,15 +3490,42 @@ fn external_broadcast_transport_error_retains_receipt_while_rpc_rejection_evicts
         other => panic!("expected external signer, got {other:?}"),
     }
 
-    // 2b. Retryable JSON-RPC errors (e.g. PoolIsFull -1106, InternalError -32603) must ALSO
-    //     retain signed_signatures + last_applied without arming backoff so an offline wallet
-    //     does not need to re-sign.
-    for (code, message) in [(-1106i64, "PoolIsFull"), (-32603i64, "InternalError")] {
-        let retryable_err = ckb_sdk::RpcError::Rpc(jsonrpc_core::Error {
-            code: jsonrpc_core::ErrorCode::ServerError(code),
-            message: message.to_string(),
+    // 2b. Retryable JSON-RPC errors (PoolRejectedTransactionByMaxAncestorsCountLimit -1105,
+    //     PoolIsFull -1106, InternalError -32603, and -302 temporary tip-lag Immature in either
+    //     message or data) must ALSO retain signed_signatures + last_applied without arming
+    //     backoff so an offline wallet does not need to re-sign.
+    let retryable_errors = vec![
+        jsonrpc_core::Error {
+            code: jsonrpc_core::ErrorCode::ServerError(-1105),
+            message: "PoolRejectedTransactionByMaxAncestorsCountLimit".to_string(),
             data: None,
-        });
+        },
+        jsonrpc_core::Error {
+            code: jsonrpc_core::ErrorCode::ServerError(-1106),
+            message: "PoolIsFull".to_string(),
+            data: None,
+        },
+        jsonrpc_core::Error {
+            code: jsonrpc_core::ErrorCode::ServerError(-32603),
+            message: "InternalError".to_string(),
+            data: None,
+        },
+        jsonrpc_core::Error {
+            code: jsonrpc_core::ErrorCode::ServerError(-302),
+            message: "TransactionFailedToVerify: Verification failed Transaction(Immature(0))"
+                .to_string(),
+            data: None,
+        },
+        jsonrpc_core::Error {
+            code: jsonrpc_core::ErrorCode::ServerError(-302),
+            message: "TransactionFailedToVerify".to_string(),
+            data: Some(jsonrpc_core::Value::String(
+                "Transaction(Immature(1))".to_string(),
+            )),
+        },
+    ];
+    for rpc_err in retryable_errors {
+        let retryable_err = ckb_sdk::RpcError::Rpc(rpc_err);
         handle_external_settlement_send_error(
             &fixture.events,
             &fixture.store,
@@ -3426,6 +3534,7 @@ fn external_broadcast_transport_error_retains_receipt_while_rpc_rejection_evicts
             &built,
             &retryable_err,
             now_ms,
+            |_| Ok("live".to_string()),
             |_| Ok(None),
         );
     }
@@ -3440,14 +3549,15 @@ fn external_broadcast_transport_error_retains_receipt_while_rpc_rejection_evicts
                 Some(request_id)
             );
             assert_eq!(ext.consecutive_expired_requests, 0);
+            assert_eq!(ext.retry_after_ms, 0);
         }
         other => panic!("expected external signer, got {other:?}"),
     }
 
-    // 3. Definitive CKB RPC rejection (-302 TransactionFailedToVerify) -> evict signed_signatures, clear last_applied, arm backoff.
+    // 3. Definitive CKB RPC rejection (non-immature -302 TransactionFailedToVerify) -> evict signed_signatures, clear last_applied, arm backoff.
     let rpc_reject_err = ckb_sdk::RpcError::Rpc(jsonrpc_core::Error {
         code: jsonrpc_core::ErrorCode::ServerError(-302),
-        message: "TransactionFailedToVerify".to_string(),
+        message: "TransactionFailedToVerify: ValidationFailure(-1)".to_string(),
         data: None,
     });
     handle_external_settlement_send_error(
@@ -3458,6 +3568,7 @@ fn external_broadcast_transport_error_retains_receipt_while_rpc_rejection_evicts
         &built,
         &rpc_reject_err,
         now_ms,
+        |_| Ok("live".to_string()),
         |_| Ok(None),
     );
     match fixture
@@ -3725,14 +3836,17 @@ fn external_revocation_path_expires_obsolete_unsigned_requests_without_backoff()
     assert!(fixture.build().expect("queue").is_none());
     let (request_id, _) = fixture.pending_request();
 
+    let unrelated_outpoint = OutPoint::new(Byte32::from([0xee; 32]), 0);
     let after_ttl_ms =
         crate::now_timestamp_as_millis_u64() + crate::ckb::held_cells::WATCHTOWER_HOLD_MS + 5_000;
-    expire_channel_pending_external_signing_requests(
+    retire_external_signing_requests_on_revocation_with_lookup(
         &fixture.events,
         &fixture.store,
         &fixture.node_id,
         &fixture.channel.channel_id,
+        &unrelated_outpoint,
         after_ttl_ms,
+        |_| Ok(None),
     );
 
     let WatchtowerSignerState::External(ext) = fixture
@@ -3749,13 +3863,687 @@ fn external_revocation_path_expires_obsolete_unsigned_requests_without_backoff()
 
 #[test]
 fn external_mature_ckb_balance_reachable_despite_expired_timeout_tlc() {
+    for for_remote in [true, false] {
+        let base_key = Privkey::from([42; 32]);
+        let tlc_key =
+            fiber_types::channel::derive_private_key(&base_key, &Privkey::from([7; 32]).pubkey());
+        let payment_hash: Hash256 = HashAlgorithm::Sha256.hash([0x33u8; 32]).into();
+        let tlcs = vec![SettlementTlc {
+            // Timeout TLC belongs to local party: Offered when for_remote, Received when !for_remote.
+            tlc_id: if for_remote {
+                TLCId::Offered(1)
+            } else {
+                TLCId::Received(1)
+            },
+            payment_amount: 5_000_000_000, // 50 CKB timeout TLC (requires spare timestamped wallet input)
+            payment_hash,
+            hash_algorithm: HashAlgorithm::Sha256,
+            expiry: 100_000,
+            local_key: None,
+            local_key_pubkey: Some(tlc_key.pubkey()),
+            local_key_commitment_number: Some(1),
+            remote_key: Privkey::from([15; 32]).pubkey(),
+        }];
+        let fixture = build_custom_ckb_fixture(
+            for_remote,
+            false,
+            20_000_000_000, // 200 CKB mature balance (self-fundable with 0 spare cells)
+            10_000_000_000,
+            tlcs,
+            vec![],
+            false,
+        );
+        let settlement_data = if for_remote {
+            &fixture.channel.remote_settlement_data
+        } else {
+            &fixture.channel.local_settlement_data
+        };
+        let signer =
+            LocalSigner::new(secp256k1::SecretKey::from_slice(&[21; 32]).expect("fee key"));
+
+        // At epoch 12 (2/3 of delay_epoch=3 after cell_header_epoch=10), only the expired timeout
+        // TLC is eligible; balance delay (epoch 13) has not matured yet.
+        assert!(build_settlement_tx(
+            &fixture.events,
+            fixture.cell.clone(),
+            EpochNumberWithFraction::new(10, 0, 1),
+            EpochNumberWithFraction::new(12, 0, 1),
+            150_000,
+            &fixture.node_id,
+            fixture.for_remote,
+            fixture.channel.clone(),
+            settlement_data,
+            fixture.witness.clone(),
+            &fixture.tracked,
+            &signer,
+            &mut FeeCells,
+            &fixture.store,
+        )
+        .expect("queue timeout")
+        .is_none());
+        let (timeout_id, timeout_req) = fixture.pending_request();
+        assert!(timeout_req.required_expiry_since.is_some());
+        assert_eq!(
+            timeout_req.content.key_purpose,
+            OnchainKeyPurpose::Tlc {
+                commitment_number: 1
+            }
+        );
+
+        // At epoch 14 (full balance delay matured, all TLCs expired), the watchtower must offer the
+        // self-fundable 200-CKB balance as a separate pending request, AND `first_pending()` must
+        // expose it ahead of the stuck timeout TLC regardless of random request_id ordering.
+        assert!(fixture.build_at(150_000).expect("queue balance").is_none());
+        let (exposed_id, exposed_req) = fixture.pending_request();
+        assert_ne!(exposed_id, timeout_id);
+        assert_eq!(
+            exposed_req.content.key_purpose,
+            OnchainKeyPurpose::Settlement
+        );
+        assert_eq!(exposed_req.required_expiry_since, None);
+
+        // Self-fund and sign the balance withdrawal with 0 extra wallet cells (even though the
+        // expired timeout TLC remains in `pending_htlcs` of witness[0]).
+        let template = &exposed_req.content.transaction;
+        let payout = template.raw().outputs().get(1).unwrap();
+        let payout_cap: u64 = payout.capacity().unpack();
+        assert_eq!(payout_cap, 20_000_000_000);
+        let funded_tx = template
+            .clone()
+            .into_view()
+            .as_advanced_builder()
+            .set_outputs(vec![
+                template.raw().outputs().get(0).unwrap(),
+                payout
+                    .as_builder()
+                    .lock(test_custom_payout_lock())
+                    .capacity(payout_cap - 1_000)
+                    .build(),
+            ])
+            .build()
+            .data();
+        sign_and_submit_funded(
+            &fixture,
+            exposed_id,
+            &base_key,
+            OnchainKeyPurpose::Settlement,
+            &funded_tx,
+        );
+        let built = fixture
+            .build_at(150_000)
+            .expect("broadcast balance")
+            .expect("signed balance tx");
+        assert_eq!(built.data().raw().as_slice(), funded_tx.raw().as_slice());
+
+        // Simulate confirming the 200-CKB balance tx on-chain: prune spent requests for the
+        // initial commitment cell and construct the successor commitment cell + SettlementWitness
+        // carrying unlock_type 0xFF (for_remote) or 0xFE (!for_remote), which zeroes our local
+        // settlement pubkey hash while leaving the 50-CKB expired timeout TLC in `pending_htlcs`.
+        prune_spent_signing_requests(
+            &fixture.events,
+            &fixture.store,
+            &fixture.node_id,
+            &fixture.channel.channel_id,
+            &HashSet::from([OutPoint::from(fixture.cell.out_point.clone())]),
+        );
+        let successor_witness_raw = built.witnesses().get(0).unwrap().raw_data();
+        let successor_witness = SettlementWitness::build_from_witness(&successor_witness_raw[16..])
+            .expect("decode balance unlock witness");
+        let mut check_sw = successor_witness.clone();
+        assert!(check_sw.update());
+        if for_remote {
+            assert_eq!(check_sw.settlement_local_pubkey_hash, [0u8; 20]);
+        } else {
+            assert_eq!(check_sw.settlement_remote_pubkey_hash, [0u8; 20]);
+        }
+        assert_eq!(check_sw.pending_htlcs.len(), 1);
+
+        let successor_cell = Cell {
+            output: built.outputs().get(0).unwrap().into(),
+            output_data: Some(ckb_jsonrpc_types::JsonBytes::default()),
+            out_point: OutPoint::new(built.hash(), 0).into(),
+            block_number: 1u64.into(),
+            tx_index: 0u32.into(),
+        };
+
+        // The successor scan must NOT return Ok(None) just because our balance slot is zeroed:
+        // it must offer and settle the remaining 50-CKB timeout TLC!
+        assert!(build_settlement_tx(
+            &fixture.events,
+            successor_cell.clone(),
+            EpochNumberWithFraction::new(14, 0, 1),
+            EpochNumberWithFraction::new(14, 0, 1),
+            150_000,
+            &fixture.node_id,
+            fixture.for_remote,
+            fixture.channel.clone(),
+            settlement_data,
+            Some(successor_witness.clone()),
+            &fixture.tracked,
+            &signer,
+            &mut FeeCells,
+            &fixture.store,
+        )
+        .expect("queue remaining timeout TLC on successor")
+        .is_none());
+        let (tlc_req_id, tlc_req) = fixture.pending_request();
+        assert_eq!(
+            tlc_req.content.key_purpose,
+            OnchainKeyPurpose::Tlc {
+                commitment_number: 1
+            }
+        );
+        assert!(tlc_req.required_expiry_since.is_some());
+        let tlc_payout_cap: u64 = tlc_req
+            .content
+            .transaction
+            .raw()
+            .outputs()
+            .get(1)
+            .unwrap()
+            .capacity()
+            .unpack();
+        assert_eq!(tlc_payout_cap, 5_000_000_000);
+
+        // Wallet funds the remaining 50-CKB timeout TLC with a spare cell (e.g. from its freshly
+        // withdrawn 200-CKB balance), signs, and watchtower broadcasts it.
+        let funded_tlc = fund_pending(&tlc_req);
+        sign_and_submit_funded(
+            &fixture,
+            tlc_req_id,
+            &tlc_key,
+            tlc_req.content.key_purpose,
+            &funded_tlc.transaction,
+        );
+        let settled_tlc_tx = build_settlement_tx(
+            &fixture.events,
+            successor_cell,
+            EpochNumberWithFraction::new(14, 0, 1),
+            EpochNumberWithFraction::new(14, 0, 1),
+            150_000,
+            &fixture.node_id,
+            fixture.for_remote,
+            fixture.channel.clone(),
+            settlement_data,
+            Some(successor_witness),
+            &fixture.tracked,
+            &signer,
+            &mut FeeCells,
+            &fixture.store,
+        )
+        .expect("broadcast remaining timeout TLC")
+        .expect("signed timeout TLC tx");
+        assert_eq!(
+            settled_tlc_tx.data().raw().as_slice(),
+            funded_tlc.transaction.raw().as_slice()
+        );
+    }
+}
+
+#[test]
+fn external_broadcasts_already_signed_superseded_snapshot_tlc_even_if_higher_priority_claim_arrives(
+) {
+    let base_key = Privkey::from([42; 32]);
+    let tlc_key_small =
+        fiber_types::channel::derive_private_key(&base_key, &Privkey::from([11; 32]).pubkey());
+    let tlc_key_large =
+        fiber_types::channel::derive_private_key(&base_key, &Privkey::from([12; 32]).pubkey());
+    let preimage_small = Hash256::from([0x11; 32]);
+    let preimage_large = Hash256::from([0x22; 32]);
+    let hash_small: Hash256 = HashAlgorithm::Sha256.hash(preimage_small.as_ref()).into();
+    let hash_large: Hash256 = HashAlgorithm::Sha256.hash(preimage_large.as_ref()).into();
+    let superseded_snapshot = SettlementData {
+        local_amount: 10_000_000_000,
+        remote_amount: 10_000_000_000,
+        tlcs: vec![
+            SettlementTlc {
+                tlc_id: TLCId::Received(1),
+                payment_amount: 10_000_000_000, // 100 CKB
+                payment_hash: hash_small,
+                hash_algorithm: HashAlgorithm::Sha256,
+                expiry: 100_000,
+                local_key: None,
+                local_key_pubkey: Some(tlc_key_small.pubkey()),
+                local_key_commitment_number: Some(11),
+                remote_key: Privkey::from([15; 32]).pubkey(),
+            },
+            SettlementTlc {
+                tlc_id: TLCId::Received(2),
+                payment_amount: 20_000_000_000, // 200 CKB
+                payment_hash: hash_large,
+                hash_algorithm: HashAlgorithm::Sha256,
+                expiry: 100_000,
+                local_key: None,
+                local_key_pubkey: Some(tlc_key_large.pubkey()),
+                local_key_commitment_number: Some(12),
+                remote_key: Privkey::from([16; 32]).pubkey(),
+            },
+        ],
+    };
+
+    // Start channel with superseded_snapshot, then supersede it with an empty newer snapshot so
+    // TLC commitment numbers 11 & 12 exist ONLY in the retained superseded remote settlement.
+    let mut fixture = build_custom_ckb_fixture(
+        true,
+        false,
+        superseded_snapshot.local_amount,
+        superseded_snapshot.remote_amount,
+        superseded_snapshot.tlcs.clone(),
+        vec![(hash_small, preimage_small)],
+        false,
+    );
+    fixture
+        .store
+        .update_pending_remote_settlement(
+            fixture.node_id.clone(),
+            fixture.channel.channel_id,
+            11,
+            superseded_snapshot.clone(),
+        )
+        .expect("retain superseded snapshot");
+    let newer_empty = SettlementData {
+        local_amount: 10_000_000_000,
+        remote_amount: 10_000_000_000,
+        tlcs: vec![],
+    };
+    fixture
+        .store
+        .update_pending_remote_settlement(
+            fixture.node_id.clone(),
+            fixture.channel.channel_id,
+            12,
+            newer_empty.clone(),
+        )
+        .expect("advance pending remote settlement");
+    fixture.store.update_local_settlement(
+        fixture.node_id.clone(),
+        fixture.channel.channel_id,
+        newer_empty.clone(),
+    );
+    fixture.store.update_revocation(
+        fixture.node_id.clone(),
+        fixture.channel.channel_id,
+        fiber_types::RevocationData {
+            commitment_number: 10,
+            aggregated_signature: musig2::CompactSignature::from_bytes(&[1u8; 64]).unwrap(),
+            output: CellOutput::default(),
+            output_data: Bytes::default(),
+        },
+        newer_empty,
+    );
+    fixture.channel = fixture
+        .store
+        .get_watch_channel(&fixture.node_id, &fixture.channel.channel_id)
+        .expect("reloaded channel");
+    // Confirm the active ChannelData no longer knows TLC key 11 without superseded settlements.
+    assert!(fixture
+        .channel
+        .expected_onchain_pubkey(&OnchainKeyPurpose::Tlc {
+            commitment_number: 11
+        })
+        .is_err());
+
+    let signer = LocalSigner::new(secp256k1::SecretKey::from_slice(&[21; 32]).expect("fee key"));
+    // Queue 100-CKB TLC from the superseded snapshot.
+    assert!(build_settlement_tx(
+        &fixture.events,
+        fixture.cell.clone(),
+        EpochNumberWithFraction::new(10, 0, 1),
+        EpochNumberWithFraction::new(14, 0, 1),
+        50_000,
+        &fixture.node_id,
+        true,
+        fixture.channel.clone(),
+        &superseded_snapshot,
+        None,
+        &fixture.tracked,
+        &signer,
+        &mut FeeCells,
+        &fixture.store,
+    )
+    .expect("queue superseded TLC")
+    .is_none());
+    let (req_id, pending) = fixture.pending_request();
+    assert_eq!(
+        pending.content.key_purpose,
+        OnchainKeyPurpose::Tlc {
+            commitment_number: 11
+        }
+    );
+    let funded = fund_pending(&pending);
+    sign_and_submit_funded(
+        &fixture,
+        req_id,
+        &tlc_key_small,
+        pending.content.key_purpose,
+        &funded.transaction,
+    );
+
+    // Higher-priority 200-CKB preimage arrives before broadcast.
+    fixture
+        .store
+        .insert_watch_preimage(fixture.node_id.clone(), hash_large, preimage_large);
+
+    // Watchtower must still broadcast the already-accepted superseded-snapshot TLC signature!
+    let built = build_settlement_tx(
+        &fixture.events,
+        fixture.cell.clone(),
+        EpochNumberWithFraction::new(10, 0, 1),
+        EpochNumberWithFraction::new(14, 0, 1),
+        50_000,
+        &fixture.node_id,
+        true,
+        fixture.channel.clone(),
+        &superseded_snapshot,
+        None,
+        &fixture.tracked,
+        &signer,
+        &mut FeeCells,
+        &fixture.store,
+    )
+    .expect("broadcast superseded signed TLC")
+    .expect("already-signed superseded TLC tx must be broadcast");
+    assert_eq!(
+        built.data().raw().as_slice(),
+        funded.transaction.raw().as_slice()
+    );
+}
+
+#[test]
+fn external_cap_reached_displaces_lowest_priority_unsigned_pending_preserving_signed() {
+    let base_key = Privkey::from([42; 32]);
+    let amounts: [u128; 6] = [
+        1_000_000_000,  // 10 CKB (below self-fundable min)
+        2_000_000_000,  // 20 CKB
+        3_000_000_000,  // 30 CKB
+        4_000_000_000,  // 40 CKB
+        20_000_000_000, // 200 CKB (self-fundable)
+        30_000_000_000, // 300 CKB (higher self-fundable)
+    ];
+    let mut keys = Vec::new();
+    let mut preimages = Vec::new();
+    let mut hashes = Vec::new();
+    let mut tlcs = Vec::new();
+    for (idx, &amount) in amounts.iter().enumerate() {
+        let seed = (idx as u8) + 1;
+        let key = fiber_types::channel::derive_private_key(
+            &base_key,
+            &Privkey::from([seed + 30; 32]).pubkey(),
+        );
+        let preimage = Hash256::from([seed + 0x50; 32]);
+        let payment_hash: Hash256 = HashAlgorithm::Sha256.hash(preimage.as_ref()).into();
+        tlcs.push(SettlementTlc {
+            tlc_id: TLCId::Received(seed as u64),
+            payment_amount: amount,
+            payment_hash,
+            hash_algorithm: HashAlgorithm::Sha256,
+            expiry: 500_000,
+            local_key: None,
+            local_key_pubkey: Some(key.pubkey()),
+            local_key_commitment_number: Some(seed as u64),
+            remote_key: Privkey::from([seed + 60; 32]).pubkey(),
+        });
+        keys.push(key);
+        preimages.push(preimage);
+        hashes.push(payment_hash);
+    }
+
+    let fixture = build_custom_ckb_fixture(
+        true,
+        false,
+        10_000_000_000,
+        10_000_000_000,
+        tlcs,
+        vec![],
+        false,
+    );
+
+    // Fill all 4 per-channel slots on the same commitment outpoint with 4 progressively larger
+    // below-minimum preimage claims (10, 20, 30, 40 CKB).
+    let mut initial_ids = Vec::new();
+    for i in 0..4 {
+        fixture
+            .store
+            .insert_watch_preimage(fixture.node_id.clone(), hashes[i], preimages[i]);
+        assert!(fixture.build_at(50_000).expect("queue small tlc").is_none());
+        let (id, req) = fixture.pending_request();
+        assert_eq!(
+            req.content.key_purpose,
+            OnchainKeyPurpose::Tlc {
+                commitment_number: (i + 1) as u64
+            }
+        );
+        initial_ids.push(id);
+    }
+    let WatchtowerSignerState::External(ext_full) = fixture
+        .store
+        .get_watchtower_signer(&fixture.node_id, &fixture.channel.channel_id)
+    else {
+        panic!("external signer");
+    };
+    assert_eq!(
+        ext_full.pending_requests.len(),
+        MAX_PENDING_EXTERNAL_SIGNING_REQUESTS_PER_CHANNEL
+    );
+
+    // Now make the 200-CKB self-fundable claim eligible -> must displace the lowest-priority
+    // unsigned entry (10 CKB = initial_ids[0]), keep total <= 4, and be exposed via first_pending().
+    fixture
+        .store
+        .insert_watch_preimage(fixture.node_id.clone(), hashes[4], preimages[4]);
+    assert!(fixture
+        .build_at(50_000)
+        .expect("displace lowest pending")
+        .is_none());
+    let WatchtowerSignerState::External(ext_displaced) = fixture
+        .store
+        .get_watchtower_signer(&fixture.node_id, &fixture.channel.channel_id)
+    else {
+        panic!("external signer");
+    };
+    assert_eq!(
+        ext_displaced.pending_requests.len() + ext_displaced.signed_signatures.len(),
+        MAX_PENDING_EXTERNAL_SIGNING_REQUESTS_PER_CHANNEL
+    );
+    assert!(
+        !ext_displaced.pending_requests.contains_key(&initial_ids[0]),
+        "lowest-priority 10-CKB unsigned entry must be displaced"
+    );
+    assert!(ext_displaced.pending_requests.contains_key(&initial_ids[1]));
+    assert!(ext_displaced.pending_requests.contains_key(&initial_ids[2]));
+    assert!(ext_displaced.pending_requests.contains_key(&initial_ids[3]));
+    let (id_200, req_200) = fixture.pending_request();
+    assert_eq!(
+        req_200.content.key_purpose,
+        OnchainKeyPurpose::Tlc {
+            commitment_number: 5
+        }
+    );
+
+    // Backoff must remain strictly enforced even when a strictly higher-priority claim arrives.
+    let now_ms = crate::now_timestamp_as_millis_u64();
+    fixture
+        .store
+        .update_watchtower_signer(&fixture.node_id, &fixture.channel.channel_id, |state| {
+            if let WatchtowerSignerState::External(ext) = state {
+                ext.retry_after_ms = now_ms + 60_000;
+            }
+            Ok::<_, std::convert::Infallible>(())
+        })
+        .unwrap();
+    fixture
+        .store
+        .insert_watch_preimage(fixture.node_id.clone(), hashes[5], preimages[5]);
+    assert!(fixture
+        .build_at(50_000)
+        .expect("blocked by backoff")
+        .is_none());
+    assert_eq!(
+        fixture.pending_request().0,
+        id_200,
+        "backoff must block even higher-priority displacement"
+    );
+
+    // Clear backoff and move 3 entries to `signed_signatures`, leaving only 1 unsigned entry
+    // (20 CKB = initial_ids[1]). Build a 300-CKB template via build_signed_settlement_tx and
+    // verify ONLY the unsigned entry is displaced while ALL 3 signed_signatures are preserved.
+    fixture
+        .store
+        .update_watchtower_signer(&fixture.node_id, &fixture.channel.channel_id, |state| {
+            if let WatchtowerSignerState::External(ext) = state {
+                ext.retry_after_ms = 0;
+            }
+            Ok::<_, std::convert::Infallible>(())
+        })
+        .unwrap();
+    for (id, key_idx) in [
+        (initial_ids[2], 2usize),
+        (initial_ids[3], 3usize),
+        (id_200, 4usize),
+    ] {
+        let req = match fixture
+            .store
+            .get_watchtower_signer(&fixture.node_id, &fixture.channel.channel_id)
+        {
+            WatchtowerSignerState::External(ext) => ext.pending_requests[&id].clone(),
+            _ => panic!("external signer"),
+        };
+        let funded = fund_pending(&req);
+        sign_and_submit_funded(
+            &fixture,
+            id,
+            &keys[key_idx],
+            req.content.key_purpose,
+            &funded.transaction,
+        );
+    }
+
+    // Build a 300-CKB template on the same commitment_outpoint directly through
+    // `build_signed_settlement_tx` (bypassing the early signed broadcast check so we exercise
+    // displacement with 3 signed + 1 unsigned).
+    let signer = LocalSigner::new(secp256k1::SecretKey::from_slice(&[21; 32]).expect("fee key"));
+    let commitment_outpoint = OutPoint::from(fixture.cell.out_point.clone());
+    let template_300 = TransactionBuilder::default()
+        .input(CellInput::new(commitment_outpoint.clone(), 0))
+        .output(
+            CellOutput::new_builder()
+                .capacity(30_000_000_000u64)
+                .build(),
+        )
+        .output_data(Bytes::default())
+        .witness([0x99u8; 32].as_slice().pack())
+        .build();
+    assert!(build_signed_settlement_tx(
+        &fixture.events,
+        &fixture.store,
+        &fixture.node_id,
+        fixture.channel.channel_id,
+        template_300,
+        OnchainKeyPurpose::Tlc {
+            commitment_number: 6
+        },
+        true,
+        None,
+        &signer,
+        None,
+        None,
+    )
+    .expect("displace last unsigned entry")
+    .is_none());
+    let WatchtowerSignerState::External(ext_after_300) = fixture
+        .store
+        .get_watchtower_signer(&fixture.node_id, &fixture.channel.channel_id)
+    else {
+        panic!("external signer");
+    };
+    assert_eq!(ext_after_300.signed_signatures.len(), 3);
+    assert!(ext_after_300
+        .signed_signatures
+        .contains_key(&initial_ids[2]));
+    assert!(ext_after_300
+        .signed_signatures
+        .contains_key(&initial_ids[3]));
+    assert!(ext_after_300.signed_signatures.contains_key(&id_200));
+    assert_eq!(ext_after_300.pending_requests.len(), 1);
+    assert!(
+        !ext_after_300.pending_requests.contains_key(&initial_ids[1]),
+        "only the unsigned 20-CKB entry may be displaced"
+    );
+    let (id_300, req_300) = fixture.pending_request();
+    assert_eq!(
+        req_300.content.key_purpose,
+        OnchainKeyPurpose::Tlc {
+            commitment_number: 6
+        }
+    );
+
+    // Move the 4th entry to `signed_signatures` (now 4 signed, 0 unsigned) -> a new 500-CKB
+    // request MUST NOT evict any `signed_signatures`!
+    fixture
+        .store
+        .update_watchtower_signer(&fixture.node_id, &fixture.channel.channel_id, |state| {
+            if let WatchtowerSignerState::External(ext) = state {
+                let pending_300 = ext.pending_requests.remove(&id_300).unwrap();
+                ext.signed_signatures.insert(
+                    id_300,
+                    fiber_types::SignedWatchtowerRequest {
+                        content: pending_300.content,
+                        signature: [0x77; 65],
+                        created_at_ms: now_ms,
+                    },
+                );
+            }
+            Ok::<_, std::convert::Infallible>(())
+        })
+        .unwrap();
+    let template_500 = TransactionBuilder::default()
+        .input(CellInput::new(commitment_outpoint, 0))
+        .output(
+            CellOutput::new_builder()
+                .capacity(50_000_000_000u64)
+                .build(),
+        )
+        .output_data(Bytes::default())
+        .witness([0x88u8; 32].as_slice().pack())
+        .build();
+    assert!(build_signed_settlement_tx(
+        &fixture.events,
+        &fixture.store,
+        &fixture.node_id,
+        fixture.channel.channel_id,
+        template_500,
+        OnchainKeyPurpose::Settlement,
+        false,
+        None,
+        &signer,
+        None,
+        None,
+    )
+    .expect("must not evict signed_signatures")
+    .is_none());
+    let WatchtowerSignerState::External(ext_all_signed) = fixture
+        .store
+        .get_watchtower_signer(&fixture.node_id, &fixture.channel.channel_id)
+    else {
+        panic!("external signer");
+    };
+    assert_eq!(ext_all_signed.signed_signatures.len(), 4);
+    assert!(ext_all_signed.pending_requests.is_empty());
+}
+
+#[test]
+fn external_barely_above_61_ckb_preimage_does_not_hide_mature_balance_and_larger_lock_fallback() {
     let base_key = Privkey::from([42; 32]);
     let tlc_key =
         fiber_types::channel::derive_private_key(&base_key, &Privkey::from([7; 32]).pubkey());
-    let payment_hash: Hash256 = HashAlgorithm::Sha256.hash([0x33u8; 32]).into();
-    let tlcs = vec![SettlementTlc {
-        tlc_id: TLCId::Offered(1),
-        payment_amount: 5_000_000_000, // 50 CKB timeout TLC (requires spare timestamped wallet input)
+    let preimage = Hash256::from([0x44; 32]);
+    let payment_hash: Hash256 = HashAlgorithm::Sha256.hash(preimage.as_ref()).into();
+
+    // Case A: 61 CKB + 1 shannon preimage TLC lacks the fee buffer (< EXTERNAL_SELF_FUNDABLE_CKB_MIN_CAPACITY),
+    // so it must NOT hide a mature 200-CKB balance on the very first scan.
+    let barely_above_61_tlcs = vec![SettlementTlc {
+        tlc_id: TLCId::Received(1),
+        payment_amount: 6_100_000_001, // 61 CKB + 1 shannon (< 6_100_010_000)
         payment_hash,
         hash_algorithm: HashAlgorithm::Sha256,
         expiry: 100_000,
@@ -3764,88 +4552,583 @@ fn external_mature_ckb_balance_reachable_despite_expired_timeout_tlc() {
         local_key_commitment_number: Some(1),
         remote_key: Privkey::from([15; 32]).pubkey(),
     }];
-    let fixture = build_custom_ckb_fixture(
+    let fixture_a = build_custom_ckb_fixture(
         true,
         false,
-        20_000_000_000, // 200 CKB mature balance (self-fundable with 0 spare cells)
+        20_000_000_000, // 200 CKB mature balance
         10_000_000_000,
-        tlcs,
-        vec![],
+        barely_above_61_tlcs,
+        vec![(payment_hash, preimage)],
         false,
     );
-    let signer = LocalSigner::new(secp256k1::SecretKey::from_slice(&[21; 32]).expect("fee key"));
-
-    // At epoch 12 (2/3 of delay_epoch=3 after cell_header_epoch=10), only the expired timeout
-    // TLC is eligible; balance delay (epoch 13) has not matured yet.
-    assert!(build_settlement_tx(
-        &fixture.events,
-        fixture.cell.clone(),
-        EpochNumberWithFraction::new(10, 0, 1),
-        EpochNumberWithFraction::new(12, 0, 1),
-        150_000,
-        &fixture.node_id,
-        fixture.for_remote,
-        fixture.channel.clone(),
-        &fixture.channel.remote_settlement_data,
-        fixture.witness.clone(),
-        &fixture.tracked,
-        &signer,
-        &mut FeeCells,
-        &fixture.store,
-    )
-    .expect("queue timeout")
-    .is_none());
-    let (timeout_id, timeout_req) = fixture.pending_request();
-    assert!(timeout_req.required_expiry_since.is_some());
+    assert!(fixture_a.build_at(150_000).expect("queue").is_none());
+    let (_, exposed_a) = fixture_a.pending_request();
     assert_eq!(
-        timeout_req.content.key_purpose,
+        exposed_a.content.key_purpose,
+        OnchainKeyPurpose::Settlement,
+        "61 CKB + 1 shannon preimage TLC must not hide a mature 200-CKB balance"
+    );
+    let payout_cap_a: u64 = exposed_a
+        .content
+        .transaction
+        .raw()
+        .outputs()
+        .get(1)
+        .unwrap()
+        .capacity()
+        .unpack();
+    assert_eq!(payout_cap_a, 20_000_000_000);
+
+    // Case B: 70-CKB preimage TLC (>= EXTERNAL_SELF_FUNDABLE_CKB_MIN_CAPACITY for secp256k1,
+    // but potentially too small for a larger lock like Omnilock/JoyID) + mature 200-CKB balance.
+    // Scan 1 offers the 70-CKB TLC; if the wallet leaves it unsigned, Scan 2 offers the larger
+    // mature 200-CKB balance as an alternative claim and `first_pending()` exposes the 200-CKB balance.
+    let larger_lock_tlcs = vec![SettlementTlc {
+        tlc_id: TLCId::Received(1),
+        payment_amount: 7_000_000_000, // 70 CKB
+        payment_hash,
+        hash_algorithm: HashAlgorithm::Sha256,
+        expiry: 100_000,
+        local_key: None,
+        local_key_pubkey: Some(tlc_key.pubkey()),
+        local_key_commitment_number: Some(1),
+        remote_key: Privkey::from([15; 32]).pubkey(),
+    }];
+    let fixture_b = build_custom_ckb_fixture(
+        true,
+        false,
+        20_000_000_000, // 200 CKB mature balance
+        10_000_000_000,
+        larger_lock_tlcs,
+        vec![(payment_hash, preimage)],
+        false,
+    );
+    assert!(fixture_b.build_at(150_000).expect("scan 1").is_none());
+    let (id_70, req_70) = fixture_b.pending_request();
+    assert_eq!(
+        req_70.content.key_purpose,
         OnchainKeyPurpose::Tlc {
             commitment_number: 1
         }
     );
-
-    // At epoch 14 (full balance delay matured, all TLCs expired), the watchtower must offer the
-    // self-fundable 200-CKB balance as a separate pending request, AND `first_pending()` must
-    // expose it ahead of the stuck timeout TLC regardless of random request_id ordering.
-    assert!(fixture.build_at(150_000).expect("queue balance").is_none());
-    let (exposed_id, exposed_req) = fixture.pending_request();
-    assert_ne!(exposed_id, timeout_id);
+    assert!(fixture_b.build_at(150_000).expect("scan 2").is_none());
+    let (id_200, req_200) = fixture_b.pending_request();
+    assert_ne!(id_200, id_70);
     assert_eq!(
-        exposed_req.content.key_purpose,
-        OnchainKeyPurpose::Settlement
-    );
-    assert_eq!(exposed_req.required_expiry_since, None);
-
-    // Self-fund and sign the balance withdrawal with 0 extra wallet cells (even though the
-    // expired timeout TLC remains in `pending_htlcs` of witness[0]).
-    let template = &exposed_req.content.transaction;
-    let payout = template.raw().outputs().get(1).unwrap();
-    let payout_cap: u64 = payout.capacity().unpack();
-    assert_eq!(payout_cap, 20_000_000_000);
-    let funded_tx = template
-        .clone()
-        .into_view()
-        .as_advanced_builder()
-        .set_outputs(vec![
-            template.raw().outputs().get(0).unwrap(),
-            payout
-                .as_builder()
-                .lock(test_custom_payout_lock())
-                .capacity(payout_cap - 1_000)
-                .build(),
-        ])
-        .build()
-        .data();
-    sign_and_submit_funded(
-        &fixture,
-        exposed_id,
-        &base_key,
+        req_200.content.key_purpose,
         OnchainKeyPurpose::Settlement,
-        &funded_tx,
+        "larger mature CKB balance must be offered when smaller TLC sits unsigned"
     );
-    let built = fixture
-        .build_at(150_000)
-        .expect("broadcast balance")
-        .expect("signed balance tx");
-    assert_eq!(built.data().raw().as_slice(), funded_tx.raw().as_slice());
+    // Scan 3 reuses the existing 200-CKB balance request without creating duplicates.
+    assert!(fixture_b.build_at(150_000).expect("scan 3").is_none());
+    let WatchtowerSignerState::External(ext_b) = fixture_b
+        .store
+        .get_watchtower_signer(&fixture_b.node_id, &fixture_b.channel.channel_id)
+    else {
+        panic!("external signer");
+    };
+    assert_eq!(ext_b.pending_requests.len(), 2);
+    assert_eq!(fixture_b.pending_request().0, id_200);
+}
+
+#[test]
+fn external_send_error_301_reconciles_committed_unknown_and_dead_fee_inputs() {
+    let err_301 = ckb_sdk::RpcError::Rpc(jsonrpc_core::Error {
+        code: jsonrpc_core::ErrorCode::ServerError(-301),
+        message: "TransactionFailedToResolve: Resolve failed Dead(...)".to_string(),
+        data: None,
+    });
+    let setup = || {
+        let fixture = Fixture::new(true, true, false, false);
+        assert!(fixture.build().expect("queue").is_none());
+        let (request_id, pending) = fixture.pending_request();
+        let funded = fund_pending(&pending);
+        let sig = sign_onchain_request(&fixture.tlc_key, &funded).expect("sig");
+        assert_eq!(
+            fixture
+                .submit_with_tx(request_id, sig, funded.transaction.clone())
+                .expect("submit"),
+            SubmitWatchtowerSignatureResult::Applied
+        );
+        let built = fixture.build().expect("apply").expect("signed tx");
+        (fixture, request_id, built)
+    };
+    let now_ms = crate::now_timestamp_as_millis_u64();
+
+    // Case 1a: -301 when signed tx is already Committed -> prune signed_signatures, preserve last_applied, NO backoff.
+    let (fixture, request_id, built) = setup();
+    let signed_tx_hash: ckb_types::H256 = built.hash().unpack();
+    handle_external_settlement_send_error(
+        &fixture.events,
+        &fixture.store,
+        &fixture.node_id,
+        &fixture.channel.channel_id,
+        &built,
+        &err_301,
+        now_ms,
+        |_| Ok("unknown".to_string()),
+        |h| {
+            if *h == signed_tx_hash {
+                Ok(Some(Status::Committed))
+            } else {
+                Ok(None)
+            }
+        },
+    );
+    let WatchtowerSignerState::External(ext) = fixture
+        .store
+        .get_watchtower_signer(&fixture.node_id, &fixture.channel.channel_id)
+    else {
+        panic!("external signer");
+    };
+    assert!(ext.signed_signatures.is_empty());
+    assert_eq!(
+        ext.last_applied.as_ref().map(|a| a.request_id),
+        Some(request_id)
+    );
+    assert_eq!(ext.consecutive_expired_requests, 0);
+    assert_eq!(ext.retry_after_ms, 0);
+
+    // Case 1b: -301 when signed tx lookup returns None, but inputs[0] is ConfirmedSpent -> prune, preserve last_applied, NO backoff.
+    let (fixture, request_id, built) = setup();
+    let commitment_outpoint = built.inputs().get(0).unwrap().previous_output();
+    let commitment_tx_hash: ckb_types::H256 = commitment_outpoint.tx_hash().unpack();
+    handle_external_settlement_send_error(
+        &fixture.events,
+        &fixture.store,
+        &fixture.node_id,
+        &fixture.channel.channel_id,
+        &built,
+        &err_301,
+        now_ms,
+        |_| Ok("unknown".to_string()),
+        |h| {
+            if *h == commitment_tx_hash {
+                Ok(Some(Status::Committed))
+            } else {
+                Ok(None)
+            }
+        },
+    );
+    let WatchtowerSignerState::External(ext) = fixture
+        .store
+        .get_watchtower_signer(&fixture.node_id, &fixture.channel.channel_id)
+    else {
+        panic!("external signer");
+    };
+    assert!(ext.signed_signatures.is_empty());
+    assert_eq!(
+        ext.last_applied.as_ref().map(|a| a.request_id),
+        Some(request_id)
+    );
+    assert_eq!(ext.consecutive_expired_requests, 0);
+    assert_eq!(ext.retry_after_ms, 0);
+
+    // Case 2: -301 when inputs[0] is Live and funding input (inputs[1]) is Unknown (unsynced parent)
+    // -> retain signed_signatures + last_applied, NO backoff.
+    let (fixture, request_id, built) = setup();
+    let commitment_outpoint = built.inputs().get(0).unwrap().previous_output();
+    let fee_outpoint = built.inputs().get(1).unwrap().previous_output();
+    let fee_tx_hash: ckb_types::H256 = fee_outpoint.tx_hash().unpack();
+    handle_external_settlement_send_error(
+        &fixture.events,
+        &fixture.store,
+        &fixture.node_id,
+        &fixture.channel.channel_id,
+        &built,
+        &err_301,
+        now_ms,
+        |op| {
+            if *op == commitment_outpoint {
+                Ok("live".to_string())
+            } else {
+                Ok("unknown".to_string())
+            }
+        },
+        // Parent block of fee input is not synced on this node yet -> Unknown.
+        |_| Ok(None),
+    );
+    let WatchtowerSignerState::External(ext) = fixture
+        .store
+        .get_watchtower_signer(&fixture.node_id, &fixture.channel.channel_id)
+    else {
+        panic!("external signer");
+    };
+    assert!(ext.signed_signatures.contains_key(&request_id));
+    assert_eq!(
+        ext.last_applied.as_ref().map(|a| a.request_id),
+        Some(request_id)
+    );
+    assert_eq!(ext.consecutive_expired_requests, 0);
+    assert_eq!(ext.retry_after_ms, 0);
+
+    // Case 3: -301 when inputs[0] is Live and funding input (inputs[1]) is ConfirmedSpent
+    // -> evict signed_signatures, clear last_applied, arm backoff.
+    handle_external_settlement_send_error(
+        &fixture.events,
+        &fixture.store,
+        &fixture.node_id,
+        &fixture.channel.channel_id,
+        &built,
+        &err_301,
+        now_ms,
+        |op| {
+            if *op == commitment_outpoint {
+                Ok("live".to_string())
+            } else {
+                Ok("unknown".to_string())
+            }
+        },
+        |h| {
+            if *h == fee_tx_hash {
+                Ok(Some(Status::Committed))
+            } else {
+                Ok(None)
+            }
+        },
+    );
+    let WatchtowerSignerState::External(ext) = fixture
+        .store
+        .get_watchtower_signer(&fixture.node_id, &fixture.channel.channel_id)
+    else {
+        panic!("external signer");
+    };
+    assert!(ext.signed_signatures.is_empty());
+    assert!(ext.last_applied.is_none());
+    assert_eq!(ext.consecutive_expired_requests, 1);
+    assert!(ext.retry_after_ms > now_ms);
+}
+
+#[test]
+fn external_revocation_retires_signed_requests_and_releases_quota_without_backoff() {
+    let fixture = Fixture::new(true, true, false, false);
+    assert!(fixture.build().expect("queue").is_none());
+    let (request_id, pending) = fixture.pending_request();
+    let funded = fund_pending(&pending);
+    let sig = sign_onchain_request(&fixture.tlc_key, &funded).expect("sig");
+    assert_eq!(
+        fixture
+            .submit_with_tx(request_id, sig, funded.transaction.clone())
+            .expect("submit"),
+        SubmitWatchtowerSignatureResult::Applied
+    );
+    let commitment_outpoint = OutPoint::from(fixture.cell.out_point.clone());
+    let (node_active_before, global_active_before, _) = fixture
+        .store
+        .watchtower_external_signing_stats(&fixture.node_id);
+    assert_eq!(node_active_before, 1);
+    assert_eq!(global_active_before, 1);
+
+    // Revocation branch encounters the revoked commitment outpoint BEFORE TTL has elapsed:
+    // signed_signatures referencing it must be retired immediately, clearing uncommitted
+    // last_applied, releasing channel/node/global quota, and NEVER arming backoff.
+    let now_ms = crate::now_timestamp_as_millis_u64();
+    retire_external_signing_requests_on_revocation_with_lookup(
+        &fixture.events,
+        &fixture.store,
+        &fixture.node_id,
+        &fixture.channel.channel_id,
+        &commitment_outpoint,
+        now_ms,
+        |_| Ok(None),
+    );
+    let WatchtowerSignerState::External(ext) = fixture
+        .store
+        .get_watchtower_signer(&fixture.node_id, &fixture.channel.channel_id)
+    else {
+        panic!("external signer");
+    };
+    assert!(ext.signed_signatures.is_empty());
+    assert!(ext.pending_requests.is_empty());
+    assert!(ext.last_applied.is_none());
+    assert_eq!(ext.consecutive_expired_requests, 0);
+    assert_eq!(ext.retry_after_ms, 0);
+    let (node_active_after, global_active_after, _) = fixture
+        .store
+        .watchtower_external_signing_stats(&fixture.node_id);
+    assert_eq!(node_active_after, 0);
+    assert_eq!(global_active_after, 0);
+
+    // Also verify a past-TTL signed request whose tx IS Committed preserves `last_applied`
+    // while still retiring `signed_signatures` and releasing quota without arming backoff.
+    assert!(fixture.build().expect("queue 2").is_none());
+    let (req_id_2, pending_2) = fixture.pending_request();
+    let funded_2 = fund_pending(&pending_2);
+    let sig_2 = sign_onchain_request(&fixture.tlc_key, &funded_2).expect("sig 2");
+    assert_eq!(
+        fixture
+            .submit_with_tx(req_id_2, sig_2, funded_2.transaction.clone())
+            .expect("submit 2"),
+        SubmitWatchtowerSignatureResult::Applied
+    );
+    let signed_tx_hash_2: ckb_types::H256 = funded_2.transaction.calc_tx_hash().unpack();
+    let other_outpoint = OutPoint::new(Byte32::from([0xdd; 32]), 0);
+    let after_ttl_ms = now_ms + crate::ckb::held_cells::WATCHTOWER_HOLD_MS + 10_000;
+    retire_external_signing_requests_on_revocation_with_lookup(
+        &fixture.events,
+        &fixture.store,
+        &fixture.node_id,
+        &fixture.channel.channel_id,
+        &other_outpoint,
+        after_ttl_ms,
+        |h| {
+            if *h == signed_tx_hash_2 {
+                Ok(Some(Status::Committed))
+            } else {
+                Ok(None)
+            }
+        },
+    );
+    let WatchtowerSignerState::External(ext_2) = fixture
+        .store
+        .get_watchtower_signer(&fixture.node_id, &fixture.channel.channel_id)
+    else {
+        panic!("external signer");
+    };
+    assert!(ext_2.signed_signatures.is_empty());
+    assert_eq!(
+        ext_2.last_applied.as_ref().map(|a| a.request_id),
+        Some(req_id_2)
+    );
+    assert_eq!(ext_2.consecutive_expired_requests, 0);
+    assert_eq!(ext_2.retry_after_ms, 0);
+}
+
+#[test]
+fn external_empty_spent_inputs_reconciles_committed_signed_tx_past_ttl() {
+    let fixture = Fixture::new(true, true, true, false);
+    assert!(fixture.build().expect("queue").is_none());
+    let (request_id, pending) = fixture.pending_request();
+    let funded = fund_pending(&pending);
+    let sig = sign_onchain_request(&fixture.tlc_key, &funded).expect("sig");
+    assert_eq!(
+        fixture
+            .submit_with_tx(request_id, sig, funded.transaction.clone())
+            .expect("submit"),
+        SubmitWatchtowerSignatureResult::Applied
+    );
+    let signed_tx_hash: ckb_types::H256 = funded.transaction.calc_tx_hash().unpack();
+    let after_ttl_ms =
+        crate::now_timestamp_as_millis_u64() + crate::ckb::held_cells::WATCHTOWER_HOLD_MS + 10_000;
+
+    // Simulate `check_watch_channel` hitting `Ok(None)` (rebuilding funding indexer) past TTL:
+    // `spent_inputs` is empty, but reconciliation queries liveness/tx status before expiration
+    // and preserves `last_applied` without arming backoff.
+    reconcile_and_expire_external_signing_requests_with_lookups(
+        &fixture.events,
+        &fixture.store,
+        &fixture.node_id,
+        &fixture.channel.channel_id,
+        &HashSet::new(),
+        after_ttl_ms,
+        |_| Ok("unknown".to_string()),
+        |h| {
+            if *h == signed_tx_hash {
+                Ok(Some(Status::Committed))
+            } else {
+                Ok(None)
+            }
+        },
+    );
+
+    let WatchtowerSignerState::External(ext) = fixture
+        .store
+        .get_watchtower_signer(&fixture.node_id, &fixture.channel.channel_id)
+    else {
+        panic!("external signer");
+    };
+    assert!(ext.signed_signatures.is_empty());
+    assert_eq!(
+        ext.last_applied.as_ref().map(|a| a.request_id),
+        Some(request_id)
+    );
+    assert_eq!(ext.consecutive_expired_requests, 0);
+    assert_eq!(ext.retry_after_ms, 0);
+    assert_eq!(
+        fixture
+            .submit_with_tx(request_id, sig, funded.transaction)
+            .expect("idempotent retry after empty spent_inputs reconcile"),
+        SubmitWatchtowerSignatureResult::AlreadyApplied
+    );
+
+    // Once active requests are empty, subsequent reconciliation performs zero RPC lookups.
+    let rpc_calls = std::cell::Cell::new(0usize);
+    reconcile_and_expire_external_signing_requests_with_lookups(
+        &fixture.events,
+        &fixture.store,
+        &fixture.node_id,
+        &fixture.channel.channel_id,
+        &HashSet::new(),
+        after_ttl_ms + 10_000,
+        |_| {
+            rpc_calls.set(rpc_calls.get() + 1);
+            Ok("unknown".to_string())
+        },
+        |_| {
+            rpc_calls.set(rpc_calls.get() + 1);
+            Ok(None)
+        },
+    );
+    assert_eq!(rpc_calls.get(), 0);
+}
+
+#[test]
+fn external_websocket_events_publish_effective_tenant_backoff_across_channels() {
+    use crate::rpc::watchtower::{GetWatchtowerSigningStatusParams, WatchtowerSigningStatus};
+    use crate::signing::notifications::{SigningChange, SigningScope};
+    use futures::FutureExt;
+
+    let fixture_b = Fixture::new(true, true, false, false);
+    let node_id = fixture_b.node_id.clone();
+    let channel_b = fixture_b.channel.channel_id;
+    let channel_a = Hash256::from([0xa1; 32]);
+    fixture_b.store.insert_watch_channel(
+        node_id.clone(),
+        channel_a,
+        None,
+        WatchChannelKeys {
+            local_settlement: SettlementKey::external(fixture_b.base_key.pubkey()),
+            remote_settlement: fixture_b.channel.remote_settlement_key,
+            local_funding: fixture_b.channel.local_funding_pubkey,
+            remote_funding: fixture_b.channel.remote_funding_pubkey,
+        },
+        SettlementData {
+            local_amount: 10_000_000_000,
+            remote_amount: 10_000_000_000,
+            tlcs: vec![],
+        },
+        ChannelFeatures::V2,
+    );
+
+    let now_ms = crate::now_timestamp_as_millis_u64();
+    let tenant_retry_after_ms = now_ms + 300_000;
+    // Channel A is in tenant-wide backoff; channel B has a shorter local backoff.
+    fixture_b
+        .store
+        .update_watchtower_signer(&node_id, &channel_a, |state| {
+            if let WatchtowerSignerState::External(ext) = state {
+                ext.consecutive_expired_requests = 2;
+                ext.retry_after_ms = tenant_retry_after_ms;
+            }
+            Ok::<_, std::convert::Infallible>(())
+        })
+        .unwrap();
+    fixture_b
+        .store
+        .update_watchtower_signer(&node_id, &channel_b, |state| {
+            if let WatchtowerSignerState::External(ext) = state {
+                ext.consecutive_expired_requests = 1;
+                ext.retry_after_ms = now_ms + 60_000;
+            }
+            Ok::<_, std::convert::Infallible>(())
+        })
+        .unwrap();
+
+    let mut changes = fixture_b
+        .events
+        .hub
+        .subscribe(SigningScope::Watchtower(node_id.clone()));
+
+    // Channel B clears its own backoff on a successful send -> live WebSocket event AND RPC
+    // get_watchtower_signing_status(B) must both report Backoff with channel A's tenant backoff!
+    clear_channel_external_retry_backoff(&fixture_b.events, &fixture_b.store, &node_id, &channel_b);
+
+    let event = changes
+        .recv()
+        .now_or_never()
+        .expect("event ready")
+        .expect("event ok");
+    let SigningChange::WatchtowerUpdated { channel_id, status } = event.as_ref() else {
+        panic!("expected WatchtowerUpdated event, got {event:?}");
+    };
+    assert_eq!(*channel_id, channel_b);
+    assert_eq!(
+        *status,
+        WatchtowerSigningStatus::Backoff {
+            retry_after_ms: tenant_retry_after_ms,
+            consecutive_expired_requests: 0,
+        }
+    );
+
+    let rpc = WatchtowerRpcServerImpl::new(fixture_b.store.clone())
+        .with_signing_events(fixture_b.events.clone());
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let rpc_status = rt
+        .block_on(rpc.get_watchtower_signing_status(
+            RpcContext {
+                node_id: node_id.to_string(),
+                tenant_scoped: false,
+            },
+            GetWatchtowerSigningStatusParams {
+                channel_id: channel_b.into(),
+            },
+        ))
+        .expect("get_watchtower_signing_status");
+    assert_eq!(rpc_status.status, *status);
+
+    // Also verify `submit_watchtower_signature` publishes effective tenant backoff when the last
+    // pending request on channel B is consumed while channel A is still in tenant backoff.
+    fixture_b
+        .store
+        .update_watchtower_signer(&node_id, &channel_a, |state| {
+            if let WatchtowerSignerState::External(ext) = state {
+                ext.retry_after_ms = 0;
+            }
+            Ok::<_, std::convert::Infallible>(())
+        })
+        .unwrap();
+    assert!(fixture_b.build().expect("queue on B").is_none());
+    let (req_id_b, pending_b) = fixture_b.pending_request();
+    // Drain the ExternalFundingRequired event from queueing.
+    let _ = changes.recv().now_or_never();
+    // Re-arm tenant backoff on channel A before submitting channel B's signature.
+    fixture_b
+        .store
+        .update_watchtower_signer(&node_id, &channel_a, |state| {
+            if let WatchtowerSignerState::External(ext) = state {
+                ext.retry_after_ms = tenant_retry_after_ms;
+            }
+            Ok::<_, std::convert::Infallible>(())
+        })
+        .unwrap();
+    let funded_b = fund_pending(&pending_b);
+    let sig_b = sign_onchain_request(&fixture_b.tlc_key, &funded_b).expect("sig B");
+    assert_eq!(
+        fixture_b
+            .submit_with_tx(req_id_b, sig_b, funded_b.transaction)
+            .expect("submit B"),
+        SubmitWatchtowerSignatureResult::Applied
+    );
+    let submit_event = changes
+        .recv()
+        .now_or_never()
+        .expect("submit event ready")
+        .expect("submit event ok");
+    let SigningChange::WatchtowerUpdated {
+        channel_id: submit_ch,
+        status: submit_status,
+    } = submit_event.as_ref()
+    else {
+        panic!("expected WatchtowerUpdated after submit, got {submit_event:?}");
+    };
+    assert_eq!(*submit_ch, channel_b);
+    assert_eq!(
+        *submit_status,
+        WatchtowerSigningStatus::Backoff {
+            retry_after_ms: tenant_retry_after_ms,
+            consecutive_expired_requests: 0,
+        }
+    );
+    let rpc_status_after_submit = rt
+        .block_on(rpc.get_watchtower_signing_status(
+            RpcContext {
+                node_id: node_id.to_string(),
+                tenant_scoped: false,
+            },
+            GetWatchtowerSigningStatusParams {
+                channel_id: channel_b.into(),
+            },
+        ))
+        .expect("get_watchtower_signing_status after submit");
+    assert_eq!(rpc_status_after_submit.status, *submit_status);
 }

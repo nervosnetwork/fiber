@@ -569,117 +569,129 @@ where
         let submitted_tx_hash = fiber_types::external_funding_watchtower_tx_hash(&submitted_tx);
         let signing_scope = self.signing_events.watchtower(&node_id);
         let mut signing_update = signing_scope.prepare_update();
-        let result = self
-            .store
-            .update_watchtower_signer(&node_id, &channel_id, |state| {
-                let Some(channel) = self.store.get_watch_channel(&node_id, &channel_id) else {
-                    return Err(rpc_error("watched channel not found"));
-                };
-                let WatchtowerSignerState::External(external) = state else {
-                    return Err(rpc_error("watched channel does not use an external signer"));
-                };
-                if let Some(existing) = external.signed_signatures.get(&request_id) {
-                    if existing.signature == signature
-                        && submitted_tx_hash
-                            == fiber_types::external_funding_watchtower_tx_hash(
-                                &existing.content.transaction,
+        let (result, updated_state) =
+            self.store
+                .update_watchtower_signer(&node_id, &channel_id, |state| {
+                    let Some(channel) = self.store.get_watch_channel(&node_id, &channel_id) else {
+                        return Err(rpc_error("watched channel not found"));
+                    };
+                    let WatchtowerSignerState::External(external) = state else {
+                        return Err(rpc_error("watched channel does not use an external signer"));
+                    };
+                    if let Some(existing) = external.signed_signatures.get(&request_id) {
+                        if existing.signature == signature
+                            && submitted_tx_hash
+                                == fiber_types::external_funding_watchtower_tx_hash(
+                                    &existing.content.transaction,
+                                )
+                            && fiber_types::validate_external_funding_retry_witness_zero(
+                                &submitted_tx,
+                                &signature,
                             )
-                        && fiber_types::validate_external_funding_retry_witness_zero(
-                            &submitted_tx,
-                            &signature,
-                        )
-                        .is_ok()
-                    {
-                        return Ok(SubmitWatchtowerSignatureResult::AlreadyApplied);
+                            .is_ok()
+                        {
+                            return Ok((SubmitWatchtowerSignatureResult::AlreadyApplied, None));
+                        }
+                        return Err(rpc_error(
+                            "submitted signature does not match the previously applied result",
+                        ));
                     }
-                    return Err(rpc_error(
-                        "submitted signature does not match the previously applied result",
-                    ));
-                }
-                if let Some(applied) = external
-                    .last_applied
-                    .as_ref()
-                    .filter(|applied| applied.request_id == request_id)
-                {
-                    if applied.signature == signature
-                        && applied.signed_transaction_hash == submitted_tx_hash
-                        && fiber_types::validate_external_funding_retry_witness_zero(
-                            &submitted_tx,
-                            &signature,
-                        )
-                        .is_ok()
+                    if let Some(applied) = external
+                        .last_applied
+                        .as_ref()
+                        .filter(|applied| applied.request_id == request_id)
                     {
-                        return Ok(SubmitWatchtowerSignatureResult::AlreadyApplied);
+                        if applied.signature == signature
+                            && applied.signed_transaction_hash == submitted_tx_hash
+                            && fiber_types::validate_external_funding_retry_witness_zero(
+                                &submitted_tx,
+                                &signature,
+                            )
+                            .is_ok()
+                        {
+                            return Ok((SubmitWatchtowerSignatureResult::AlreadyApplied, None));
+                        }
+                        return Err(rpc_error(
+                            "submitted signature does not match the previously applied result",
+                        ));
                     }
-                    return Err(rpc_error(
-                        "submitted signature does not match the previously applied result",
-                    ));
-                }
-                let Some(pending) = external.pending_requests.get(&request_id) else {
-                    return Err(rpc_error(
-                        "signature request id not found in pending requests",
-                    ));
-                };
-                let now_ms = crate::now_timestamp_as_millis_u64();
-                if pending.created_at_ms > 0
-                    && now_ms
-                        >= pending
-                            .created_at_ms
-                            .saturating_add(crate::ckb::held_cells::WATCHTOWER_HOLD_MS)
-                {
-                    return Err(rpc_error("watchtower signature request has expired"));
-                }
-                let normalized =
-                    fiber_types::validate_and_normalize_external_funding_watchtower_tx(
-                        &pending.content.transaction,
-                        &submitted_tx,
-                        pending.required_expiry_since,
-                        Some(&signature),
+                    let Some(pending) = external.pending_requests.get(&request_id) else {
+                        return Err(rpc_error(
+                            "signature request id not found in pending requests",
+                        ));
+                    };
+                    let now_ms = crate::now_timestamp_as_millis_u64();
+                    if pending.created_at_ms > 0
+                        && now_ms
+                            >= pending
+                                .created_at_ms
+                                .saturating_add(crate::ckb::held_cells::WATCHTOWER_HOLD_MS)
+                    {
+                        return Err(rpc_error("watchtower signature request has expired"));
+                    }
+                    let normalized =
+                        fiber_types::validate_and_normalize_external_funding_watchtower_tx(
+                            &pending.content.transaction,
+                            &submitted_tx,
+                            pending.required_expiry_since,
+                            Some(&signature),
+                        )
+                        .map_err(rpc_error)?;
+                    let signed_tx_hash =
+                        fiber_types::external_funding_watchtower_tx_hash(&normalized);
+                    let signed_entry = fiber_types::SignedWatchtowerRequest {
+                        content: fiber_types::OnchainSigningContent {
+                            key_purpose: pending.content.key_purpose,
+                            transaction: normalized,
+                        },
+                        signature,
+                        created_at_ms: now_ms,
+                    };
+                    let superseded = self
+                        .store
+                        .get_superseded_remote_settlements(&node_id, &channel_id);
+                    let expected_pubkey = channel
+                        .expected_onchain_pubkey_with_settlements(
+                            &signed_entry.content.key_purpose,
+                            &superseded,
+                        )
+                        .map_err(rpc_error)?;
+                    crate::watchtower::WatchtowerSigner::apply_submitted(
+                        &expected_pubkey,
+                        &signed_entry.content,
+                        signature,
                     )
                     .map_err(rpc_error)?;
-                let signed_tx_hash = fiber_types::external_funding_watchtower_tx_hash(&normalized);
-                let signed_entry = fiber_types::SignedWatchtowerRequest {
-                    content: fiber_types::OnchainSigningContent {
-                        key_purpose: pending.content.key_purpose,
-                        transaction: normalized,
-                    },
-                    signature,
-                    created_at_ms: now_ms,
-                };
-                let superseded = self
-                    .store
-                    .get_superseded_remote_settlements(&node_id, &channel_id);
-                let expected_pubkey = channel
-                    .expected_onchain_pubkey_with_settlements(
-                        &signed_entry.content.key_purpose,
-                        &superseded,
-                    )
-                    .map_err(rpc_error)?;
-                crate::watchtower::WatchtowerSigner::apply_submitted(
-                    &expected_pubkey,
-                    &signed_entry.content,
-                    signature,
-                )
-                .map_err(rpc_error)?;
-                external
-                    .pending_requests
-                    .remove(&request_id)
-                    .expect("pending request checked above");
-                external.last_applied = Some(LastAppliedWatchtowerSignature {
-                    request_id,
-                    signature,
-                    signed_transaction_hash: signed_tx_hash,
-                });
-                external.signed_signatures.insert(request_id, signed_entry);
-                signing_update.watchtower_state(channel_id, state);
-                Ok(SubmitWatchtowerSignatureResult::Applied)
-            })?;
+                    external
+                        .pending_requests
+                        .remove(&request_id)
+                        .expect("pending request checked above");
+                    external.last_applied = Some(LastAppliedWatchtowerSignature {
+                        request_id,
+                        signature,
+                        signed_transaction_hash: signed_tx_hash,
+                    });
+                    external.signed_signatures.insert(request_id, signed_entry);
+                    Ok((
+                        SubmitWatchtowerSignatureResult::Applied,
+                        Some(state.clone()),
+                    ))
+                })?;
+        if let Some(updated_state) = updated_state {
+            let (_, _, node_retry_after_ms) =
+                self.store.watchtower_external_signing_stats(&node_id);
+            signing_update.watchtower_state_with_backoff(
+                channel_id,
+                &updated_state,
+                node_retry_after_ms,
+            );
+        }
         signing_update.publish();
         Ok(result)
     }
 }
 
-#[cfg(feature = "watchtower")]
+#[cfg(all(test, feature = "watchtower"))]
 pub(crate) fn to_rpc_watchtower_signing_status(
     state: fiber_types::WatchtowerSignerState,
 ) -> WatchtowerSigningStatus {

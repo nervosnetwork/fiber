@@ -392,9 +392,9 @@ impl WatchtowerExternalSignerState {
     }
 
     /// Return the highest-priority pending request for RPC status and subscription replay:
-    /// prefer self-fundable plain-CKB payouts (> 61 CKB, no expiry input required), then any
-    /// non-timeout claim (`required_expiry_since.is_none()`), then larger CKB payout capacity,
-    /// breaking ties deterministically by lowest `request_id`.
+    /// prefer self-fundable plain-CKB payouts (`>= EXTERNAL_SELF_FUNDABLE_CKB_MIN_CAPACITY`,
+    /// no expiry input required), then any non-timeout claim (`required_expiry_since.is_none()`),
+    /// then larger CKB payout capacity, breaking ties deterministically by lowest `request_id`.
     pub fn first_pending(&self) -> Option<(Hash256, &PendingWatchtowerRequest)> {
         self.pending_requests
             .iter()
@@ -407,10 +407,21 @@ impl WatchtowerExternalSignerState {
     }
 }
 
-fn pending_request_priority(req: &PendingWatchtowerRequest) -> (bool, bool, u64) {
+/// Minimum plain-CKB payout capacity (61 CKB standard secp256k1 occupied floor + 10,000 shannons
+/// fee buffer) for an external watchtower request to be treated as self-fundable without attaching
+/// a separate wallet funding input.
+pub const EXTERNAL_SELF_FUNDABLE_CKB_MIN_CAPACITY: u64 = 6_100_010_000;
+
+/// Compute the priority key `(self_fundable, no_expiry_required, payout_capacity)` for a pending
+/// external watchtower request.
+///
+/// Higher tuples take precedence: self-fundable plain-CKB payouts
+/// (`required_expiry_since.is_none()`, no type script, and
+/// `payout_capacity >= EXTERNAL_SELF_FUNDABLE_CKB_MIN_CAPACITY`) rank first, then non-timeout
+/// claims, then larger CKB payout capacity.
+pub fn pending_request_priority(req: &PendingWatchtowerRequest) -> (bool, bool, u64) {
     use ckb_types::prelude::Unpack;
 
-    const STANDARD_SECP256K1_MIN_CAPACITY: u64 = 6_100_000_000;
     let no_expiry_required = req.required_expiry_since.is_none();
     let outputs = req.content.transaction.raw().outputs();
     let payout = outputs
@@ -422,8 +433,9 @@ fn pending_request_priority(req: &PendingWatchtowerRequest) -> (bool, bool, u64)
         .map(|o| Unpack::<u64>::unpack(&o.capacity()))
         .unwrap_or(0);
     let is_plain_ckb = payout.is_some_and(|o| o.type_().is_none());
-    let self_fundable =
-        no_expiry_required && is_plain_ckb && payout_capacity > STANDARD_SECP256K1_MIN_CAPACITY;
+    let self_fundable = no_expiry_required
+        && is_plain_ckb
+        && payout_capacity >= EXTERNAL_SELF_FUNDABLE_CKB_MIN_CAPACITY;
     (self_fundable, no_expiry_required, payout_capacity)
 }
 
@@ -1530,7 +1542,12 @@ mod key_material_tests {
         let wallet_outpoint = OutPoint::new(Byte32::from([2u8; 32]), 1);
         let wallet_lock = test_wallet_lock();
         let udt_type = test_udt_type();
+        let residual_lock = Script::new_builder()
+            .code_hash(Byte32::from([0x55; 32]))
+            .args([0xaau8; 56].pack())
+            .build();
         let residual_out = CellOutput::new_builder()
+            .lock(residual_lock)
             .capacity(28_400_000_000u64)
             .type_(Some(udt_type.clone()).pack())
             .build();
@@ -2265,24 +2282,42 @@ mod key_material_tests {
         )
         .is_err());
 
+        let orig_out0 = funded.raw().outputs().get(0).unwrap();
+        let orig_lock = orig_out0.lock();
+        let mut flipped_lock_args = orig_lock.args().raw_data().to_vec();
+        assert!(!flipped_lock_args.is_empty());
+        flipped_lock_args[0] ^= 0x01;
+        let tampered_out0 = orig_out0
+            .as_builder()
+            .lock(
+                orig_lock
+                    .as_builder()
+                    .args(flipped_lock_args.pack())
+                    .build(),
+            )
+            .build();
         let bad_out0 = funded
             .clone()
             .into_view()
             .as_advanced_builder()
             .set_outputs(vec![
-                CellOutput::new_builder().capacity(1u64).build(),
+                tampered_out0,
                 funded.raw().outputs().get(1).unwrap(),
                 funded.raw().outputs().get(2).unwrap(),
             ])
             .build()
             .data();
-        assert!(validate_and_normalize_external_funding_watchtower_tx(
+        let bad_out0_err = validate_and_normalize_external_funding_watchtower_tx(
             &template,
             &bad_out0,
             Some(expiry_since),
             Some(&sig),
         )
-        .is_err());
+        .expect_err("tampered output[0] must be rejected");
+        assert!(
+            bad_out0_err.contains("output[0] must match template commitment output"),
+            "unexpected error: {bad_out0_err}"
+        );
 
         let bad_out_data0 = funded
             .clone()
@@ -2431,5 +2466,71 @@ mod key_material_tests {
         state.pending_requests.remove(&self_fundable_id);
         // Without a self-fundable claim, non-timeout still precedes a lower-ID timeout claim.
         assert_eq!(state.first_pending().map(|(id, _)| id), Some(small_id));
+    }
+
+    #[test]
+    fn first_pending_requires_fee_buffer_for_self_fundable_threshold() {
+        use ckb_types::core::TransactionBuilder;
+        use ckb_types::prelude::*;
+
+        let make_req = |payout_capacity: u64, type_script: Option<Script>| {
+            let tx = TransactionBuilder::default()
+                .output(
+                    CellOutput::new_builder()
+                        .capacity(payout_capacity)
+                        .type_(type_script.pack())
+                        .build(),
+                )
+                .output_data(ckb_types::packed::Bytes::default())
+                .build()
+                .data();
+            PendingWatchtowerRequest {
+                content: crate::channel_signer::OnchainSigningContent {
+                    key_purpose: crate::channel_signer::OnchainKeyPurpose::Settlement,
+                    transaction: tx,
+                },
+                created_at_ms: 1_000,
+                required_expiry_since: None,
+            }
+        };
+
+        let barely_above_61_req = make_req(6_100_000_001, None);
+        let at_threshold_req = make_req(EXTERNAL_SELF_FUNDABLE_CKB_MIN_CAPACITY, None);
+        let ckb_200_req = make_req(20_000_000_000, None);
+        let udt_200_req = make_req(20_000_000_000, Some(test_udt_type()));
+
+        assert!(!pending_request_priority(&barely_above_61_req).0);
+        assert!(pending_request_priority(&at_threshold_req).0);
+        assert!(pending_request_priority(&ckb_200_req).0);
+        assert!(!pending_request_priority(&udt_200_req).0);
+
+        let low_id = Hash256::from([0x01; 32]);
+        let high_id = Hash256::from([0xff; 32]);
+
+        // 61 CKB + 1 shannon with a lower request_id must rank below a 200 CKB claim.
+        let mut ckb_state = WatchtowerExternalSignerState::default();
+        ckb_state
+            .pending_requests
+            .insert(low_id, barely_above_61_req.clone());
+        ckb_state.pending_requests.insert(high_id, ckb_200_req);
+        assert_eq!(ckb_state.first_pending().map(|(id, _)| id), Some(high_id));
+
+        // Against a 200 CKB UDT claim (not self-fundable), 61 CKB + 1 shannon also ranks below it
+        // because it lacks the fee buffer, whereas EXTERNAL_SELF_FUNDABLE_CKB_MIN_CAPACITY ranks above it.
+        let mut udt_state = WatchtowerExternalSignerState::default();
+        udt_state
+            .pending_requests
+            .insert(low_id, barely_above_61_req);
+        udt_state.pending_requests.insert(high_id, udt_200_req);
+        assert_eq!(udt_state.first_pending().map(|(id, _)| id), Some(high_id));
+
+        let threshold_id = Hash256::from([0xfe; 32]);
+        udt_state
+            .pending_requests
+            .insert(threshold_id, at_threshold_req);
+        assert_eq!(
+            udt_state.first_pending().map(|(id, _)| id),
+            Some(threshold_id)
+        );
     }
 }
