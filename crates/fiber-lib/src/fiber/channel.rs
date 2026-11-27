@@ -9679,6 +9679,29 @@ impl ChannelActorState {
                 }
             }
             ChannelState::AwaitingChannelReady(flags) => {
+                // The first signer may have missed the final response. Its saved
+                // Ready, if present, proves it has passed the signature exchange.
+                if !flags.contains(AwaitingChannelReadyFlags::THEIR_CHANNEL_READY)
+                    && !self.ephemeral_config.external_funding.enabled
+                    && !self.should_local_send_tx_signatures_first()
+                    && self.latest_commitment_transaction().is_some()
+                {
+                    let witnesses: Vec<Vec<u8>> = self
+                        .must_get_funding_transaction()
+                        .witnesses()
+                        .into_iter()
+                        .map(|witness| witness.unpack())
+                        .collect();
+                    if !witnesses
+                        .iter()
+                        .any(|witness| is_secp_sighash_placeholder_witness(witness))
+                    {
+                        self.send_message_to_peer(FiberMessage::tx_signatures(TxSignatures {
+                            channel_id: self.id,
+                            witnesses,
+                        }));
+                    }
+                }
                 // V2 must replay Ready even if both flags were saved before opening completed.
                 if flags.contains(AwaitingChannelReadyFlags::OUR_CHANNEL_READY) {
                     let session = &self.session;
