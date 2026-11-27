@@ -1034,21 +1034,29 @@ pub struct GetWatchtowerSigningStatusResult {
 #[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "type")]
+#[allow(clippy::large_enum_variant)]
 pub enum WatchtowerSigningStatus {
     /// No external signature is currently required and no retry backoff is active.
     NoSignatureRequired,
-    /// Settlement or TLC spend is paused until this signature is submitted.
-    SignatureRequired {
+    /// Watchtower issued an unfunded template transaction; the client's external wallet must fund
+    /// transaction fees (and any CKB capacity shortfall), sign `inputs[0]`, and submit both
+    /// `signature` and `signed_transaction`.
+    ExternalFundingRequired {
         /// Identifier of the outstanding signature request.
         request_id: Hash256,
-        /// Structured on-chain plaintext independently hashed by the signer.
+        /// Unfunded template on-chain plaintext (`inputs[0]`, settlement outputs, `witness[0]`).
         content: OnchainSigningContent,
-        /// Unix millisecond timestamp when this request's 30-minute fee-cell hold expires.
+        /// Unix millisecond timestamp when this request's TTL expires.
         #[serde_as(as = "U64Hex")]
         #[schemars(schema_with = "schema_as_uint_hex")]
         expires_at_ms: u64,
+        /// Optional absolute timestamp `since` required on the first absolute-timestamp input (`since >> 56 == 0x40`) for a timeout TLC unlock.
+        #[serde_as(as = "Option<U64Hex>")]
+        #[schemars(schema_with = "schema_as_uint_hex_optional")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        required_expiry_since: Option<u64>,
     },
-    /// New fee-holding signing requests are paused due to channel or tenant retry backoff.
+    /// New signing requests are paused due to channel or tenant retry backoff.
     Backoff {
         /// Effective Unix millisecond timestamp when retry backoff ends.
         #[serde_as(as = "U64Hex")]
@@ -1073,6 +1081,14 @@ pub struct SubmitWatchtowerSignatureParams {
     #[serde_as(as = "SliceHex")]
     #[schemars(schema_with = "schema_as_hex_bytes")]
     pub signature: Vec<u8>,
+    /// Client-funded transaction carrying client `cell_deps`, optional `inputs[1..]`,
+    /// payout/change outputs, and `witness[1..]`.
+    ///
+    /// Callers performing idempotent retries after a lost response must persist and replay the
+    /// exact `signed_transaction` (including client funding `witness[1..]`) together with the
+    /// same `signature`; re-signing funding inputs with fresh nonces changes
+    /// `signed_transaction_hash` and is rejected as a mismatch.
+    pub signed_transaction: Transaction,
 }
 
 /// Result of submitting an external watchtower signature.
@@ -1081,7 +1097,12 @@ pub struct SubmitWatchtowerSignatureParams {
 pub enum SubmitWatchtowerSignatureResult {
     /// The signature was verified and the watchtower resumed.
     Applied,
-    /// The same signature was already applied for this request.
+    /// The same `signature` and `signed_transaction` were already applied for this request.
+    ///
+    /// To receive `AlreadyApplied` on an idempotent retry after a lost response, callers must
+    /// persist and replay the exact previously submitted `signed_transaction` (including client
+    /// funding `witness[1..]`) along with the same `signature`; re-signing funding inputs with
+    /// fresh nonces changes `signed_transaction_hash` and is rejected as a mismatch.
     AlreadyApplied,
 }
 

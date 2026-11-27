@@ -36,7 +36,6 @@ pub fn ensure_hosted_watch_channel(
             snapshot.keys,
             snapshot.settlement_data,
             snapshot.channel_features,
-            snapshot.payout_lock_script,
             quotas,
         )? {
             signing_update.publish();
@@ -72,7 +71,6 @@ pub fn ensure_hosted_watch_channel(
         snapshot.keys.inverted(),
         invert_empty_settlement(snapshot.settlement_data),
         snapshot.channel_features,
-        snapshot.remote_payout_lock_script,
         quotas,
     )? {
         signing_update.publish();

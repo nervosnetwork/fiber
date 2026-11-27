@@ -1576,7 +1576,6 @@ pub enum NetworkServiceEvent {
         WatchChannelKeys,
         SettlementData,
         ChannelFeatures,
-        Script,
     ),
     // The channel is ready to use (with funding transaction confirmed
     // and both parties sent ChannelReady messages).

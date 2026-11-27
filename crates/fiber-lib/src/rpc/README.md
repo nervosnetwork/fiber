@@ -1527,8 +1527,10 @@ Subscribe to a topic and return an ID for subsequent notifications and cancellat
 
  Signing subscriptions always send currently pending requests when established,
  then send status changes, including transitions to no pending request. Initial
- requests use the same `SignatureRequired` status and notification format as live
- requests. There is no separate completion marker or option to enable this replay.
+ requests use the same pending status and notification format as live requests
+ (`SignatureRequired` for `channel_signing` and `ExternalFundingRequired` for
+ `watchtower_signing`). There is no separate completion marker or option to enable
+ this replay.
  The initial read is ordered with writes in the selected topic and authorized
  scope, so live updates follow it without a gap. Database reads happen only
  during subscription setup; live filtering and deduplication use memory.
@@ -1605,8 +1607,6 @@ Create a new watched channel.
 * `remote_funding_pubkey` - <em>[Pubkey](#type-pubkey)</em>, The remote party's funding public key (hex without 0x prefix)
 * `settlement_data` - <em>[SettlementData](#type-settlementdata)</em>, Settlement data
 * `channel_features` - <em>[ChannelFeatures](#type-channelfeatures)</em>, Required channel feature bitmap as hex. Only "0x1" (V2 with full payment hashes) is supported.
-* `payout_lock_script` - <em>`Option<Script>`</em>, Optional lock script that receives settled funds. When omitted, settled funds
- are sent to the watchtower fee provider lock script.
 
 ##### Returns
 
@@ -1752,11 +1752,23 @@ Submit an external watchtower settlement or TLC signature.
 * `channel_id` - <em>[Hash256](#type-hash256)</em>, The watched channel that produced the outstanding signature request.
 * `request_id` - <em>[Hash256](#type-hash256)</em>, Identifier of the outstanding signature request.
 * `signature` - <em>`Vec<u8>`</em>, Recoverable ECDSA signature (64 bytes + recovery id), `0x`-prefixed hex.
+* `signed_transaction` - <em>`Transaction`</em>, Client-funded transaction carrying client `cell_deps`, optional `inputs[1..]`,
+ payout/change outputs, and `witness[1..]`.
+
+ Callers performing idempotent retries after a lost response must persist and replay the
+ exact `signed_transaction` (including client funding `witness[1..]`) together with the
+ same `signature`; re-signing funding inputs with fresh nonces changes
+ `signed_transaction_hash` and is rejected as a mismatch.
 
 ##### Returns
 
 * `Applied` - <em>``</em>, The signature was verified and the watchtower resumed.
-* `AlreadyApplied` - <em>``</em>, The same signature was already applied for this request.
+* `AlreadyApplied` - <em>``</em>, The same `signature` and `signed_transaction` were already applied for this request.
+
+ To receive `AlreadyApplied` on an idempotent retry after a lost response, callers must
+ persist and replay the exact previously submitted `signed_transaction` (including client
+ funding `witness[1..]`) along with the same `signature`; re-signing funding inputs with
+ fresh nonces changes `signed_transaction_hash` and is rejected as a mismatch.
 
 ---
 
@@ -2559,7 +2571,9 @@ Read-only projection of a watchtower's external signing requests.
 #### Enum with values of
 
 * `NoSignatureRequired` - No external signature is currently required and no retry backoff is active.
-* `SignatureRequired` - Settlement or TLC spend is paused until this signature is submitted.
-* `Backoff` - New fee-holding signing requests are paused due to channel or tenant retry backoff.
+* `ExternalFundingRequired` - Watchtower issued an unfunded template transaction; the client's external wallet must fund
+ transaction fees (and any CKB capacity shortfall), sign `inputs[0]`, and submit both
+ `signature` and `signed_transaction`.
+* `Backoff` - New signing requests are paused due to channel or tenant retry backoff.
 ---
 

@@ -777,10 +777,19 @@ impl<R: FiberRpc, S: SignerStore> Agent<R, S> {
         channel_id: Hash256,
         status: WatchtowerSigningStatus,
     ) -> Result<()> {
-        if matches!(
-            status,
-            WatchtowerSigningStatus::NoSignatureRequired | WatchtowerSigningStatus::Backoff { .. }
-        ) {
+        let WatchtowerSigningStatus::ExternalFundingRequired {
+            content,
+            required_expiry_since,
+            ..
+        } = &status
+        else {
+            return Ok(());
+        };
+        if required_expiry_since.is_some() {
+            tracing::warn!(
+                channel_id = %format!("{channel_id:#x}"),
+                "skipping timeout TLC external-funding request: test agent does not carry an auxiliary wallet key"
+            );
             return Ok(());
         }
         let approval = self
@@ -788,25 +797,103 @@ impl<R: FiberRpc, S: SignerStore> Agent<R, S> {
             .get(&format!("{channel_id:#x}"))
             .context("watchtower request requires local authorization")?
             .clone();
+        let Some(funded_tx) = Self::fund_external_funding_template(
+            &content.transaction.clone().into(),
+            approval.destination.clone().into(),
+            approval.max_fee,
+        )?
+        else {
+            tracing::warn!(
+                channel_id = %format!("{channel_id:#x}"),
+                "skipping watchtower external-funding request needing auxiliary top-up: test agent does not carry an auxiliary wallet key"
+            );
+            return Ok(());
+        };
         let (chain, deps) = self
             .chain
             .clone()
             .context("watchtower requires independent ChainVerifier")?;
-        let WatchtowerSigningStatus::SignatureRequired { content, .. } = &status else {
-            unreachable!()
+        let funded_content = fiber_json_types::OnchainSigningContent {
+            key_purpose: content.key_purpose,
+            transaction: funded_tx.clone().into(),
         };
+        // Template without secp256k1 fee inputs only needs `[commitment-lock, auth]`
+        // (plus any UDT dep appended by watchtower_authorization).
+        let base_deps = deps.into_iter().take(2).collect();
         let authorization = self
             .watchtower_authorization(
                 channel_id,
-                content,
+                &funded_content,
                 approval,
                 &chain,
-                deps,
+                base_deps,
                 chain.udt_deps(),
             )
             .await?;
-        self.sign_watchtower_status(channel_id, status, authorization, &chain)
-            .await
+        self.sign_external_funding_watchtower_status(
+            channel_id,
+            status,
+            funded_tx.into(),
+            authorization,
+            &chain,
+        )
+        .await
+    }
+
+    fn fund_external_funding_template(
+        template: &ckb_types::packed::Transaction,
+        destination: ckb_types::packed::Script,
+        max_fee: u64,
+    ) -> Result<Option<ckb_types::packed::Transaction>> {
+        let mut outputs: Vec<_> = template.raw().outputs().into_iter().collect();
+        let payout_idx = outputs
+            .len()
+            .checked_sub(1)
+            .context("external-funding template missing payout output")?;
+        let payout_capacity: u64 = outputs[payout_idx].capacity().unpack();
+        outputs[payout_idx] = outputs[payout_idx]
+            .clone()
+            .as_builder()
+            .lock(destination)
+            .build();
+        let with_destination = template
+            .clone()
+            .into_view()
+            .as_advanced_builder()
+            .set_outputs(outputs.clone())
+            .build();
+        let fee = (with_destination.data().serialized_size_in_block() as u64).max(1_000);
+        anyhow::ensure!(
+            fee <= max_fee,
+            "required watchtower fee ({fee}) exceeds local max_fee ({max_fee})"
+        );
+        let Some(adjusted_capacity) = payout_capacity.checked_sub(fee) else {
+            return Ok(None);
+        };
+        let payout_data_len = template
+            .raw()
+            .outputs_data()
+            .get(payout_idx)
+            .map(|d| d.raw_data().len())
+            .unwrap_or(0);
+        let min_capacity = outputs[payout_idx]
+            .occupied_capacity(ckb_types::core::Capacity::bytes(payout_data_len)?)?
+            .as_u64();
+        if adjusted_capacity < min_capacity {
+            return Ok(None);
+        }
+        outputs[payout_idx] = outputs[payout_idx]
+            .clone()
+            .as_builder()
+            .capacity(adjusted_capacity)
+            .build();
+        Ok(Some(
+            with_destination
+                .as_advanced_builder()
+                .set_outputs(outputs)
+                .build()
+                .data(),
+        ))
     }
 
     async fn watchtower_authorization<C: ChainVerifier>(
@@ -909,14 +996,54 @@ impl<R: FiberRpc, S: SignerStore> Agent<R, S> {
             .get_watchtower_signing_status(token, channel_id.into())
             .await?
             .status;
-        self.sign_watchtower_status(channel_id, status, authorization, chain)
-            .await
+        let WatchtowerSigningStatus::ExternalFundingRequired { content, .. } = &status else {
+            return Ok(());
+        };
+        let template: ckb_types::packed::Transaction = content.transaction.clone().into();
+        let funded_tx: ckb_jsonrpc_types::Transaction = if template
+            .raw()
+            .outputs()
+            .into_iter()
+            .last()
+            .is_some_and(|out| out.lock() == ckb_types::packed::Script::default())
+        {
+            let mut outputs: Vec<_> = template.raw().outputs().into_iter().collect();
+            let payout_idx = outputs.len() - 1;
+            let payout_cap: u64 = outputs[payout_idx].capacity().unpack();
+            let adjusted = payout_cap
+                .checked_sub(authorization.fee)
+                .context("payout output capacity smaller than authorized fee")?;
+            outputs[payout_idx] = outputs[payout_idx]
+                .clone()
+                .as_builder()
+                .lock(authorization.destination.clone())
+                .capacity(adjusted)
+                .build();
+            template
+                .into_view()
+                .as_advanced_builder()
+                .set_outputs(outputs)
+                .build()
+                .data()
+                .into()
+        } else {
+            content.transaction.clone()
+        };
+        self.sign_external_funding_watchtower_status(
+            channel_id,
+            status,
+            funded_tx,
+            authorization,
+            chain,
+        )
+        .await
     }
 
-    async fn sign_watchtower_status<C: fiber_lsp_sdk::ChainVerifier>(
+    async fn sign_external_funding_watchtower_status<C: fiber_lsp_sdk::ChainVerifier>(
         &self,
         channel_id: Hash256,
         status: WatchtowerSigningStatus,
+        funded_tx: ckb_jsonrpc_types::Transaction,
         authorization: fiber_lsp_sdk::OnchainSpendAuthorization,
         chain: &C,
     ) -> Result<()> {
@@ -924,47 +1051,64 @@ impl<R: FiberRpc, S: SignerStore> Agent<R, S> {
             .session
             .tenant_token()
             .context("agent is not registered")?;
-        let key_purpose = match &status {
-            WatchtowerSigningStatus::NoSignatureRequired
-            | WatchtowerSigningStatus::Backoff { .. } => return Ok(()),
-            WatchtowerSigningStatus::SignatureRequired { content, .. } => content.key_purpose,
+        let WatchtowerSigningStatus::ExternalFundingRequired { content, .. } = &status else {
+            return Ok(());
         };
+        let key_purpose = content.key_purpose;
         let outcome = self
             .session
-            .handle_watchtower_status_verified(channel_id, status, authorization, chain)
+            .handle_external_funding_watchtower_status(
+                channel_id,
+                status,
+                funded_tx,
+                authorization,
+                chain,
+                now_ms(),
+            )
             .await
-            .map_err(|e| anyhow!("prepare watchtower: {e}"))?;
+            .map_err(|e| anyhow!("prepare external-funding watchtower: {e}"))?;
         match outcome {
             ProcessOutcome::Idle => Ok(()),
             ProcessOutcome::NeedConfirmation(pending) => {
                 let SubmitParams::Watchtower(params) = self
                     .session
-                    .confirm_onchain(pending, chain)
+                    .confirm_external_funding_onchain(pending, chain, now_ms())
                     .await
-                    .map_err(|e| anyhow!("confirm watchtower: {e}"))?
+                    .map_err(|e| anyhow!("confirm external-funding watchtower: {e}"))?
                 else {
                     return Err(anyhow!("expected watchtower signature"));
                 };
-                let request_id = format!("{:#x}", Hash256::from(params.request_id));
-                self.rpc.submit_watchtower_signature(token, params).await?;
-                let path = self.config.store_dir.join("watchtower-submissions.json");
-                let mut receipts: HashMap<String, Vec<WatchtowerSubmission>> = if path.exists() {
-                    serde_json::from_slice(&fs::read(&path)?)?
-                } else {
-                    HashMap::new()
-                };
-                let entries = receipts.entry(format!("{channel_id:#x}")).or_default();
-                if !entries.iter().any(|entry| entry.request_id == request_id) {
-                    entries.push(WatchtowerSubmission {
-                        request_id,
-                        key_purpose,
-                    });
-                }
-                atomic_write(&path, &serde_json::to_vec_pretty(&receipts)?)?;
-                Ok(())
+                self.submit_and_record_watchtower_signature(channel_id, key_purpose, token, params)
+                    .await
             }
             _ => Err(anyhow!("watchtower must require explicit confirmation")),
         }
+    }
+
+    async fn submit_and_record_watchtower_signature(
+        &self,
+        channel_id: Hash256,
+        key_purpose: fiber_json_types::OnchainKeyPurpose,
+        token: &str,
+        params: fiber_json_types::SubmitWatchtowerSignatureParams,
+    ) -> Result<()> {
+        let request_id = format!("{:#x}", Hash256::from(params.request_id));
+        self.rpc.submit_watchtower_signature(token, params).await?;
+        let path = self.config.store_dir.join("watchtower-submissions.json");
+        let mut receipts: HashMap<String, Vec<WatchtowerSubmission>> = if path.exists() {
+            serde_json::from_slice(&fs::read(&path)?)?
+        } else {
+            HashMap::new()
+        };
+        let entries = receipts.entry(format!("{channel_id:#x}")).or_default();
+        if !entries.iter().any(|entry| entry.request_id == request_id) {
+            entries.push(WatchtowerSubmission {
+                request_id,
+                key_purpose,
+            });
+        }
+        atomic_write(&path, &serde_json::to_vec_pretty(&receipts)?)?;
+        Ok(())
     }
 
     async fn write_status(&mut self) -> Result<()> {
@@ -1965,7 +2109,7 @@ mod tests {
         assert!(node.state().watchtower_submissions.is_empty());
         assert_eq!(fs::read(dir.path().join("snapshot.bin")).unwrap(), before);
         chain.live = true;
-        let WatchtowerSigningStatus::SignatureRequired { content, .. } =
+        let WatchtowerSigningStatus::ExternalFundingRequired { content, .. } =
             node.state().watchtower_statuses[&channel_id().into()].clone()
         else {
             panic!()
@@ -2272,5 +2416,199 @@ mod tests {
             .await
             .expect("approved UDT type script must append UDT dep");
         assert_eq!(auth.cell_deps, vec![base_dep, udt_dep]);
+    }
+
+    #[tokio::test]
+    async fn agent_handles_external_funding_watchtower_status_with_fee_from_payout() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let node = FakeNode::default();
+        node.insert_external_channel(channel_id());
+        let mut agent = Agent::open(
+            node.clone(),
+            AgentConfig {
+                store_dir: dir.path().to_path_buf(),
+                status_file: None,
+                lsp_node_id: lsp_node_id(),
+            },
+        )
+        .await
+        .unwrap();
+        agent.initialize().await.unwrap();
+        let (id, funding) = approve_pending(&mut agent).await;
+        let signer = agent
+            .open_channel(agent.binding(id).unwrap())
+            .await
+            .unwrap();
+        let status = convert_tests::commitment_status(&signer, &funding, false).await;
+        node.state().statuses.insert(id.into(), status);
+        agent.poll_once().await.unwrap();
+        let records = signer.recovery_records().await.unwrap();
+        let (sig_status, authorization, chain) = convert_tests::settlement(&records[0]);
+        let WatchtowerSigningStatus::ExternalFundingRequired {
+            request_id,
+            content,
+            expires_at_ms,
+            ..
+        } = sig_status
+        else {
+            panic!("expected ExternalFundingRequired fixture");
+        };
+        // Reconstruct an unfunded template tx (placeholder lock and payout capacity before fee).
+        let signed_tx: ckb_types::packed::Transaction = content.transaction.into();
+        let mut template_outputs: Vec<_> = signed_tx.raw().outputs().into_iter().collect();
+        let payout_cap: u64 = template_outputs[1].capacity().unpack();
+        template_outputs[1] = template_outputs[1]
+            .clone()
+            .as_builder()
+            .lock(ckb_types::packed::Script::default())
+            .capacity(payout_cap + authorization.fee)
+            .build();
+        let template_tx = signed_tx
+            .into_view()
+            .as_advanced_builder()
+            .set_outputs(template_outputs)
+            .build()
+            .data();
+        let external_status = WatchtowerSigningStatus::ExternalFundingRequired {
+            request_id,
+            content: fiber_json_types::OnchainSigningContent {
+                key_purpose: content.key_purpose,
+                transaction: template_tx.clone().into(),
+            },
+            expires_at_ms,
+            required_expiry_since: None,
+        };
+
+        // Rejects max_fee below the minimum required fee instead of silently underpaying.
+        assert!(
+            Agent::<FakeNode, fiber_lsp_sdk::MemoryStore>::fund_external_funding_template(
+                &template_tx,
+                authorization.destination.clone(),
+                5,
+            )
+            .is_err()
+        );
+        // Returns Ok(None) when payout output would drop below occupied capacity after fee
+        // deduction (expected auxiliary top-up shortfall rather than a fatal agent error).
+        let mut tiny_outputs: Vec<_> = template_tx.raw().outputs().into_iter().collect();
+        tiny_outputs[1] = tiny_outputs[1]
+            .clone()
+            .as_builder()
+            .capacity(2_000u64)
+            .build();
+        let tiny_template = template_tx
+            .clone()
+            .into_view()
+            .as_advanced_builder()
+            .set_outputs(tiny_outputs)
+            .build()
+            .data();
+        assert!(
+            Agent::<FakeNode, fiber_lsp_sdk::MemoryStore>::fund_external_funding_template(
+                &tiny_template,
+                authorization.destination.clone(),
+                10_000,
+            )
+            .expect("expected top-up shortfall should return Ok(None)")
+            .is_none()
+        );
+
+        let approval = WatchtowerApproval {
+            destination: authorization.destination.clone().into(),
+            fee_sponsor_lock: None,
+            max_fee: 10_000,
+        };
+        let funded_tx =
+            Agent::<FakeNode, fiber_lsp_sdk::MemoryStore>::fund_external_funding_template(
+                &template_tx,
+                authorization.destination,
+                approval.max_fee,
+            )
+            .expect("fund template from payout")
+            .expect("payout should be self-fundable");
+        let funded_content = fiber_json_types::OnchainSigningContent {
+            key_purpose: content.key_purpose,
+            transaction: funded_tx.clone().into(),
+        };
+        let empty_udt_deps = HashMap::new();
+        let checked = agent
+            .watchtower_authorization(
+                id,
+                &funded_content,
+                approval.clone(),
+                &chain,
+                vec![],
+                &empty_udt_deps,
+            )
+            .await
+            .expect("verify external-funding authorization");
+        assert!(checked.fee >= 1_000 && checked.fee <= 10_000);
+        agent
+            .sign_external_funding_watchtower_status(
+                id,
+                external_status,
+                funded_tx.clone().into(),
+                checked,
+                &chain,
+            )
+            .await
+            .expect("sign and submit external-funding watchtower tx");
+
+        {
+            let state = node.state();
+            assert_eq!(state.watchtower_submissions.len(), 1);
+            assert_eq!(state.watchtower_submissions[0].request_id, request_id);
+            assert_eq!(state.watchtower_submissions[0].signature.len(), 65);
+            assert_eq!(
+                ckb_types::packed::Transaction::from(
+                    state.watchtower_submissions[0].signed_transaction.clone()
+                )
+                .raw()
+                .as_slice(),
+                funded_tx.raw().as_slice()
+            );
+        }
+
+        // An unsupported timeout TLC request (`required_expiry_since: Some(...)`) must be
+        // skipped gracefully with `Ok(())` so polling/subscription handling continues for other
+        // channels rather than aborting or reconnecting in a loop.
+        let timeout_status = WatchtowerSigningStatus::ExternalFundingRequired {
+            request_id: fiber_types::Hash256::from([0x98; 32]).into(),
+            content: fiber_json_types::OnchainSigningContent {
+                key_purpose: content.key_purpose,
+                transaction: template_tx.into(),
+            },
+            expires_at_ms: now_ms() + 1_800_000,
+            required_expiry_since: Some(fiber_types::watchtower::settlement_timestamp_since(
+                100_000,
+            )),
+        };
+        agent
+            .handle_watchtower_status(id, timeout_status)
+            .await
+            .expect(
+                "unsupported timeout TLC should be skipped without interrupting other channels",
+            );
+        assert_eq!(node.state().watchtower_submissions.len(), 1);
+
+        // A small CKB or UDT payout needing an auxiliary wallet top-up must also be left pending
+        // with `Ok(())` so `poll_once` and subscription handling continue servicing other channels.
+        agent
+            .watchtower_approvals
+            .insert(format!("{id:#x}"), approval);
+        let topup_status = WatchtowerSigningStatus::ExternalFundingRequired {
+            request_id: fiber_types::Hash256::from([0x97; 32]).into(),
+            content: fiber_json_types::OnchainSigningContent {
+                key_purpose: content.key_purpose,
+                transaction: tiny_template.into(),
+            },
+            expires_at_ms: now_ms() + 1_800_000,
+            required_expiry_since: None,
+        };
+        agent
+            .handle_watchtower_status(id, topup_status)
+            .await
+            .expect("payout needing top-up should be skipped without interrupting other channels");
+        assert_eq!(node.state().watchtower_submissions.len(), 1);
     }
 }

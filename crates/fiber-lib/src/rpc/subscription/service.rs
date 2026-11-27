@@ -278,7 +278,9 @@ impl<S: RpcServerStore> Source<S> {
 
     #[cfg(feature = "watchtower")]
     fn watchtower_event(&self, id: Hash256) -> SubscriptionEvent {
-        let (_, _, node_retry_after_ms) = self.watchtower.watchtower_fee_hold_stats(&self.node);
+        let (_, _, node_retry_after_ms) = self
+            .watchtower
+            .watchtower_external_signing_stats(&self.node);
         SubscriptionEvent::WatchtowerSigning(Box::new(
             fiber_json_types::GetWatchtowerSigningStatusResult {
                 channel_id: id.into(),
@@ -301,7 +303,7 @@ fn is_pending(event: &SubscriptionEvent) -> bool {
         #[cfg(feature = "watchtower")]
         SubscriptionEvent::WatchtowerSigning(result) => matches!(
             result.status,
-            fiber_json_types::WatchtowerSigningStatus::SignatureRequired { .. }
+            fiber_json_types::WatchtowerSigningStatus::ExternalFundingRequired { .. }
         ),
         _ => false,
     }

@@ -486,7 +486,6 @@ async fn tenant_watchtower_rpc_rejects_secrets_and_cross_tenant_signatures() {
             remote_amount: 1000,
             tlcs: vec![],
         },
-        payout_lock_script: None,
     };
     let err = owner
         .request::<(), _>("create_watch_channel", rpc_params![params.clone()])
@@ -508,17 +507,59 @@ async fn tenant_watchtower_rpc_rejects_secrets_and_cross_tenant_signatures() {
     let mut owner_events = subscribe_signing(&owner_ws, SubscriptionTopic::WatchtowerSigning).await;
     let mut other_events = subscribe_signing(&other_ws, SubscriptionTopic::WatchtowerSigning).await;
 
+    use ckb_types::prelude::*;
     // This test checks authenticated routing only; the watchtower actor tests
     // cover generating and applying requests from real settlement transactions.
+    let mut witness = [0u8; 16 + 1 + 1 + 72 + 1 + 1 + 65];
+    witness[16] = 0x01;
+    witness[90] = 0xfe;
+    let tx = ckb_types::core::TransactionBuilder::default()
+        .input(ckb_types::packed::CellInput::new(
+            ckb_types::packed::OutPoint::new(ckb_types::prelude::Pack::pack(&[0x11u8; 32]), 0),
+            0,
+        ))
+        .output(
+            ckb_types::packed::CellOutput::new_builder()
+                .capacity(100_000_000_000u64)
+                .build(),
+        )
+        .output_data(ckb_types::packed::Bytes::default())
+        .witness(ckb_types::prelude::Pack::pack(witness.as_slice()))
+        .build()
+        .data();
+    let payout_lock = ckb_types::packed::Script::new_builder()
+        .code_hash(ckb_types::prelude::Pack::pack(&[0x22u8; 32]))
+        .hash_type(ckb_types::core::ScriptHashType::Type)
+        .args(ckb_types::prelude::Pack::pack([0x33u8; 20].as_slice()))
+        .build();
+    let signed_tx = tx
+        .clone()
+        .into_view()
+        .as_advanced_builder()
+        .set_outputs(vec![ckb_types::packed::CellOutput::new_builder()
+            .lock(payout_lock)
+            .capacity(99_999_990_000u64)
+            .build()])
+        .build()
+        .data();
     let content = OnchainSigningContent {
         key_purpose: OnchainKeyPurpose::Settlement,
-        transaction: Transaction::default(),
+        transaction: tx,
+    };
+    let funded_content = OnchainSigningContent {
+        key_purpose: OnchainKeyPurpose::Settlement,
+        transaction: signed_tx.clone(),
     };
     let request_id = Hash256::from([0x88; 32]);
     let mut external = WatchtowerExternalSignerState::default();
-    external
-        .pending_requests
-        .insert(request_id, content.clone());
+    external.pending_requests.insert(
+        request_id,
+        fiber_types::PendingWatchtowerRequest {
+            content: content.clone(),
+            created_at_ms: crate::now_timestamp_as_millis_u64(),
+            required_expiry_since: None,
+        },
+    );
     let node = crate::lsp::tenant_watchtower_node_id(&owner_pubkey);
     let signing_scope = fixture.public_t.signing_events.watchtower(&node);
     let mut signing_update = signing_scope.prepare_update();
@@ -534,7 +575,7 @@ async fn tenant_watchtower_rpc_rejects_secrets_and_cross_tenant_signatures() {
     signing_update.publish();
     let live = next_subscription_event(&mut owner_events).await;
     assert!(matches!(&live, SubscriptionEvent::WatchtowerSigning(result)
-        if matches!(result.status, fiber_json_types::WatchtowerSigningStatus::SignatureRequired { request_id: id, .. } if id == request_id.into())));
+        if matches!(result.status, fiber_json_types::WatchtowerSigningStatus::ExternalFundingRequired { request_id: id, .. } if id == request_id.into())));
     let mut recovered = subscribe_signing(&owner_ws, SubscriptionTopic::WatchtowerSigning).await;
     assert_eq!(next_subscription_event(&mut recovered).await, live);
     assert!(
@@ -564,9 +605,10 @@ async fn tenant_watchtower_rpc_rejects_secrets_and_cross_tenant_signatures() {
     let submission = SubmitWatchtowerSignatureParams {
         channel_id: channel_id.into(),
         request_id: request_id.into(),
-        signature: crate::watchtower::sign_onchain_request(&key, &content)
+        signature: crate::watchtower::sign_onchain_request(&key, &funded_content)
             .unwrap()
             .to_vec(),
+        signed_transaction: signed_tx.into(),
     };
     let err = other
         .request::<SubmitWatchtowerSignatureResult, _>(
@@ -584,7 +626,7 @@ async fn tenant_watchtower_rpc_rejects_secrets_and_cross_tenant_signatures() {
         .await
         .expect("owner query");
     assert!(
-        matches!(status.status, fiber_json_types::WatchtowerSigningStatus::SignatureRequired { request_id: id, .. } if id == request_id.into())
+        matches!(status.status, fiber_json_types::WatchtowerSigningStatus::ExternalFundingRequired { request_id: id, .. } if id == request_id.into())
     );
     assert_eq!(
         owner
@@ -1380,7 +1422,6 @@ async fn tenant_watchtower_writes_stay_in_the_tenant_namespace() {
             remote_amount: 1000,
             tlcs: vec![],
         },
-        payout_lock_script: None,
     };
     owner
         .request::<(), _>("create_watch_channel", rpc_params![params.clone()])

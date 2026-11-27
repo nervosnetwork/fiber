@@ -367,7 +367,6 @@ async fn subscription_watchtower_uses_the_authorized_node_even_for_shared_channe
                 tlcs: vec![],
             },
             ChannelFeatures::V2,
-            None,
         );
     }
     // The query RPC also permits read("channels") for watchtower signing status.

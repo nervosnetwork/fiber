@@ -21,9 +21,8 @@ body:json {
 script:pre-request {
   const body = req.getBody();
   body.channel_id = bru.getVar("HOSTED_CHANNEL_ID");
-  // Tenant receives settled funds; Public T only sponsors the transaction fee.
+  // Tenant receives settled funds and self-funds watchtower settlement fees from payout.
   body.destination = bru.getVar("REMOTE_FUNDING_SCRIPT");
-  body.fee_sponsor_lock = bru.getVar("REMOTE_PEER_SHUTDOWN_SCRIPT");
   req.setBody(body);
 }
 

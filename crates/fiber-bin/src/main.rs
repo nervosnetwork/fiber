@@ -384,8 +384,8 @@ async fn run_node(
                 None
             };
 
-            // Start watchtower before network so WatchtowerActor::pre_start restores
-            // persisted external fee-cell holds before any channel funding can pick cells.
+            // Start built-in watchtower before network so channel monitoring is ready
+            // when early network events arrive.
             let watchtower_actor = if fiber_config.disable_built_in_watchtower.unwrap_or_default() {
                 None
             } else {
@@ -768,7 +768,6 @@ fn forward_event_to_actor(
             keys,
             remote_settlement_data,
             channel_features,
-            _local_shutdown_script,
         ) => {
             watchtower_actor
                 .send_message(WatchtowerMessage::CreateChannel(

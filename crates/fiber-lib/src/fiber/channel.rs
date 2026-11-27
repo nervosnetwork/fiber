@@ -142,8 +142,6 @@ pub(crate) struct HostedWatchChannelSnapshot {
     pub channel_features: ChannelFeatures,
     pub funding_udt_type_script: Option<Script>,
     pub settlement_data: SettlementData,
-    pub payout_lock_script: Option<Script>,
-    pub remote_payout_lock_script: Option<Script>,
 }
 
 // - `empty_witness_args`: 16 bytes, fixed to 0x10000000100000001000000010000000, for compatibility with the xudt
@@ -9236,7 +9234,6 @@ impl ChannelActorState {
                             self.watch_channel_keys(),
                             settlement_data,
                             self.channel_features,
-                            self.get_local_shutdown_script(),
                         ),
                     ))
                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);
@@ -10351,8 +10348,6 @@ impl ChannelActorState {
             channel_features: self.channel_features,
             funding_udt_type_script: self.funding_udt_type_script.clone(),
             settlement_data,
-            payout_lock_script: Some(self.get_local_shutdown_script()),
-            remote_payout_lock_script: self.remote_shutdown_script.clone(),
         })
     }
 
@@ -12593,7 +12588,6 @@ where
                         state.watch_channel_keys(),
                         settlement.clone(),
                         state.channel_features,
-                        state.get_local_shutdown_script(),
                     ),
                 ))
                 .expect(ASSUME_NETWORK_ACTOR_ALIVE);

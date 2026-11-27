@@ -77,10 +77,44 @@ pub struct PendingRequest {
     kind: RequestKind,
 }
 
+impl PendingRequest {
+    /// Whether this pending request is an externally funded watchtower settlement request
+    /// confirmed via [`HostedSession::confirm_external_funding_onchain`].
+    pub fn is_external_funding(&self) -> bool {
+        matches!(self.kind, RequestKind::WatchtowerExternalFunding { .. })
+    }
+
+    /// Optional absolute timestamp `since` required on a funding input for an externally funded
+    /// timeout TLC unlock.
+    pub fn required_expiry_since(&self) -> Option<u64> {
+        match self.kind {
+            RequestKind::WatchtowerExternalFunding {
+                required_expiry_since,
+                ..
+            } => required_expiry_since,
+            RequestKind::Channel => None,
+        }
+    }
+
+    /// Exclusive request expiry in Unix milliseconds when carried by an externally funded
+    /// watchtower request (`None` if unset/0 or not an external-funding watchtower request).
+    pub fn expires_at_ms(&self) -> Option<u64> {
+        match self.kind {
+            RequestKind::WatchtowerExternalFunding { expires_at_ms, .. } => {
+                (expires_at_ms != 0).then_some(expires_at_ms)
+            }
+            RequestKind::Channel => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RequestKind {
     Channel,
-    Watchtower,
+    WatchtowerExternalFunding {
+        required_expiry_since: Option<u64>,
+        expires_at_ms: u64,
+    },
 }
 
 /// What the caller should do with a handled status.
@@ -504,31 +538,36 @@ impl<S: SignerStore> HostedSession<S> {
     }
 
     /// Handle a full `get_watchtower_signing_status` (or `watchtower_signing` subscription)
-    /// payload with trusted chain verification and wallet-approved on-chain spending terms,
+    /// payload with trusted chain verification and wallet-funded transaction + spending terms,
     /// reporting structured [`WatchtowerHealthStatus`] (TTL / backoff) to `handler` alongside
     /// the verified signing [`ProcessOutcome`]. Does not submit.
     pub async fn handle_watchtower_status_result<C: crate::ChainVerifier>(
         &self,
         result: GetWatchtowerSigningStatusResult,
         now_ms: u64,
-        authorization: Option<crate::OnchainSpendAuthorization>,
+        funded_spend: Option<(
+            ckb_jsonrpc_types::Transaction,
+            crate::OnchainSpendAuthorization,
+        )>,
         chain: &C,
         handler: &mut impl WatchtowerEventHandler,
     ) -> Result<(WatchtowerHealthStatus, ProcessOutcome), SessionError> {
         let health = evaluate_watchtower_status(&result, now_ms);
         handler.on_status_update(&health);
         let outcome = match result.status {
-            WatchtowerSigningStatus::SignatureRequired { .. } => {
-                let auth = authorization.ok_or_else(|| {
+            WatchtowerSigningStatus::ExternalFundingRequired { .. } => {
+                let (funded_tx, auth) = funded_spend.ok_or_else(|| {
                     SessionError::Invalid(
-                        "on-chain watchtower signing requires OnchainSpendAuthorization".into(),
+                        "on-chain watchtower signing requires a funded transaction and OnchainSpendAuthorization".into(),
                     )
                 })?;
-                self.handle_watchtower_status_verified(
+                self.handle_external_funding_watchtower_status(
                     result.channel_id.into(),
                     result.status,
+                    funded_tx,
                     auth,
                     chain,
+                    now_ms,
                 )
                 .await?
             }
@@ -576,17 +615,6 @@ impl<S: SignerStore> HostedSession<S> {
             .ok_or(SessionError::ChannelNotInDirectory)?;
         let signer = self.root.open_channel(key_id).await?;
         let keys = signer.public_material().base_public_keys;
-        let payout_lock_script = signer
-            .load_binding()
-            .await?
-            .map(|binding| {
-                ckb_types::core::ScriptHashType::try_from(binding.local_shutdown_script.hash_type())
-                    .map(|_| ckb_jsonrpc_types::Script::from(binding.local_shutdown_script))
-                    .map_err(|error| {
-                        SessionError::Invalid(format!("invalid local_shutdown_script: {error}"))
-                    })
-            })
-            .transpose()?;
         Ok(CreateWatchChannelParams {
             channel_id: channel_id.into(),
             funding_udt_type_script,
@@ -597,7 +625,6 @@ impl<S: SignerStore> HostedSession<S> {
             remote_funding_pubkey: remote_funding_pubkey.into(),
             settlement_data,
             channel_features: commitment_contract_features.into(),
-            payout_lock_script,
         })
     }
 
@@ -734,45 +761,96 @@ impl<S: SignerStore> HostedSession<S> {
         }))
     }
 
-    /// Prepare a watchtower request with wallet-approved spending terms and trusted chain data.
-    /// On-chain signatures always require confirmation, regardless of policy.
-    pub async fn handle_watchtower_status_verified<C: crate::ChainVerifier>(
+    /// Prepare an externally funded watchtower request
+    /// ([`WatchtowerSigningStatus::ExternalFundingRequired`]) after the wallet has funded
+    /// transaction fees (and any required CKB shortfall, plus `cell_deps`, `inputs[1..]`,
+    /// payout/change outputs, and `witness[1..]` when needed) on the watchtower-issued template
+    /// transaction. On-chain signatures always require confirmation, regardless of policy.
+    ///
+    /// Validates `funded_transaction` against both the watchtower template (preserving `inputs[0]`,
+    /// any residual commitment `outputs[0]`, `witness[0]`, and any `required_expiry_since`) and the
+    /// wallet's trusted [`crate::ChainVerifier`] + [`crate::OnchainSpendAuthorization`].
+    pub async fn handle_external_funding_watchtower_status<C: crate::ChainVerifier>(
         &self,
         channel_id: Hash256,
         status: WatchtowerSigningStatus,
+        funded_transaction: ckb_jsonrpc_types::Transaction,
         authorization: crate::OnchainSpendAuthorization,
         chain: &C,
+        now_ms: u64,
     ) -> Result<ProcessOutcome, SessionError> {
-        let WatchtowerSigningStatus::SignatureRequired {
-            request_id,
-            content,
-            ..
-        } = status
-        else {
-            return Ok(ProcessOutcome::Idle);
+        let (request_id, template, expires_at_ms, required_expiry_since) = match status {
+            WatchtowerSigningStatus::ExternalFundingRequired {
+                request_id,
+                content,
+                expires_at_ms,
+                required_expiry_since,
+            } => (request_id, content, expires_at_ms, required_expiry_since),
+            WatchtowerSigningStatus::NoSignatureRequired
+            | WatchtowerSigningStatus::Backoff { .. } => {
+                return Ok(ProcessOutcome::Idle);
+            }
+        };
+        if expires_at_ms != 0 && now_ms >= expires_at_ms {
+            return Err(SessionError::Invalid(
+                "watchtower signing request has expired".into(),
+            ));
+        }
+        let template_content = onchain_from_rpc(template);
+        let funded_packed: ckb_types::packed::Transaction = funded_transaction.into();
+        let normalized_funded = fiber_types::validate_and_normalize_external_funding_watchtower_tx(
+            &template_content.transaction,
+            &funded_packed,
+            required_expiry_since,
+            None,
+        )
+        .map_err(SessionError::Invalid)?;
+        let funded_content = crate::OnchainSigningContent {
+            key_purpose: template_content.key_purpose,
+            transaction: normalized_funded,
         };
         let signer = self.channel_signer(channel_id).await?;
         let prepared = signer
-            .prepare_onchain(onchain_from_rpc(content), authorization, chain)
+            .prepare_onchain(funded_content, authorization, chain)
             .await?;
         Ok(ProcessOutcome::NeedConfirmation(PendingRequest {
             channel_id,
             request_id: request_id.into(),
             prepared,
             settlement: None,
-            kind: RequestKind::Watchtower,
+            kind: RequestKind::WatchtowerExternalFunding {
+                required_expiry_since,
+                expires_at_ms,
+            },
         }))
     }
 
-    /// Confirm an on-chain request, rechecking live chain inputs and maturity before signing.
-    pub async fn confirm_onchain<C: crate::ChainVerifier>(
+    /// Confirm an externally funded on-chain watchtower request (`pending.is_external_funding() == true`),
+    /// rechecking request expiry, live chain inputs, and maturity before signing `inputs[0]` and
+    /// returning [`SubmitWatchtowerSignatureParams`] carrying both `signature` and
+    /// `signed_transaction` (with all client funding inputs, cell_deps, outputs, and `witness[1..]`
+    /// intact).
+    pub async fn confirm_external_funding_onchain<C: crate::ChainVerifier>(
         &self,
         pending: PendingRequest,
         chain: &C,
+        now_ms: u64,
     ) -> Result<SubmitParams, SessionError> {
-        if !matches!(pending.kind, RequestKind::Watchtower) {
-            return Err(SessionError::Invalid("expected watchtower request".into()));
+        let expires_at_ms = match pending.kind {
+            RequestKind::WatchtowerExternalFunding { expires_at_ms, .. } => expires_at_ms,
+            RequestKind::Channel => {
+                return Err(SessionError::Invalid("expected watchtower request".into()));
+            }
+        };
+        if expires_at_ms != 0 && now_ms >= expires_at_ms {
+            return Err(SessionError::Invalid(
+                "watchtower signing request has expired".into(),
+            ));
         }
+        let crate::ChannelSigningContent::Onchain(onchain) = pending.prepared.content() else {
+            return Err(SessionError::Invalid("expected on-chain content".into()));
+        };
+        let funded_tx: ckb_jsonrpc_types::Transaction = onchain.transaction.clone().into();
         let signer = self.channel_signer(pending.channel_id).await?;
         let ChannelSignature::Onchain(signature) =
             signer.sign_onchain(pending.prepared, chain).await?
@@ -783,6 +861,7 @@ impl<S: SignerStore> HostedSession<S> {
             channel_id: pending.channel_id.into(),
             request_id: pending.request_id.into(),
             signature: signature.signature.to_vec(),
+            signed_transaction: funded_tx,
         }))
     }
 
@@ -861,13 +940,6 @@ impl<S: SignerStore> HostedSession<S> {
                     request_id: pending.request_id.into(),
                     partial_signature: signature.partial_signature.serialize(),
                     next_material,
-                }))
-            }
-            (RequestKind::Watchtower, ChannelSignature::Onchain(signature)) => {
-                Ok(SubmitParams::Watchtower(SubmitWatchtowerSignatureParams {
-                    channel_id: pending.channel_id.into(),
-                    request_id: pending.request_id.into(),
-                    signature: signature.signature.to_vec(),
                 }))
             }
             _ => Err(SessionError::Invalid(
@@ -1116,13 +1188,14 @@ mod tests {
             .output_data(ckb_types::packed::Bytes::default())
             .build()
             .data();
-        WatchtowerSigningStatus::SignatureRequired {
+        WatchtowerSigningStatus::ExternalFundingRequired {
             request_id: Hash256::from([0x44; 32]).into(),
             content: fiber_json_types::OnchainSigningContent {
                 key_purpose: fiber_json_types::OnchainKeyPurpose::Settlement,
                 transaction: tx.into(),
             },
             expires_at_ms: 0,
+            required_expiry_since: None,
         }
     }
 
@@ -1204,7 +1277,6 @@ mod tests {
             .expect("watch params");
         assert!(params.local_settlement_key.is_none());
         assert!(params.local_settlement_key_pubkey.is_some());
-        assert!(params.payout_lock_script.is_some());
         assert_eq!(params.channel_id, channel_id.into());
     }
 }

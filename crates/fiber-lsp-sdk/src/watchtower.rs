@@ -2,7 +2,7 @@
 //!
 //! These helpers keep `fiber-lsp-sdk` transport- and runtime-agnostic while giving
 //! wallet applications structured signals for watchtower channel/preimage quotas,
-//! fee-hold TTLs, and per-node retry backoff.
+//! pending signing request TTLs, and per-node retry backoff.
 
 use fiber_types::Hash256;
 use serde::{Deserialize, Serialize};
@@ -113,24 +113,27 @@ pub enum WatchtowerHealthStatus {
         /// Watched channel identifier.
         channel_id: Hash256,
     },
-    /// An external watchtower signature is waiting for client verification and submission.
-    PendingSignature {
+    /// Watchtower issued an unfunded template transaction that the client's external wallet must
+    /// fund (covering fees and any CKB shortfall) and sign before submitting `signed_transaction`.
+    PendingExternalFunding {
         /// Watched channel identifier.
         channel_id: Hash256,
         /// Outstanding signature request identifier.
         request_id: Hash256,
-        /// Unix millisecond timestamp when the 30-minute fee-cell hold expires.
+        /// Unix millisecond timestamp when the request TTL expires.
         expires_at_ms: u64,
-        /// Remaining milliseconds before the fee-cell hold expires (`0` if already elapsed).
+        /// Remaining milliseconds before the request expires (`0` if already elapsed).
         remaining_ms: u64,
+        /// Optional absolute timestamp `since` required on a funding input for a timeout TLC unlock.
+        required_expiry_since: Option<u64>,
     },
-    /// No signature is currently pending, and new fee-holding requests are paused due to backoff.
+    /// No signature is currently pending, and new signing requests are paused due to backoff.
     InBackoff {
         /// Watched channel identifier.
         channel_id: Hash256,
         /// Effective Unix millisecond timestamp when backoff expires (channel or tenant-wide).
         retry_after_ms: u64,
-        /// Remaining milliseconds until the watchtower can create a new fee-holding request.
+        /// Remaining milliseconds until the watchtower can create a new signing request.
         remaining_backoff_ms: u64,
         /// Consecutive expired or failed-broadcast requests recorded on this channel.
         consecutive_expired_requests: u32,
@@ -142,7 +145,7 @@ impl WatchtowerHealthStatus {
     pub fn channel_id(&self) -> Hash256 {
         match self {
             Self::Healthy { channel_id }
-            | Self::PendingSignature { channel_id, .. }
+            | Self::PendingExternalFunding { channel_id, .. }
             | Self::InBackoff { channel_id, .. } => *channel_id,
         }
     }
@@ -162,9 +165,8 @@ impl WatchtowerHealthStatus {
             return true;
         }
         match self {
-            Self::Healthy { .. } => false,
+            Self::Healthy { .. } | Self::PendingExternalFunding { .. } => false,
             Self::InBackoff { retry_after_ms, .. } => *retry_after_ms >= safe_cutoff,
-            Self::PendingSignature { .. } => false,
         }
     }
 }
@@ -216,15 +218,17 @@ pub fn evaluate_watchtower_status(
 ) -> WatchtowerHealthStatus {
     let channel_id: Hash256 = result.channel_id.into();
     match &result.status {
-        fiber_json_types::WatchtowerSigningStatus::SignatureRequired {
+        fiber_json_types::WatchtowerSigningStatus::ExternalFundingRequired {
             request_id,
             expires_at_ms,
+            required_expiry_since,
             ..
-        } => WatchtowerHealthStatus::PendingSignature {
+        } => WatchtowerHealthStatus::PendingExternalFunding {
             channel_id,
             request_id: (*request_id).into(),
             expires_at_ms: *expires_at_ms,
             remaining_ms: expires_at_ms.saturating_sub(now_ms),
+            required_expiry_since: *required_expiry_since,
         },
         fiber_json_types::WatchtowerSigningStatus::Backoff {
             retry_after_ms,
@@ -366,42 +370,47 @@ mod tests {
         // Dispute deadline far in the future -> no self-broadcast needed yet.
         assert!(!backoff.needs_self_broadcast(10_000, 400, 600));
 
-        // SignatureRequired with TTL deadline.
-        let pending_rpc = fiber_json_types::GetWatchtowerSigningStatusResult {
+        // ExternalFundingRequired maps to PendingExternalFunding with TTL and optional required_expiry_since.
+        let external_funding_rpc = fiber_json_types::GetWatchtowerSigningStatusResult {
             channel_id: channel_id.into(),
-            status: fiber_json_types::WatchtowerSigningStatus::SignatureRequired {
+            status: fiber_json_types::WatchtowerSigningStatus::ExternalFundingRequired {
                 request_id: request_id.into(),
                 content: fiber_json_types::OnchainSigningContent {
-                    key_purpose: fiber_json_types::OnchainKeyPurpose::Settlement,
+                    key_purpose: fiber_json_types::OnchainKeyPurpose::Tlc {
+                        commitment_number: 3,
+                    },
                     transaction: ckb_types::core::TransactionBuilder::default()
                         .build()
                         .data()
                         .into(),
                 },
-                expires_at_ms: 2_000,
+                expires_at_ms: 3_000,
+                required_expiry_since: Some(0x4000_0000_0000_0064),
             },
         };
-        let pending = evaluate_watchtower_status(&pending_rpc, 1_200);
+        let ext_funding = evaluate_watchtower_status(&external_funding_rpc, 1_000);
         assert_eq!(
-            pending,
-            WatchtowerHealthStatus::PendingSignature {
+            ext_funding,
+            WatchtowerHealthStatus::PendingExternalFunding {
                 channel_id,
                 request_id,
-                expires_at_ms: 2_000,
-                remaining_ms: 800,
+                expires_at_ms: 3_000,
+                remaining_ms: 2_000,
+                required_expiry_since: Some(0x4000_0000_0000_0064),
             }
         );
-        assert!(!pending.needs_self_broadcast(2_500, 1_200, 500));
+        assert!(!ext_funding.needs_self_broadcast(3_500, 1_000, 500));
+        assert!(ext_funding.needs_self_broadcast(3_500, 3_000, 500));
 
         // Expired pending request near dispute deadline -> trigger self-broadcast.
-        let expired_pending = evaluate_watchtower_status(&pending_rpc, 2_100);
-        assert!(expired_pending.needs_self_broadcast(2_500, 2_100, 500));
+        let expired_pending = evaluate_watchtower_status(&external_funding_rpc, 3_100);
+        assert!(expired_pending.needs_self_broadcast(3_500, 3_100, 500));
 
-        // Even if an untrusted LSP reports Healthy or a future-TTL PendingSignature,
+        // Even if an untrusted LSP reports Healthy or a future-TTL PendingExternalFunding,
         // reaching the dispute safety cutoff MUST still trigger self-broadcast.
         let healthy = WatchtowerHealthStatus::Healthy { channel_id };
         assert!(!healthy.needs_self_broadcast(2_500, 1_200, 500));
         assert!(healthy.needs_self_broadcast(2_500, 2_000, 500));
-        assert!(pending.needs_self_broadcast(2_500, 2_000, 500));
+        assert!(ext_funding.needs_self_broadcast(2_500, 2_000, 500));
     }
 }

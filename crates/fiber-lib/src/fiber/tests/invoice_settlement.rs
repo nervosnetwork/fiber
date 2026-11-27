@@ -167,7 +167,6 @@ fn insert_watch_channel_with_pending_tlc(
         },
         settlement_data,
         fiber_types::ChannelFeatures::V2,
-        None,
     );
 }
 

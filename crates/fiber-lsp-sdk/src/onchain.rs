@@ -225,10 +225,12 @@ pub(crate) async fn validate<C: ChainVerifier>(
             }
         } else if unlock[1] != 0 || now / 1000 <= tlc.expiry / 1000 {
             return Err(invalid("TLC timeout has not matured"));
-        } else if !inputs.iter().any(|input| {
-            let since: u64 = input.since().unpack();
-            since >> 56 == 0x40 && (since & 0x00ff_ffff_ffff_ffff) >= tlc.expiry / 1000
-        }) {
+        } else if inputs
+            .iter()
+            .map(|input| Unpack::<u64>::unpack(&input.since()))
+            .find(|since| since >> 56 == 0x40)
+            .is_none_or(|since| (since & 0x00ff_ffff_ffff_ffff) < tlc.expiry / 1000)
+        {
             return Err(invalid("TLC timeout requires an absolute timestamp input"));
         }
         next.drain(1 + index * tlc_len..1 + (index + 1) * tlc_len);
@@ -350,6 +352,15 @@ pub(crate) async fn validate<C: ChainVerifier>(
             .ok_or_else(|| invalid("missing output data"))?
             .raw_data();
         let capacity: u64 = output.capacity().unpack();
+        let data_cap = ckb_types::core::Capacity::bytes(data.len())
+            .map_err(|_| invalid("output data capacity overflow"))?;
+        let occupied = output
+            .occupied_capacity(data_cap)
+            .map_err(|_| invalid("output occupied capacity overflow"))?
+            .as_u64();
+        if capacity < occupied {
+            return Err(invalid("output capacity is below occupied capacity"));
+        }
         output_capacity = output_capacity
             .checked_add(capacity)
             .ok_or_else(|| invalid("output overflow"))?;
