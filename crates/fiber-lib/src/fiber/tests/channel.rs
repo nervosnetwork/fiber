@@ -7169,44 +7169,253 @@ async fn test_connect_to_peers_with_mutual_channel_on_restart_1() {
     assert!(node_b.get_triggered_unexpected_events().await.is_empty());
 }
 
+fn v2_reestablish_handshake(state: &ChannelActorState) -> ReestablishChannelV2 {
+    ReestablishChannelV2 {
+        channel_id: state.id,
+        next_commitment_number: state.session.own.number,
+        next_ack_number: state.get_local_commitment_number(),
+        next_local_commitment_nonce: state.session.own.public_nonce.clone(),
+    }
+}
+
+fn announcement_signature_count(messages: &[FiberMessageWithTarget]) -> usize {
+    messages
+        .iter()
+        .filter(|message| {
+            matches!(
+                message.message,
+                FiberMessage::ChannelNormalOperation(FiberChannelMessage::AnnouncementSignatures(
+                    _
+                ))
+            )
+        })
+        .count()
+}
+
+fn recovery_state(
+    node: &NetworkNode,
+    state: &ChannelActorState,
+    network: &ActorRef<NetworkActorMessage>,
+) -> ChannelActorState {
+    let mut state = state.clone();
+    state.network = Some(network.clone().into());
+    state.private_key = Some(node.private_key.clone());
+    state.mark_reestablishing_offline();
+    state
+}
+
 #[tokio::test]
-async fn test_reestablish_does_not_resend_announcement_signatures_on_a_ready_channel() {
+async fn test_reestablish_replays_announcement_signature_only_while_peer_is_opening() {
     init_tracing();
 
-    // A ready public channel has both announcement signatures. Recovery must
-    // not send ours again: a v0.10.1 peer takes a late AnnouncementSignatures
-    // on a ready channel as a new ChannelReady and moves both commitment numbers.
-    let (mut node_a, mut node_b, channel_id, _) =
-        NetworkNode::new_2_nodes_with_established_channel(100000000000, 11800000000, true).await;
-    for node in [&node_a, &node_b] {
-        let state = node.get_channel_actor_state(channel_id);
-        assert_eq!(state.state, ChannelState::ChannelReady);
-        let info = state.public_channel_info.as_ref().expect("public channel");
-        assert!(info.local_channel_announcement_signature.is_some());
-        assert!(info.remote_channel_announcement_signature.is_some());
-    }
-    let late_signature = vec!["Ignored AnnouncementSignatures on a ready channel".to_string()];
-    node_b.add_unexpected_events(late_signature).await;
+    // Recovery may only send our cached announcement signature to a peer whose own handshake
+    // still shows opening. A v0.10.1 peer takes a late AnnouncementSignatures on a ready channel
+    // as a new ChannelReady and moves both commitment numbers without a signed update.
+    let (a, b, id) = create_nodes_with_established_channel(100000000000, 11800000000, true).await;
+    let ready = a.get_channel_actor_state(id);
+    let peer = b.get_channel_actor_state(id);
+    assert_eq!(ready.state, ChannelState::ChannelReady);
+    let info = ready.public_channel_info.as_ref().expect("public channel");
+    assert!(info.local_channel_announcement_signature.is_some());
+    assert!(info.remote_channel_announcement_signature.is_some());
+    let peer_bootstrap_nonce = crate::fiber::types::ChannelReadyV2::try_from(
+        ready
+            .session
+            .remote_ready
+            .clone()
+            .expect("accepted peer Ready"),
+    )
+    .expect("peer Ready")
+    .next_commitment_nonce;
 
-    for _ in 0..2 {
-        node_a.restart().await;
-        node_a
-            .expect_event(
-                |event| matches!(event, NetworkServiceEvent::PeerConnected(id, _addr) if id == &node_b.pubkey),
-            )
-            .await;
-        node_a
-            .expect_debug_event("Reestablished channel in ChannelReady")
-            .await;
-        node_b
-            .expect_debug_event("Reestablished channel in ChannelReady")
-            .await;
-    }
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let (network, _task) = Actor::spawn(None, CapturingNetworkActor, captured.clone())
+        .await
+        .unwrap();
+    let (myself, _handle) = Actor::spawn(None, NoopChannelActor, ()).await.unwrap();
+    let actor = ChannelActor::new(a.pubkey, b.pubkey, network.clone(), a.store.clone(), None);
+
+    let mut state = recovery_state(&a, &ready, &network);
+    actor
+        .handle_peer_message(
+            &myself,
+            &mut state,
+            FiberChannelMessage::ReestablishChannelV2(v2_reestablish_handshake(&peer)),
+        )
+        .await
+        .unwrap();
+    let sent = take_captured_actor_messages(&network, &captured).await;
     assert_eq!(
-        node_b.get_triggered_unexpected_events().await,
-        Vec::<String>::new(),
-        "node A sent AnnouncementSignatures again on a ready channel"
+        announcement_signature_count(&sent),
+        0,
+        "replayed our signature to a peer that finished opening: {sent:?}"
+    );
+    assert_eq!(state.commitment_numbers, ready.commitment_numbers);
+
+    let mut state = recovery_state(&a, &ready, &network);
+    let opening_peer = ReestablishChannelV2 {
+        next_ack_number: fiber_types::INITIAL_COMMITMENT_NUMBER + 1,
+        next_local_commitment_nonce: peer_bootstrap_nonce,
+        ..v2_reestablish_handshake(&peer)
+    };
+    actor
+        .handle_peer_message(
+            &myself,
+            &mut state,
+            FiberChannelMessage::ReestablishChannelV2(opening_peer),
+        )
+        .await
+        .unwrap();
+    let sent = take_captured_actor_messages(&network, &captured).await;
+    assert_eq!(
+        announcement_signature_count(&sent),
+        1,
+        "the peer never acked the bootstrap commitment and still needs our signature: {sent:?}"
+    );
+    assert_eq!(state.commitment_numbers, ready.commitment_numbers);
+}
+
+#[tokio::test]
+async fn test_announcement_signature_replay_finishes_a_one_sided_opening() {
+    init_tracing();
+
+    // B sent its Ready and its own announcement signature but never received A's, so it is still
+    // opening: bootstrap counters, no announcement. A is ready and holds B's signature.
+    let (a, b, id) = create_nodes_with_established_channel(100000000000, 11800000000, true).await;
+    let ready = a.get_channel_actor_state(id);
+    let mut opening = b.get_channel_actor_state(id);
+    opening.state = ChannelState::AwaitingChannelReady(
+        AwaitingChannelReadyFlags::CHANNEL_READY | AwaitingChannelReadyFlags::OUR_CHANNEL_READY,
+    );
+    opening.commitment_numbers = fiber_types::CommitmentNumbers {
+        local: fiber_types::INITIAL_COMMITMENT_NUMBER + 1,
+        remote: fiber_types::INITIAL_COMMITMENT_NUMBER + 1,
+    };
+    opening.private_key = Some(b.private_key.clone());
+    {
+        let info = opening
+            .public_channel_info
+            .as_mut()
+            .expect("public channel");
+        info.channel_announcement = None;
+        info.remote_channel_announcement_signature = None;
+        assert!(info.local_channel_announcement_signature.is_some());
+    }
+    assert_eq!(
+        opening.state,
+        ChannelState::AwaitingChannelReady(
+            AwaitingChannelReadyFlags::CHANNEL_READY | AwaitingChannelReadyFlags::OUR_CHANNEL_READY
+        )
+    );
+
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let (network, _task) = Actor::spawn(None, CapturingNetworkActor, captured.clone())
+        .await
+        .unwrap();
+    let (myself, _handle) = Actor::spawn(None, NoopChannelActor, ()).await.unwrap();
+    let actor = ChannelActor::new(a.pubkey, b.pubkey, network.clone(), a.store.clone(), None);
+    let mut state = recovery_state(&a, &ready, &network);
+    actor
+        .handle_peer_message(
+            &myself,
+            &mut state,
+            FiberChannelMessage::ReestablishChannelV2(v2_reestablish_handshake(&opening)),
+        )
+        .await
+        .unwrap();
+    let sent = take_captured_actor_messages(&network, &captured).await;
+    let signature = sent
+        .iter()
+        .find_map(|message| match &message.message {
+            FiberMessage::ChannelNormalOperation(FiberChannelMessage::AnnouncementSignatures(
+                signature,
+            )) => Some(signature.clone()),
+            _ => None,
+        })
+        .expect("the ready side must replay its signature to a peer that is still opening");
+
+    let b_captured = Arc::new(Mutex::new(Vec::new()));
+    let (b_network, _b_task) = Actor::spawn(None, CapturingNetworkActor, b_captured.clone())
+        .await
+        .unwrap();
+    opening.network = Some(b_network.clone().into());
+    let b_actor = ChannelActor::new(b.pubkey, a.pubkey, b_network.clone(), b.store.clone(), None);
+    b_actor
+        .handle_peer_message(
+            &myself,
+            &mut opening,
+            FiberChannelMessage::AnnouncementSignatures(signature),
+        )
+        .await
+        .unwrap();
+    assert_eq!(opening.state, ChannelState::ChannelReady);
+    assert_eq!(
+        opening.commitment_numbers,
+        fiber_types::CommitmentNumbers {
+            local: 2,
+            remote: 2
+        }
+    );
+    assert_eq!(opening.session.own.number, 2);
+
+    // The peer has finished opening now, so a further reconnect sends nothing and neither side
+    // moves a counter.
+    let mut state = recovery_state(&a, &ready, &network);
+    actor
+        .handle_peer_message(
+            &myself,
+            &mut state,
+            FiberChannelMessage::ReestablishChannelV2(v2_reestablish_handshake(&opening)),
+        )
+        .await
+        .unwrap();
+    let sent = take_captured_actor_messages(&network, &captured).await;
+    assert_eq!(
+        announcement_signature_count(&sent),
+        0,
+        "both sides are ready, nothing is owed: {sent:?}"
+    );
+    assert_eq!(state.commitment_numbers, ready.commitment_numbers);
+    assert_eq!(
+        opening.commitment_numbers,
+        fiber_types::CommitmentNumbers {
+            local: 2,
+            remote: 2
+        }
+    );
+}
+
+#[tokio::test]
+async fn test_shutting_down_recovery_does_not_replay_announcement_signature() {
+    init_tracing();
+
+    // A lost ShutdownV2 leaves this side in ShuttingDown while the peer is still ready. Close
+    // recovery must not hand it an AnnouncementSignatures it reads as a new ChannelReady.
+    let (a, b, id) = create_nodes_with_established_channel(100000000000, 11800000000, true).await;
+    let ready = a.get_channel_actor_state(id);
+    let peer = b.get_channel_actor_state(id);
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let (network, _task) = Actor::spawn(None, CapturingNetworkActor, captured.clone())
+        .await
+        .unwrap();
+    let (myself, _handle) = Actor::spawn(None, NoopChannelActor, ()).await.unwrap();
+    let actor = ChannelActor::new(a.pubkey, b.pubkey, network.clone(), a.store.clone(), None);
+
+    let mut state = recovery_state(&a, &ready, &network);
+    state.state = ChannelState::ShuttingDown(ShuttingDownFlags::OUR_SHUTDOWN_SENT);
+    actor
+        .handle_peer_message(
+            &myself,
+            &mut state,
+            FiberChannelMessage::ReestablishChannelV2(v2_reestablish_handshake(&peer)),
+        )
+        .await
+        .unwrap();
+    let sent = take_captured_actor_messages(&network, &captured).await;
+    assert_eq!(
+        announcement_signature_count(&sent),
+        0,
+        "close recovery replayed our signature to a ready peer: {sent:?}"
     );
 }
 
