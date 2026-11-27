@@ -431,6 +431,40 @@ fn test_graph_find_path_basic() {
 
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_graph_equal_routes_use_stable_channel_order() {
+    let mut network = MockNetworkGraph::new(3);
+    for (from, to) in [(1, 3), (2, 3), (0, 1), (0, 2)] {
+        network.add_edge(from, to, Some(1_000), Some(1_000));
+    }
+    for channel in network.graph.channels.values_mut() {
+        for update in [&mut channel.update_of_node1, &mut channel.update_of_node2]
+            .into_iter()
+            .flatten()
+        {
+            update.timestamp = 1;
+        }
+    }
+
+    let into_target: Vec<_> = network
+        .graph
+        .get_node_inbounds(network.keys[3].into())
+        .map(|(_, _, channel, _)| channel.out_point().clone())
+        .collect();
+    assert_eq!(
+        into_target,
+        vec![network.edges[0].2.clone(), network.edges[1].2.clone()]
+    );
+
+    let route = network
+        .find_path(0, 3, 100, 100)
+        .expect("equal-cost routes");
+    assert_eq!(route.len(), 2);
+    assert_eq!(route[0].channel_outpoint, network.edges[2].2);
+    assert_eq!(route[1].channel_outpoint, network.edges[0].2);
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 fn test_graph_find_path_three_nodes() {
     let mut network = MockNetworkGraph::new(3);
     network.add_edge(1, 2, Some(500), Some(2));

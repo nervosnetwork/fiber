@@ -1132,30 +1132,19 @@ where
             .flatten()
             .collect();
 
-        // Iterating over HashMap's values is not guaranteed to be in order,
-        // which may introduce randomness in the path finding.
-        // We will first sort the channels by outbound_liquidity, then capacity, and at last update time.
-        // This is because the weight algorithm in find_path does not considering outbound_liquidity and capacity,
-        // so the channel with larger outbound_liquidity/capacity maybe have the same weight with the channel
-        // with smaller outbound_liquidity/capacity, even though the former have better chance to success.
-        channels.sort_by(
-            |(_, _, a_channel_info, a_channel_update_info),
-             (_, _, b_channel_info, b_channel_update_info)| {
-                b_channel_update_info
-                    .outbound_liquidity
-                    .cmp(&a_channel_update_info.outbound_liquidity)
-                    .then(
-                        b_channel_info
-                            .capacity()
-                            .cmp(&a_channel_info.capacity())
-                            .then(
-                                b_channel_info
-                                    .channel_last_update_time()
-                                    .cmp(&a_channel_info.channel_last_update_time()),
-                            ),
-                    )
-            },
-        );
+        // Prefer higher liquidity, capacity, and fresher updates when path costs tie.
+        // The channel index is a HashSet, so finish with a stable outpoint order.
+        channels.sort_unstable_by(|(_, _, a, a_update), (_, _, b, b_update)| {
+            b_update
+                .outbound_liquidity
+                .cmp(&a_update.outbound_liquidity)
+                .then_with(|| b.capacity().cmp(&a.capacity()))
+                .then_with(|| {
+                    b.channel_last_update_time()
+                        .cmp(&a.channel_last_update_time())
+                })
+                .then_with(|| a.out_point().cmp(b.out_point()))
+        });
         channels.into_iter()
     }
 
