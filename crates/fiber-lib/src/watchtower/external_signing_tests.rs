@@ -5132,3 +5132,1122 @@ fn external_websocket_events_publish_effective_tenant_backoff_across_channels() 
         .expect("get_watchtower_signing_status after submit");
     assert_eq!(rpc_status_after_submit.status, *submit_status);
 }
+
+#[test]
+fn external_unchanged_rebroadcast_and_unobserved_updates_skip_stats_scan_and_events() {
+    use crate::signing::notifications::{SigningChange, SigningScope};
+    use futures::FutureExt;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Clone)]
+    struct CountingWatchtowerStore {
+        inner: Store,
+        stats_calls: Arc<AtomicUsize>,
+    }
+
+    impl WatchtowerStore for CountingWatchtowerStore {
+        fn get_watch_channels_with_nodes(&self) -> Vec<(NodeId, ChannelData)> {
+            self.inner.get_watch_channels_with_nodes()
+        }
+        fn get_watch_channels_for_node(&self, node_id: &NodeId) -> Vec<ChannelData> {
+            self.inner.get_watch_channels_for_node(node_id)
+        }
+        fn insert_watch_channel(
+            &self,
+            node_id: NodeId,
+            channel_id: Hash256,
+            funding_udt_type_script: Option<Script>,
+            keys: WatchChannelKeys,
+            settlement_data: SettlementData,
+            channel_features: ChannelFeatures,
+        ) -> bool {
+            self.inner.insert_watch_channel(
+                node_id,
+                channel_id,
+                funding_udt_type_script,
+                keys,
+                settlement_data,
+                channel_features,
+            )
+        }
+        fn remove_watch_channel(&self, node_id: NodeId, channel_id: Hash256) -> bool {
+            self.inner.remove_watch_channel(node_id, channel_id)
+        }
+        fn get_watch_channel(&self, node_id: &NodeId, channel_id: &Hash256) -> Option<ChannelData> {
+            self.inner.get_watch_channel(node_id, channel_id)
+        }
+        fn update_revocation(
+            &self,
+            node_id: NodeId,
+            channel_id: Hash256,
+            revocation_data: RevocationData,
+            remote_settlement_data: SettlementData,
+        ) {
+            self.inner.update_revocation(
+                node_id,
+                channel_id,
+                revocation_data,
+                remote_settlement_data,
+            )
+        }
+        fn update_pending_remote_settlement(
+            &self,
+            node_id: NodeId,
+            channel_id: Hash256,
+            commitment_number: u64,
+            pending_remote_settlement_data: SettlementData,
+        ) -> Result<(), String> {
+            self.inner.update_pending_remote_settlement(
+                node_id,
+                channel_id,
+                commitment_number,
+                pending_remote_settlement_data,
+            )
+        }
+        fn get_superseded_remote_settlements(
+            &self,
+            node_id: &NodeId,
+            channel_id: &Hash256,
+        ) -> Vec<SettlementData> {
+            self.inner
+                .get_superseded_remote_settlements(node_id, channel_id)
+        }
+        fn update_local_settlement(
+            &self,
+            node_id: NodeId,
+            channel_id: Hash256,
+            local_settlement_data: SettlementData,
+        ) {
+            self.inner
+                .update_local_settlement(node_id, channel_id, local_settlement_data)
+        }
+        fn insert_watch_preimage(&self, node_id: NodeId, payment_hash: Hash256, preimage: Hash256) {
+            self.inner
+                .insert_watch_preimage(node_id, payment_hash, preimage)
+        }
+        fn remove_watch_preimage(&self, node_id: NodeId, payment_hash: Hash256) {
+            self.inner.remove_watch_preimage(node_id, payment_hash)
+        }
+        fn get_watchtower_signer(
+            &self,
+            node_id: &NodeId,
+            channel_id: &Hash256,
+        ) -> WatchtowerSignerState {
+            self.inner.get_watchtower_signer(node_id, channel_id)
+        }
+        fn put_watchtower_signer(
+            &self,
+            node_id: &NodeId,
+            channel_id: &Hash256,
+            state: WatchtowerSignerState,
+        ) {
+            self.inner.put_watchtower_signer(node_id, channel_id, state)
+        }
+        fn update_watchtower_signer<R, E>(
+            &self,
+            node_id: &NodeId,
+            channel_id: &Hash256,
+            update: impl FnOnce(&mut WatchtowerSignerState) -> Result<R, E>,
+        ) -> Result<R, E> {
+            self.inner
+                .update_watchtower_signer(node_id, channel_id, update)
+        }
+        fn watchtower_external_signing_stats(&self, node_id: &NodeId) -> (usize, usize, u64) {
+            self.stats_calls.fetch_add(1, Ordering::SeqCst);
+            self.inner.watchtower_external_signing_stats(node_id)
+        }
+        fn get_watch_preimage(&self, node_id: &NodeId, payment_hash: &Hash256) -> Option<Hash256> {
+            self.inner.get_watch_preimage(node_id, payment_hash)
+        }
+        fn insert_onchain_tlc_settlement(
+            &self,
+            node_id: &NodeId,
+            channel_id: &Hash256,
+            tlc_id: TLCId,
+            settlement: crate::fiber::onchain_tlc_reconcile::OnChainTlcSettlement,
+        ) {
+            self.inner
+                .insert_onchain_tlc_settlement(node_id, channel_id, tlc_id, settlement)
+        }
+        fn get_onchain_tlc_settlement(
+            &self,
+            node_id: &NodeId,
+            channel_id: &Hash256,
+            tlc_id: TLCId,
+            payment_hash: &Hash256,
+        ) -> Option<crate::fiber::onchain_tlc_reconcile::OnChainTlcSettlement> {
+            self.inner
+                .get_onchain_tlc_settlement(node_id, channel_id, tlc_id, payment_hash)
+        }
+    }
+
+    let fixture = Fixture::new(true, true, false, false);
+    let stats_calls = Arc::new(AtomicUsize::new(0));
+    let counting_store = CountingWatchtowerStore {
+        inner: fixture.store.clone(),
+        stats_calls: stats_calls.clone(),
+    };
+    let signer = LocalSigner::new(secp256k1::SecretKey::from_slice(&[21; 32]).expect("fee key"));
+
+    // Queue a pending request.
+    assert!(fixture.build().expect("queue").is_none());
+    let (request_id, pending) = fixture.pending_request();
+    let funded = fund_pending(&pending);
+    let sig = sign_onchain_request(&fixture.tlc_key, &funded).expect("sig");
+
+    // 1. Unobserved path (no WS subscribers): submit_watchtower_signature,
+    //    apply_existing_signed_settlement_tx, clear_channel_external_retry_backoff, and
+    //    prune_spent_signing_requests must perform ZERO stats scans.
+    stats_calls.store(0, Ordering::SeqCst);
+    let rpc = WatchtowerRpcServerImpl::new(counting_store.clone())
+        .with_signing_events(fixture.events.clone());
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    assert_eq!(
+        rt.block_on(rpc.submit_watchtower_signature(
+            RpcContext {
+                node_id: fixture.node_id.to_string(),
+                tenant_scoped: false,
+            },
+            SubmitWatchtowerSignatureParams {
+                channel_id: fixture.channel.channel_id.into(),
+                request_id: request_id.into(),
+                signature: sig.to_vec(),
+                signed_transaction: funded.transaction.clone().into(),
+            },
+        ))
+        .expect("submit unobserved"),
+        SubmitWatchtowerSignatureResult::Applied
+    );
+    assert_eq!(
+        stats_calls.load(Ordering::SeqCst),
+        0,
+        "unobserved submit_watchtower_signature must skip watchtower_external_signing_stats"
+    );
+
+    let signed_content = match fixture
+        .store
+        .get_watchtower_signer(&fixture.node_id, &fixture.channel.channel_id)
+    {
+        WatchtowerSignerState::External(ext) => ext.signed_signatures[&request_id].content.clone(),
+        other => panic!("expected external signer, got {other:?}"),
+    };
+    assert!(apply_existing_signed_settlement_tx(
+        &fixture.events,
+        &counting_store,
+        &fixture.node_id,
+        fixture.channel.channel_id,
+        request_id,
+        &signed_content,
+        false,
+    )
+    .expect("apply unobserved")
+    .is_some());
+    assert_eq!(
+        stats_calls.load(Ordering::SeqCst),
+        0,
+        "unobserved apply_existing_signed_settlement_tx must skip stats scan"
+    );
+
+    // Arm backoff directly, then clear while unobserved -> 0 stats scans.
+    fixture
+        .store
+        .update_watchtower_signer(&fixture.node_id, &fixture.channel.channel_id, |state| {
+            if let WatchtowerSignerState::External(ext) = state {
+                ext.retry_after_ms = crate::now_timestamp_as_millis_u64() + 60_000;
+                ext.consecutive_expired_requests = 1;
+            }
+            Ok::<_, std::convert::Infallible>(())
+        })
+        .unwrap();
+    clear_channel_external_retry_backoff(
+        &fixture.events,
+        &counting_store,
+        &fixture.node_id,
+        &fixture.channel.channel_id,
+    );
+    assert_eq!(
+        stats_calls.load(Ordering::SeqCst),
+        0,
+        "unobserved clear_channel_external_retry_backoff must skip stats scan"
+    );
+
+    // 2. Observed path: attach WS subscriber. Repeatedly applying the already-applied signed tx
+    //    (both via apply_existing_signed_settlement_tx and build_signed_settlement_tx) must emit
+    //    ZERO WatchtowerUpdated events and perform ZERO stats scans.
+    let mut changes = fixture
+        .events
+        .hub
+        .subscribe(SigningScope::Watchtower(fixture.node_id.clone()));
+    stats_calls.store(0, Ordering::SeqCst);
+
+    for _ in 0..3 {
+        let tx = apply_existing_signed_settlement_tx(
+            &fixture.events,
+            &counting_store,
+            &fixture.node_id,
+            fixture.channel.channel_id,
+            request_id,
+            &signed_content,
+            false,
+        )
+        .expect("rebroadcast apply")
+        .expect("signed tx");
+        assert_applied_signature(&tx, &funded, &fixture.tlc_key);
+    }
+    // Also exercise build_signed_settlement_tx with existing_request_id = Some(request_id)
+    // and existing_request_id = None hitting the signed_signatures branch.
+    let tx_existing = build_signed_settlement_tx(
+        &fixture.events,
+        &counting_store,
+        &fixture.node_id,
+        fixture.channel.channel_id,
+        pending.content.transaction.clone().into_view(),
+        pending.content.key_purpose,
+        false,
+        None,
+        &signer,
+        Some(request_id),
+        pending.required_expiry_since,
+    )
+    .expect("build_signed_settlement_tx existing")
+    .expect("signed tx");
+    assert_applied_signature(&tx_existing, &funded, &fixture.tlc_key);
+
+    assert_eq!(
+        stats_calls.load(Ordering::SeqCst),
+        0,
+        "unchanged rebroadcast must not trigger watchtower_external_signing_stats scan"
+    );
+    assert!(
+        changes.recv().now_or_never().is_none(),
+        "unchanged rebroadcast must not emit redundant WatchtowerUpdated events"
+    );
+
+    // Exercise build_signed_settlement_tx with existing_request_id = None (does 1 pre-lock stats
+    // read for cap checks, but must emit 0 WatchtowerUpdated events and 0 finish stats scans).
+    stats_calls.store(0, Ordering::SeqCst);
+    let tx_concurrent = build_signed_settlement_tx(
+        &fixture.events,
+        &counting_store,
+        &fixture.node_id,
+        fixture.channel.channel_id,
+        pending.content.transaction.clone().into_view(),
+        pending.content.key_purpose,
+        false,
+        None,
+        &signer,
+        None,
+        pending.required_expiry_since,
+    )
+    .expect("build_signed_settlement_tx concurrent signed hit")
+    .expect("signed tx");
+    assert_applied_signature(&tx_concurrent, &funded, &fixture.tlc_key);
+    assert_eq!(
+        stats_calls.load(Ordering::SeqCst),
+        1,
+        "only the pre-lock cap stats read should run; finish_watchtower_signing_update must skip"
+    );
+    assert!(
+        changes.recv().now_or_never().is_none(),
+        "unchanged concurrent signed hit must not emit redundant WatchtowerUpdated events"
+    );
+
+    // Contrast: if last_applied differs (e.g. cleared), applying DOES update state and emits 1 event.
+    fixture
+        .store
+        .update_watchtower_signer(&fixture.node_id, &fixture.channel.channel_id, |state| {
+            if let WatchtowerSignerState::External(ext) = state {
+                ext.last_applied = None;
+            }
+            Ok::<_, std::convert::Infallible>(())
+        })
+        .unwrap();
+    stats_calls.store(0, Ordering::SeqCst);
+    assert!(apply_existing_signed_settlement_tx(
+        &fixture.events,
+        &counting_store,
+        &fixture.node_id,
+        fixture.channel.channel_id,
+        request_id,
+        &signed_content,
+        false,
+    )
+    .expect("apply when last_applied changed")
+    .is_some());
+    assert_eq!(stats_calls.load(Ordering::SeqCst), 1);
+    let event = changes
+        .recv()
+        .now_or_never()
+        .expect("event ready")
+        .expect("event ok");
+    assert!(matches!(
+        event.as_ref(),
+        SigningChange::WatchtowerUpdated { channel_id, .. } if *channel_id == fixture.channel.channel_id
+    ));
+}
+
+#[test]
+fn external_send_error_302_cellbase_immaturity_retains_signed_tx_without_backoff() {
+    let fixture = Fixture::new(true, true, false, false);
+    assert!(fixture.build().expect("queue").is_none());
+    let (request_id, pending) = fixture.pending_request();
+    let funded = fund_pending(&pending);
+    let sig = sign_onchain_request(&fixture.tlc_key, &funded).expect("sig");
+    assert_eq!(
+        fixture
+            .submit_with_tx(request_id, sig, funded.transaction.clone())
+            .expect("submit"),
+        SubmitWatchtowerSignatureResult::Applied
+    );
+    let built = fixture.build().expect("apply").expect("signed tx");
+    let now_ms = crate::now_timestamp_as_millis_u64();
+
+    let retryable_errors = [
+        ckb_sdk::RpcError::Rpc(jsonrpc_core::Error {
+            code: jsonrpc_core::ErrorCode::ServerError(-302),
+            message:
+                "TransactionFailedToVerify: Verification failed Transaction(CellbaseImmaturity)"
+                    .to_string(),
+            data: None,
+        }),
+        ckb_sdk::RpcError::Rpc(jsonrpc_core::Error {
+            code: jsonrpc_core::ErrorCode::ServerError(-302),
+            message: "TransactionFailedToVerify".to_string(),
+            data: Some(serde_json::Value::String(
+                "Verification failed Transaction(CellbaseImmaturity)".to_string(),
+            )),
+        }),
+        ckb_sdk::RpcError::Rpc(jsonrpc_core::Error {
+            code: jsonrpc_core::ErrorCode::ServerError(-302),
+            message: "TransactionFailedToVerify: Verification failed Transaction(Immature)"
+                .to_string(),
+            data: None,
+        }),
+    ];
+
+    for err in &retryable_errors {
+        handle_external_settlement_send_error(
+            &fixture.events,
+            &fixture.store,
+            &fixture.node_id,
+            &fixture.channel.channel_id,
+            &built,
+            err,
+            now_ms,
+            |_| Ok("live".to_string()),
+            |_| Ok(None),
+        );
+        let WatchtowerSignerState::External(ext) = fixture
+            .store
+            .get_watchtower_signer(&fixture.node_id, &fixture.channel.channel_id)
+        else {
+            panic!("external signer");
+        };
+        assert!(
+            ext.signed_signatures.contains_key(&request_id),
+            "retryable -302 error {err:?} must retain signed_signatures"
+        );
+        assert_eq!(
+            ext.last_applied.as_ref().map(|a| a.request_id),
+            Some(request_id)
+        );
+        assert_eq!(ext.consecutive_expired_requests, 0);
+        assert_eq!(ext.retry_after_ms, 0);
+    }
+
+    // Non-immaturity -302 error must still evict and arm backoff.
+    let script_failure = ckb_sdk::RpcError::Rpc(jsonrpc_core::Error {
+        code: jsonrpc_core::ErrorCode::ServerError(-302),
+        message: "TransactionFailedToVerify: Verification failed Script(...)".to_string(),
+        data: None,
+    });
+    handle_external_settlement_send_error(
+        &fixture.events,
+        &fixture.store,
+        &fixture.node_id,
+        &fixture.channel.channel_id,
+        &built,
+        &script_failure,
+        now_ms,
+        |_| Ok("live".to_string()),
+        |_| Ok(None),
+    );
+    let WatchtowerSignerState::External(ext) = fixture
+        .store
+        .get_watchtower_signer(&fixture.node_id, &fixture.channel.channel_id)
+    else {
+        panic!("external signer");
+    };
+    assert!(ext.signed_signatures.is_empty());
+    assert!(ext.last_applied.is_none());
+    assert_eq!(ext.consecutive_expired_requests, 1);
+    assert!(ext.retry_after_ms > now_ms);
+}
+
+#[test]
+fn external_send_error_301_retains_on_unsynced_cell_dep_when_all_inputs_live() {
+    use ckb_types::{core::DepType, packed::CellDep};
+
+    let err_301 = ckb_sdk::RpcError::Rpc(jsonrpc_core::Error {
+        code: jsonrpc_core::ErrorCode::ServerError(-301),
+        message: "TransactionFailedToResolve: Resolve failed Unknown(...)".to_string(),
+        data: None,
+    });
+    let wallet_dep_outpoint = OutPoint::new(Byte32::from([0xee; 32]), 0);
+    let wallet_dep_tx_hash: ckb_types::H256 = wallet_dep_outpoint.tx_hash().unpack();
+    let wallet_dep = CellDep::new_builder()
+        .out_point(wallet_dep_outpoint.clone())
+        .dep_type(DepType::Code)
+        .build();
+
+    let fixture = Fixture::new(true, true, false, false);
+    assert!(fixture.build().expect("queue").is_none());
+    let (request_id, pending) = fixture.pending_request();
+    let mut funded = fund_pending(&pending);
+    funded.transaction = funded
+        .transaction
+        .into_view()
+        .as_advanced_builder()
+        .cell_dep(wallet_dep)
+        .build()
+        .data();
+    let sig = sign_onchain_request(&fixture.tlc_key, &funded).expect("sig");
+    assert_eq!(
+        fixture
+            .submit_with_tx(request_id, sig, funded.transaction.clone())
+            .expect("submit"),
+        SubmitWatchtowerSignatureResult::Applied
+    );
+    let built = fixture.build().expect("apply").expect("signed tx");
+    let now_ms = crate::now_timestamp_as_millis_u64();
+
+    // All inputs are "live", but wallet cell_dep returns "unknown" with non-committed parent tx
+    // -> must retain signed_signatures + last_applied without backoff.
+    handle_external_settlement_send_error(
+        &fixture.events,
+        &fixture.store,
+        &fixture.node_id,
+        &fixture.channel.channel_id,
+        &built,
+        &err_301,
+        now_ms,
+        |op| {
+            if *op == wallet_dep_outpoint {
+                Ok("unknown".to_string())
+            } else {
+                Ok("live".to_string())
+            }
+        },
+        |_| Ok(None),
+    );
+    let WatchtowerSignerState::External(ext) = fixture
+        .store
+        .get_watchtower_signer(&fixture.node_id, &fixture.channel.channel_id)
+    else {
+        panic!("external signer");
+    };
+    assert!(
+        ext.signed_signatures.contains_key(&request_id),
+        "unsynced cell_dep on -301 must retain signed tx"
+    );
+    assert_eq!(
+        ext.last_applied.as_ref().map(|a| a.request_id),
+        Some(request_id)
+    );
+    assert_eq!(ext.consecutive_expired_requests, 0);
+    assert_eq!(ext.retry_after_ms, 0);
+
+    // If the wallet cell_dep is ConfirmedSpent (parent tx Committed) while all inputs remain live,
+    // -301 must evict signed_signatures, clear last_applied, and arm backoff.
+    handle_external_settlement_send_error(
+        &fixture.events,
+        &fixture.store,
+        &fixture.node_id,
+        &fixture.channel.channel_id,
+        &built,
+        &err_301,
+        now_ms,
+        |op| {
+            if *op == wallet_dep_outpoint {
+                Ok("unknown".to_string())
+            } else {
+                Ok("live".to_string())
+            }
+        },
+        |h| {
+            if *h == wallet_dep_tx_hash {
+                Ok(Some(Status::Committed))
+            } else {
+                Ok(None)
+            }
+        },
+    );
+    let WatchtowerSignerState::External(ext) = fixture
+        .store
+        .get_watchtower_signer(&fixture.node_id, &fixture.channel.channel_id)
+    else {
+        panic!("external signer");
+    };
+    assert!(ext.signed_signatures.is_empty());
+    assert!(ext.last_applied.is_none());
+    assert_eq!(ext.consecutive_expired_requests, 1);
+    assert!(ext.retry_after_ms > now_ms);
+}
+
+#[test]
+fn external_send_error_301_rechecks_confirmation_before_evicting_spent_fee_input() {
+    let err_301 = ckb_sdk::RpcError::Rpc(jsonrpc_core::Error {
+        code: jsonrpc_core::ErrorCode::ServerError(-301),
+        message: "TransactionFailedToResolve: Resolve failed Dead(...)".to_string(),
+        data: None,
+    });
+    let setup = || {
+        let fixture = Fixture::new(true, true, false, false);
+        assert!(fixture.build().expect("queue").is_none());
+        let (request_id, pending) = fixture.pending_request();
+        let funded = fund_pending(&pending);
+        let sig = sign_onchain_request(&fixture.tlc_key, &funded).expect("sig");
+        assert_eq!(
+            fixture
+                .submit_with_tx(request_id, sig, funded.transaction.clone())
+                .expect("submit"),
+            SubmitWatchtowerSignatureResult::Applied
+        );
+        let built = fixture.build().expect("apply").expect("signed tx");
+        (fixture, request_id, sig, funded, built)
+    };
+    let now_ms = crate::now_timestamp_as_millis_u64();
+
+    // Case A: Settlement confirms between reading inputs[0] ("live") and inputs[1] ("unknown" /
+    // ConfirmedSpent); rechecking get_tx_status(&signed_tx_hash) observes Status::Committed ->
+    // prune signed_signatures preserving last_applied, zero backoff, AlreadyApplied on retry.
+    let (fixture, request_id, sig, funded, built) = setup();
+    let signed_tx_hash: ckb_types::H256 = built.hash().unpack();
+    let commitment_outpoint = built.inputs().get(0).unwrap().previous_output();
+    let fee_outpoint = built.inputs().get(1).unwrap().previous_output();
+    let fee_tx_hash: ckb_types::H256 = fee_outpoint.tx_hash().unpack();
+    let mut tx_status_reads = 0usize;
+    handle_external_settlement_send_error(
+        &fixture.events,
+        &fixture.store,
+        &fixture.node_id,
+        &fixture.channel.channel_id,
+        &built,
+        &err_301,
+        now_ms,
+        |op| {
+            if *op == commitment_outpoint {
+                Ok("live".to_string())
+            } else {
+                Ok("unknown".to_string())
+            }
+        },
+        |h| {
+            if *h == signed_tx_hash {
+                tx_status_reads += 1;
+                if tx_status_reads == 1 {
+                    Ok(None)
+                } else {
+                    Ok(Some(Status::Committed))
+                }
+            } else if *h == fee_tx_hash {
+                Ok(Some(Status::Committed))
+            } else {
+                Ok(None)
+            }
+        },
+    );
+    let WatchtowerSignerState::External(ext) = fixture
+        .store
+        .get_watchtower_signer(&fixture.node_id, &fixture.channel.channel_id)
+    else {
+        panic!("external signer");
+    };
+    assert!(ext.signed_signatures.is_empty());
+    assert_eq!(
+        ext.last_applied.as_ref().map(|a| a.request_id),
+        Some(request_id)
+    );
+    assert_eq!(ext.consecutive_expired_requests, 0);
+    assert_eq!(ext.retry_after_ms, 0);
+    assert_eq!(
+        fixture
+            .submit_with_tx(request_id, sig, funded.transaction)
+            .expect("idempotent retry after TOCTOU commit"),
+        SubmitWatchtowerSignatureResult::AlreadyApplied
+    );
+
+    // Case B: get_tx_status(&signed_tx_hash) stays None, but inputs[0] transitions from "live"
+    // on the first read to ConfirmedSpent on the second read -> prune preserving last_applied,
+    // zero backoff, AlreadyApplied on retry.
+    let (fixture, request_id, sig, funded, built) = setup();
+    let commitment_outpoint = built.inputs().get(0).unwrap().previous_output();
+    let commitment_tx_hash: ckb_types::H256 = commitment_outpoint.tx_hash().unpack();
+    let fee_outpoint = built.inputs().get(1).unwrap().previous_output();
+    let fee_tx_hash: ckb_types::H256 = fee_outpoint.tx_hash().unpack();
+    let mut commitment_reads = 0usize;
+    handle_external_settlement_send_error(
+        &fixture.events,
+        &fixture.store,
+        &fixture.node_id,
+        &fixture.channel.channel_id,
+        &built,
+        &err_301,
+        now_ms,
+        |op| {
+            if *op == commitment_outpoint {
+                commitment_reads += 1;
+                if commitment_reads == 1 {
+                    Ok("live".to_string())
+                } else {
+                    Ok("unknown".to_string())
+                }
+            } else {
+                Ok("unknown".to_string())
+            }
+        },
+        |h| {
+            if *h == fee_tx_hash || *h == commitment_tx_hash {
+                Ok(Some(Status::Committed))
+            } else {
+                Ok(None)
+            }
+        },
+    );
+    let WatchtowerSignerState::External(ext) = fixture
+        .store
+        .get_watchtower_signer(&fixture.node_id, &fixture.channel.channel_id)
+    else {
+        panic!("external signer");
+    };
+    assert!(ext.signed_signatures.is_empty());
+    assert_eq!(
+        ext.last_applied.as_ref().map(|a| a.request_id),
+        Some(request_id)
+    );
+    assert_eq!(ext.consecutive_expired_requests, 0);
+    assert_eq!(ext.retry_after_ms, 0);
+    assert_eq!(
+        fixture
+            .submit_with_tx(request_id, sig, funded.transaction)
+            .expect("idempotent retry after TOCTOU commitment spend"),
+        SubmitWatchtowerSignatureResult::AlreadyApplied
+    );
+
+    // Case C: On TOCTOU recheck, signed tx appears Pending in mempool -> retain without backoff.
+    let (fixture, request_id, _sig, _funded, built) = setup();
+    let signed_tx_hash: ckb_types::H256 = built.hash().unpack();
+    let commitment_outpoint = built.inputs().get(0).unwrap().previous_output();
+    let fee_outpoint = built.inputs().get(1).unwrap().previous_output();
+    let fee_tx_hash: ckb_types::H256 = fee_outpoint.tx_hash().unpack();
+    let mut tx_status_reads = 0usize;
+    handle_external_settlement_send_error(
+        &fixture.events,
+        &fixture.store,
+        &fixture.node_id,
+        &fixture.channel.channel_id,
+        &built,
+        &err_301,
+        now_ms,
+        |op| {
+            if *op == commitment_outpoint {
+                Ok("live".to_string())
+            } else {
+                Ok("unknown".to_string())
+            }
+        },
+        |h| {
+            if *h == signed_tx_hash {
+                tx_status_reads += 1;
+                if tx_status_reads == 1 {
+                    Ok(None)
+                } else {
+                    Ok(Some(Status::Pending))
+                }
+            } else if *h == fee_tx_hash {
+                Ok(Some(Status::Committed))
+            } else {
+                Ok(None)
+            }
+        },
+    );
+    let WatchtowerSignerState::External(ext) = fixture
+        .store
+        .get_watchtower_signer(&fixture.node_id, &fixture.channel.channel_id)
+    else {
+        panic!("external signer");
+    };
+    assert!(ext.signed_signatures.contains_key(&request_id));
+    assert_eq!(
+        ext.last_applied.as_ref().map(|a| a.request_id),
+        Some(request_id)
+    );
+    assert_eq!(ext.consecutive_expired_requests, 0);
+    assert_eq!(ext.retry_after_ms, 0);
+}
+
+#[test]
+fn external_unsigned_requests_expire_on_chain_lookup_errors_without_backoff() {
+    use crate::signing::notifications::{SigningChange, SigningScope};
+    use futures::FutureExt;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    fn spawn_mock_ckb_rpc(responses: Vec<String>) -> (String, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock ckb rpc");
+        let addr = listener.local_addr().expect("local addr");
+        let handle = std::thread::spawn(move || {
+            for body in responses {
+                let (mut stream, _) = listener.accept().expect("accept");
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes());
+            }
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    let signer = LocalSigner::new(secp256k1::SecretKey::from_slice(&[21; 32]).expect("fee key"));
+    let tx_hash_hex = format!("{:#x}", Byte32::from([0x44; 32]));
+    let get_txs_hit = format!(
+        r#"{{"jsonrpc":"2.0","id":1,"result":{{"last_cursor":"0x","objects":[{{"tx_hash":"{tx_hash_hex}","block_number":"0x1","tx_index":"0x0","io_index":"0x0","io_type":"input"}}]}}}}"#
+    );
+    let rpc_err = r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"internal error"}}"#
+        .to_string();
+    let get_tx_none = r#"{"jsonrpc":"2.0","id":1,"result":null}"#.to_string();
+
+    let scenarios = [
+        // 1. find_first_input_tx_hash fails with RPC error.
+        vec![rpc_err.clone()],
+        // 2. get_transaction returns Ok(None).
+        vec![get_txs_hit.clone(), get_tx_none],
+        // 3. get_transaction fails with RPC error.
+        vec![get_txs_hit, rpc_err],
+    ];
+
+    for responses in scenarios {
+        let fixture = Fixture::new(true, true, false, false);
+        let now_ms = crate::now_timestamp_as_millis_u64();
+        let pending_id = Hash256::from([0x11; 32]);
+        let signed_id = Hash256::from([0x22; 32]);
+        let dummy_tx = TransactionBuilder::default()
+            .input(CellInput::new(
+                OutPoint::new(Byte32::from([0x33; 32]), 0),
+                0,
+            ))
+            .build()
+            .data();
+        let dummy_content = OnchainSigningContent {
+            key_purpose: OnchainKeyPurpose::Settlement,
+            transaction: dummy_tx.clone(),
+        };
+        let signed_tx_hash = fiber_types::external_funding_watchtower_tx_hash(&dummy_tx);
+
+        fixture
+            .store
+            .update_watchtower_signer(&fixture.node_id, &fixture.channel.channel_id, |state| {
+                if let WatchtowerSignerState::External(ext) = state {
+                    ext.pending_requests.insert(
+                        pending_id,
+                        fiber_types::PendingWatchtowerRequest {
+                            content: dummy_content.clone(),
+                            created_at_ms: now_ms,
+                            required_expiry_since: None,
+                        },
+                    );
+                    ext.signed_signatures.insert(
+                        signed_id,
+                        fiber_types::SignedWatchtowerRequest {
+                            content: dummy_content.clone(),
+                            signature: [0x55; 65],
+                            created_at_ms: now_ms,
+                        },
+                    );
+                    ext.last_applied = Some(fiber_types::LastAppliedWatchtowerSignature {
+                        request_id: signed_id,
+                        signature: [0x55; 65],
+                        signed_transaction_hash: signed_tx_hash,
+                    });
+                }
+                Ok::<_, std::convert::Infallible>(())
+            })
+            .unwrap();
+        assert_eq!(
+            fixture
+                .store
+                .watchtower_external_signing_stats(&fixture.node_id),
+            (2, 2, 0)
+        );
+
+        let mut changes = fixture
+            .events
+            .hub
+            .subscribe(SigningScope::Watchtower(fixture.node_id.clone()));
+        let (url, server) = spawn_mock_ckb_rpc(responses);
+        let ckb_client = CkbRpcClient::with_builder(&url, |b| b.no_proxy()).expect("ckb client");
+        let after_ttl_ms = now_ms + crate::ckb::held_cells::WATCHTOWER_HOLD_MS + 1;
+
+        check_watch_channel(
+            &fixture.events,
+            &fixture.store,
+            &signer,
+            &ckb_client,
+            &mut FeeCells,
+            fixture.node_id.clone(),
+            fixture.channel.clone(),
+            after_ttl_ms,
+        );
+        server.join().expect("mock rpc server finished");
+
+        let WatchtowerSignerState::External(ext) = fixture
+            .store
+            .get_watchtower_signer(&fixture.node_id, &fixture.channel.channel_id)
+        else {
+            panic!("external signer");
+        };
+        assert!(
+            ext.pending_requests.is_empty(),
+            "expired unsigned pending request must be removed even on chain lookup error"
+        );
+        assert!(
+            ext.signed_signatures.contains_key(&signed_id),
+            "signed_signatures must NOT be dropped on chain lookup error"
+        );
+        assert_eq!(
+            ext.last_applied.as_ref().map(|a| a.request_id),
+            Some(signed_id)
+        );
+        assert_eq!(ext.consecutive_expired_requests, 0);
+        assert_eq!(ext.retry_after_ms, 0);
+        assert_eq!(
+            fixture
+                .store
+                .watchtower_external_signing_stats(&fixture.node_id),
+            (1, 1, 0),
+            "per-node and global quota must reflect expired unsigned request removal"
+        );
+        let event = changes
+            .recv()
+            .now_or_never()
+            .expect("event ready")
+            .expect("event ok");
+        assert!(matches!(
+            event.as_ref(),
+            SigningChange::WatchtowerUpdated {
+                channel_id,
+                status: fiber_json_types::WatchtowerSigningStatus::NoSignatureRequired,
+            } if *channel_id == fixture.channel.channel_id
+        ));
+    }
+}
+
+#[test]
+fn external_websocket_sibling_channel_receives_tenant_backoff_arm_and_early_clear() {
+    use crate::rpc::watchtower::{GetWatchtowerSigningStatusParams, WatchtowerSigningStatus};
+    use crate::signing::notifications::{SigningChange, SigningScope};
+    use futures::FutureExt;
+
+    let fixture_b = Fixture::new(true, true, false, false);
+    let node_id = fixture_b.node_id.clone();
+    let channel_b = fixture_b.channel.channel_id;
+    let channel_a = Hash256::from([0xa1; 32]);
+    let channel_c = Hash256::from([0xc3; 32]);
+    for ch in [channel_a, channel_c] {
+        fixture_b.store.insert_watch_channel(
+            node_id.clone(),
+            ch,
+            None,
+            WatchChannelKeys {
+                local_settlement: SettlementKey::external(fixture_b.base_key.pubkey()),
+                remote_settlement: fixture_b.channel.remote_settlement_key,
+                local_funding: fixture_b.channel.local_funding_pubkey,
+                remote_funding: fixture_b.channel.remote_funding_pubkey,
+            },
+            SettlementData {
+                local_amount: 10_000_000_000,
+                remote_amount: 10_000_000_000,
+                tlcs: vec![],
+            },
+            ChannelFeatures::V2,
+        );
+    }
+
+    let now_ms = crate::now_timestamp_as_millis_u64();
+    let dummy_content = |seed: u8| OnchainSigningContent {
+        key_purpose: OnchainKeyPurpose::Settlement,
+        transaction: TransactionBuilder::default()
+            .input(CellInput::new(
+                OutPoint::new(Byte32::from([seed; 32]), 0),
+                0,
+            ))
+            .build()
+            .data(),
+    };
+
+    // Put an active pending request on channel C so we verify it is unaffected by sibling backoff.
+    fixture_b
+        .store
+        .update_watchtower_signer(&node_id, &channel_c, |state| {
+            if let WatchtowerSignerState::External(ext) = state {
+                ext.pending_requests.insert(
+                    Hash256::from([0xcc; 32]),
+                    fiber_types::PendingWatchtowerRequest {
+                        content: dummy_content(0xcc),
+                        created_at_ms: now_ms,
+                        required_expiry_since: None,
+                    },
+                );
+            }
+            Ok::<_, std::convert::Infallible>(())
+        })
+        .unwrap();
+
+    // Put an already-expired pending request on channel A so expiring it arms tenant backoff.
+    let expired_created_at =
+        now_ms.saturating_sub(crate::ckb::held_cells::WATCHTOWER_HOLD_MS + 1_000);
+    fixture_b
+        .store
+        .update_watchtower_signer(&node_id, &channel_a, |state| {
+            if let WatchtowerSignerState::External(ext) = state {
+                ext.pending_requests.insert(
+                    Hash256::from([0xaa; 32]),
+                    fiber_types::PendingWatchtowerRequest {
+                        content: dummy_content(0xaa),
+                        created_at_ms: expired_created_at,
+                        required_expiry_since: None,
+                    },
+                );
+            }
+            Ok::<_, std::convert::Infallible>(())
+        })
+        .unwrap();
+
+    let mut changes = fixture_b
+        .events
+        .hub
+        .subscribe(SigningScope::Watchtower(node_id.clone()));
+    let drain_events = |changes: &mut crate::signing::notifications::SigningChanges| {
+        let mut collected = Vec::new();
+        while let Some(Ok(ev)) = changes.recv().now_or_never() {
+            collected.push(ev);
+        }
+        collected
+    };
+    let rpc = WatchtowerRpcServerImpl::new(fixture_b.store.clone())
+        .with_signing_events(fixture_b.events.clone());
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let rpc_status_b = || {
+        rt.block_on(rpc.get_watchtower_signing_status(
+            RpcContext {
+                node_id: node_id.to_string(),
+                tenant_scoped: false,
+            },
+            GetWatchtowerSigningStatusParams {
+                channel_id: channel_b.into(),
+            },
+        ))
+        .expect("get_watchtower_signing_status(B)")
+        .status
+    };
+
+    // 1. Channel A expires its request -> imposes tenant backoff. A subscriber watching ONLY
+    //    channel B must receive WatchtowerUpdated(B, Backoff) matching get_watchtower_signing_status(B).
+    expire_channel_external_signing_requests(
+        &fixture_b.events,
+        &fixture_b.store,
+        &node_id,
+        &channel_a,
+        now_ms,
+    );
+    let events_after_arm = drain_events(&mut changes);
+    let b_event_arm = events_after_arm
+        .iter()
+        .find_map(|ev| match ev.as_ref() {
+            SigningChange::WatchtowerUpdated { channel_id, status } if *channel_id == channel_b => {
+                Some(status.clone())
+            }
+            _ => None,
+        })
+        .expect("channel B must receive Backoff update when channel A arms tenant backoff");
+    assert!(matches!(
+        b_event_arm,
+        WatchtowerSigningStatus::Backoff {
+            retry_after_ms,
+            consecutive_expired_requests: 0,
+        } if retry_after_ms > now_ms
+    ));
+    assert_eq!(b_event_arm, rpc_status_b());
+    assert!(
+        !events_after_arm
+            .iter()
+            .any(|ev| ev.channel_id() == channel_c),
+        "channel C with active pending request must not receive spurious backoff update"
+    );
+
+    // 2. Channel A clears its backoff early -> channel B must receive NoSignatureRequired,
+    //    matching get_watchtower_signing_status(B).
+    clear_channel_external_retry_backoff(&fixture_b.events, &fixture_b.store, &node_id, &channel_a);
+    let events_after_clear = drain_events(&mut changes);
+    let b_event_clear = events_after_clear
+        .iter()
+        .find_map(|ev| match ev.as_ref() {
+            SigningChange::WatchtowerUpdated { channel_id, status } if *channel_id == channel_b => {
+                Some(status.clone())
+            }
+            _ => None,
+        })
+        .expect("channel B must receive NoSignatureRequired when channel A clears tenant backoff");
+    assert_eq!(b_event_clear, WatchtowerSigningStatus::NoSignatureRequired);
+    assert_eq!(b_event_clear, rpc_status_b());
+
+    // 3. Channel A evicts a failed signed tx -> imposes tenant backoff again, and B receives Backoff.
+    let failed_content = dummy_content(0xab);
+    let failed_raw = failed_content.transaction.raw();
+    fixture_b
+        .store
+        .update_watchtower_signer(&node_id, &channel_a, |state| {
+            if let WatchtowerSignerState::External(ext) = state {
+                ext.signed_signatures.insert(
+                    Hash256::from([0xab; 32]),
+                    fiber_types::SignedWatchtowerRequest {
+                        content: failed_content.clone(),
+                        signature: [0x11; 65],
+                        created_at_ms: now_ms,
+                    },
+                );
+            }
+            Ok::<_, std::convert::Infallible>(())
+        })
+        .unwrap();
+    evict_failed_signed_settlement_tx(
+        &fixture_b.events,
+        &fixture_b.store,
+        &node_id,
+        &channel_a,
+        failed_raw.as_slice(),
+        now_ms,
+    );
+    let events_after_evict = drain_events(&mut changes);
+    let b_event_evict = events_after_evict
+        .iter()
+        .find_map(|ev| match ev.as_ref() {
+            SigningChange::WatchtowerUpdated { channel_id, status } if *channel_id == channel_b => {
+                Some(status.clone())
+            }
+            _ => None,
+        })
+        .expect("channel B must receive Backoff update when channel A evicts failed signed tx");
+    assert!(matches!(
+        b_event_evict,
+        WatchtowerSigningStatus::Backoff {
+            retry_after_ms,
+            consecutive_expired_requests: 0,
+        } if retry_after_ms > now_ms
+    ));
+    assert_eq!(b_event_evict, rpc_status_b());
+}

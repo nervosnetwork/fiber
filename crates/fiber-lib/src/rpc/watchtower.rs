@@ -678,13 +678,15 @@ where
                     ))
                 })?;
         if let Some(updated_state) = updated_state {
-            let (_, _, node_retry_after_ms) =
-                self.store.watchtower_external_signing_stats(&node_id);
-            signing_update.watchtower_state_with_backoff(
-                channel_id,
-                &updated_state,
-                node_retry_after_ms,
-            );
+            if signing_update.is_observed() {
+                let (_, _, node_retry_after_ms) =
+                    self.store.watchtower_external_signing_stats(&node_id);
+                signing_update.watchtower_state_with_backoff(
+                    channel_id,
+                    &updated_state,
+                    node_retry_after_ms,
+                );
+            }
         }
         signing_update.publish();
         Ok(result)

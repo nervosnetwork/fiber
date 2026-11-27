@@ -74,7 +74,7 @@ impl ChannelSigningEvents {
         let update = {
             let mut update = update;
             if update.write.observed() {
-                update.change = Some(notifications::SigningChange::Channel {
+                update.changes.push(notifications::SigningChange::Channel {
                     channel_id: state.get_id(),
                     status: crate::rpc::channel::to_rpc_channel_signing_status(state),
                 });
@@ -115,11 +115,13 @@ impl WatchtowerSigningEvents {
         let update = {
             let mut update = update;
             if update.write.observed() {
-                update.change = Some(notifications::SigningChange::WatchtowerCreated {
-                    channel_id: id,
-                    // A newly inserted row initializes the signer to Internal or an empty External.
-                    status: fiber_json_types::WatchtowerSigningStatus::NoSignatureRequired,
-                });
+                update
+                    .changes
+                    .push(notifications::SigningChange::WatchtowerCreated {
+                        channel_id: id,
+                        // A newly inserted row initializes the signer to Internal or an empty External.
+                        status: fiber_json_types::WatchtowerSigningStatus::NoSignatureRequired,
+                    });
             }
             update
         };
@@ -140,7 +142,7 @@ pub(crate) struct SigningUpdate<'a> {
     #[cfg(not(target_arch = "wasm32"))]
     write: notifications::SigningWrite<'a>,
     #[cfg(not(target_arch = "wasm32"))]
-    change: Option<notifications::SigningChange>,
+    changes: Vec<notifications::SigningChange>,
     #[cfg(target_arch = "wasm32")]
     _scope: std::marker::PhantomData<&'a ()>,
 }
@@ -151,9 +153,21 @@ impl<'a> SigningUpdate<'a> {
             #[cfg(not(target_arch = "wasm32"))]
             write: topic.write(),
             #[cfg(not(target_arch = "wasm32"))]
-            change: None,
+            changes: Vec::new(),
             #[cfg(target_arch = "wasm32")]
             _scope: std::marker::PhantomData,
+        }
+    }
+
+    #[cfg(feature = "watchtower")]
+    pub(crate) fn is_observed(&self) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.write.observed()
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            false
         }
     }
 
@@ -161,7 +175,9 @@ impl<'a> SigningUpdate<'a> {
         #[cfg(not(target_arch = "wasm32"))]
         {
             let mut update = self;
-            update.change = Some(notifications::SigningChange::Removed(id));
+            update
+                .changes
+                .push(notifications::SigningChange::Removed(id));
             update
         }
         #[cfg(target_arch = "wasm32")]
@@ -191,14 +207,15 @@ impl<'a> SigningUpdate<'a> {
     ) {
         #[cfg(not(target_arch = "wasm32"))]
         if self.write.observed() {
-            self.change = Some(notifications::SigningChange::WatchtowerUpdated {
-                channel_id: id,
-                status: crate::rpc::watchtower::to_rpc_watchtower_signing_status_with_backoff(
-                    state.clone(),
-                    node_retry_after_ms,
-                    crate::now_timestamp_as_millis_u64(),
-                ),
-            });
+            self.changes
+                .push(notifications::SigningChange::WatchtowerUpdated {
+                    channel_id: id,
+                    status: crate::rpc::watchtower::to_rpc_watchtower_signing_status_with_backoff(
+                        state.clone(),
+                        node_retry_after_ms,
+                        crate::now_timestamp_as_millis_u64(),
+                    ),
+                });
         }
         #[cfg(target_arch = "wasm32")]
         let _ = (id, state, node_retry_after_ms);
@@ -216,7 +233,7 @@ impl<'a> SigningUpdate<'a> {
     /// Publish the captured state after persistence, then release the scope lock.
     pub(crate) fn publish(self) {
         #[cfg(not(target_arch = "wasm32"))]
-        if let Some(change) = self.change {
+        for change in self.changes {
             self.write.publish(|| change);
         }
     }
