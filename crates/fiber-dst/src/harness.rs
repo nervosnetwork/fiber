@@ -20,7 +20,9 @@ use rand::{rngs::StdRng, Rng, SeedableRng};
 use tokio::sync::oneshot;
 
 use crate::host::{send, Host, LinkControl, Nodes, Peer, Slot, Trace, NAMES};
-
+use crate::lsp::{
+    LspHostConfig, LspSlot, WalletCommand, WalletHost, WalletSlot, Wallets, WALLET_HOSTS,
+};
 use crate::tower::{Tower, TowerMode};
 
 pub(crate) const EPOCH: Duration = Duration::from_secs(1_700_000_000);
@@ -40,6 +42,9 @@ pub(crate) struct Harness {
     pub(crate) disks: Vec<SimulatedDisk>,
     pub(crate) watchtowers: Option<Vec<Tower>>,
     pub(crate) tower_hits: Vec<Vec<ChainFaultHit>>,
+    pub(crate) lsp_node: Option<usize>,
+    pub(crate) lsp_slot: LspSlot,
+    pub(crate) wallets: Wallets,
 }
 
 struct ChannelSnapshot {
@@ -47,11 +52,19 @@ struct ChannelSnapshot {
     state: Rc<ChannelActorState>,
 }
 
+pub(crate) struct LspSetup {
+    pub(crate) lsp_node: usize,
+    pub(crate) wallet_count: usize,
+    pub(crate) tenant_liquidity: u128,
+    pub(crate) config: fnn::lsp::LspConfig,
+}
+
 pub(crate) struct HarnessOptions {
     pub(crate) duration: Duration,
     pub(crate) tcp_capacity: Option<usize>,
     pub(crate) tower_mode: Option<TowerMode>,
     pub(crate) funding_timeout_seconds: Option<u64>,
+    pub(crate) lsp: Option<LspSetup>,
 }
 
 impl Harness {
@@ -67,6 +80,7 @@ impl Harness {
             tcp_capacity,
             tower_mode,
             funding_timeout_seconds,
+            lsp,
         } = options;
         let mut builder = turmoil::Builder::new();
         builder
@@ -106,11 +120,33 @@ impl Harness {
                 .map(|node| Tower::new(node, mode, trace.clone()))
                 .collect::<Vec<_>>()
         });
+        let lsp_slot: LspSlot = Default::default();
+        let lsp_node = lsp.as_ref().map(|setup| setup.lsp_node);
+        let wallet_count = lsp.as_ref().map_or(0, |setup| setup.wallet_count);
+        let wallets: Wallets = Rc::new(RefCell::new(
+            (0..wallet_count).map(|_| WalletSlot::default()).collect(),
+        ));
         let mut disks = Vec::with_capacity(count);
         for (index, key) in keys.into_iter().enumerate() {
             let path = path.join(NAMES[index]);
             let disk = SimulatedDisk::new(&path).map_err(|error| anyhow!(error))?;
             disks.push(disk.clone());
+            let lsp_cfg = lsp
+                .as_ref()
+                .filter(|setup| setup.lsp_node == index)
+                .map(|setup| {
+                    let mut biscuit_seed = [0u8; 32];
+                    for (i, byte) in biscuit_seed.iter_mut().enumerate() {
+                        *byte = ((seed.wrapping_add(i as u64).wrapping_mul(31)) ^ 0x5a) as u8;
+                    }
+                    LspHostConfig {
+                        dir: path.join("lsp"),
+                        biscuit_seed,
+                        config: setup.config.clone(),
+                        tenant_liquidity: setup.tenant_liquidity,
+                        slot: lsp_slot.clone(),
+                    }
+                });
             let host = Host {
                 index,
                 key,
@@ -132,11 +168,40 @@ impl Harness {
                 trace: trace.clone(),
                 watchtower: watchtowers.as_ref().map(|controls| controls[index].clone()),
                 funding_timeout_seconds,
+                lsp: lsp_cfg,
             };
             world.host(NAMES[index], move || {
                 let host = host.clone();
                 async move { Ok(host.run().await?) }
             });
+        }
+        if let Some(setup) = &lsp {
+            for (wallet_index, &wallet_name) in
+                WALLET_HOSTS.iter().enumerate().take(setup.wallet_count)
+            {
+                let mut root_key = [0u8; 32];
+                root_key[0] = 0x70 + wallet_index as u8;
+                root_key[1..9].copy_from_slice(&seed.to_le_bytes());
+                let mut funding_bytes = [0u8; 32];
+                funding_bytes[0] = 0x90 + wallet_index as u8;
+                funding_bytes[1..9].copy_from_slice(&seed.to_le_bytes());
+                let wallet = WalletHost {
+                    index: wallet_index,
+                    root_key,
+                    funding_key: Privkey::from(funding_bytes),
+                    lsp_index: setup.lsp_node,
+                    lsp_pubkey: peers[setup.lsp_node],
+                    lsp_slot: lsp_slot.clone(),
+                    path: path.join(wallet_name),
+                    chain: chain.clone(),
+                    wallets: wallets.clone(),
+                    trace: trace.clone(),
+                };
+                world.host(wallet_name, move || {
+                    let wallet = wallet.clone();
+                    async move { Ok(wallet.run().await?) }
+                });
+            }
         }
         if let Some(towers) = watchtowers
             .as_ref()
@@ -170,6 +235,9 @@ impl Harness {
             disks,
             watchtowers,
             tower_hits: vec![Vec::new(); count],
+            lsp_node,
+            lsp_slot,
+            wallets,
         })
     }
 
@@ -371,6 +439,9 @@ impl Harness {
                 tower.store.take();
             }
         }
+        if self.lsp_node == Some(node) {
+            self.lsp_slot.borrow_mut().take();
+        }
         self.world.crash(NAMES[node]);
         // A dialer can crash before Turmoil creates its TcpStream, leaving the
         // accepted socket on the surviving host without a FIN. Retire unfinished
@@ -429,6 +500,65 @@ impl Harness {
             self.world.repair(NAMES[from], NAMES[to]);
         }
     }
+
+    pub(crate) fn crash_wallet(&mut self, wallet: usize) {
+        self.note(format_args!("crash {}", WALLET_HOSTS[wallet]));
+        {
+            let mut wallets = self.wallets.borrow_mut();
+            let slot = &mut wallets[wallet];
+            slot.online = false;
+            slot.commands = None;
+        }
+        self.world.crash(WALLET_HOSTS[wallet]);
+    }
+
+    pub(crate) fn restart_wallet(&mut self, wallet: usize) {
+        self.note(format_args!("restart {}", WALLET_HOSTS[wallet]));
+        self.world.bounce(WALLET_HOSTS[wallet]);
+    }
+
+    pub(crate) fn partition_wallet(&self, wallet: usize, partitioned: bool) -> Result<()> {
+        let lsp = self.lsp_node.context("LSP node not configured")?;
+        if partitioned {
+            self.world.partition(WALLET_HOSTS[wallet], NAMES[lsp]);
+            self.note(format_args!(
+                "partition {}<->{} LSP RPC",
+                WALLET_HOSTS[wallet], NAMES[lsp]
+            ));
+        } else {
+            self.world.repair(WALLET_HOSTS[wallet], NAMES[lsp]);
+            self.note(format_args!(
+                "repair {}<->{} LSP RPC",
+                WALLET_HOSTS[wallet], NAMES[lsp]
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn wallet_request<T>(
+        &self,
+        wallet: usize,
+        command: impl FnOnce(oneshot::Sender<Result<T>>) -> WalletCommand,
+    ) -> Result<oneshot::Receiver<Result<T>>> {
+        let (reply, receiver) = oneshot::channel();
+        let wallets = self.wallets.borrow();
+        let sender = wallets[wallet]
+            .commands
+            .as_ref()
+            .with_context(|| format!("{} is offline", WALLET_HOSTS[wallet]))?;
+        sender
+            .send(command(reply))
+            .map_err(|_| anyhow!("{} command channel closed", WALLET_HOSTS[wallet]))?;
+        Ok(receiver)
+    }
+
+    pub(crate) fn lsp_actor(&self) -> Result<ractor::ActorRef<fnn::lsp::LspServiceMessage>> {
+        self.lsp_slot
+            .borrow()
+            .as_ref()
+            .map(|handle| handle.actor.clone())
+            .context("LSP service is offline")
+    }
 }
 
 #[cfg(test)]
@@ -452,6 +582,7 @@ mod tests {
                         tcp_capacity: None,
                         tower_mode: None,
                         funding_timeout_seconds: None,
+                        lsp: None,
                     },
                 )
                 .unwrap();

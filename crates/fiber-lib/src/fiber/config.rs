@@ -12,7 +12,7 @@ use clap_serde_derive::{
 };
 use fiber_types::protocol::AnnouncedNodeName;
 pub use fiber_types::DEFAULT_FINAL_TLC_EXPIRY_DELTA;
-#[cfg(not(any(test, feature = "bench")))]
+#[cfg(not(any(test, feature = "bench", feature = "simulation")))]
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf, str::FromStr};
@@ -490,7 +490,7 @@ pub struct FiberConfig {
     pub onion: OnionConfig,
 }
 
-#[cfg(not(any(test, feature = "bench")))]
+#[cfg(not(any(test, feature = "bench", feature = "simulation")))]
 static FIBER_SECRET_KEYS: Lazy<
     parking_lot::Mutex<std::collections::HashMap<PathBuf, super::KeyPair>>,
 > = Lazy::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
@@ -537,12 +537,12 @@ impl FiberConfig {
 
     // `OnceCell` will make all actors in UI tests use the same secret key.
     // which is not what we want. So we disable it in tests.
-    #[cfg(any(test, feature = "bench"))]
+    #[cfg(any(test, feature = "bench", feature = "simulation"))]
     pub fn read_or_generate_secret_key(&self) -> Result<super::KeyPair> {
         self.inner_read_or_generate_secret_key()
     }
 
-    #[cfg(not(any(test, feature = "bench")))]
+    #[cfg(not(any(test, feature = "bench", feature = "simulation")))]
     pub fn read_or_generate_secret_key(&self) -> Result<super::KeyPair> {
         let key_path = self.base_dir().join("sk");
         let mut keys = FIBER_SECRET_KEYS.lock();
@@ -642,6 +642,13 @@ impl FiberConfig {
     pub fn announce_node_interval_seconds(&self) -> u64 {
         self.announce_node_interval_seconds
             .unwrap_or(DEFAULT_ANNOUNCE_NODE_INTERVAL_SECONDS)
+    }
+
+    #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+    pub fn set_simulation_announced_addr(&mut self, addr: String, interval_seconds: u64) {
+        self.announced_addrs = vec![addr];
+        self.auto_announce_node = Some(true);
+        self.announce_node_interval_seconds = Some(interval_seconds);
     }
 
     /// Reads or creates the node key and returns its public key.

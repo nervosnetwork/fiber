@@ -2369,7 +2369,13 @@ name = "fiber-dst"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "ckb-jsonrpc-types",
+ "ckb-types",
+ "fiber-json-types",
+ "fiber-lsp-sdk",
  "fnn",
+ "hex",
  "jsonrpsee",
  "ractor",
  "rand 0.9.5",

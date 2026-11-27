@@ -62,5 +62,36 @@ pub use commitment::{
     CommitmentContext, CommitmentParameters, CommitmentReview, PaymentAuthorization,
 };
 
+#[cfg(feature = "simulation")]
+type SimulationRngFill = fn(&mut [u8]);
+
+#[cfg(feature = "simulation")]
+thread_local! {
+    static SIMULATION_RNG: std::cell::Cell<Option<SimulationRngFill>> = const { std::cell::Cell::new(None) };
+}
+
+/// Install a deterministic random-byte filler on the current thread for simulation tests.
+#[cfg(feature = "simulation")]
+pub fn with_simulation_rng<T>(fill: SimulationRngFill, run: impl FnOnce() -> T) -> T {
+    struct Reset(Option<SimulationRngFill>);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            SIMULATION_RNG.set(self.0);
+        }
+    }
+    let previous = SIMULATION_RNG.replace(Some(fill));
+    let _reset = Reset(previous);
+    run()
+}
+
+pub(crate) fn fill_random(dest: &mut [u8]) -> Result<(), SignerError> {
+    #[cfg(feature = "simulation")]
+    if let Some(fill) = SIMULATION_RNG.get() {
+        fill(dest);
+        return Ok(());
+    }
+    getrandom::fill(dest).map_err(|error| SignerError::Random(error.to_string()))
+}
+
 #[cfg(test)]
 mod commitment_tests;

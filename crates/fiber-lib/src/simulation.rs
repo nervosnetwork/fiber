@@ -17,6 +17,8 @@ use crate::ckb::CkbChainMessage;
 use crate::fiber::types::FiberMessage;
 use crate::store::Store;
 
+#[cfg(feature = "lsp")]
+pub use crate::fiber::network::simulation::{start_lsp_runtime, SimulatedLspRuntime};
 pub use crate::fiber::network::{start_node, SimulatedChain, SimulatedNode};
 pub use crate::store::store_impl::ChannelRecords;
 #[cfg(feature = "sqlite")]
@@ -72,6 +74,11 @@ pub(crate) fn with_random<T>(f: impl FnOnce(&mut dyn rand::RngCore) -> T) -> T {
     ENVIRONMENT.with_borrow_mut(|environment| {
         f(&mut environment.as_mut().expect("active simulation").random)
     })
+}
+
+/// Fill `dest` from the active deterministic simulation RNG.
+pub fn fill_random(dest: &mut [u8]) {
+    with_random(|rng| rng.fill_bytes(dest));
 }
 
 /// Derive simulation entropy from a logical owner rather than task scheduling order.

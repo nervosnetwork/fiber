@@ -26,6 +26,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot, watch};
 use turmoil::net::{TcpListener, TcpStream};
 
+use crate::lsp::{serve_lsp_rpc, LspHandle, LspHostConfig};
 use crate::tower::{self, Tower, TowerMode};
 
 const PORT: u16 = 7100;
@@ -218,6 +219,7 @@ pub(crate) struct Host {
     pub trace: Trace,
     pub watchtower: Option<Tower>,
     pub funding_timeout_seconds: Option<u64>,
+    pub lsp: Option<LspHostConfig>,
 }
 
 impl Host {
@@ -235,6 +237,9 @@ impl Host {
         if let Some(timeout) = self.funding_timeout_seconds {
             config.funding_timeout_seconds = timeout;
         }
+        if self.lsp.is_some() {
+            config.set_simulation_announced_addr("/ip4/127.0.0.1/tcp/8228".to_string(), 1);
+        }
         let features = config.gen_node_features();
         let generation = {
             let mut nodes = self.nodes.borrow_mut();
@@ -246,7 +251,7 @@ impl Host {
             *byte ^= generation_byte;
         }
         let mut runtime = simulation::start_node(
-            config,
+            config.clone(),
             self.key.clone(),
             entropy,
             store.clone(),
@@ -264,6 +269,34 @@ impl Host {
         );
 
         let mut tasks = tokio::task::JoinSet::new();
+        let _lsp_runtime = if let Some(lsp_cfg) = &self.lsp {
+            let lsp_runtime = Rc::new(
+                simulation::start_lsp_runtime(
+                    &runtime,
+                    config.clone(),
+                    self.key.clone(),
+                    store.clone(),
+                    lsp_cfg.dir.clone(),
+                    lsp_cfg.biscuit_seed,
+                    lsp_cfg.config.clone(),
+                )
+                .await?,
+            );
+            lsp_cfg.slot.replace(Some(LspHandle {
+                actor: lsp_runtime.lsp_actor.clone(),
+                admin_token: lsp_runtime.admin_token.clone(),
+                _runtime: lsp_runtime.clone(),
+            }));
+            let rpc_runtime = lsp_runtime.clone();
+            tasks.spawn_local(async move { serve_lsp_rpc(rpc_runtime).await });
+            record(
+                &self.trace,
+                format_args!("{} LSP service started", NAMES[self.index]),
+            );
+            Some(lsp_runtime)
+        } else {
+            None
+        };
         let forward = match &self.watchtower {
             Some(tower) if tower.mode == TowerMode::BuiltIn => {
                 let (tower, store, chain, key) = (
@@ -329,8 +362,31 @@ impl Host {
                         forward.send(event.clone()).map_err(|_| anyhow!("external watchtower forwarder stopped"))?;
                     }
                     match event {
-                        NetworkServiceEvent::ChannelPendingToBeAccepted(_, id) => {
+                        NetworkServiceEvent::ChannelPendingToBeAccepted(peer, id) => {
                             self.nodes.borrow_mut()[self.index].pending_channels.insert(id);
+                            if let Some(lsp_cfg) = &self.lsp {
+                                if self.peers.iter().all(|known| known.key != peer) {
+                                    let (reply, _rx) = oneshot::channel();
+                                    let _ = send(
+                                        &runtime.actor,
+                                        NetworkActorMessage::new_command(
+                                            FiberActorCommand::AcceptChannel(
+                                                fnn::fiber::network::AcceptChannelCommand {
+                                                    temp_channel_id: id,
+                                                    funding_amount: lsp_cfg.tenant_liquidity,
+                                                    shutdown_script: None,
+                                                    max_tlc_value_in_flight: None,
+                                                    max_tlc_number_in_flight: None,
+                                                    min_tlc_value: None,
+                                                    tlc_fee_proportional_millionths: Some(0),
+                                                    tlc_expiry_delta: None,
+                                                },
+                                                reply.into(),
+                                            ),
+                                        ),
+                                    );
+                                }
+                            }
                         }
                         NetworkServiceEvent::ChannelFundingAborted(id) => {
                             self.nodes.borrow_mut()[self.index].aborted_channels.insert(id);

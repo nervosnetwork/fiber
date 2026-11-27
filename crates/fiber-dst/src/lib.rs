@@ -4,6 +4,7 @@
 
 mod harness;
 mod host;
+mod lsp;
 mod scenario;
 mod tower;
 

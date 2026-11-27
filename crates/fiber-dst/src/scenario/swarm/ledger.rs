@@ -506,12 +506,11 @@ impl<'a> Ledger<'a> {
                 edge.channel
             );
         }
-        for node in 0..driver.runtime.peers.len() {
+        for (node, &name) in NAMES.iter().enumerate().take(driver.runtime.peers.len()) {
             if driver.runtime.node_available(node) {
                 let store = driver.runtime.store(node)?;
-                simulation::verify_payment_hash_index(&store).map_err(|error| {
-                    anyhow::anyhow!("{} payment-hash index: {error}", NAMES[node])
-                })?;
+                simulation::verify_payment_hash_index(&store)
+                    .map_err(|error| anyhow::anyhow!("{name} payment-hash index: {error}"))?;
             }
         }
         Ok(succeeded)

@@ -1,5 +1,5 @@
 #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
-mod simulation;
+pub(crate) mod simulation;
 
 #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
 pub use simulation::{start_node, SimulatedChain, SimulatedNode};
@@ -11172,10 +11172,18 @@ where
                     features,
                 },
             );
+            let announced_addrs = config
+                .announced_addrs
+                .iter()
+                .map(|addr| {
+                    addr.parse::<MultiAddr>()
+                        .expect("valid announced multiaddr")
+                })
+                .collect::<Vec<_>>();
             let public = PublicNetworkRuntimeState {
                 state_to_be_persisted,
                 node_name: config.announced_node_name,
-                announced_addrs: vec![],
+                announced_addrs,
                 auto_announce: config.auto_announce_node(),
                 last_node_announcement_message: None,
                 control: service.control().clone(),
@@ -11192,7 +11200,18 @@ where
                 peer_reconnect_backoff_attempts: Default::default(),
                 requested_disconnect_peers: Default::default(),
             };
-            return Ok(NetworkActorState { fiber, public });
+            let mut state = NetworkActorState { fiber, public };
+            if let Some(node_announcement) = state.get_or_create_new_node_announcement_message() {
+                let mut graph = self.core.network_graph.write().await;
+                graph.process_node_announcement(node_announcement.clone());
+                drop(graph);
+                let _ = myself.send_message(NetworkActorMessage::new_command(
+                    PublicNetworkCommand::BroadcastMessages(vec![
+                        BroadcastMessageWithTimestamp::NodeAnnouncement(node_announcement),
+                    ]),
+                ));
+            }
+            return Ok(state);
         }
         let kp = config
             .read_or_generate_secret_key()

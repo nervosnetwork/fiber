@@ -204,8 +204,7 @@ impl<S: SignerStore> RootSigner<S> {
     pub async fn create_channel(&self) -> Result<ChannelSigner<S>, SignerError> {
         for _ in 0..MAX_ALLOCATION_ATTEMPTS {
             let mut allocation_entropy = [0u8; 32];
-            getrandom::fill(&mut allocation_entropy)
-                .map_err(|error| SignerError::Random(error.to_string()))?;
+            crate::fill_random(&mut allocation_entropy)?;
             let (channel_key_id, key_material) = self.derive_channel(&allocation_entropy);
             let record = StoredChannel {
                 format_version: STORE_FORMAT_VERSION,
@@ -499,7 +498,7 @@ impl<S: SignerStore> ChannelSigner<S> {
     pub async fn get_musig2_nonce(&self, slot: NonceSlot) -> Result<Musig2Nonce, SignerError> {
         validate_nonce_slot(slot)?;
         let mut seed = zeroize::Zeroizing::new([0u8; 32]);
-        getrandom::fill(seed.as_mut()).map_err(|e| SignerError::Random(e.to_string()))?;
+        crate::fill_random(seed.as_mut())?;
         let public_nonce = SecNonceBuilder::new(*seed)
             .with_seckey(&self.key_material.funding_key)
             .build()

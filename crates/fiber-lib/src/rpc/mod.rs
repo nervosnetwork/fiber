@@ -14,7 +14,7 @@ pub mod invoice;
 #[cfg(all(not(target_arch = "wasm32"), feature = "lsp"))]
 pub mod lsp;
 #[cfg(not(target_arch = "wasm32"))]
-mod middleware;
+pub(crate) mod middleware;
 pub mod payment;
 pub mod peer;
 #[cfg(all(feature = "pprof", not(target_arch = "wasm32")))]

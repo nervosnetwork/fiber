@@ -8,7 +8,13 @@ publish = false
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 anyhow = "1"
-fnn = { path = "../fiber-lib", features = ["simulation", "sqlite"] }
+async-trait = "0.1"
+ckb-jsonrpc-types = "1"
+ckb-types = "1"
+fiber-json-types = { path = "../fiber-json-types", features = ["conversion", "watchtower"] }
+fiber-lsp-sdk = { path = "../fiber-lsp-sdk", features = ["json", "simulation", "test-apis"] }
+fnn = { path = "../fiber-lib", features = ["simulation", "sqlite", "lsp", "watchtower"] }
+hex = "0.4"
 jsonrpsee = { version = "0.25", features = ["client-core", "server"] }
 rand = "0.9"
 ractor = { version = "0.15", features = ["async-trait"] }

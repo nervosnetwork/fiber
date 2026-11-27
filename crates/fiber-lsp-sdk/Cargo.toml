@@ -32,6 +32,8 @@ default = ["json"]
 json = ["dep:fiber-json-types", "dep:ckb-jsonrpc-types"]
 # Exposes test-only helpers (`SigningPolicy::Always`, `MemoryStore::snapshot`/`from_snapshot`).
 test-apis = []
+# Deterministic simulation RNG hook for cross-process DST replay.
+simulation = []
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt"] }
