@@ -3610,7 +3610,9 @@ where
                             state.tlc_state.set_offered_tlc_removed(id, fulfill.clone());
                         }
                         if let Some(attempt_id) = tlc.attempt_id {
-                            state.notify_payment_hash_v2(tlc.payment_hash);
+                            state
+                                .pending_payment_notifications
+                                .insert(tlc.session_key());
                             let confirmed = OnChainConfirmedPayerTlc {
                                 upstream_tlc_key: tlc.upstream_tlc_key,
                                 tlc_id: tlc.tlc_id,
@@ -3645,7 +3647,9 @@ where
             if self.reconcile_onchain_payer_tlc(channel_id, tlc).await {
                 if confirm_onchain_payer_fulfill(state, tlc) {
                     self.store.insert_preimage(tlc.payment_hash, tlc.preimage);
-                    state.notify_payment_hash_v2(tlc.payment_hash);
+                    state
+                        .pending_payment_notifications
+                        .insert(tlc.session_key());
                 }
             } else {
                 payer_effects_applied = false;
@@ -3710,13 +3714,14 @@ where
             })
             .collect();
         for (id, reason) in offered_updates {
-            let hash = state.tlc_state.set_offered_tlc_removed(id, reason);
-            if state
+            let _hash = state.tlc_state.set_offered_tlc_removed(id, reason);
+            if let Some(session_key) = state
                 .tlc_state
                 .get(&TLCId::Offered(id))
-                .is_some_and(|tlc| tlc.attempt_id.is_some() && tlc.forwarding_tlc.is_none())
+                .filter(|tlc| tlc.attempt_id.is_some() && tlc.forwarding_tlc.is_none())
+                .map(TlcInfo::session_key)
             {
-                state.notify_payment_hash_v2(hash);
+                state.pending_payment_notifications.insert(session_key);
             }
         }
 
@@ -4467,21 +4472,23 @@ where
                 {
                     let session = &mut state.session;
                     // `retain` removes an entry exactly when this lookup finds one, so the
-                    // payment hash also tells us whether the outbox changed.
-                    let payment_hash = session
+                    // captured payment hash and scoped session key also tell us whether the
+                    // outbox changed. Capture the full `PaymentSessionKey` before `retain`
+                    // drops the last copy of `upstream_tlc_key` for scoped trampoline sessions.
+                    let removed = session
                         .remove_effects
                         .iter()
                         .find(|(tlc, _)| {
                             tlc.tlc_id == tlc_id && tlc.removed_reason.as_ref() == Some(&reason)
                         })
-                        .map(|(tlc, _)| tlc.payment_hash);
+                        .map(|(tlc, _)| (tlc.payment_hash, tlc.session_key()));
                     session.remove_effects.retain(|(tlc, _)| {
                         tlc.tlc_id != tlc_id || tlc.removed_reason.as_ref() != Some(&reason)
                     });
-                    if let Some(hash) = payment_hash {
+                    if let Some((hash, session_key)) = removed {
                         // Include retired TLCs in the message-tail notification,
                         // published only after the outbox acknowledgement is saved.
-                        state.notify_payment_hash_v2(hash);
+                        state.pending_payment_notifications.insert(session_key);
                         let retain_invoice_preimage = self.store.has_invoice_preimage(&hash)
                             && self.store.get_invoice_status(&hash) == Some(CkbInvoiceStatus::Open);
                         if matches!(reason, RemoveTlcReason::RemoveTlcFulfill(_))
@@ -4521,13 +4528,13 @@ where
                             && tlc.attempt_id.is_some()
                             && tlc.forwarding_tlc.is_none()
                         {
-                            changed_payment = Some(tlc.payment_hash);
+                            changed_payment = Some(tlc.session_key());
                         }
                         tlc.applied_flags.insert(AppliedFlags::REMOVE);
                     }
                 }
-                if let Some(hash) = changed_payment {
-                    state.notify_payment_hash_v2(hash);
+                if let Some(session_key) = changed_payment {
+                    state.pending_payment_notifications.insert(session_key);
                 }
                 if state.is_waiting_onchain_settlement() && state.is_onchain_settlement_confirmed()
                 {
@@ -13311,7 +13318,7 @@ mod tests {
             store,
             None,
         );
-        state.notify_payment_hash_v2(hash);
+        state.pending_payment_notifications.insert(hash.into());
         for _ in 0..3 {
             actor.persist_state_and_publish_pending_effects(&mut state);
         }
@@ -13329,6 +13336,106 @@ mod tests {
         assert_eq!(
             count, 1,
             "unrelated channel messages must not republish a completed TLC"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_onchain_tlc_relay_confirmed_notifies_scoped_trampoline_session_key() {
+        // Capture every emitted `PaymentTlcUpdated(session_key)` directly.
+        let noticed = std::sync::Arc::new(std::sync::Mutex::new(Vec::<PaymentSessionKey>::new()));
+        struct KeyCollector(std::sync::Arc<std::sync::Mutex<Vec<PaymentSessionKey>>>);
+
+        #[async_trait::async_trait]
+        impl Actor for KeyCollector {
+            type Msg = FiberActorMessage;
+            type State = ();
+            type Arguments = ();
+
+            async fn pre_start(
+                &self,
+                _: ActorRef<Self::Msg>,
+                _: (),
+            ) -> Result<(), ActorProcessingErr> {
+                Ok(())
+            }
+
+            async fn handle(
+                &self,
+                _: ActorRef<Self::Msg>,
+                message: Self::Msg,
+                _: &mut (),
+            ) -> Result<(), ActorProcessingErr> {
+                match message {
+                    FiberActorMessage::Command(FiberActorCommand::PaymentTlcUpdated(key)) => {
+                        self.0.lock().unwrap().push(key);
+                    }
+                    FiberActorMessage::Command(FiberActorCommand::GetInflightPaymentCount(
+                        reply,
+                    )) => {
+                        let _ = reply.send(Ok(0));
+                    }
+                    _ => {}
+                }
+                Ok(())
+            }
+        }
+
+        let (store, _dir) = crate::tests::test_utils::generate_store();
+        let (network, task) = Actor::spawn(None, KeyCollector(noticed.clone()), ())
+            .await
+            .unwrap();
+        let (myself, channel_task) = Actor::spawn(None, NoticeChannelMailbox, ()).await.unwrap();
+        let mut state =
+            channel_state_with_limits(ChannelConstraints::default(), ChannelConstraints::default());
+        let mut tlc = failed_remove_ack_confirmed_tlc(TLCId::Offered(0), 100);
+        let upstream = fiber_types::UpstreamTlcKey {
+            incoming_channel_id: Hash256::from([0x77; 32]),
+            incoming_tlc_id: 9,
+        };
+        let preimage = Hash256::from([0x42; 32]);
+        let reason = RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+            payment_preimage: preimage,
+        });
+        tlc.attempt_id = Some(1);
+        tlc.upstream_tlc_key = Some(upstream);
+        tlc.removed_reason = Some(reason.clone());
+        let expected_key = tlc.session_key();
+        // Fulfilled offered TLC has already left `tlc_state` and lives only in `remove_effects`.
+        state.session.remove_effects.push((tlc, Some(1)));
+        store.insert_channel_actor_state_for_test(state.clone());
+        let actor = ChannelActor::new(
+            state.local_pubkey,
+            state.remote_pubkey,
+            network.clone(),
+            store,
+            None,
+        );
+        actor
+            .handle_event(
+                &myself,
+                &mut state,
+                ChannelEvent::OnChainTlcRelayConfirmed(TLCId::Offered(0), reason),
+            )
+            .await
+            .unwrap();
+        actor.persist_state_and_publish_pending_effects(&mut state);
+        let _ = ractor::call_t!(
+            network,
+            |reply| FiberActorMessage::new_command(FiberActorCommand::GetInflightPaymentCount(
+                reply
+            )),
+            5000
+        )
+        .unwrap()
+        .unwrap();
+        myself.stop(None);
+        channel_task.await.unwrap();
+        network.stop(None);
+        task.await.unwrap();
+        assert_eq!(
+            *noticed.lock().unwrap(),
+            vec![expected_key],
+            "retiring the last remove_effects entry must notify the scoped trampoline PaymentSessionKey"
         );
     }
 
@@ -14747,35 +14854,6 @@ impl ChannelActorState {
             self.signing_context.v2_nonce_pool.clear();
             self.signing_context.v2_commitment_points.clear();
         }
-    }
-}
-
-impl ChannelActorState {
-    fn notify_payment_hash_v2(&mut self, hash: Hash256) {
-        let mut keys: HashSet<PaymentSessionKey> = self
-            .tlc_state
-            .all_tlcs()
-            .filter(|t| t.payment_hash == hash)
-            .map(TlcInfo::session_key)
-            .collect();
-        keys.extend(
-            self.session
-                .remove_effects
-                .iter()
-                .filter(|(t, _)| t.payment_hash == hash)
-                .map(|(t, _)| t.session_key()),
-        );
-        for op in &self.retryable_tlc_operations {
-            if let RetryableTlcOperation::AddTlc(c) = op {
-                if c.payment_hash == hash {
-                    keys.insert(c.session_key());
-                }
-            }
-        }
-        if keys.is_empty() {
-            keys.insert(hash.into());
-        }
-        self.pending_payment_notifications.extend(keys);
     }
 }
 
