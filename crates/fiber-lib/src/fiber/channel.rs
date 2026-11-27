@@ -7853,16 +7853,26 @@ impl ChannelActorState {
             .expect("public channel info exists")
     }
 
-    /// Recovery replays our announcement signature only while the announcement
-    /// is incomplete. Once we are ChannelReady with the peer's signature it is
-    /// not sent again.
-    pub(crate) fn should_replay_announcement_signature(&self) -> bool {
+    /// Whether the peer's handshake still needs our cached announcement signature.
+    ///
+    /// The handshake proves the peer's own opening progress, compared only with values we
+    /// validated while opening: `next_ack_number` stays at the bootstrap commitment until the
+    /// peer completes the Ready exchange, and `next_local_commitment_nonce` still equals the
+    /// bootstrap Ready it sent us until a later reconnect rotates it. Our local state is not
+    /// part of the decision: a ready or shutting-down node still owes the signature to a peer
+    /// that never finished opening, while a ready peer re-runs its ready transition on a late
+    /// `AnnouncementSignatures` and moves both commitment numbers without a signed update.
+    pub(crate) fn should_replay_announcement_signature(&self, peer: &ReestablishChannelV2) -> bool {
         let Some(info) = self.public_channel_info.as_ref() else {
             return false;
         };
         info.local_channel_announcement_signature.is_some()
-            && !(matches!(self.state, ChannelState::ChannelReady)
-                && info.remote_channel_announcement_signature.is_some())
+            && peer.next_ack_number == INITIAL_COMMITMENT_NUMBER + 1
+            && self.session.remote_ready.as_ref().is_some_and(|ready| {
+                ChannelReadyV2::try_from(ready.clone()).is_ok_and(|ready| {
+                    ready.next_commitment_nonce == peer.next_local_commitment_nonce
+                })
+            })
     }
 
     fn get_remote_channel_announcement_nonce(&self) -> Option<PubNonce> {
@@ -12253,6 +12263,7 @@ where
                 return Err(invalid("Incompatible V2 funding Ready history"));
             }
             let replay_initial = peer.next_commitment_number == INITIAL_COMMITMENT_NUMBER + 1;
+            self.replay_announcement_signature_v2(state, &peer);
             state.recovery_peer_v2 = Some(peer);
             self.replay_effects_v2(state);
             if state.ephemeral_config.external_funding.signed_submitted && !state.is_acceptor {
@@ -12412,6 +12423,11 @@ where
         };
         let peer_nonce = peer.next_local_commitment_nonce.clone();
         let peer_number = peer.next_commitment_number;
+        // A v0.10.1 peer takes a late AnnouncementSignatures on a ready channel as a new
+        // ChannelReady and moves both commitment numbers without a signed update, so the next
+        // reestablish fails and the channel has to be closed by force. Its handshake is the only
+        // evidence of its opening progress, so replay only while it still shows opening.
+        self.replay_announcement_signature_v2(state, &peer);
         state.recovery_peer_v2 = Some(peer);
         let rebind_pending_send = peer_number == local
             && pending_send
@@ -12575,28 +12591,36 @@ where
         self.progress_close_v2(state).await
     }
 
-    fn replay_effects_v2(&self, state: &ChannelActorState) {
-        // The remote may have lost its runtime queue while an external
-        // announcement signature was pending. Replay our durable signature on
-        // recovery until the channel is ready. Not after: a v0.10.1 peer takes a
-        // late AnnouncementSignatures on a ready channel as a new ChannelReady
-        // and moves both commitment numbers without a signed update, so the next
-        // reestablish fails and the channel has to be closed by force.
-        if let Some((node_signature, partial_signature)) = state
+    /// Our cached announcement signature is owed to a peer that never finished opening.
+    ///
+    /// Sent only after a validated handshake, never from the restore path, which runs before the
+    /// peer's opening progress is known.
+    fn replay_announcement_signature_v2(
+        &self,
+        state: &ChannelActorState,
+        peer: &ReestablishChannelV2,
+    ) {
+        if !state.should_replay_announcement_signature(peer) {
+            return;
+        }
+        let Some((node_signature, partial_signature)) = state
             .public_channel_info
             .as_ref()
-            .filter(|_| state.should_replay_announcement_signature())
             .and_then(|info| info.local_channel_announcement_signature.clone())
-        {
-            state.send_message_to_peer(FiberMessage::announcement_signatures(
-                AnnouncementSignatures {
-                    channel_id: state.id,
-                    channel_outpoint: state.must_get_funding_transaction_outpoint(),
-                    node_signature,
-                    partial_signature,
-                },
-            ));
-        }
+        else {
+            return;
+        };
+        state.send_message_to_peer(FiberMessage::announcement_signatures(
+            AnnouncementSignatures {
+                channel_id: state.id,
+                channel_outpoint: state.must_get_funding_transaction_outpoint(),
+                node_signature,
+                partial_signature,
+            },
+        ));
+    }
+
+    fn replay_effects_v2(&self, state: &ChannelActorState) {
         let session = &state.session;
         if let Some(settlement) = &session.bootstrap_settlement {
             self.network
