@@ -75,6 +75,7 @@ pub(crate) enum FrameLoss {
     After(usize),
     FundingUpdate(Hash256),
     FundingSignatures(Hash256),
+    RevokeAndAck(Hash256),
 }
 
 #[derive(Clone, Copy)]
@@ -153,6 +154,11 @@ impl LinkControl {
                 message,
                 FiberMessage::ChannelNormalOperation(FiberChannelMessage::TxSignatures(signatures))
                     if signatures.channel_id == channel
+            ),
+            Some(FrameLoss::RevokeAndAck(channel)) => matches!(
+                message,
+                FiberMessage::ChannelNormalOperation(FiberChannelMessage::RevokeAndAckV2(ack))
+                    if ack.channel_id == channel
             ),
             None => false,
         };

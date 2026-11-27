@@ -41,6 +41,8 @@ pub enum RandomFaultPolicy {
 pub enum Scenario {
     /// Force close a CKB channel and execute settlement through the real watchtower.
     WatchtowerSettlement,
+    /// Supersede a round's CommitmentSignedV2 variant, force close, and settle via watchtower.
+    WatchtowerSuperseded,
     /// Crash the receiver after it commits an incoming V2 commitment, before it sends the ACK.
     CrashBeforeAck,
     /// Exercise faults and recovery during serial payments across a two-node channel.
@@ -119,12 +121,16 @@ pub fn run(scenario: Scenario, seed: u64) -> Result<Vec<String>> {
         };
         let continuous = matches!(scenario, Scenario::Random { fault_policy, .. }
             if fault_policy != RandomFaultPolicy::Windows);
-        let tower_mode = (topology.is_some() || matches!(scenario, Scenario::WatchtowerSettlement))
-            .then_some(if seed.is_multiple_of(2) {
-                TowerMode::BuiltIn
-            } else {
-                TowerMode::External
-            });
+        let tower_mode = (topology.is_some()
+            || matches!(
+                scenario,
+                Scenario::WatchtowerSettlement | Scenario::WatchtowerSuperseded
+            ))
+        .then_some(if seed.is_multiple_of(2) {
+            TowerMode::BuiltIn
+        } else {
+            TowerMode::External
+        });
         let runtime = Harness::new(
             seed,
             directory.path(),
@@ -153,6 +159,7 @@ pub fn run(scenario: Scenario, seed: u64) -> Result<Vec<String>> {
         ));
         match scenario {
             Scenario::WatchtowerSettlement => driver.watchtower_settlement(),
+            Scenario::WatchtowerSuperseded => driver.watchtower_superseded(),
             Scenario::Faults => driver.faults(),
             Scenario::Multihop => driver.multihop(),
             Scenario::Mpp => driver.mpp(seed),

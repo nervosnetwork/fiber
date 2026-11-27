@@ -169,6 +169,10 @@ impl Driver {
         )?;
         injection.heal(&mut self.runtime);
         self.finish_payment(channel, from, payment, amount, before)?;
+        for node in [0, 1] {
+            let store = self.runtime.store(node)?;
+            fnn::simulation::verify_payment_hash_index(&store).map_err(|error| anyhow!(error))?;
+        }
         Ok(())
     }
 
@@ -203,6 +207,10 @@ impl Driver {
         );
         injection.heal(&mut self.runtime);
         self.finish_payment(channel, from, payment, amount, before)?;
+        for node in [0, 1] {
+            let store = self.runtime.store(node)?;
+            fnn::simulation::verify_payment_hash_index(&store).map_err(|error| anyhow!(error))?;
+        }
         Ok(())
     }
 
@@ -243,6 +251,10 @@ impl Driver {
             .note(format_args!("{} hit TCP {fault:?}", NAMES[target]));
         injection.heal(&mut self.runtime);
         self.finish_payment(channel, from, payment, amount, before)?;
+        for node in [0, 1] {
+            let store = self.runtime.store(node)?;
+            fnn::simulation::verify_payment_hash_index(&store).map_err(|error| anyhow!(error))?;
+        }
         Ok(())
     }
 
@@ -265,6 +277,10 @@ impl Driver {
         ));
         injection.heal(&mut self.runtime);
         self.finish_payment(channel, from, payment, amount, before)?;
+        for node in [0, 1] {
+            let store = self.runtime.store(node)?;
+            fnn::simulation::verify_payment_hash_index(&store).map_err(|error| anyhow!(error))?;
+        }
         Ok(())
     }
 

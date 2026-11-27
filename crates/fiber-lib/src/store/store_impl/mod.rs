@@ -780,6 +780,83 @@ impl Store {
             .map(|kv| OutPoint::from_slice(&kv.key[1..]).expect("decode indexed funding outpoint"))
             .collect()
     }
+
+    pub(crate) fn simulation_verify_payment_hash_index(&self) -> Result<(), String> {
+        use std::collections::{BTreeMap, BTreeSet};
+
+        let mut expected_by_channel: BTreeMap<Hash256, BTreeSet<Hash256>> = BTreeMap::new();
+        let mut expected_pairs: BTreeSet<(Hash256, Hash256)> = BTreeSet::new();
+        for kv in self.collect_by_prefix(&[CHANNEL_ACTOR_STATE_PREFIX]) {
+            let channel_id: [u8; 32] = kv
+                .key
+                .get(1..)
+                .and_then(|bytes| bytes.try_into().ok())
+                .ok_or_else(|| format!("malformed channel key len={}", kv.key.len()))?;
+            let channel_id = Hash256::from(channel_id);
+            let Some(records) = self.simulation_channel_records(&channel_id) else {
+                continue;
+            };
+            let state = records.decode();
+            let hashes = state.pending_payment_hashes();
+            if !hashes.is_empty() {
+                for &hash in &hashes {
+                    expected_pairs.insert((hash, channel_id));
+                }
+                expected_by_channel.insert(channel_id, hashes);
+            }
+        }
+
+        let mut actual_by_channel: BTreeMap<Hash256, BTreeSet<Hash256>> = BTreeMap::new();
+        for kv in self.collect_by_prefix(&[CHANNEL_PAYMENT_HASHES_PREFIX]) {
+            let channel_id: [u8; 32] = kv
+                .key
+                .get(1..)
+                .and_then(|bytes| bytes.try_into().ok())
+                .ok_or_else(|| {
+                    format!("malformed channel-payment-hashes key len={}", kv.key.len())
+                })?;
+            let channel_id = Hash256::from(channel_id);
+            let hashes: Vec<Hash256> = deserialize_from(kv.value.as_ref(), "ChannelPaymentHashes");
+            if hashes.is_empty() {
+                return Err(format!(
+                    "empty CHANNEL_PAYMENT_HASHES_PREFIX row for channel {channel_id}"
+                ));
+            }
+            if !hashes.windows(2).all(|pair| pair[0] < pair[1]) {
+                return Err(format!(
+                    "unsorted or duplicate CHANNEL_PAYMENT_HASHES_PREFIX row for channel {channel_id}"
+                ));
+            }
+            actual_by_channel.insert(channel_id, hashes.into_iter().collect());
+        }
+        if actual_by_channel != expected_by_channel {
+            return Err(format!(
+                "CHANNEL_PAYMENT_HASHES_PREFIX mismatch: actual={actual_by_channel:?}, expected={expected_by_channel:?}"
+            ));
+        }
+
+        let mut actual_pairs: BTreeSet<(Hash256, Hash256)> = BTreeSet::new();
+        for kv in self.collect_by_prefix(&[PAYMENT_HASH_CHANNEL_ID_PREFIX]) {
+            if kv.key.len() != 65 || !kv.value.is_empty() {
+                return Err(format!(
+                    "malformed PAYMENT_HASH_CHANNEL_ID_PREFIX row: key_len={}, val_len={}",
+                    kv.key.len(),
+                    kv.value.len()
+                ));
+            }
+            let payment_hash =
+                Hash256::from(<[u8; 32]>::try_from(&kv.key[1..33]).expect("32-byte payment hash"));
+            let channel_id =
+                Hash256::from(<[u8; 32]>::try_from(&kv.key[33..65]).expect("32-byte channel id"));
+            actual_pairs.insert((payment_hash, channel_id));
+        }
+        if actual_pairs != expected_pairs {
+            return Err(format!(
+                "PAYMENT_HASH_CHANNEL_ID_PREFIX mismatch: actual={actual_pairs:?}, expected={expected_pairs:?}"
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[cfg(all(test, feature = "simulation", not(target_arch = "wasm32")))]

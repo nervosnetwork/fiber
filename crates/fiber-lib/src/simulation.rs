@@ -105,6 +105,11 @@ pub fn indexed_funding_outpoints(
     store.simulation_indexed_funding_outpoints(channel)
 }
 
+/// Verify that the raw pending payment-hash secondary indexes match persisted channel states.
+pub fn verify_payment_hash_index(store: &Store) -> Result<(), String> {
+    store.simulation_verify_payment_hash_index()
+}
+
 /// One endpoint's durable balance change from fulfilling a TLC.
 #[derive(Clone, Debug)]
 pub struct TlcSettlement {

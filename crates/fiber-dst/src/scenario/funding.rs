@@ -104,6 +104,7 @@ fn audited_channel_state(
             "deleted channel {id} remains in cache"
         );
     }
+    simulation::verify_payment_hash_index(store).map_err(|error| anyhow::anyhow!(error))?;
     Ok(state.map(|state| state.state))
 }
 

@@ -30,6 +30,7 @@ fn emit_fixture_trace() {
     let path = env::var_os("FIBER_DST_TRACE").expect("trace path");
     let scenario = match case.as_str() {
         "watchtower-settlement" => Scenario::WatchtowerSettlement,
+        "watchtower-superseded" => Scenario::WatchtowerSuperseded,
         "crash-before-ack" => Scenario::CrashBeforeAck,
         "two-node-faults" => Scenario::TwoNodeFaults,
         "swarm" => Scenario::Swarm,
@@ -537,4 +538,28 @@ fn external_watchtower_recovers_its_link_and_settles_while_fiber_is_offline() {
             .unwrap_or_else(|| panic!("missing or out-of-order milestone {marker}"));
     }
     assert_eq!(trace, run_fixture("watchtower-settlement", seed));
+}
+
+#[test]
+fn watchtower_settles_superseded_round_variant_in_builtin_and_external_modes() {
+    for (seed, mode_marker) in [
+        ("42", "watchtower mode BuiltIn"),
+        ("43", "watchtower mode External"),
+    ] {
+        let trace = run_fixture("watchtower-superseded", seed);
+        for marker in [
+            mode_marker,
+            "A dropped peer frame from B RevokeAndAckV2",
+            "watchtower recorded superseded settlement count=",
+            "advance virtual Unix clock",
+            "watchtowers completed settlement",
+            "watchtower settled superseded-round commitment=",
+        ] {
+            assert!(
+                trace.contains(marker),
+                "seed {seed} missing milestone {marker}"
+            );
+        }
+        assert_eq!(trace, run_fixture("watchtower-superseded", seed));
+    }
 }

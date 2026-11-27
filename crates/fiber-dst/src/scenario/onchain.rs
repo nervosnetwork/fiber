@@ -10,8 +10,9 @@ use fnn::invoice::{CkbInvoiceStatus, Currency, InvoiceBuilder, InvoiceStore};
 use fnn::simulation::{slow_mailbox, ChainEndpoint, ChainFault};
 use fnn::watchtower::{WatchtowerMessage, WatchtowerStore};
 
+use super::faults::Fault;
 use super::{receive, Driver};
-use crate::host::NAMES;
+use crate::host::{FrameDelay, FrameLoss, NAMES};
 use crate::tower::{Tower, TowerMode};
 
 impl Driver {
@@ -75,6 +76,252 @@ impl Driver {
         self.start_watchtowers([0, 1])?;
         let channel = self.open_channel()?;
         self.settle_held_payment(channel, [0, 1], Hash256::from([17; 32]))
+    }
+
+    pub(super) fn watchtower_superseded(&mut self) -> Result<()> {
+        self.start_watchtowers([0, 1])?;
+        let channel = self.open_channel()?;
+        let from = self
+            .runtime
+            .channel(0, &channel)
+            .context("missing opener channel state")?;
+        let funding = from
+            .get_funding_transaction_outpoint()
+            .context("funding output")?;
+
+        let add_invoice = |driver: &mut Self,
+                           payee: usize,
+                           preimage: Hash256,
+                           known_preimage: bool,
+                           amount: u128|
+         -> Result<(Hash256, String)> {
+            let payment: Hash256 = HashAlgorithm::CkbHash.hash(preimage).into();
+            let payee_key = fnn::fiber::Privkey::from([(payee + 1) as u8; 32]);
+            let invoice = InvoiceBuilder::new(Currency::Fibd)
+                .amount(Some(amount))
+                .payment_hash(payment)
+                .payee_pub_key(driver.runtime.peers[payee].into())
+                .build_with_sign(|message| {
+                    secp256k1::SECP256K1.sign_ecdsa_recoverable(message, &payee_key.0)
+                })?;
+            let invoice_string = invoice.to_string();
+            let mut reply = driver.runtime.request(payee, |reply| {
+                FiberActorCommand::AddInvoice(invoice, known_preimage.then_some(preimage), reply)
+            })?;
+            driver.until("invoice recorded", |_| {
+                receive(&mut reply)?.transpose().map_err(Into::into)
+            })?;
+            Ok((payment, invoice_string))
+        };
+
+        let send_direct = |driver: &mut Self,
+                           payer: usize,
+                           payee: usize,
+                           invoice_string: String,
+                           amount: u128,
+                           payment: Hash256|
+         -> Result<()> {
+            let reply = driver.runtime.request(payer, |reply| {
+                FiberActorCommand::SendPaymentWithRouter(
+                    SendPaymentWithRouterCommand {
+                        invoice: Some(invoice_string),
+                        router: vec![RouterHop {
+                            target: driver.runtime.peers[payee],
+                            channel_outpoint: funding.clone(),
+                            amount_received: amount,
+                            incoming_tlc_expiry: DEFAULT_FINAL_TLC_EXPIRY_DELTA,
+                        }],
+                        ..Default::default()
+                    },
+                    reply,
+                )
+            })?;
+            ensure!(driver.reply("submit superseded probe", reply)?.payment_hash == payment);
+            Ok(())
+        };
+
+        let pre0 = Hash256::from([20; 32]);
+        let pre1 = Hash256::from([21; 32]);
+        let pre2 = Hash256::from([22; 32]);
+        let amount0 = 400 * 100_000_000;
+        let amount1 = 1_000 * 100_000_000;
+        let amount2 = 500 * 100_000_000;
+        let (p0, inv0) = add_invoice(self, 0, pre0, false, amount0)?;
+        let (p1, inv1) = add_invoice(self, 1, pre1, false, amount1)?;
+        let (p2, inv2) = add_invoice(self, 0, pre2, false, amount2)?;
+
+        // First commit hold invoice p0 (B->A) cleanly so A can reveal pre0 after force close.
+        send_direct(self, 1, 0, inv0, amount0, p0)?;
+        self.until("baseline hold invoice p0 committed on both sides", |s| {
+            let received = s.runtime.nodes.borrow()[0]
+                .node
+                .as_ref()
+                .and_then(|node| node.store.get_invoice_status(&p0))
+                == Some(CkbInvoiceStatus::Received);
+            let [a, b] = [0, 1].map(|n| s.runtime.channel(n, &channel));
+            Ok((received
+                && a.zip(b)
+                    .is_some_and(|(a, b)| !a.tlc_state.waiting_ack && !b.tlc_state.waiting_ack))
+            .then_some(()))
+        })?;
+
+        // Delay A's CommitmentSignedV2 for the next round (frame after AddTlc) so the link stays
+        // up while A is waiting_ack on variant 1 ([p0, p1]) and B concurrently commits p2 (B->A).
+        let delay_cs = Fault::DelayPeerFrame {
+            from: 0,
+            to: 1,
+            rule: FrameDelay {
+                after: 1,
+                duration: Duration::from_secs(5),
+            },
+        }
+        .inject(&mut self.runtime)?;
+        send_direct(self, 0, 1, inv1, amount1, p1)?;
+        self.until(
+            "A signs variant 1 while CommitmentSignedV2 is delayed in transit",
+            |s| {
+                let a_waiting = s.runtime.channel(0, &channel).is_some_and(|state| {
+                    state.tlc_state.waiting_ack
+                        && state.tlc_state.all_tlcs().any(|tlc| tlc.payment_hash == p1)
+                });
+                Ok((delay_cs.hit(&s.runtime) && a_waiting).then_some(()))
+            },
+        )?;
+
+        // Send p2 in the reverse direction (B->A) while A's variant-1 CS is still delayed.
+        // Once A accepts B's CommitmentSignedV2 for p2, p2 enters A's remote commitment
+        // state, changing A's pending round settlement for B from [p0, p1] to [p0, p1, p2].
+        send_direct(self, 1, 0, inv2, amount2, p2)?;
+        self.until(
+            "A commits incoming p2 while variant-1 CS is still delayed",
+            |s| {
+                Ok(s.runtime
+                    .channel(0, &channel)
+                    .is_some_and(|state| {
+                        state.tlc_state.all_tlcs().any(|tlc| tlc.payment_hash == p2)
+                    })
+                    .then_some(()))
+            },
+        )?;
+        delay_cs.heal(&mut self.runtime);
+
+        let drop_ack = Fault::DropPeerFrame {
+            from: 1,
+            to: 0,
+            rule: FrameLoss::RevokeAndAck(channel),
+        }
+        .inject(&mut self.runtime)?;
+        self.runtime.reset_link(0, 1);
+
+        self.until(
+            "A resigns the round with variant 2 and B's RevokeAndAckV2 is dropped",
+            |s| {
+                let b_committed = s.runtime.channel(1, &channel).is_some_and(|state| {
+                    state.tlc_state.all_tlcs().any(|tlc| tlc.payment_hash == p1)
+                });
+                Ok((drop_ack.hit(&s.runtime) && b_committed).then_some(()))
+            },
+        )?;
+        self.runtime.partition(0, 1, false);
+        drop_ack.heal(&mut self.runtime);
+
+        let tower_a = self.tower(0)?.clone();
+        let superseded_count = self.until(
+            "A watchtower records superseded settlement variant for the round",
+            |_| {
+                let store = tower_a.store.borrow();
+                let count = store
+                    .as_ref()
+                    .map(|store| {
+                        store
+                            .get_superseded_remote_settlements(&NodeId::local(), &channel)
+                            .len()
+                    })
+                    .unwrap_or(0);
+                Ok((count > 0).then_some(count))
+            },
+        )?;
+        let a_state = self
+            .runtime
+            .channel(0, &channel)
+            .context("missing A channel state")?;
+        ensure!(
+            a_state.tlc_state.waiting_ack && !a_state.session.superseded_settlements.is_empty(),
+            "A did not retain superseded settlement while awaiting ACK"
+        );
+        self.runtime.note(format_args!(
+            "watchtower recorded superseded settlement count={superseded_count} channel={channel}"
+        ));
+
+        // B force-closes with variant 2 ([p0, p1, p2]) while A still holds both
+        // variant 1 (superseded) and variant 2 (pending) for the same round.
+        let commitment = self.confirm_force_close(channel, 1, 0)?;
+        ensure!(self.runtime.chain.confirmed_spend(&funding) == Some(commitment));
+
+        // Settle p0 on-chain by revealing pre0 on A (whose watchtower holds the superseded
+        // variants), and let p1 and p2 time out on-chain after advancing the virtual clock.
+        self.reveal_preimage(0, p0, pre0)?;
+        self.until(
+            "watchtower settles fulfilled TLC p0 on superseded round",
+            |s| {
+                if s.runtime.elapsed().as_millis().is_multiple_of(50) {
+                    s.scan_onchain([0, 1])?;
+                }
+                let fulfilled = s.runtime.nodes.borrow()[0]
+                    .node
+                    .as_ref()
+                    .and_then(|node| node.store.get_invoice_status(&p0))
+                    == Some(CkbInvoiceStatus::Paid)
+                    && s.runtime.payment_status(1, p0) == Some(PaymentStatus::Success);
+                Ok(fulfilled.then_some(()))
+            },
+        )?;
+
+        let max_expiry = self
+            .runtime
+            .channel(0, &channel)
+            .context("missing A closed channel")?
+            .tlc_state
+            .all_tlcs()
+            .filter(|tlc| tlc.payment_hash == p1 || tlc.payment_hash == p2)
+            .map(|tlc| tlc.expiry)
+            .max()
+            .context("missing p1/p2 TLCs on A")?;
+        self.advance_clock_past(max_expiry);
+
+        let spend = self.finish_onchain_close([0, 1], channel, commitment)?;
+        self.until(
+            "both endpoints reconcile timed-out TLCs on superseded round",
+            |s| {
+                Ok(
+                    (s.runtime.payment_status(0, p1) == Some(PaymentStatus::Failed)
+                        && s.runtime.payment_status(1, p2) == Some(PaymentStatus::Failed))
+                    .then_some(()),
+                )
+            },
+        )?;
+        ensure!(
+            self.runtime.nodes.borrow()[1]
+                .node
+                .as_ref()
+                .and_then(|node| node.store.get_invoice_status(&p1))
+                != Some(CkbInvoiceStatus::Paid)
+                && self.runtime.nodes.borrow()[0]
+                    .node
+                    .as_ref()
+                    .and_then(|node| node.store.get_invoice_status(&p2))
+                    != Some(CkbInvoiceStatus::Paid),
+            "timed-out invoice was marked Paid"
+        );
+        for node in [0, 1] {
+            let store = self.runtime.store(node)?;
+            fnn::simulation::verify_payment_hash_index(&store)
+                .map_err(|error| anyhow::anyhow!("{} payment-hash index: {error}", NAMES[node]))?;
+        }
+        self.runtime.note(format_args!(
+            "watchtower settled superseded-round commitment={commitment} spend={spend}"
+        ));
+        Ok(())
     }
 
     pub(super) fn settle_held_payment(
