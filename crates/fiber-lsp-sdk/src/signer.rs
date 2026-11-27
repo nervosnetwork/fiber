@@ -760,6 +760,35 @@ impl<S: SignerStore> ChannelSigner<S> {
             .await
     }
 
+    /// Atomically authorize cancellation for any pending outbound TLCs that `snapshot`
+    /// provably refunds back into `local_amount`.
+    pub(crate) async fn authorize_outbound_refunds(
+        &self,
+        snapshot: &crate::OwnedSettlementBinding,
+        for_remote: bool,
+    ) -> Result<(), SignerError> {
+        loop {
+            let (encoded, mut state) = self.load_signing_state().await?;
+            let Some(commitment) = state.commitment.as_mut() else {
+                return Ok(());
+            };
+            let refunds = commitment.refundable_pending_outbound_tlcs(snapshot, for_remote);
+            if refunds.is_empty() {
+                return Ok(());
+            }
+            for payment_hash in refunds {
+                commitment.resolve(payment_hash, None)?;
+            }
+            state.revision = state
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| crate::commitment::invalid("state revision overflow"))?;
+            if self.store_signing_state(encoded.as_deref(), &state).await? {
+                return Ok(());
+            }
+        }
+    }
+
     async fn update_commitment(
         &self,
         update: impl Fn(&mut crate::commitment::CommitmentState) -> Result<(), SignerError>,

@@ -684,15 +684,25 @@ impl<S: SignerStore> HostedSession<S> {
                     ))
                 }
             };
+            let settlement_binding = settlement.clone().ok_or_else(|| {
+                SessionError::Invalid("missing commitment settlement".to_string())
+            })?;
+            let for_remote =
+                transition == fiber_types::ChannelSigningTransition::SendCommitmentSigned;
+            // HostedTenant cannot transition an outbound payment to `Failed` (or retry a failed
+            // attempt) until the external signer signs the commitment removing the failed TLC.
+            // Authorize cancellation only when every unresolved removed TLC is outbound and
+            // provably refunded back to `local_amount`.
+            signer
+                .authorize_outbound_refunds(&settlement_binding, for_remote)
+                .await?;
             signer
                 .prepare_commitment(
                     content,
                     crate::CommitmentContext {
                         transition,
                         session,
-                        settlement: settlement.clone().ok_or_else(|| {
-                            SessionError::Invalid("missing commitment settlement".to_string())
-                        })?,
+                        settlement: settlement_binding,
                     },
                     now_ms,
                 )
@@ -1278,5 +1288,145 @@ mod tests {
         assert!(params.local_settlement_key.is_none());
         assert!(params.local_settlement_key_pubkey.is_some());
         assert_eq!(params.channel_id, channel_id.into());
+    }
+
+    #[tokio::test]
+    async fn outbound_refund_auto_authorizes_cancel_while_fulfill_and_inbound_cancel_still_require_authorization(
+    ) {
+        let make_status = |content: ChannelSigningContent,
+                           context: crate::CommitmentContext,
+                           for_remote: bool| {
+            let ChannelSigningContent::Musig2(content) = content else {
+                panic!("expected musig2")
+            };
+            let snapshot = context.settlement;
+            let settlement = fiber_json_types::SigningSettlement {
+                local_amount: snapshot.data.local_amount,
+                remote_amount: snapshot.data.remote_amount,
+                local_settlement_pubkey: snapshot.local_settlement_key.into(),
+                remote_settlement_pubkey: snapshot.remote_settlement_key.into(),
+                for_remote,
+                tlcs: snapshot
+                    .data
+                    .tlcs
+                    .iter()
+                    .map(|tlc| fiber_json_types::SigningSettlementTlc {
+                        tlc_id: u64::from(tlc.tlc_id),
+                        local_key_commitment_number: tlc.local_key_commitment_number.unwrap(),
+                        inbound: tlc.tlc_id.is_received() == for_remote,
+                        payment_hash: tlc.payment_hash.into(),
+                        payment_amount: tlc.payment_amount,
+                        hash_algorithm: tlc.hash_algorithm.into(),
+                        expiry: tlc.expiry,
+                        local_key_pubkey: tlc.local_pubkey().into(),
+                        remote_key: tlc.remote_key.into(),
+                    })
+                    .collect(),
+            };
+            ChannelSigningStatus::SignatureRequired {
+                session_evidence: crate::json::session_evidence_to_rpc(&context.session),
+                request_id: Hash256::from([0x33; 32]).into(),
+                transition: if for_remote {
+                    ChannelSigningTransition::SendCommitmentSigned
+                } else {
+                    ChannelSigningTransition::CompleteReceivedCommitment
+                },
+                content: musig2_to_rpc(&content),
+                settlement: Some(settlement),
+            }
+        };
+
+        // 1. Outbound TLC refunded back to `local_amount` must NOT deadlock waiting for RPC `Failed`.
+        let f = crate::commitment_tests::Fixture::new(false).await;
+        f.sign(true, 0, f.opening()).await;
+        f.sign(false, 0, f.opening()).await;
+        f.signer.authorize_payment(f.terms(false)).await.unwrap();
+        let outbound_local = fiber_types::SettlementData {
+            local_amount: 350,
+            remote_amount: 600,
+            tlcs: vec![f.tlc(false, false)],
+        };
+        let outbound_remote = fiber_types::SettlementData {
+            local_amount: 350,
+            remote_amount: 600,
+            tlcs: vec![f.tlc(false, true)],
+        };
+        f.sign(true, 1, outbound_remote).await;
+        f.sign(false, 1, outbound_local).await;
+
+        let channel_id = Hash256::from([0x44; 32]);
+        let key_id = f.signer.channel_key_id();
+        let (pay_remote_content, pay_remote_ctx) = f
+            .request(
+                false,
+                2,
+                fiber_types::SettlementData {
+                    local_amount: 350,
+                    remote_amount: 650,
+                    tlcs: vec![],
+                },
+            )
+            .await;
+        let (refund_content, refund_ctx) = f.request(false, 2, f.opening()).await;
+        let mut session = HostedSession::new(f.root);
+        session.state.bindings.insert(channel_id, key_id);
+
+        // Removing an outbound TLC that pays `remote_amount` without `authorize_fulfillment`
+        // must still be rejected.
+        let err = session
+            .handle_channel_status(
+                channel_id,
+                make_status(pay_remote_content, pay_remote_ctx, false),
+                100,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("locally authorized resolution"),
+            "unexpected error: {err}"
+        );
+
+        // Removing the same outbound TLC back into `local_amount` (refund) auto-authorizes
+        // cancellation so HostedTenant can finish removing the failed TLC.
+        let outcome = session
+            .handle_channel_status(
+                channel_id,
+                make_status(refund_content, refund_ctx, false),
+                100,
+            )
+            .await
+            .expect("outbound refund should auto-authorize cancel");
+        let ProcessOutcome::NeedConfirmation(pending) = outcome else {
+            panic!("expected confirmation for outbound balance transition, got {outcome:?}");
+        };
+        let _ = session
+            .confirm(pending, 100)
+            .await
+            .expect("confirming refunded outbound commitment should succeed");
+
+        // 2. Inbound TLC cancelled back to `remote_amount` must STILL require explicit authorization.
+        let f_in = crate::commitment_tests::Fixture::new(false).await;
+        f_in.sign(false, 0, f_in.opening()).await;
+        f_in.signer
+            .authorize_invoice(f_in.terms(true), [9; 32].into())
+            .await
+            .unwrap();
+        f_in.sign(false, 1, f_in.incoming(false)).await;
+        let (in_cancel_content, in_cancel_ctx) = f_in.request(false, 2, f_in.opening()).await;
+        let in_key_id = f_in.signer.channel_key_id();
+        let mut in_session = HostedSession::new(f_in.root);
+        in_session.state.bindings.insert(channel_id, in_key_id);
+        let in_err = in_session
+            .handle_channel_status(
+                channel_id,
+                make_status(in_cancel_content, in_cancel_ctx, false),
+                100,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            in_err.to_string().contains("locally authorized resolution"),
+            "unexpected inbound cancel error: {in_err}"
+        );
     }
 }

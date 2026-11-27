@@ -307,6 +307,135 @@ impl CommitmentState {
         Ok(())
     }
 
+    /// Identify pending outbound payments removed in `snapshot` whose full TLC amounts are
+    /// provably refunded back into `local_amount` without paying `remote_amount`.
+    ///
+    /// Inbound invoices and any commitment that moves an unresolved TLC into `remote_amount`
+    /// always return an empty list so callers must supply explicit authorization/preimages.
+    pub(crate) fn refundable_pending_outbound_tlcs(
+        &self,
+        snapshot: &OwnedSettlementBinding,
+        for_remote: bool,
+    ) -> Vec<Hash256> {
+        if snapshot.for_remote != Some(for_remote) {
+            return Vec::new();
+        }
+        let index = usize::from(for_remote);
+        let Some(previous) = self.lanes[index].as_ref() else {
+            return Vec::new();
+        };
+        let new_tlcs: Vec<(u64, bool, u128)> = snapshot
+            .data
+            .tlcs
+            .iter()
+            .map(|tlc| {
+                let inbound = tlc.tlc_id.is_received() == for_remote;
+                (u64::from(tlc.tlc_id), inbound, tlc.payment_amount)
+            })
+            .collect();
+        let mut local = previous.local_amount;
+        let mut remote = previous.remote_amount;
+        let mut pending_refunds = Vec::new();
+
+        for old in &previous.tlcs {
+            if new_tlcs
+                .iter()
+                .any(|&(id, inbound, _)| id == old.id && inbound == old.inbound)
+            {
+                continue;
+            }
+            let Some(payment) = self
+                .payments
+                .iter()
+                .find(|p| p.terms.payment_hash == old.hash)
+            else {
+                return Vec::new();
+            };
+            let locked_resolution = if let Some(retired_other) =
+                self.lanes[1 - index].as_ref().and_then(|lane| {
+                    lane.retired
+                        .iter()
+                        .find(|r| r.tlc.id == old.id && r.tlc.inbound == old.inbound)
+                }) {
+                if retired_other.tlc != *old {
+                    return Vec::new();
+                }
+                Some(retired_other.resolution)
+            } else {
+                None
+            };
+            let resolution = locked_resolution.unwrap_or(payment.resolution);
+            match resolution {
+                Resolution::Pending => {
+                    if old.inbound {
+                        return Vec::new();
+                    }
+                    let Ok(next_local) = sum(local, old.amount) else {
+                        return Vec::new();
+                    };
+                    local = next_local;
+                    if !pending_refunds.contains(&old.hash) {
+                        pending_refunds.push(old.hash);
+                    }
+                }
+                Resolution::Fulfill => {
+                    if old.inbound {
+                        let Ok(next_local) = sum(local, old.amount) else {
+                            return Vec::new();
+                        };
+                        local = next_local;
+                    } else {
+                        let Ok(next_remote) = sum(remote, old.amount) else {
+                            return Vec::new();
+                        };
+                        remote = next_remote;
+                    }
+                }
+                Resolution::Cancel => {
+                    if !old.inbound {
+                        let Ok(next_local) = sum(local, old.amount) else {
+                            return Vec::new();
+                        };
+                        local = next_local;
+                    } else {
+                        let Ok(next_remote) = sum(remote, old.amount) else {
+                            return Vec::new();
+                        };
+                        remote = next_remote;
+                    }
+                }
+            }
+        }
+        if pending_refunds.is_empty() {
+            return Vec::new();
+        }
+        for &(id, inbound, amount) in &new_tlcs {
+            if previous
+                .tlcs
+                .iter()
+                .any(|old| old.id == id && old.inbound == inbound)
+            {
+                continue;
+            }
+            if inbound {
+                let Ok(next_remote) = sub(remote, amount) else {
+                    return Vec::new();
+                };
+                remote = next_remote;
+            } else {
+                let Ok(next_local) = sub(local, amount) else {
+                    return Vec::new();
+                };
+                local = next_local;
+            }
+        }
+        if local == snapshot.data.local_amount && remote == snapshot.data.remote_amount {
+            pending_refunds
+        } else {
+            Vec::new()
+        }
+    }
+
     pub fn validate(
         &mut self,
         content: &ChannelSigningContent,
