@@ -350,6 +350,26 @@ fn random_workload_reconciles_a_force_close_and_times_out_the_onchain_tlc() {
 }
 
 #[test]
+fn random_workload_reconciles_excluded_unapplied_tlc_removal_on_force_close() {
+    let options = ["--payments", "32", "--phases", "5", "--chaos"];
+    let trace = run_random("1", &options);
+    let channel = "Hash256(0x9223db1831a236802deb9a20cdfec68e590814fa7dd3eaa9a591bfa09bea0792)";
+    let payment = "0x78400076ee6bb9c04412a187a7c1bac8b24ecbbc6231019c7f8fe07aeac4dd6e";
+    assert!(trace.contains(&format!("swarm audited close channel={channel}")));
+    let audit = trace
+        .lines()
+        .find(|line| line.contains("swarm audit Direct D->E") && line.contains(payment))
+        .expect("audit the payment whose unapplied RemoveWaitPrevAck TLC was excluded on close");
+    assert!(
+        audit.contains("status=Some(Failed)") || audit.contains("status=Some(Success)"),
+        "{audit}"
+    );
+    assert!(trace.contains("random reconciled workload=32"));
+    assert!(trace.contains("recovery_probes=4"));
+    assert_eq!(trace, run_random("1", &options));
+}
+
+#[test]
 fn parallel_funding_opens_six_channels_and_probes_each() {
     let trace = run_fixture("parallel-funding", "42");
     assert!(trace.contains("parallel funding overlap=6"));
