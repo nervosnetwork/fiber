@@ -7,12 +7,13 @@ use fnn::fiber::{FiberActorCommand, Hash256};
 use fnn::simulation;
 use tokio::sync::oneshot;
 
-use crate::harness::{Harness, HarnessOptions, EPOCH, TICK};
+use crate::harness::{Harness, HarnessOptions, LspSetup, EPOCH, TICK};
 use crate::host::Trace;
 use crate::tower::TowerMode;
 
 mod faults;
 mod funding;
+mod lsp;
 mod onchain;
 mod routes;
 mod swarm;
@@ -80,6 +81,19 @@ pub enum Scenario {
         /// Drop a funding update for one attempt and check abort isolation.
         mixed: bool,
     },
+    /// Buffer hosted LSP payments while an external SDK wallet is offline, restart LSP,
+    /// and verify both recovery and long-offline buffer expiry.
+    LspOfflineDelivery,
+    /// Inject abrupt crashes, dropped responses, duplicate/conflicting signatures, and
+    /// long-offline force-close self-funded watchtower settlement against an external SDK wallet.
+    LspSignerFaults,
+    /// Seeded multi-tenant LSP + external SDK wallet workload with optional random chaos faults.
+    LspRandom {
+        /// Number of payments to execute across public peers and hosted SDK wallets.
+        payments: usize,
+        /// Inject random wallet crashes, long-offline expiries, partitions, and duplicate RPCs.
+        chaos: bool,
+    },
 }
 
 /// Exercise real Fiber actors and return the logical trace for cross-process replay.
@@ -87,114 +101,144 @@ pub enum Scenario {
 pub fn run(scenario: Scenario, seed: u64) -> Result<Vec<String>> {
     let trace = Trace::default();
     let result = simulation::run(seed ^ 0x0066_6962_6572, virtual_time, || {
-        struct ResetClock;
-        impl Drop for ResetClock {
-            fn drop(&mut self) {
-                CLOCK_OFFSET_MS.set(0);
-            }
-        }
-        let _clock = ResetClock;
-        let directory = tempfile::tempdir()?;
-        let topology = if let Scenario::Random {
-            payments, phases, ..
-        } = scenario
-        {
-            ensure!(
-                phases > 0 && phases <= payments,
-                "random requires 1 <= phases <= payments"
-            );
-            Some(swarm::random::Topology::generate(seed))
-        } else {
-            None
-        };
-        let edges: &[(usize, usize)] = match scenario {
-            Scenario::Multihop => &[(0, 1), (1, 2)],
-            Scenario::Mpp | Scenario::Swarm => &[(0, 1), (0, 2), (1, 3), (2, 3)],
-            Scenario::Random { .. } => &topology.as_ref().expect("random topology").links,
-            _ => &[(0, 1)],
-        };
-        // Random exploration has a watchdog per stage, including the protocol's MPP hold timer.
-        let duration = if topology.is_some() {
-            Duration::MAX
-        } else {
-            Duration::from_secs(900)
-        };
-        let continuous = matches!(scenario, Scenario::Random { fault_policy, .. }
-            if fault_policy != RandomFaultPolicy::Windows);
-        let tower_mode = (topology.is_some()
-            || matches!(
-                scenario,
-                Scenario::WatchtowerSettlement | Scenario::WatchtowerSuperseded
-            ))
-        .then_some(if seed.is_multiple_of(2) {
-            TowerMode::BuiltIn
-        } else {
-            TowerMode::External
-        });
-        let runtime = Harness::new(
-            seed,
-            directory.path(),
-            trace.clone(),
-            edges,
-            HarnessOptions {
-                duration,
-                // Continuous reconnects need headroom in Turmoil's shared SYN and data queue.
-                tcp_capacity: continuous.then_some(512),
-                tower_mode,
-                // A peer that misses the terminal abort frame follows its funding timer.
-                funding_timeout_seconds: matches!(
-                    scenario,
-                    Scenario::ChannelIdRewrite { .. } | Scenario::ParallelFundingCleanup
-                )
-                .then_some(1),
-            },
-        )?;
-        let mut driver = Driver {
-            runtime,
-            chaos: None,
-        };
-        driver.runtime.note(format_args!(
-            "fiber={} seed={seed} scenario={scenario:?}",
-            fnn::get_git_version()
-        ));
-        match scenario {
-            Scenario::WatchtowerSettlement => driver.watchtower_settlement(),
-            Scenario::WatchtowerSuperseded => driver.watchtower_superseded(),
-            Scenario::Faults => driver.faults(),
-            Scenario::Multihop => driver.multihop(),
-            Scenario::Mpp => driver.mpp(seed),
-            Scenario::Swarm => driver.swarm(seed, edges),
-            Scenario::Random {
-                payments,
-                phases,
-                fault_policy,
-            } => driver.random(
-                seed,
-                topology.as_ref().expect("random topology"),
-                payments,
-                phases,
-                fault_policy,
-            ),
-            Scenario::FundingAbortRecovery => driver.funding_abort_recovery(),
-            Scenario::FundingSignatureReplay => driver.funding_signature_replay(),
-            Scenario::ChannelIdRewrite { after_commit } => driver.channel_id_rewrite(after_commit),
-            Scenario::ParallelFundingCleanup => {
-                driver.parallel_funding_fixture(funding::BatchFault::AbortCleanup(1))
-            }
-            Scenario::ParallelFunding { mixed } => driver.parallel_funding_fixture(if mixed {
-                funding::BatchFault::DropUpdate(1)
-            } else {
-                funding::BatchFault::None
-            }),
-            Scenario::CrashBeforeAck | Scenario::TwoNodeFaults => {
-                let channel = driver.open_channel()?;
-                match scenario {
-                    Scenario::CrashBeforeAck => driver.crash_before_ack(&channel),
-                    _ => driver.two_node_faults(&channel, seed),
+        fiber_lsp_sdk::with_simulation_rng(simulation::fill_random, || {
+            struct ResetClock;
+            impl Drop for ResetClock {
+                fn drop(&mut self) {
+                    CLOCK_OFFSET_MS.set(0);
                 }
-                .with_context(|| format!("channel state: {:?}", driver.channel_summary(&channel)))
             }
-        }
+            let _clock = ResetClock;
+            let directory = tempfile::tempdir()?;
+            let topology = if let Scenario::Random {
+                payments, phases, ..
+            } = scenario
+            {
+                ensure!(
+                    phases > 0 && phases <= payments,
+                    "random requires 1 <= phases <= payments"
+                );
+                Some(swarm::random::Topology::generate(seed))
+            } else {
+                None
+            };
+            let edges: &[(usize, usize)] = match scenario {
+                Scenario::Multihop | Scenario::LspRandom { .. } => &[(0, 1), (1, 2)],
+                Scenario::Mpp | Scenario::Swarm => &[(0, 1), (0, 2), (1, 3), (2, 3)],
+                Scenario::Random { .. } => &topology.as_ref().expect("random topology").links,
+                _ => &[(0, 1)],
+            };
+            let is_lsp = matches!(
+                scenario,
+                Scenario::LspOfflineDelivery
+                    | Scenario::LspSignerFaults
+                    | Scenario::LspRandom { .. }
+            );
+            // Random exploration has a watchdog per stage, including the protocol's MPP hold timer.
+            let duration = if topology.is_some() || matches!(scenario, Scenario::LspRandom { .. }) {
+                Duration::MAX
+            } else {
+                Duration::from_secs(900)
+            };
+            let continuous = matches!(scenario, Scenario::Random { fault_policy, .. }
+            if fault_policy != RandomFaultPolicy::Windows);
+            let tower_mode = if is_lsp {
+                Some(TowerMode::BuiltIn)
+            } else {
+                (topology.is_some()
+                    || matches!(
+                        scenario,
+                        Scenario::WatchtowerSettlement | Scenario::WatchtowerSuperseded
+                    ))
+                .then_some(if seed.is_multiple_of(2) {
+                    TowerMode::BuiltIn
+                } else {
+                    TowerMode::External
+                })
+            };
+            let lsp = is_lsp.then(|| LspSetup {
+                lsp_node: 1,
+                wallet_count: if matches!(scenario, Scenario::LspRandom { .. }) {
+                    2
+                } else {
+                    1
+                },
+                tenant_liquidity: FUNDING_AMOUNT,
+                config: Driver::lsp_config_for_scenario(),
+            });
+            let runtime = Harness::new(
+                seed,
+                directory.path(),
+                trace.clone(),
+                edges,
+                HarnessOptions {
+                    duration,
+                    // Continuous reconnects need headroom in Turmoil's shared SYN and data queue.
+                    tcp_capacity: (continuous || is_lsp).then_some(512),
+                    tower_mode,
+                    // A peer that misses the terminal abort frame follows its funding timer.
+                    funding_timeout_seconds: matches!(
+                        scenario,
+                        Scenario::ChannelIdRewrite { .. } | Scenario::ParallelFundingCleanup
+                    )
+                    .then_some(1),
+                    lsp,
+                },
+            )?;
+            let mut driver = Driver {
+                runtime,
+                chaos: None,
+            };
+            driver.runtime.note(format_args!(
+                "fiber={} seed={seed} scenario={scenario:?}",
+                fnn::get_git_version()
+            ));
+            match scenario {
+                Scenario::WatchtowerSettlement => driver.watchtower_settlement(),
+                Scenario::WatchtowerSuperseded => driver.watchtower_superseded(),
+                Scenario::Faults => driver.faults(),
+                Scenario::Multihop => driver.multihop(),
+                Scenario::Mpp => driver.mpp(seed),
+                Scenario::Swarm => driver.swarm(seed, edges),
+                Scenario::Random {
+                    payments,
+                    phases,
+                    fault_policy,
+                } => driver.random(
+                    seed,
+                    topology.as_ref().expect("random topology"),
+                    payments,
+                    phases,
+                    fault_policy,
+                ),
+                Scenario::FundingAbortRecovery => driver.funding_abort_recovery(),
+                Scenario::FundingSignatureReplay => driver.funding_signature_replay(),
+                Scenario::ChannelIdRewrite { after_commit } => {
+                    driver.channel_id_rewrite(after_commit)
+                }
+                Scenario::ParallelFundingCleanup => {
+                    driver.parallel_funding_fixture(funding::BatchFault::AbortCleanup(1))
+                }
+                Scenario::ParallelFunding { mixed } => driver.parallel_funding_fixture(if mixed {
+                    funding::BatchFault::DropUpdate(1)
+                } else {
+                    funding::BatchFault::None
+                }),
+                Scenario::LspOfflineDelivery => driver.lsp_offline_delivery(),
+                Scenario::LspSignerFaults => driver.lsp_signer_faults(),
+                Scenario::LspRandom { payments, chaos } => driver.lsp_random(seed, payments, chaos),
+                Scenario::CrashBeforeAck | Scenario::TwoNodeFaults => {
+                    let channel = driver.open_channel()?;
+                    match scenario {
+                        Scenario::CrashBeforeAck => driver.crash_before_ack(&channel),
+                        _ => driver.two_node_faults(&channel, seed),
+                    }
+                    .with_context(|| {
+                        format!("channel state: {:?}", driver.channel_summary(&channel))
+                    })
+                }
+            }
+        })
     });
     result.with_context(|| trace.borrow().join("\n"))?;
     Ok(trace.take())

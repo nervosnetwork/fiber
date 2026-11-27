@@ -23,6 +23,8 @@ cargo run --locked -p fiber-dst -- random
 cargo run --locked -p fiber-dst -- random 42 --payments 128 --phases 8
 cargo run --locked -p fiber-dst -- random 6 --payments 32 --phases 5 --chaos
 cargo run --locked -p fiber-dst -- random --chaos-payments
+cargo run --locked -p fiber-dst -- lsp
+cargo run --locked -p fiber-dst -- lsp 7 --payments 16 --chaos
 cargo nextest run --locked -p fiber-dst
 ```
 
@@ -55,6 +57,11 @@ Turmoil world              one process, 5 ms virtual ticks
   +-- optional external Watchtower hosts
       own runtime and SQLite, JSON-RPC over simulated TCP to Fiber,
       independent access to the same mock CKB
+
+  +-- optional external `fiber-lsp-sdk` wallet hosts (`SDK-0`..`SDK-3`)
+      persisted `RootSigner`/`HostedSession` on disk, Biscuit-authenticated
+      JSON-RPC over simulated TCP to a hosted `LspService` node,
+      injectable RPC duplicate / dropped-response / delay / crash / partition faults
 ```
 
 The driver sends commands through the normal actor mailboxes. On each step it
@@ -88,6 +95,10 @@ payment-wave driver and settlement auditor.
 | `multihop` | A relay crashes after persisting downstream fulfillment and before relaying it upstream. The checker verifies the amount received, both channel deltas, and the relay fee. |
 | `mpp` | A diamond topology forces a signed invoice onto two paths. One relay crashes while a shard is in flight. The invoice and both unique shards must settle, with exact channel balances and no TLCs left. |
 | Watchtower settlement | Force-closes a channel with a committed hold-invoice TLC. A Watchtower mailbox delay, indexer outage, actor restart, and settlement submission timeout precede on-chain fulfillment. The test checks the settlement witness, invoice and payment states, and both wallet payouts. The external fixture also partitions the RPC link and completes settlement while the recipient is down. |
+| Superseded watchtower round | Delays a bidirectional `CommitmentSignedV2` update and reconnects with a second round variant while dropping `RevokeAndAckV2`, forcing the Watchtower to retain `superseded_remote_settlements` and settle a force-closed superseded commitment in both built-in and external modes. |
+| `lsp-offline-delivery` | Registers an external `fiber-lsp-sdk` wallet over Biscuit-authenticated JSON-RPC (with duplicate `lsp_register_tenant` replay rejected), crashes the wallet and evicts the cold tenant so a public trampoline payment buffers as `Deferred`, crashes and restarts the LSP, verifies replay rejection persists across restart, recovers and settles with duplicate `settle_invoice`, and then holds the wallet offline past `buffer_deadline` to verify clean expiry. |
+| `lsp-signer-faults` | Crashes the external `fiber-lsp-sdk` wallet mid-`AwaitingSignature`, restarts from persisted `sdk_store.bin` and `session_state.json`, drops the RPC response after commit on `submit_channel_signature`, injects duplicate and conflicting signature replays, then force-closes the private channel while the wallet is offline so the returning wallet registers the preimage via `create_preimage` and completes self-funded `ExternalFundingRequired` Watchtower settlement with duplicate `submit_watchtower_signature`. |
+| LSP random chaos (`lsp`) | Runs two public peers (`A`, `C`), a hosted LSP (`B`), and two external `fiber-lsp-sdk` wallets (`SDK-0`, `SDK-1`) across public-to-tenant, tenant-to-public (trampoline), and tenant-to-tenant payments while randomly injecting long-offline buffer expiries, abrupt wallet crashes mid-signing, SDK-LSP network partitions, dropped requests, dropped responses after commit, delays, and duplicate RPCs. |
 | Funding signature replay | Drops the final funding signatures and restarts the first signer. The peer must replay the same signatures before Ready, and a payment must settle on the original funding outpoint. |
 | Funding abort recovery | Drops a funding frame, verifies that both endpoints abort and clear funding state, and retries the open. |
 | Channel ID rewrite | Injects an SQLite sync error in the rewrite and, in a separate run, crashes after commit before notifying the network actor. SQLite reopens with exactly one complete channel ID and matching indexes. The original attempt either becomes usable or aborts cleanly before a new channel settles a payment. |

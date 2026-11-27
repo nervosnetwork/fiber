@@ -46,6 +46,8 @@ fn emit_fixture_trace() {
         "channel-id-rewrite-crash" => Scenario::ChannelIdRewrite { after_commit: true },
         "parallel-funding-cleanup" => Scenario::ParallelFundingCleanup,
         "parallel-funding-abort" => Scenario::ParallelFunding { mixed: true },
+        "lsp-offline-delivery" => Scenario::LspOfflineDelivery,
+        "lsp-signer-faults" => Scenario::LspSignerFaults,
         _ => panic!("unknown replay fixture {case}"),
     };
     let trace = fiber_dst::run(scenario, seed).expect("run replay fixture");
@@ -562,4 +564,79 @@ fn watchtower_settles_superseded_round_variant_in_builtin_and_external_modes() {
         }
         assert_eq!(trace, run_fixture("watchtower-superseded", seed));
     }
+}
+
+fn run_lsp(seed: &str, extra: &[&str]) -> String {
+    let output = Command::new(env!("CARGO_BIN_EXE_fiber-dst"))
+        .args(["lsp", seed])
+        .args(extra)
+        .env_remove("RUST_LOG")
+        .output()
+        .expect("start Fiber DST LSP");
+    check_output(&output, "lsp", seed);
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr).lines().next(),
+        Some(format!("fiber-dst lsp {seed} {}", extra.join(" ")).as_str())
+    );
+    String::from_utf8(output.stdout).expect("UTF-8 trace")
+}
+
+#[test]
+fn lsp_offline_delivery_buffers_recovers_and_expires_after_long_offline() {
+    let seed = "42";
+    let trace = run_fixture("lsp-offline-delivery", seed);
+    for marker in [
+        "SDK-0 RPC duplicate #1 lsp_register_tenant -> err=",
+        "LSP evicted cold tenant",
+        "LSP buffered payment",
+        "LSP preserved Deferred delivery",
+        "LSP rejected replayed registration after restart",
+        "SDK-0 RPC duplicate #1 settle_invoice",
+        "LSP offline buffered payment",
+        "LSP long-offline buffered payment",
+    ] {
+        assert!(
+            trace.contains(marker),
+            "missing LSP offline marker {marker}"
+        );
+    }
+    assert_eq!(trace, run_fixture("lsp-offline-delivery", seed));
+}
+
+#[test]
+fn lsp_external_signer_handles_crashes_duplicates_and_watchtower_settlement() {
+    let seed = "42";
+    let trace = run_fixture("lsp-signer-faults", seed);
+    for marker in [
+        "SDK-0 abrupt crash while channel",
+        "SDK-0 RPC dropped response after commit submit_channel_signature",
+        "SDK-0 RPC duplicate #1 submit_channel_signature",
+        "LSP channel signature replay=AlreadyApplied",
+        "LSP force-closed private channel",
+        "SDK-0 RPC duplicate #1 submit_watchtower_signature",
+        "SDK-0 self-funded external watchtower settled commitment=",
+    ] {
+        assert!(
+            trace.contains(marker),
+            "missing LSP signer fault marker {marker}"
+        );
+    }
+    assert_eq!(trace, run_fixture("lsp-signer-faults", seed));
+}
+
+#[test]
+fn lsp_random_chaos_reconciles_multi_tenant_sdk_wallets_across_processes() {
+    let options = ["--payments", "16", "--chaos"];
+    let trace = run_lsp("7", &options);
+    for marker in [
+        "lsp-random bootstrapped 2 public peers and 2 SDK wallets chaos=true payments=16",
+        "long-offline expired",
+        "lsp-random reconciled payments=16",
+    ] {
+        assert!(
+            trace.contains(marker),
+            "missing LSP random chaos marker {marker}"
+        );
+    }
+    assert_eq!(trace, run_lsp("7", &options));
 }
