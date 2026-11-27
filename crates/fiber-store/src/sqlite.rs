@@ -12,7 +12,7 @@ use crate::iterator::{IteratorDirection, KVPair};
 pub struct Store {
     conn: Arc<Mutex<Connection>>,
     #[cfg(feature = "simulation")]
-    batch_faults: Option<crate::simulation::BatchFaults>,
+    batch_faults: Option<Arc<dyn crate::simulation::BatchCommitHook>>,
 }
 
 impl Store {
@@ -312,7 +312,7 @@ pub struct Batch {
     conn: Arc<Mutex<Connection>>,
     operations: Vec<BatchOp>,
     #[cfg(feature = "simulation")]
-    batch_faults: Option<crate::simulation::BatchFaults>,
+    batch_faults: Option<Arc<dyn crate::simulation::BatchCommitHook>>,
 }
 
 impl BatchWriter for Batch {
@@ -333,17 +333,18 @@ impl BatchWriter for Batch {
         let mut conn = self.conn.lock().expect("lock poisoned");
         #[cfg(feature = "simulation")]
         let _batch_scope = self.batch_faults.as_ref().and_then(|faults| {
-            faults.enter(|target| {
-                target.put_prefix.as_ref().is_none_or(|prefix| {
+            faults.enter_batch(
+                &|prefix| {
                     self.operations
                         .iter()
                         .any(|op| matches!(op, BatchOp::Put { key, .. } if key.starts_with(prefix)))
-                }) && target.delete_prefix.as_ref().is_none_or(|prefix| {
+                },
+                &|prefix| {
                     self.operations
                         .iter()
                         .any(|op| matches!(op, BatchOp::Delete { key } if key.starts_with(prefix)))
-                })
-            })
+                },
+            )
         });
         let tx = conn.transaction().expect("begin transaction");
         for op in &self.operations {

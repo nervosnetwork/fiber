@@ -1,9 +1,10 @@
 use std::time::Duration;
 
+use crate::chain_fault::ChainFault;
+use crate::sqlite_vfs::DiskFault;
 use anyhow::{ensure, Context, Result};
 use fnn::fiber::payment::SendPaymentCommand;
 use fnn::fiber::{ChannelConnectivityState, ChannelState, Hash256, PaymentStatus};
-use fnn::simulation::{ChainFault, DiskFault};
 use rand::{rngs::StdRng, Rng, SeedableRng};
 
 use crate::host::{TcpFault, NAMES};

@@ -3,7 +3,9 @@ use std::time::Duration;
 
 use anyhow::{ensure, Context, Result};
 use fnn::fiber::Hash256;
-use fnn::simulation::{self, BatchTarget, DiskFault};
+use fnn::simulation;
+
+use crate::sqlite_vfs::{BatchTarget, DiskFault};
 use rand::seq::{IndexedRandom, IteratorRandom, SliceRandom};
 use rand::{rngs::StdRng, Rng, SeedableRng};
 

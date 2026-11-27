@@ -9,12 +9,13 @@ use std::sync::{
 };
 use std::time::Duration;
 
+use crate::chain::SimulatedChain;
+use crate::chain_fault::SimulatedChainAccess;
 use anyhow::{bail, Context, Result};
 use fnn::event_handler::forward_event_to_client;
 use fnn::fiber::{NetworkServiceEvent, Privkey};
 use fnn::fiber_types::NodeId;
 use fnn::rpc::watchtower::{RpcContext, WatchtowerRpcServer, WatchtowerRpcServerImpl};
-use fnn::simulation::{SimulatedChain, SimulatedChainAccess};
 use fnn::store::{open_store_with_migration, Store};
 use fnn::watchtower::{WatchtowerMessage, WatchtowerStore};
 use jsonrpsee::core::client::{BatchResponse, ClientT, Error as ClientError};

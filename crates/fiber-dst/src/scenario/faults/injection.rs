@@ -3,12 +3,14 @@ use std::{cell::RefCell, time::Duration};
 use anyhow::{Context, Result};
 use fnn::fiber::Hash256;
 use fnn::simulation::{
-    pause_before_commitment_ack, pause_before_forwarding_fulfill, slow_mailbox, BatchTarget,
-    ChainEndpoint, ChainFault, CommitmentPause, DiskFault, MailboxDelay,
+    pause_before_commitment_ack, pause_before_forwarding_fulfill, slow_mailbox, CommitmentPause,
+    MailboxDelay,
 };
 use ractor::ActorCell;
 
+use crate::chain_fault::{ChainEndpoint, ChainFault};
 use crate::host::{FrameDelay, FrameLoss, LinkControl, TcpFault};
+use crate::sqlite_vfs::{BatchTarget, DiskFault};
 
 use crate::harness::Harness;
 

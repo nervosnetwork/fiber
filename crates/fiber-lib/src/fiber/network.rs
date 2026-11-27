@@ -2,7 +2,7 @@
 pub(crate) mod simulation;
 
 #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
-pub use simulation::{start_node, SimulatedChain, SimulatedNode};
+pub use simulation::{start_node, SimulatedNode};
 
 use crate::fiber_types::{PaymentSessionKey, UpstreamTlcKey};
 use crate::store::actor::StoreActorMessage;

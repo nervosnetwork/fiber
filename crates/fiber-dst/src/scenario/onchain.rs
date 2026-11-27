@@ -7,7 +7,9 @@ use fnn::fiber::payment::SendPaymentWithRouterCommand;
 use fnn::fiber::{ChannelState, FiberActorCommand, Hash256, NetworkActorMessage, PaymentStatus};
 use fnn::fiber_types::{CloseFlags, HashAlgorithm, NodeId, RouterHop};
 use fnn::invoice::{CkbInvoiceStatus, Currency, InvoiceBuilder, InvoiceStore};
-use fnn::simulation::{slow_mailbox, ChainEndpoint, ChainFault};
+use fnn::simulation::slow_mailbox;
+
+use crate::chain_fault::{ChainEndpoint, ChainFault};
 use fnn::watchtower::{WatchtowerMessage, WatchtowerStore};
 
 use super::faults::Fault;

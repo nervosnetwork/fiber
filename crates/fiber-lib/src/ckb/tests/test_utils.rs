@@ -310,6 +310,26 @@ pub trait MockChainActorMiddleware: Send + std::fmt::Debug {
     fn clone_box(&self) -> Box<dyn MockChainActorMiddleware>;
 }
 
+/// Minimal simulation chain driver seam injected by `fiber-dst` into `MockChainState`.
+#[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+pub trait SimulatedChainDriver: Send + Sync + std::fmt::Debug {
+    /// Whether settlement clock validation and simulated block headers are active.
+    fn is_active(&self) -> bool;
+    /// Validate inputs, relative/absolute `since` maturity, and capacity conservation.
+    fn validate_spend(&self, state: &MockChainState, tx: &TransactionView) -> anyhow::Result<()>;
+    /// Current simulated block header derived from the virtual clock.
+    fn current_tip(&self, state: &MockChainState) -> ckb_types::core::HeaderView;
+    /// Query live cells from `MockChainState` using CKB indexer semantics.
+    fn query_cells(
+        &self,
+        state: &MockChainState,
+        key: &ckb_sdk::rpc::ckb_indexer::SearchKey,
+        order: ckb_sdk::rpc::ckb_indexer::Order,
+        limit: u32,
+        after: Option<ckb_jsonrpc_types::JsonBytes>,
+    ) -> ckb_sdk::rpc::ckb_indexer::Pagination<ckb_sdk::rpc::ckb_indexer::Cell>;
+}
+
 #[derive(Clone, Debug)]
 pub struct MockChainState {
     pub txs: HashMap<Hash256, GetTxResponse>,
@@ -320,9 +340,7 @@ pub struct MockChainState {
     #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
     simulation_timestamps: BlockTimestampContext,
     #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
-    pub(crate) settlement_epoch_ms: Option<u64>,
-    #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
-    pub(crate) watchtower_headers: HashMap<H256, u64>,
+    pub driver: Option<Arc<dyn SimulatedChainDriver>>,
 }
 
 impl Default for MockChainState {
@@ -342,16 +360,11 @@ impl MockChainState {
             #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
             simulation_timestamps: BlockTimestampContext::default(),
             #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
-            settlement_epoch_ms: None,
-            #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
-            watchtower_headers: HashMap::new(),
+            driver: None,
         }
     }
 
-    pub(crate) fn submit_transaction(
-        &mut self,
-        tx: TransactionView,
-    ) -> Result<(), ckb_sdk::RpcError> {
+    pub fn submit_transaction(&mut self, tx: TransactionView) -> Result<(), ckb_sdk::RpcError> {
         const MAX_CYCLES: u64 = 100_000_000;
         let hash = tx.hash().into();
         if self
@@ -373,8 +386,8 @@ impl MockChainState {
                 );
             }
             #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
-            if self.settlement_epoch_ms.is_some() {
-                self.validate_simulated_spend(&tx)?;
+            if let Some(driver) = self.driver.as_ref().filter(|driver| driver.is_active()) {
+                driver.validate_spend(self, &tx)?;
             }
             let context = &mut MOCK_CONTEXT.write().unwrap().context;
             if !inputs.is_empty() {
@@ -397,8 +410,8 @@ impl MockChainState {
         let status = match &result {
             Ok(()) => {
                 #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
-                if self.settlement_epoch_ms.is_some() {
-                    let header = self.simulated_tip();
+                if let Some(driver) = self.driver.as_ref().filter(|driver| driver.is_active()) {
+                    let header = driver.current_tip(self);
                     let hash = H256::from(header.hash());
                     self.simulation_timestamps
                         .timestamps
@@ -964,7 +977,7 @@ async fn test_set_and_get_block_timestamp() {
 pub struct MockCkbChainClient {
     pub state: Arc<RwLock<MockChainState>>,
     #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
-    pub(crate) simulation_access: Option<crate::simulation::SimulatedChainAccess>,
+    pub simulation_hook: Option<Arc<dyn crate::simulation::SimulatedChainClientHook>>,
 }
 
 impl MockCkbChainClient {
@@ -972,7 +985,7 @@ impl MockCkbChainClient {
         Self {
             state,
             #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
-            simulation_access: None,
+            simulation_hook: None,
         }
     }
 }
@@ -981,10 +994,8 @@ impl MockCkbChainClient {
 impl CkbChainClient for MockCkbChainClient {
     async fn get_transaction(&self, hash: ckb_types::H256) -> Result<GetTxResponse, anyhow::Error> {
         #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
-        if let Some(access) = &self.simulation_access {
-            access
-                .before(crate::simulation::ChainEndpoint::Client, "get_transaction")
-                .await?;
+        if let Some(hook) = &self.simulation_hook {
+            hook.before_client_request("get_transaction").await?;
         }
         let hash: Hash256 = hash.into();
         let state = self.state.read().unwrap();
@@ -1032,15 +1043,13 @@ impl CkbChainClient for MockCkbChainClient {
     ) -> Result<ckb_sdk::rpc::ckb_indexer::Pagination<ckb_sdk::rpc::ckb_indexer::Cell>, anyhow::Error>
     {
         #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
-        if let Some(access) = &self.simulation_access {
-            access
-                .before(crate::simulation::ChainEndpoint::Client, "get_cells")
-                .await?;
+        if let Some(hook) = &self.simulation_hook {
+            hook.before_client_request("get_cells").await?;
         }
         let state = self.state.read().unwrap();
         #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
-        if state.settlement_epoch_ms.is_some() {
-            return Ok(state.simulated_cells(&search_key, order, limit, after));
+        if let Some(driver) = state.driver.as_ref().filter(|driver| driver.is_active()) {
+            return Ok(driver.query_cells(&state, &search_key, order, limit, after));
         }
         let _ = (search_key, order, limit, after);
         Ok(ckb_sdk::rpc::ckb_indexer::Pagination {
@@ -1051,13 +1060,8 @@ impl CkbChainClient for MockCkbChainClient {
 
     async fn get_block_timestamp(&self, block_hash: Hash256) -> Result<Option<u64>, anyhow::Error> {
         #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
-        if let Some(access) = &self.simulation_access {
-            access
-                .before(
-                    crate::simulation::ChainEndpoint::Client,
-                    "get_block_timestamp",
-                )
-                .await?;
+        if let Some(hook) = &self.simulation_hook {
+            hook.before_client_request("get_block_timestamp").await?;
         }
         #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
         if crate::simulation::is_running() {
@@ -1077,10 +1081,8 @@ impl CkbChainClient for MockCkbChainClient {
         _funding_lock_script: ckb_types::packed::Script,
     ) -> Result<Option<crate::ckb::client::GetShutdownTxResponse>, anyhow::Error> {
         #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
-        if let Some(access) = &self.simulation_access {
-            access
-                .before(crate::simulation::ChainEndpoint::Client, "get_shutdown_tx")
-                .await?;
+        if let Some(hook) = &self.simulation_hook {
+            hook.before_client_request("get_shutdown_tx").await?;
             let state = self.state.read().expect("shared mock chain");
             // Discover a confirmed spend of the actual funding output, as the
             // production indexer would. Unconfirmed spends are not shutdown evidence.

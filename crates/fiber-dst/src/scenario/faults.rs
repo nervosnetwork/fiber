@@ -1,9 +1,10 @@
 use std::time::Duration;
 
+use crate::chain_fault::{ChainEndpoint, ChainFault};
+use crate::sqlite_vfs::DiskFault;
 use anyhow::{anyhow, ensure, Context, Result};
 use fnn::fiber::channel::{ChannelActorMessage, ChannelCommand};
 use fnn::fiber::{ChannelState, FiberActorCommand, Hash256, PaymentStatus};
-use fnn::simulation::{ChainEndpoint, ChainFault, DiskFault};
 use ractor::ActorRef;
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use tokio::sync::oneshot;

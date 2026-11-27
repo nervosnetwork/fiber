@@ -509,6 +509,11 @@ impl FiberConfig {
         self.base_dir.as_ref().expect("have set base dir")
     }
 
+    #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+    pub fn set_base_dir(&mut self, dir: PathBuf) {
+        self.base_dir = Some(dir);
+    }
+
     pub fn create_base_dir(&self) -> Result<()> {
         if !self.base_dir().exists() {
             fs::create_dir_all(self.base_dir())?;

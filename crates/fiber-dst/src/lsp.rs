@@ -30,7 +30,10 @@ use fiber_lsp_sdk::{
 use fnn::fiber::config::{DEFAULT_MIN_SHUTDOWN_FEE, MILLI_SECONDS_PER_EPOCH};
 use fnn::fiber::{Hash256, Privkey, Pubkey};
 use fnn::lsp::{LspConfig, LspServiceMessage, TenantId};
-use fnn::simulation::{self, SimulatedChain, SimulatedLspRuntime};
+use fnn::simulation;
+
+use crate::chain::SimulatedChain;
+use crate::lsp_runtime::SimulatedLspRuntime;
 use ractor::ActorRef;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};

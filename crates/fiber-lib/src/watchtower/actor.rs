@@ -68,7 +68,7 @@ pub struct WatchtowerActor<S> {
     signing_events: crate::signing::SigningEvents,
     store: S,
     #[cfg(feature = "simulation")]
-    simulated_chain: Option<super::simulation::SimulatedWatchtowerChain>,
+    simulated_chain: Option<Arc<dyn super::chain::SimulatedWatchtowerBackend>>,
 }
 
 const ACTOR_HANDLE_WARN_THRESHOLD_MS: u64 = 15_000;
@@ -115,9 +115,9 @@ impl<S: WatchtowerStore> WatchtowerActor<S> {
     }
 
     #[cfg(feature = "simulation")]
-    pub(crate) fn with_simulated_chain(
+    pub fn with_simulated_chain(
         mut self,
-        chain: super::simulation::SimulatedWatchtowerChain,
+        chain: Arc<dyn super::chain::SimulatedWatchtowerBackend>,
     ) -> Self {
         self.simulated_chain = Some(chain);
         self
@@ -267,12 +267,13 @@ where
                     let mut channels = self.store.get_watch_channels_with_nodes();
                     channels.sort_by_key(|(node, channel)| (node.to_string(), channel.channel_id));
                     let now_ms = crate::now_timestamp_as_millis_u64();
+                    let mut collector = chain.collector();
                     scan_channels(
                         &self.signing_events,
                         &self.store,
                         &state.signer,
-                        chain,
-                        &mut chain.collector(),
+                        chain.as_ref(),
+                        collector.as_mut(),
                         channels,
                         now_ms,
                     )
@@ -381,8 +382,8 @@ async fn scan_channels<S: WatchtowerStore>(
     events: &crate::signing::SigningEvents,
     store: &S,
     signer: &LocalSigner,
-    ckb_client: &impl WatchtowerChain,
-    cell_collector: &mut impl CellCollector,
+    ckb_client: &(impl WatchtowerChain + ?Sized),
+    cell_collector: &mut dyn CellCollector,
     channels: Vec<(NodeId, ChannelData)>,
     now_ms: u64,
 ) {
@@ -407,7 +408,7 @@ fn check_watch_channel<S: WatchtowerStore>(
     store: &S,
     signer: &LocalSigner,
     ckb_client: &CkbRpcClient,
-    cell_collector: &mut impl CellCollector,
+    cell_collector: &mut dyn CellCollector,
     channel_node_id: NodeId,
     channel_data: ChannelData,
     now_ms: u64,
@@ -429,8 +430,8 @@ async fn check_watch_channel_on_chain<S: WatchtowerStore>(
     events: &crate::signing::SigningEvents,
     store: &S,
     signer: &LocalSigner,
-    ckb_client: &impl WatchtowerChain,
-    cell_collector: &mut impl CellCollector,
+    ckb_client: &(impl WatchtowerChain + ?Sized),
+    cell_collector: &mut dyn CellCollector,
     channel_node_id: NodeId,
     channel_data: ChannelData,
     now_ms: u64,
@@ -898,7 +899,7 @@ pub(crate) fn retire_external_signing_requests_on_revocation<S: WatchtowerStore>
 
 async fn retire_external_signing_requests_on_revocation_on_chain<S: WatchtowerStore>(
     events: &crate::signing::SigningEvents,
-    client: &impl WatchtowerChain,
+    client: &(impl WatchtowerChain + ?Sized),
     store: &S,
     node: &NodeId,
     channel_id: &Hash256,
@@ -1174,7 +1175,7 @@ fn build_revocation_tx(
     revocation_data: RevocationData,
     x_only_aggregated_pubkey: [u8; 32],
     signer: &LocalSigner,
-    cell_collector: &mut impl CellCollector,
+    cell_collector: &mut dyn CellCollector,
 ) -> Result<TransactionView, Box<dyn std::error::Error>> {
     let witness = [
         XUDT_COMPATIBLE_WITNESS.to_vec(),
@@ -1281,11 +1282,11 @@ async fn try_settle_commitment_tx<S: WatchtowerStore>(
     events: &crate::signing::SigningEvents,
     commitment_lock: Script,
     first_commitment_tx_out_point: OutPoint,
-    ckb_client: &impl WatchtowerChain,
+    ckb_client: &(impl WatchtowerChain + ?Sized),
     channel_data: ChannelData,
     for_remote: bool,
     signer: &LocalSigner,
-    cell_collector: &mut impl CellCollector,
+    cell_collector: &mut dyn CellCollector,
     store: &S,
     self_node_id: NodeId,
     first_commitment_block_number: u64,
@@ -1683,7 +1684,7 @@ struct WatchedSettlementScan {
 #[allow(clippy::too_many_arguments)]
 async fn scan_watched_settlement_txs<S: WatchtowerStore>(
     search_key: SearchKey,
-    ckb_client: &impl WatchtowerChain,
+    ckb_client: &(impl WatchtowerChain + ?Sized),
     commitment_lock_prefix: &Script,
     first_commitment_tx_out_point: OutPoint,
     initial_tlcs: Vec<TrackedSettlementTlc>,
@@ -1928,7 +1929,7 @@ fn is_definitive_send_tx_rpc_rejection(err: &ckb_sdk::RpcError) -> bool {
 #[allow(clippy::too_many_arguments)]
 async fn handle_external_settlement_send_error_on_chain<S: WatchtowerStore>(
     events: &crate::signing::SigningEvents,
-    ckb_client: &impl WatchtowerChain,
+    ckb_client: &(impl WatchtowerChain + ?Sized),
     store: &S,
     node_id: &NodeId,
     channel_id: &Hash256,
@@ -2460,7 +2461,7 @@ fn reconcile_and_expire_external_signing_requests<S: WatchtowerStore>(
 #[allow(clippy::too_many_arguments)]
 async fn reconcile_and_expire_external_signing_requests_on_chain<S: WatchtowerStore>(
     events: &crate::signing::SigningEvents,
-    client: &impl WatchtowerChain,
+    client: &(impl WatchtowerChain + ?Sized),
     store: &S,
     node_id: &NodeId,
     channel_id: &Hash256,

@@ -1,13 +1,13 @@
 mod actor;
 mod chain;
 mod signer;
-#[cfg(feature = "simulation")]
-pub(crate) mod simulation;
 mod store;
 
 #[cfg(test)]
 pub(crate) use actor::build_settlement_transaction;
 pub use actor::{WatchtowerActor, WatchtowerMessage, DEFAULT_WATCHTOWER_CHECK_INTERVAL_SECONDS};
+#[cfg(feature = "simulation")]
+pub use chain::{SimulatedWatchtowerBackend, WatchtowerChain};
 pub use fiber_types::ChannelData;
 pub use signer::{
     sign_onchain_request, verify_onchain_signature, WatchtowerSignOutcome, WatchtowerSigner,

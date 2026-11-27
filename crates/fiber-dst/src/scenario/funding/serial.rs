@@ -1,8 +1,8 @@
+use crate::sqlite_vfs::{BatchTarget, DiskFault};
 use anyhow::{ensure, Context, Result};
 use fnn::fiber::{ChannelState, Hash256};
 use fnn::fiber_types::schema::CHANNEL_IMMUTABLE_STATE_PREFIX;
 use fnn::fiber_types::{AwaitingChannelReadyFlags, AwaitingTxSignaturesFlags};
-use fnn::simulation::{BatchTarget, DiskFault};
 
 use crate::host::{FrameLoss, NAMES};
 

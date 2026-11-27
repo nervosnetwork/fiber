@@ -1,9 +1,9 @@
 use std::collections::BTreeSet;
 use std::time::Duration;
 
+use crate::sqlite_vfs::{BatchTarget, DiskFault};
 use anyhow::Result;
 use fnn::fiber::Hash256;
-use fnn::simulation::{BatchTarget, DiskFault};
 use rand::rngs::StdRng;
 use rand::seq::IteratorRandom;
 use rand::{Rng, SeedableRng};

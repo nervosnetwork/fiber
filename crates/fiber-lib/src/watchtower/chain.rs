@@ -11,7 +11,7 @@ use ckb_types::{packed::Script, H256};
 macro_rules! watchtower_chain {
     ($(fn $method:ident($($arg:ident: $arg_type:ty),*) -> $result:ty;)+) => {
         #[async_trait::async_trait]
-        pub(crate) trait WatchtowerChain: Send + Sync {
+        pub trait WatchtowerChain: Send + Sync {
             fn can_submit(&self) -> bool { true }
             fn as_rpc_client(&self) -> Option<&CkbRpcClient> { None }
 
@@ -42,8 +42,17 @@ watchtower_chain! {
     fn send_transaction(tx: Transaction, validator: Option<OutputsValidator>) -> H256;
 }
 
+/// Simulation backend injected into `WatchtowerActor` without coupling `fiber-lib` to a mock chain.
+#[cfg(feature = "simulation")]
+pub trait SimulatedWatchtowerBackend: WatchtowerChain {
+    /// Local signer used by the watchtower when building fee-bearing transactions.
+    fn signer(&self) -> crate::ckb::signer::LocalSigner;
+    /// Cell collector for fee inputs in a single watchtower periodic scan.
+    fn collector(&self) -> Box<dyn ckb_sdk::traits::CellCollector + Send>;
+}
+
 pub(super) async fn find_funding_spend(
-    chain: &impl WatchtowerChain,
+    chain: &(impl WatchtowerChain + ?Sized),
     lock: &Script,
 ) -> Result<Option<H256>, RpcError> {
     use crate::ckb::client::{first_input_tx_hash, new_shutdown_tx_search_key};

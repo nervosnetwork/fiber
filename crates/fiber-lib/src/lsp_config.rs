@@ -162,6 +162,11 @@ impl LspConfig {
         self.base_dir.as_deref().expect("have set LSP base dir")
     }
 
+    #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+    pub fn set_base_dir(&mut self, dir: PathBuf) {
+        self.base_dir = Some(dir);
+    }
+
     /// Return the root directory below which tenant-local runtime files are created.
     pub fn tenant_store_root(&self) -> PathBuf {
         self.base_dir().join("tenants")

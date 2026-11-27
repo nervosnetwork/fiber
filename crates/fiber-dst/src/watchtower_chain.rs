@@ -1,5 +1,7 @@
-use std::collections::BTreeSet;
-use std::sync::{Arc, RwLock};
+//! In-memory CKB watchtower chain backend and settlement clock driver for Fiber DST.
+
+use std::collections::{BTreeSet, HashMap};
+use std::sync::{Arc, OnceLock, RwLock};
 
 use ckb_jsonrpc_types::{
     BlockNumber, CellWithStatus, HeaderView, JsonBytes, OutPoint as JsonOutPoint, OutputsValidator,
@@ -22,85 +24,39 @@ use ckb_types::{
     prelude::*,
     H256,
 };
-use fiber_types::{Hash256, Privkey};
-
-use crate::ckb::{
+use fnn::ckb::{
     contracts::{get_script_by_contract, Contract},
     signer::LocalSigner,
-    tests::test_utils::{CellStatus, MockChainState},
+    tests::test_utils::{CellStatus, MockChainState, SimulatedChainDriver},
 };
-use crate::simulation::{ChainEndpoint, SimulatedChainAccess};
+use fnn::fiber_types::{Hash256, Privkey};
+use fnn::watchtower::{SimulatedWatchtowerBackend, WatchtowerChain};
 
-use super::chain::WatchtowerChain;
+use crate::chain_fault::{ChainEndpoint, SimulatedChainAccess};
 
 const BLOCK_MS: u64 = 5;
 const BLOCKS_PER_EPOCH: u64 = 10;
 const FEE_CELL_CAPACITY: u64 = 10_000 * 100_000_000;
 
-#[derive(Clone)]
-pub(crate) struct SimulatedWatchtowerChain {
-    state: Arc<RwLock<MockChainState>>,
-    access: SimulatedChainAccess,
-    signer: LocalSigner,
-    can_submit: bool,
+/// Shared virtual-clock and indexer implementation injected into `MockChainState`.
+#[derive(Debug, Default)]
+pub(crate) struct SimulatedChainClock {
+    settlement_epoch_ms: OnceLock<u64>,
+    watchtower_headers: RwLock<HashMap<H256, u64>>,
 }
 
-impl SimulatedWatchtowerChain {
-    pub(crate) fn new(
-        state: Arc<RwLock<MockChainState>>,
-        access: SimulatedChainAccess,
-        key: Privkey,
-        can_submit: bool,
-    ) -> anyhow::Result<Self> {
-        let signer = LocalSigner::new(key.into());
-        if can_submit {
-            let lock = get_script_by_contract(Contract::Secp256k1Lock, signer.pubkey_hash());
-            let genesis = TransactionBuilder::default()
-                .output(
-                    CellOutput::new_builder()
-                        .capacity(FEE_CELL_CAPACITY)
-                        .lock(lock)
-                        .build(),
-                )
-                .output_data(ckb_types::packed::Bytes::default())
-                .build();
-            let mut chain = state.write().unwrap();
-            chain
-                .settlement_epoch_ms
-                .get_or_insert_with(crate::now_timestamp_as_millis_u64);
-            chain.submit_transaction(genesis)?;
-        }
-        Ok(Self {
-            state,
-            access,
-            signer,
-            can_submit,
-        })
+impl SimulatedChainClock {
+    pub(crate) fn activate(&self) {
+        self.settlement_epoch_ms
+            .get_or_init(fnn::now_timestamp_as_millis_u64);
     }
 
-    pub(crate) fn signer(&self) -> LocalSigner {
-        self.signer.clone()
-    }
-
-    pub(crate) fn collector(&self) -> SimulatedFeeCollector {
-        SimulatedFeeCollector {
-            state: self.state.clone(),
-            locked: BTreeSet::new(),
-        }
-    }
-
-    async fn before(&self, request: &'static str) -> Result<(), RpcError> {
-        self.access
-            .before(ChainEndpoint::Watchtower, request)
-            .await
-            .map_err(RpcError::Other)
-    }
-}
-
-impl MockChainState {
-    fn simulated_header(&self, number: u64) -> ChainHeader {
-        let timestamp =
-            self.settlement_epoch_ms.expect("settlement chain clock") + number * BLOCK_MS;
+    fn header(&self, number: u64) -> ChainHeader {
+        let timestamp = *self
+            .settlement_epoch_ms
+            .get()
+            .expect("settlement chain clock")
+            + number * BLOCK_MS;
         let epoch = EpochNumberWithFraction::new(
             number / BLOCKS_PER_EPOCH,
             number % BLOCKS_PER_EPOCH,
@@ -113,68 +69,40 @@ impl MockChainState {
             .build()
     }
 
-    pub(crate) fn simulated_tip(&self) -> ChainHeader {
-        let elapsed = crate::now_timestamp_as_millis_u64()
-            .saturating_sub(self.settlement_epoch_ms.expect("settlement chain clock"));
-        self.simulated_header(elapsed / BLOCK_MS)
+    fn tip(&self) -> ChainHeader {
+        let elapsed = fnn::now_timestamp_as_millis_u64().saturating_sub(
+            *self
+                .settlement_epoch_ms
+                .get()
+                .expect("settlement chain clock"),
+        );
+        self.header(elapsed / BLOCK_MS)
+    }
+}
+
+impl SimulatedChainDriver for SimulatedChainClock {
+    fn is_active(&self) -> bool {
+        self.settlement_epoch_ms.get().is_some()
     }
 
-    fn confirmed_transactions(&self) -> impl Iterator<Item = (u64, u32, &TransactionView)> {
-        self.txs.values().filter_map(|record| {
-            let TxStatus::Committed(block, _, index) = record.tx_status else {
-                return None;
-            };
-            Some((block, index, record.transaction.as_ref()?))
-        })
-    }
-
-    fn confirmed_cell(&self, outpoint: &OutPoint) -> Option<LiveCell> {
-        let record = self.txs.get(&Hash256::from(outpoint.tx_hash()))?;
-        let TxStatus::Committed(block_number, _, tx_index) = record.tx_status else {
-            return None;
-        };
-        let index: u32 = outpoint.index().unpack();
-        let tx = record.transaction.as_ref()?;
-        Some(LiveCell {
-            output: tx.outputs().get(index as usize)?,
-            output_data: tx.outputs_data().get(index as usize)?.raw_data(),
-            out_point: outpoint.clone(),
-            block_number,
-            tx_index,
-        })
-    }
-
-    pub(crate) fn live_cells(&self) -> Vec<LiveCell> {
-        let mut cells: Vec<_> = self
-            .confirmed_transactions()
-            .flat_map(|(_, _, tx)| tx.output_pts())
-            .filter(|outpoint| !self.cell_status.contains_key(outpoint))
-            .filter_map(|outpoint| self.confirmed_cell(&outpoint))
-            .collect();
-        cells.sort_by_key(|cell| (cell.block_number, cell.tx_index, cell.out_point.clone()));
-        cells
-    }
-
-    pub(crate) fn validate_simulated_spend(&self, tx: &TransactionView) -> anyhow::Result<()> {
+    fn validate_spend(&self, state: &MockChainState, tx: &TransactionView) -> anyhow::Result<()> {
         if tx.inputs().is_empty() {
             // Synthetic funding and fee cells provide the starting value in DST.
             return Ok(());
         }
-        let tip = self.simulated_tip();
+        let tip = self.tip();
         let mut total_inputs = 0u128;
         for input in tx.inputs() {
-            let cell = self
-                .confirmed_cell(&input.previous_output())
-                .ok_or_else(|| {
-                    anyhow::anyhow!("unknown simulated input {}", input.previous_output())
-                })?;
+            let cell = confirmed_cell(state, &input.previous_output()).ok_or_else(|| {
+                anyhow::anyhow!("unknown simulated input {}", input.previous_output())
+            })?;
             total_inputs += u128::from(Unpack::<u64>::unpack(&cell.output.capacity()));
             let since = Since::from_raw_value(input.since().unpack());
             anyhow::ensure!(since.flags_is_valid(), "invalid since flags");
             let (metric, value) = since
                 .extract_metric()
                 .ok_or_else(|| anyhow::anyhow!("invalid since metric"))?;
-            let base = self.simulated_header(if since.is_relative() {
+            let base = self.header(if since.is_relative() {
                 cell.block_number
             } else {
                 0
@@ -215,85 +143,194 @@ impl MockChainState {
         Ok(())
     }
 
-    pub(crate) fn simulated_cells(
+    fn current_tip(&self, _state: &MockChainState) -> ChainHeader {
+        self.tip()
+    }
+
+    fn query_cells(
         &self,
+        state: &MockChainState,
         key: &SearchKey,
         order: Order,
         limit: u32,
         after: Option<JsonBytes>,
     ) -> Pagination<Cell> {
-        let cells = self
-            .live_cells()
-            .into_iter()
-            .filter(|cell| {
-                matches_block(key, cell.block_number) && matches_script(key, &cell.output)
-            })
-            .map(|cell| Cell {
-                output: cell.output.into(),
-                output_data: key
-                    .with_data
-                    .unwrap_or(true)
-                    .then(|| JsonBytes::from_bytes(cell.output_data)),
-                out_point: cell.out_point.into(),
-                block_number: cell.block_number.into(),
-                tx_index: cell.tx_index.into(),
-            })
-            .collect();
-        page(cells, order, limit, after)
+        simulated_cells(state, key, order, limit, after)
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct SimulatedWatchtowerChain {
+    state: Arc<RwLock<MockChainState>>,
+    clock: Arc<SimulatedChainClock>,
+    access: SimulatedChainAccess,
+    signer: LocalSigner,
+    can_submit: bool,
+}
+
+impl SimulatedWatchtowerChain {
+    pub(crate) fn new(
+        state: Arc<RwLock<MockChainState>>,
+        clock: Arc<SimulatedChainClock>,
+        access: SimulatedChainAccess,
+        key: Privkey,
+        can_submit: bool,
+    ) -> anyhow::Result<Self> {
+        let signer = LocalSigner::new(key.into());
+        if can_submit {
+            let lock = get_script_by_contract(Contract::Secp256k1Lock, signer.pubkey_hash());
+            let genesis = TransactionBuilder::default()
+                .output(
+                    CellOutput::new_builder()
+                        .capacity(FEE_CELL_CAPACITY)
+                        .lock(lock)
+                        .build(),
+                )
+                .output_data(ckb_types::packed::Bytes::default())
+                .build();
+            let mut chain = state.write().unwrap();
+            clock.activate();
+            chain.submit_transaction(genesis)?;
+        }
+        Ok(Self {
+            state,
+            clock,
+            access,
+            signer,
+            can_submit,
+        })
     }
 
-    fn simulated_transactions(
-        &self,
-        key: &SearchKey,
-        order: Order,
-        limit: u32,
-        after: Option<JsonBytes>,
-    ) -> Pagination<Tx> {
-        let mut transactions: Vec<_> = self.confirmed_transactions().collect();
-        transactions.sort_by_key(|(block, index, tx)| (*block, *index, tx.hash()));
-        let mut entries = Vec::new();
-        for (block, index, tx) in transactions {
-            if !matches_block(key, block) {
-                continue;
+    async fn before(&self, request: &'static str) -> Result<(), RpcError> {
+        self.access
+            .before(ChainEndpoint::Watchtower, request)
+            .await
+            .map_err(RpcError::Other)
+    }
+}
+
+impl SimulatedWatchtowerBackend for SimulatedWatchtowerChain {
+    fn signer(&self) -> LocalSigner {
+        self.signer.clone()
+    }
+
+    fn collector(&self) -> Box<dyn CellCollector + Send> {
+        Box::new(SimulatedFeeCollector {
+            state: self.state.clone(),
+            locked: BTreeSet::new(),
+        })
+    }
+}
+
+fn confirmed_transactions(
+    state: &MockChainState,
+) -> impl Iterator<Item = (u64, u32, &TransactionView)> {
+    state.txs.values().filter_map(|record| {
+        let TxStatus::Committed(block, _, index) = record.tx_status else {
+            return None;
+        };
+        Some((block, index, record.transaction.as_ref()?))
+    })
+}
+
+fn confirmed_cell(state: &MockChainState, outpoint: &OutPoint) -> Option<LiveCell> {
+    let record = state.txs.get(&Hash256::from(outpoint.tx_hash()))?;
+    let TxStatus::Committed(block_number, _, tx_index) = record.tx_status else {
+        return None;
+    };
+    let index: u32 = outpoint.index().unpack();
+    let tx = record.transaction.as_ref()?;
+    Some(LiveCell {
+        output: tx.outputs().get(index as usize)?,
+        output_data: tx.outputs_data().get(index as usize)?.raw_data(),
+        out_point: outpoint.clone(),
+        block_number,
+        tx_index,
+    })
+}
+
+pub(crate) fn live_cells(state: &MockChainState) -> Vec<LiveCell> {
+    let mut cells: Vec<_> = confirmed_transactions(state)
+        .flat_map(|(_, _, tx)| tx.output_pts())
+        .filter(|outpoint| !state.cell_status.contains_key(outpoint))
+        .filter_map(|outpoint| confirmed_cell(state, &outpoint))
+        .collect();
+    cells.sort_by_key(|cell| (cell.block_number, cell.tx_index, cell.out_point.clone()));
+    cells
+}
+
+fn simulated_cells(
+    state: &MockChainState,
+    key: &SearchKey,
+    order: Order,
+    limit: u32,
+    after: Option<JsonBytes>,
+) -> Pagination<Cell> {
+    let cells = live_cells(state)
+        .into_iter()
+        .filter(|cell| matches_block(key, cell.block_number) && matches_script(key, &cell.output))
+        .map(|cell| Cell {
+            output: cell.output.into(),
+            output_data: key
+                .with_data
+                .unwrap_or(true)
+                .then(|| JsonBytes::from_bytes(cell.output_data)),
+            out_point: cell.out_point.into(),
+            block_number: cell.block_number.into(),
+            tx_index: cell.tx_index.into(),
+        })
+        .collect();
+    page(cells, order, limit, after)
+}
+
+fn simulated_transactions(
+    state: &MockChainState,
+    key: &SearchKey,
+    order: Order,
+    limit: u32,
+    after: Option<JsonBytes>,
+) -> Pagination<Tx> {
+    let mut transactions: Vec<_> = confirmed_transactions(state).collect();
+    transactions.sort_by_key(|(block, index, tx)| (*block, *index, tx.hash()));
+    let mut entries = Vec::new();
+    for (block, index, tx) in transactions {
+        if !matches_block(key, block) {
+            continue;
+        }
+        let mut matches = Vec::new();
+        for (i, input) in tx.input_pts_iter().enumerate() {
+            if confirmed_cell(state, &input).is_some_and(|cell| matches_script(key, &cell.output)) {
+                matches.push((CellType::Input, Uint32::from(i as u32)));
             }
-            let mut matches = Vec::new();
-            for (i, input) in tx.input_pts_iter().enumerate() {
-                if self
-                    .confirmed_cell(&input)
-                    .is_some_and(|cell| matches_script(key, &cell.output))
-                {
-                    matches.push((CellType::Input, Uint32::from(i as u32)));
-                }
+        }
+        for (i, output) in tx.outputs().into_iter().enumerate() {
+            if matches_script(key, &output) {
+                matches.push((CellType::Output, Uint32::from(i as u32)));
             }
-            for (i, output) in tx.outputs().into_iter().enumerate() {
-                if matches_script(key, &output) {
-                    matches.push((CellType::Output, Uint32::from(i as u32)));
-                }
-            }
-            if matches.is_empty() {
-                continue;
-            }
-            if key.group_by_transaction.unwrap_or_default() {
-                entries.push(Tx::Grouped(TxWithCells {
+        }
+        if matches.is_empty() {
+            continue;
+        }
+        if key.group_by_transaction.unwrap_or_default() {
+            entries.push(Tx::Grouped(TxWithCells {
+                tx_hash: tx.hash().into(),
+                block_number: block.into(),
+                tx_index: index.into(),
+                cells: matches,
+            }));
+        } else {
+            entries.extend(matches.into_iter().map(|(io_type, io_index)| {
+                Tx::Ungrouped(TxWithCell {
                     tx_hash: tx.hash().into(),
                     block_number: block.into(),
                     tx_index: index.into(),
-                    cells: matches,
-                }));
-            } else {
-                entries.extend(matches.into_iter().map(|(io_type, io_index)| {
-                    Tx::Ungrouped(TxWithCell {
-                        tx_hash: tx.hash().into(),
-                        block_number: block.into(),
-                        tx_index: index.into(),
-                        io_type,
-                        io_index,
-                    })
-                }));
-            }
+                    io_type,
+                    io_index,
+                })
+            }));
         }
-        page(entries, order, limit, after)
     }
+    page(entries, order, limit, after)
 }
 
 fn matches_block(key: &SearchKey, block: u64) -> bool {
@@ -399,10 +436,11 @@ impl WatchtowerChain for SimulatedWatchtowerChain {
 
     async fn get_tip_header(&self) -> Result<HeaderView, RpcError> {
         self.before("get_tip_header").await?;
-        let mut chain = self.state.write().unwrap();
-        let tip = chain.simulated_tip();
-        chain
+        let tip = self.clock.tip();
+        self.clock
             .watchtower_headers
+            .write()
+            .unwrap()
             .insert(tip.hash().into(), tip.timestamp());
         Ok(tip.into())
     }
@@ -412,23 +450,17 @@ impl WatchtowerChain for SimulatedWatchtowerChain {
         number: BlockNumber,
     ) -> Result<Option<HeaderView>, RpcError> {
         self.before("get_header_by_number").await?;
-        Ok(Some(
-            self.state
-                .read()
-                .unwrap()
-                .simulated_header(number.value())
-                .into(),
-        ))
+        Ok(Some(self.clock.header(number.value()).into()))
     }
 
     async fn get_block_median_time(&self, hash: H256) -> Result<Option<Timestamp>, RpcError> {
         self.before("get_block_median_time").await?;
         // The tip query and median-time query may be separated by an injected delay.
         Ok(self
-            .state
+            .clock
+            .watchtower_headers
             .read()
             .unwrap()
-            .watchtower_headers
             .get(&hash)
             .copied()
             .map(Into::into))
@@ -444,7 +476,7 @@ impl WatchtowerChain for SimulatedWatchtowerChain {
         let outpoint: OutPoint = outpoint.into();
         let status = if state.cell_status.get(&outpoint) == Some(&CellStatus::Consumed) {
             "dead"
-        } else if state.confirmed_cell(&outpoint).is_some() {
+        } else if confirmed_cell(&state, &outpoint).is_some() {
             "live"
         } else {
             "unknown"
@@ -464,11 +496,13 @@ impl WatchtowerChain for SimulatedWatchtowerChain {
         after: Option<JsonBytes>,
     ) -> Result<Pagination<Cell>, RpcError> {
         self.before("get_cells").await?;
-        Ok(self
-            .state
-            .read()
-            .unwrap()
-            .simulated_cells(&key, order, limit.value(), after))
+        Ok(simulated_cells(
+            &self.state.read().unwrap(),
+            &key,
+            order,
+            limit.value(),
+            after,
+        ))
     }
 
     async fn get_transactions(
@@ -479,11 +513,13 @@ impl WatchtowerChain for SimulatedWatchtowerChain {
         after: Option<JsonBytes>,
     ) -> Result<Pagination<Tx>, RpcError> {
         self.before("get_transactions").await?;
-        Ok(self
-            .state
-            .read()
-            .unwrap()
-            .simulated_transactions(&key, order, limit.value(), after))
+        Ok(simulated_transactions(
+            &self.state.read().unwrap(),
+            &key,
+            order,
+            limit.value(),
+            after,
+        ))
     }
 
     async fn send_transaction(
@@ -506,7 +542,7 @@ impl WatchtowerChain for SimulatedWatchtowerChain {
 }
 
 #[derive(Clone)]
-pub(crate) struct SimulatedFeeCollector {
+struct SimulatedFeeCollector {
     state: Arc<RwLock<MockChainState>>,
     locked: BTreeSet<OutPoint>,
 }
@@ -528,7 +564,7 @@ impl CellCollector for SimulatedFeeCollector {
     ) -> Result<(Vec<LiveCell>, u64), CellCollectorError> {
         let mut selected = Vec::new();
         let mut capacity = 0u64;
-        for cell in self.state.read().unwrap().live_cells() {
+        for cell in live_cells(&self.state.read().unwrap()) {
             if self.locked.contains(&cell.out_point) || !query.match_cell(&cell, u64::MAX) {
                 continue;
             }

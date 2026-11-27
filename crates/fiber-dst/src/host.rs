@@ -16,9 +16,7 @@ use fnn::fiber::{
     Privkey, Pubkey, PublicNetworkEvent,
 };
 use fnn::fiber_types::Hash256;
-use fnn::simulation::{
-    self, SimulatedChain, SimulatedChainAccess, SimulatedDisk, SimulatedPeerSender,
-};
+use fnn::simulation::SimulatedPeerSender;
 use fnn::store::{open_store_with_migration, Store};
 use fnn::watchtower::WatchtowerMessage;
 use ractor::ActorRef;
@@ -26,7 +24,11 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot, watch};
 use turmoil::net::{TcpListener, TcpStream};
 
+use crate::chain::SimulatedChain;
+use crate::chain_fault::SimulatedChainAccess;
 use crate::lsp::{serve_lsp_rpc, LspHandle, LspHostConfig};
+use crate::lsp_runtime::start_lsp_runtime;
+use crate::sqlite_vfs::SimulatedDisk;
 use crate::tower::{self, Tower, TowerMode};
 
 const PORT: u16 = 7100;
@@ -250,15 +252,16 @@ impl Host {
         for (byte, generation_byte) in entropy.iter_mut().zip(generation.to_le_bytes()) {
             *byte ^= generation_byte;
         }
-        let mut runtime = simulation::start_node(
-            config.clone(),
-            self.key.clone(),
-            entropy,
-            store.clone(),
-            self.chain.clone(),
-            self.access.clone(),
-        )
-        .await?;
+        let mut runtime = self
+            .chain
+            .start_node(
+                config.clone(),
+                self.key.clone(),
+                entropy,
+                store.clone(),
+                self.access.clone(),
+            )
+            .await?;
         self.nodes.borrow_mut()[self.index].node = Some(Node {
             actor: runtime.actor.clone(),
             store: store.clone(),
@@ -271,7 +274,7 @@ impl Host {
         let mut tasks = tokio::task::JoinSet::new();
         let _lsp_runtime = if let Some(lsp_cfg) = &self.lsp {
             let lsp_runtime = Rc::new(
-                simulation::start_lsp_runtime(
+                start_lsp_runtime(
                     &runtime,
                     config.clone(),
                     self.key.clone(),

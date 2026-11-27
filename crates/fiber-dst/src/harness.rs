@@ -14,7 +14,11 @@ use fnn::fiber::{
     ChannelConnectivityState, ChannelState, FiberActorCommand, Hash256, NetworkActorMessage,
     PaymentStatus, Privkey, Pubkey, PublicNetworkEvent,
 };
-use fnn::simulation::{self, ChainFaultHit, SimulatedChain, SimulatedChainAccess, SimulatedDisk};
+use fnn::simulation;
+
+use crate::chain::SimulatedChain;
+use crate::chain_fault::{ChainFaultHit, SimulatedChainAccess};
+use crate::sqlite_vfs::SimulatedDisk;
 use fnn::store::{open_store_with_migration, Store};
 use ractor::RpcReplyPort;
 use rand::{rngs::StdRng, Rng, SeedableRng};

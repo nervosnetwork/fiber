@@ -1,11 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::chain_fault::{ChainEndpoint, ChainFault};
+use crate::sqlite_vfs::{BatchTarget, DiskFault};
 use anyhow::{ensure, Context, Result};
 use fnn::fiber::config::DEFAULT_FINAL_TLC_EXPIRY_DELTA;
 use fnn::fiber::payment::SendPaymentWithRouterCommand;
 use fnn::fiber::{ChannelState, FiberActorCommand, Hash256, PaymentStatus};
 use fnn::fiber_types::{CloseFlags, RouterHop};
-use fnn::simulation::{BatchTarget, ChainEndpoint, ChainFault, DiskFault};
 
 use crate::host::{FrameLoss, NAMES};
 use crate::scenario::{faults::Fault, TICK};
