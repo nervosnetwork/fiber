@@ -621,8 +621,11 @@ where
             if let FiberChannelMessage::ReestablishChannelV2(reestablish) = message {
                 return Box::pin(self.reestablish_v2(myself, state, reestablish)).await;
             }
-            // Do not accept replay or updates until both handshakes have been validated.
-            if state.recovery_peer_v2.is_none() {
+            // Gate replay and updates on the handshake. A peer that already aborted
+            // may never complete it; the TxAbort handler checks whether funding can abort.
+            if state.recovery_peer_v2.is_none()
+                && !matches!(&message, FiberChannelMessage::TxAbort(_))
+            {
                 return Ok(());
             }
         }
