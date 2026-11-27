@@ -2,7 +2,7 @@
 
 use std::process::{Command, Output};
 
-use fiber_dst::Scenario;
+use fiber_dst::{RandomFaultPolicy, Scenario};
 
 fn check_output(output: &Output, case: &str, seed: &str) {
     assert!(
@@ -48,6 +48,24 @@ fn emit_fixture_trace() {
         "parallel-funding-abort" => Scenario::ParallelFunding { mixed: true },
         "lsp-offline-delivery" => Scenario::LspOfflineDelivery,
         "lsp-signer-faults" => Scenario::LspSignerFaults,
+        other if other.starts_with("legacy-random:") => {
+            let parts: Vec<_> = other.split(':').collect();
+            assert_eq!(parts.len(), 4, "invalid legacy-random fixture {other}");
+            let payments = parts[1].parse().expect("legacy-random payments");
+            let phases = parts[2].parse().expect("legacy-random phases");
+            let fault_policy = match parts[3] {
+                "windows" => RandomFaultPolicy::Windows,
+                "continuous" => RandomFaultPolicy::Continuous,
+                "payments" => RandomFaultPolicy::Payments,
+                p => panic!("unknown fault policy {p}"),
+            };
+            Scenario::Random {
+                payments,
+                phases,
+                fault_policy,
+                lsp: false,
+            }
+        }
         _ => panic!("unknown replay fixture {case}"),
     };
     let trace = fiber_dst::run(scenario, seed).expect("run replay fixture");
@@ -69,6 +87,10 @@ fn run_fixture(case: &str, seed: &str) -> String {
     std::fs::read_to_string(path).expect("read fixture trace")
 }
 
+fn run_legacy_random(seed: &str, payments: usize, phases: usize, policy: &str) -> String {
+    run_fixture(&format!("legacy-random:{payments}:{phases}:{policy}"), seed)
+}
+
 fn run_random(seed: &str, extra: &[&str]) -> String {
     let output = Command::new(env!("CARGO_BIN_EXE_fiber-dst"))
         .args(["random", seed])
@@ -86,8 +108,7 @@ fn run_random(seed: &str, extra: &[&str]) -> String {
 
 #[test]
 fn continuous_chaos_replays_funding_and_relay_crashes_peer_faults_and_force_close() {
-    let options = ["--payments", "32", "--phases", "5", "--chaos"];
-    let trace = run_random("6", &options);
+    let trace = run_legacy_random("6", 32, 5, "continuous");
     for marker in [
         "chaos startup starts",
         "chaos hit FundingPersisted",
@@ -120,13 +141,12 @@ fn continuous_chaos_replays_funding_and_relay_crashes_peer_faults_and_force_clos
             "{local} did not reconnect to {remote}"
         );
     }
-    assert_eq!(trace, run_random("6", &options));
+    assert_eq!(trace, run_legacy_random("6", 32, 5, "continuous"));
 }
 
 #[test]
 fn random_replays_startup_funding_and_repeated_workload() {
-    let options = ["--payments", "32", "--phases", "5"];
-    let trace = run_random("1", &options);
+    let trace = run_legacy_random("1", 32, 5, "windows");
     for marker in [
         "random topology",
         "random startup hit TCP Dial",
@@ -146,14 +166,13 @@ fn random_replays_startup_funding_and_repeated_workload() {
     assert_eq!(trace.matches("ckb_fault=true").count(), 2);
     assert_eq!(trace.matches("swarm audit").count(), 40);
     assert!(trace.contains("faults_during_payment=true"));
-    let replay = run_random("1", &options);
+    let replay = run_legacy_random("1", 32, 5, "windows");
     assert_eq!(trace, replay);
 }
 
 #[test]
 fn seeded_random_wave_replays_a_long_peer_delay() {
-    let options = ["--payments", "12", "--phases", "3"];
-    let trace = run_random("2", &options);
+    let trace = run_legacy_random("2", 12, 3, "windows");
     assert!(
         trace
             .lines()
@@ -162,7 +181,7 @@ fn seeded_random_wave_replays_a_long_peer_delay() {
     );
     assert!(trace.contains("swarm end delay-frame hit=true"));
     assert!(trace.contains("random reconciled workload=12 successful=12"));
-    assert_eq!(trace, run_random("2", &options));
+    assert_eq!(trace, run_legacy_random("2", 12, 3, "windows"));
 }
 
 #[test]
@@ -304,7 +323,7 @@ fn fully_aborted_funding_is_verified_and_retried() {
 
 #[test]
 fn tx_abort_while_syncing_cleans_up_funding_and_allows_retry() {
-    let trace = run_random("9", &["--payments", "12", "--phases", "3", "--chaos"]);
+    let trace = run_legacy_random("9", 12, 3, "continuous");
     let channel = "Hash256(0x361dcb3d5c0a965b8239b64850b16d8db5bbcb14348290d9fe2d705bf6a2061a)";
     let (before_abort, after_abort) = trace
         .split_once("C receive from D TxAbort ")
@@ -327,8 +346,7 @@ fn tx_abort_while_syncing_cleans_up_funding_and_allows_retry() {
 
 #[test]
 fn random_workload_reconciles_a_force_close_and_times_out_the_onchain_tlc() {
-    let options = ["--payments", "32", "--phases", "5", "--chaos"];
-    let trace = run_random("14", &options);
+    let trace = run_legacy_random("14", 32, 5, "continuous");
     let channel = "Hash256(0xaf6235d802873849bd6e022432f4db58110a6d03e6365626f4904d827bf8fc05)";
     let payment = "0x28301a784c490cd9657113a93bb5b6b6501752c9df817dc126fabe20bbcc604e";
     assert!(trace.contains("advance virtual Unix clock"));
@@ -349,13 +367,12 @@ fn random_workload_reconciles_a_force_close_and_times_out_the_onchain_tlc() {
     );
     assert!(trace.contains("random reconciled workload=32"));
     assert!(trace.contains("recovery_probes=4"));
-    assert_eq!(trace, run_random("14", &options));
+    assert_eq!(trace, run_legacy_random("14", 32, 5, "continuous"));
 }
 
 #[test]
 fn random_workload_reconciles_excluded_unapplied_tlc_removal_on_force_close() {
-    let options = ["--payments", "32", "--phases", "5", "--chaos"];
-    let trace = run_random("1", &options);
+    let trace = run_legacy_random("1", 32, 5, "continuous");
     let channel = "Hash256(0x9223db1831a236802deb9a20cdfec68e590814fa7dd3eaa9a591bfa09bea0792)";
     let payment = "0x78400076ee6bb9c04412a187a7c1bac8b24ecbbc6231019c7f8fe07aeac4dd6e";
     assert!(trace.contains(&format!("swarm audited close channel={channel}")));
@@ -369,7 +386,7 @@ fn random_workload_reconciles_excluded_unapplied_tlc_removal_on_force_close() {
     );
     assert!(trace.contains("random reconciled workload=32"));
     assert!(trace.contains("recovery_probes=4"));
-    assert_eq!(trace, run_random("1", &options));
+    assert_eq!(trace, run_legacy_random("1", 32, 5, "continuous"));
 }
 
 #[test]
@@ -411,8 +428,7 @@ fn interrupted_abort_cleanup_preserves_online_siblings() {
 
 #[test]
 fn mpp_first_hop_rejection_leaves_no_undispatched_attempt() {
-    let options = ["--payments", "12", "--phases", "3", "--chaos-payments"];
-    let trace = run_random("3", &options);
+    let trace = run_legacy_random("3", 12, 3, "payments");
     let payment = "0x2ff7b23acb22470a20fba6888cfc3e8c605030a7d2857d1c9ab410e32d854fbe";
     let audit = trace
         .lines()
@@ -423,15 +439,12 @@ fn mpp_first_hop_rejection_leaves_no_undispatched_attempt() {
         "{audit}"
     );
     assert!(trace.contains("random reconciled workload=12"));
-    assert_eq!(trace, run_random("3", &options));
+    assert_eq!(trace, run_legacy_random("3", 12, 3, "payments"));
 }
 
 #[test]
 fn receiver_restart_expires_an_incomplete_mpp_hold() {
-    let trace = run_random(
-        "13661109889927125842",
-        &["--payments", "128", "--phases", "8"],
-    );
+    let trace = run_legacy_random("13661109889927125842", 128, 8, "windows");
     let payment = "0x47a8fc7c101e867aed09efdddce18fd880d492e1291a260fbae8d5765632c002";
     let shard_received = trace
         .lines()
@@ -459,8 +472,7 @@ fn receiver_restart_expires_an_incomplete_mpp_hold() {
 
 #[test]
 fn random_payment_chaos_replays_a_targeted_sqlite_write_error() {
-    let options = ["--payments", "12", "--phases", "3", "--chaos-payments"];
-    let trace = run_random("9", &options);
+    let trace = run_legacy_random("9", 12, 3, "payments");
     let mut remaining = trace.as_str();
     for marker in [
         "chaos arm sqlite-batch F WriteIo",
@@ -473,13 +485,12 @@ fn random_payment_chaos_replays_a_targeted_sqlite_write_error() {
             .split_once(marker)
             .unwrap_or_else(|| panic!("missing or out-of-order SQLite milestone {marker}"));
     }
-    assert_eq!(trace, run_random("9", &options));
+    assert_eq!(trace, run_legacy_random("9", 12, 3, "payments"));
 }
 
 #[test]
 fn random_chaos_replays_parallel_funding_under_ckb_delay() {
-    let options = ["--payments", "12", "--phases", "3", "--chaos"];
-    let trace = run_random("8", &options);
+    let trace = run_legacy_random("8", 12, 3, "continuous");
     for marker in [
         "parallel funding G-A starts attempts=3 fault=slow-ckb",
         "parallel funding overlap=3",
@@ -492,7 +503,7 @@ fn random_chaos_replays_parallel_funding_under_ckb_delay() {
             "missing parallel funding milestone {marker}"
         );
     }
-    assert_eq!(trace, run_random("8", &options));
+    assert_eq!(trace, run_legacy_random("8", 12, 3, "continuous"));
 }
 
 #[test]
@@ -566,21 +577,6 @@ fn watchtower_settles_superseded_round_variant_in_builtin_and_external_modes() {
     }
 }
 
-fn run_lsp(seed: &str, extra: &[&str]) -> String {
-    let output = Command::new(env!("CARGO_BIN_EXE_fiber-dst"))
-        .args(["lsp", seed])
-        .args(extra)
-        .env_remove("RUST_LOG")
-        .output()
-        .expect("start Fiber DST LSP");
-    check_output(&output, "lsp", seed);
-    assert_eq!(
-        String::from_utf8_lossy(&output.stderr).lines().next(),
-        Some(format!("fiber-dst lsp {seed} {}", extra.join(" ")).as_str())
-    );
-    String::from_utf8(output.stdout).expect("UTF-8 trace")
-}
-
 #[test]
 fn lsp_offline_delivery_buffers_recovers_and_expires_after_long_offline() {
     let seed = "42";
@@ -625,18 +621,27 @@ fn lsp_external_signer_handles_crashes_duplicates_and_watchtower_settlement() {
 }
 
 #[test]
-fn lsp_random_chaos_reconciles_multi_tenant_sdk_wallets_across_processes() {
-    let options = ["--payments", "16", "--chaos"];
-    let trace = run_lsp("7", &options);
+fn random_chaos_reconciles_public_mesh_with_lsp_and_sdk_wallets() {
+    let options = ["--payments", "16", "--phases", "3", "--chaos"];
+    let trace = run_random("4", &options);
     for marker in [
-        "lsp-random bootstrapped 2 public peers and 2 SDK wallets chaos=true payments=16",
-        "long-offline expired",
-        "lsp-random reconciled payments=16",
+        "LSP service started",
+        "SDK-0 start 1 tenant=",
+        "SDK-1 start 1 tenant=",
+        "bootstrapped",
+        "2 SDK wallets",
+        "continuous workload drained",
+        "lsp-random concurrent wave settled",
+        "lsp-random reconciled payments=8",
+        "lsp-random self-funded watchtower settled",
+        "random reconciled workload=16",
+        "lsp_payments=8",
+        "lsp_self_funded_watchtower=true",
     ] {
         assert!(
             trace.contains(marker),
-            "missing LSP random chaos marker {marker}"
+            "missing integrated random+LSP chaos marker {marker}"
         );
     }
-    assert_eq!(trace, run_lsp("7", &options));
+    assert_eq!(trace, run_random("4", &options));
 }

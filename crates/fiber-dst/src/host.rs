@@ -340,6 +340,9 @@ impl Host {
                     result.context("Fiber actor task failed")?;
                     if let Some(fault) = self.disk.hit() {
                         self.nodes.borrow_mut()[self.index].storage_failed = true;
+                        if let Some(lsp_cfg) = &self.lsp {
+                            lsp_cfg.slot.replace(None);
+                        }
                         record(&self.trace, format_args!("{} SQLite fault {fault:?} stopped Fiber", NAMES[self.index]));
                         drop(tasks);
                         return std::future::pending().await;

@@ -47,6 +47,12 @@ impl Topology {
         }
     }
 
+    pub(crate) fn lsp_node(&self, seed: u64) -> usize {
+        // Pick one of the two diamond-core relay nodes so LSP has both inbound and outbound
+        // multi-hop paths across the full 6-8 node mesh.
+        self.core[1 + (seed as usize % 2)]
+    }
+
     fn pairs(&self, adjacent: bool) -> Vec<(usize, usize)> {
         let directed = (0..self.nodes).flat_map(|from| {
             (0..self.nodes)
@@ -67,6 +73,7 @@ impl Driver {
         payments: usize,
         phases: usize,
         fault_policy: RandomFaultPolicy,
+        lsp: bool,
     ) -> Result<()> {
         let mut setup = StdRng::seed_from_u64(seed ^ 0x6361_6d70_7365_7475);
         let mut workload = StdRng::seed_from_u64(seed ^ 0x6361_6d70_776f_726b);
@@ -181,6 +188,17 @@ impl Driver {
         for edge in &mut edges {
             *edge = self.opened_edge(edge.sender, edge.receiver, edge.channel, edge.fee)?;
         }
+        // When LSP is enabled, register external fiber-lsp-sdk wallets and open their private
+        // hosted channels BEFORE the public payment workload so LSP/tenant state also endures
+        // public chaos crashes, partitions, and SQLite faults.
+        let random_lsp = if lsp {
+            let saved_chaos = self.chaos.take();
+            let state = self.bootstrap_random_lsp(topology.nodes)?;
+            self.chaos = saved_chaos;
+            Some(state)
+        } else {
+            None
+        };
         let mut ledger = Ledger::new(&edges);
 
         let direct = topology.pairs(true);
@@ -319,6 +337,41 @@ impl Driver {
             }
         }
 
+        let mut lsp_summary = if let Some(lsp_state) = &random_lsp {
+            let lsp_payments = (payments / 2).clamp(6, 20);
+            let summary = self.run_random_lsp_workload(
+                seed,
+                lsp_state,
+                topology.nodes,
+                lsp_payments,
+                continuous,
+            )?;
+            // Multi-hop public <-> SDK payments shift balances on the public mesh and emit
+            // hosted-channel TLC settlements; discard those observations, keep only live
+            // online edges (so previously closed edges are not re-audited against the fresh
+            // recovery ledger), and re-snapshot their balances before recovery probes.
+            let _ = simulation::take_tlc_settlements();
+            let mut live_edges = Vec::new();
+            for edge in &edges {
+                if self
+                    .runtime
+                    .channel_online(edge.sender, edge.receiver, &edge.channel)
+                {
+                    live_edges.push(self.opened_edge(
+                        edge.sender,
+                        edge.receiver,
+                        edge.channel,
+                        edge.fee,
+                    )?);
+                }
+            }
+            edges = live_edges;
+            ledger = Ledger::new(&edges);
+            Some(summary)
+        } else {
+            None
+        };
+
         let probes = [
             order(0, a, b, Kind::Direct, 10_000),
             order(0, d, c, Kind::Direct, 10_000),
@@ -359,11 +412,38 @@ impl Driver {
             endpoints,
             Hash256::from(faults.random::<[u8; 32]>()),
         )?;
+        if let Some(lsp_state) = &random_lsp {
+            if continuous {
+                let settled_onchain =
+                    self.run_random_lsp_offline_force_close_probe(seed, lsp_state, topology.nodes)?;
+                if let Some(summary) = &mut lsp_summary {
+                    summary.self_funded_watchtower = settled_onchain;
+                }
+            }
+            let public_nodes: Vec<usize> = (0..topology.nodes).collect();
+            self.verify_lsp_indexes(&public_nodes, &lsp_state.tenant_ids)?;
+        }
         ensure!(reconciled == payments);
-        self.runtime.note(format_args!(
-            "random reconciled workload={reconciled} successful={settled} phases={phases} fault_overlaps={overlaps} peak_inflight={peak} recovery_probes={}",
-            recovery.len()
-        ));
+        if let Some(lsp_summary) = lsp_summary {
+            self.runtime.note(format_args!(
+                "random reconciled workload={reconciled} successful={settled} phases={phases} fault_overlaps={overlaps} peak_inflight={peak} recovery_probes={} lsp_payments={} lsp_succeeded={} lsp_concurrent={} lsp_long_offline={} lsp_crashes={} lsp_node_crashes={} lsp_duplicates={} lsp_responses_dropped={} lsp_self_funded_watchtower={}",
+                recovery.len(),
+                lsp_summary.payments,
+                lsp_summary.succeeded,
+                lsp_summary.concurrent_payments,
+                lsp_summary.expired_long_offline,
+                lsp_summary.crashes_injected,
+                lsp_summary.lsp_crashes_injected,
+                lsp_summary.duplicates_injected,
+                lsp_summary.responses_dropped,
+                lsp_summary.self_funded_watchtower,
+            ));
+        } else {
+            self.runtime.note(format_args!(
+                "random reconciled workload={reconciled} successful={settled} phases={phases} fault_overlaps={overlaps} peak_inflight={peak} recovery_probes={}",
+                recovery.len()
+            ));
+        }
         Ok(())
     }
 

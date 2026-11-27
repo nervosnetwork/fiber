@@ -5,9 +5,13 @@ use fiber_json_types::{
     CkbInvoiceStatus as JsonInvoiceStatus, GetInvoiceResult, GetPaymentCommandResult,
     InvoiceResult, PaymentStatus as JsonPaymentStatus,
 };
-use fnn::fiber::gossip::GossipMessageStore;
+use fnn::fiber::gossip::{GossipMessageStore, GossipMessageUpdates};
 use fnn::fiber::payment::SendPaymentCommand;
-use fnn::fiber::{ChannelState, FiberActorCommand, Hash256, PaymentStatus};
+use fnn::fiber::types::BroadcastMessageWithTimestamp;
+use fnn::fiber::{
+    ChannelState, FiberActorCommand, Hash256, NetworkActorMessage, PaymentStatus,
+    PublicNetworkEvent,
+};
 use fnn::fiber_types::{CloseFlags, HashAlgorithm};
 use fnn::invoice::{CkbInvoiceStatus, Currency, InvoiceBuilder, InvoiceStore};
 use fnn::lsp::{
@@ -15,33 +19,52 @@ use fnn::lsp::{
 };
 use fnn::simulation;
 use fnn::store::NodeNamespace;
+use rand::seq::SliceRandom;
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use tokio::sync::oneshot;
 
-use crate::host::NAMES;
+use crate::host::{send, NAMES};
 use crate::lsp::{LspRpcFault, WalletCommand, WALLET_HOSTS};
 
 use super::funding::OpeningFault;
 use super::{receive, Driver, FUNDING_AMOUNT};
 
-const LSP_NODE: usize = 1;
+const FIXTURE_LSP_NODE: usize = 1;
 const PUBLIC_PAYER_A: usize = 0;
-const PUBLIC_PAYER_C: usize = 2;
 const TENANT_FUNDING_AMOUNT: u128 = 50_000 * 100_000_000;
 const LSP_BUFFER_DURATION_MS: u64 = 5_000;
 
+pub(super) struct RandomLspState {
+    pub(super) lsp_node: usize,
+    pub(super) tenant_ids: Vec<TenantId>,
+    pub(super) tenant_channels: Vec<Hash256>,
+}
+
+pub(super) struct RandomLspSummary {
+    pub(super) payments: usize,
+    pub(super) succeeded: usize,
+    pub(super) expired_long_offline: usize,
+    pub(super) crashes_injected: usize,
+    pub(super) lsp_crashes_injected: usize,
+    pub(super) duplicates_injected: usize,
+    pub(super) responses_dropped: usize,
+    pub(super) concurrent_payments: usize,
+    pub(super) self_funded_watchtower: bool,
+}
+
 impl Driver {
     pub(super) fn lsp_offline_delivery(&mut self) -> Result<()> {
+        let lsp_node = self.lsp_node()?;
         self.start_lsp_watchtower()?;
         let _public_edge = self.open_between(
             PUBLIC_PAYER_A,
-            LSP_NODE,
+            lsp_node,
             FUNDING_AMOUNT,
             0,
             true,
             OpeningFault::None,
         )?;
-        self.wait_trampoline_ready(PUBLIC_PAYER_A, LSP_NODE)?;
+        self.wait_trampoline_ready(PUBLIC_PAYER_A, lsp_node)?;
         self.wait_wallet_online(0)?;
 
         // Duplicate lsp_register_tenant: copy 1 succeeds, copy 2 is rejected as replayed request_id.
@@ -105,15 +128,15 @@ impl Driver {
             .note(format_args!("LSP buffered payment {hash1} as Deferred"));
 
         // Crash and restart LSP while delivery is Deferred; verify durability and consumed request_id!
-        self.runtime.crash(LSP_NODE);
+        self.runtime.crash(lsp_node);
         for _ in 0..4 {
             self.step()?;
         }
-        self.runtime.restart(LSP_NODE);
+        self.runtime.restart(lsp_node);
         self.wait_lsp_ready()?;
         self.start_lsp_watchtower()?;
         self.until("Public A reconnects to restarted LSP", |s| {
-            Ok(s.runtime.link(PUBLIC_PAYER_A, LSP_NODE).then_some(()))
+            Ok(s.runtime.link(PUBLIC_PAYER_A, lsp_node).then_some(()))
         })?;
         let after_restart = self
             .lsp_delivery_now(hash1)
@@ -237,21 +260,22 @@ impl Driver {
             inv2_state.status != JsonInvoiceStatus::Paid,
             "expired long-offline invoice was marked Paid"
         );
-        self.verify_lsp_indexes(&[PUBLIC_PAYER_A, LSP_NODE], &[tenant_id])?;
+        self.verify_lsp_indexes(&[PUBLIC_PAYER_A, lsp_node], &[tenant_id])?;
         Ok(())
     }
 
     pub(super) fn lsp_signer_faults(&mut self) -> Result<()> {
+        let lsp_node = self.lsp_node()?;
         self.start_lsp_watchtower()?;
         let _public_edge = self.open_between(
             PUBLIC_PAYER_A,
-            LSP_NODE,
+            lsp_node,
             FUNDING_AMOUNT,
             0,
             true,
             OpeningFault::None,
         )?;
-        self.wait_trampoline_ready(PUBLIC_PAYER_A, LSP_NODE)?;
+        self.wait_trampoline_ready(PUBLIC_PAYER_A, lsp_node)?;
         self.wait_wallet_online(0)?;
 
         let tenant_id = self.wallet_call(0, |reply| WalletCommand::Register { reply })?;
@@ -396,7 +420,7 @@ impl Driver {
 
         // Wallet goes long offline; LSP force-closes the private channel.
         self.runtime.crash_wallet(0);
-        let shutdown_reply = self.runtime.request(LSP_NODE, |reply| {
+        let shutdown_reply = self.runtime.request(lsp_node, |reply| {
             FiberActorCommand::ControlFiberChannel(fnn::fiber::channel::ChannelCommandWithId {
                 channel_id,
                 command: fnn::fiber::channel::ChannelCommand::Shutdown(
@@ -411,7 +435,7 @@ impl Driver {
         })?;
         self.reply("LSP force close hosted tenant channel", shutdown_reply)?;
         let commitment = self.until("LSP force close confirmed on chain", |s| {
-            Ok(s.runtime.channel(LSP_NODE, &channel_id).and_then(|state| {
+            Ok(s.runtime.channel(lsp_node, &channel_id).and_then(|state| {
                 matches!(state.state, ChannelState::Closed(flags) if flags.contains(CloseFlags::UNCOOPERATIVE_LOCAL))
                     .then(|| state.shutdown_transaction_hash.clone().map(Hash256::from))
                     .flatten()
@@ -447,7 +471,7 @@ impl Driver {
             "external SDK wallet self-funds and settles p2 TLC on-chain via watchtower",
             |s| {
                 if s.runtime.elapsed().as_millis().is_multiple_of(50) {
-                    s.scan_onchain([LSP_NODE])?;
+                    s.scan_onchain([lsp_node])?;
                 }
                 let settled = s.runtime.chain.commitment_settled(commitment);
                 let payer_ok =
@@ -465,52 +489,27 @@ impl Driver {
             self.runtime.wallets.borrow()[0].watchtower_sigs_applied
         ));
 
-        self.verify_lsp_indexes(&[PUBLIC_PAYER_A, LSP_NODE], &[tenant_id])?;
+        self.verify_lsp_indexes(&[PUBLIC_PAYER_A, lsp_node], &[tenant_id])?;
         Ok(())
     }
 
-    pub(super) fn lsp_random(&mut self, seed: u64, payments: usize, chaos: bool) -> Result<()> {
-        self.start_lsp_watchtower()?;
-        // Bidirectional public liquidity between A <-> LSP <-> C so payments work in all directions.
-        let _edge_ab = self.open_between(
-            PUBLIC_PAYER_A,
-            LSP_NODE,
-            FUNDING_AMOUNT,
-            0,
-            true,
-            OpeningFault::None,
-        )?;
-        let _edge_ba = self.open_between(
-            LSP_NODE,
-            PUBLIC_PAYER_A,
-            FUNDING_AMOUNT,
-            0,
-            true,
-            OpeningFault::None,
-        )?;
-        let _edge_bc = self.open_between(
-            LSP_NODE,
-            PUBLIC_PAYER_C,
-            FUNDING_AMOUNT,
-            0,
-            true,
-            OpeningFault::None,
-        )?;
-        let _edge_cb = self.open_between(
-            PUBLIC_PAYER_C,
-            LSP_NODE,
-            FUNDING_AMOUNT,
-            0,
-            true,
-            OpeningFault::None,
-        )?;
-        self.wait_trampoline_ready(PUBLIC_PAYER_A, LSP_NODE)?;
-        self.wait_trampoline_ready(PUBLIC_PAYER_C, LSP_NODE)?;
+    pub(super) fn bootstrap_random_lsp(&mut self, public_nodes: usize) -> Result<RandomLspState> {
+        let lsp_node = self.lsp_node()?;
+        self.wait_lsp_ready()?;
+        self.sync_lsp_trampoline_gossip(public_nodes)?;
 
         let mut tenant_ids = Vec::new();
         let mut tenant_channels = Vec::new();
         for wallet in 0..2 {
             self.wait_wallet_online(wallet)?;
+            if wallet == 0 {
+                self.wallet_rpc(wallet)
+                    .set_fault(Some(LspRpcFault::DuplicateRequest {
+                        method: Some("lsp_register_tenant"),
+                        copies: 2,
+                        once: true,
+                    }));
+            }
             let tenant_id = self.wallet_call(wallet, |reply| WalletCommand::Register { reply })?;
             let channel_id = self.wallet_call(wallet, |reply| WalletCommand::OpenChannel {
                 funding_amount: TENANT_FUNDING_AMOUNT,
@@ -521,18 +520,51 @@ impl Driver {
             tenant_channels.push(channel_id);
         }
         self.runtime.note(format_args!(
-            "lsp-random bootstrapped 2 public peers and 2 SDK wallets chaos={chaos} payments={payments}"
+            "random LSP {} bootstrapped {} public peers and 2 SDK wallets",
+            NAMES[lsp_node], public_nodes
         ));
+        Ok(RandomLspState {
+            lsp_node,
+            tenant_ids,
+            tenant_channels,
+        })
+    }
 
+    pub(super) fn run_random_lsp_workload(
+        &mut self,
+        seed: u64,
+        state: &RandomLspState,
+        public_nodes: usize,
+        payments: usize,
+        chaos: bool,
+    ) -> Result<RandomLspSummary> {
+        let lsp_node = state.lsp_node;
+        let tenant_ids = &state.tenant_ids;
+        let tenant_channels = &state.tenant_channels;
+
+        self.wait_lsp_ready()?;
+        self.sync_lsp_trampoline_gossip(public_nodes)?;
+        for wallet in 0..2 {
+            self.ensure_wallet_online(wallet)?;
+            let _ = self.lsp_call(|reply| {
+                LspServiceMessage::EnsureTenant(tenant_ids[wallet].clone(), reply)
+            })?;
+            self.wait_tenant_channel_online(&tenant_ids[wallet], tenant_channels[wallet])?;
+        }
+
+        let public_peers: Vec<usize> = (0..public_nodes).filter(|&n| n != lsp_node).collect();
         let mut rng = StdRng::seed_from_u64(seed ^ 0x6c73_702d_6473);
         let mut succeeded = 0usize;
         let mut expired_long_offline = 0usize;
         let mut crashes_injected = 0usize;
+        let mut lsp_crashes_injected = 0usize;
         let mut duplicates_injected = 0usize;
         let mut responses_dropped = 0usize;
 
         for seq in 0..payments {
-            let amount = (rng.random_range(100..=600) as u128) * 100_000_000;
+            // Keep amounts modest (10..60 CKB) so multi-hop public channels retain liquidity
+            // across the combined public + LSP workload.
+            let amount = (rng.random_range(100..=600) as u128) * 10_000_000;
             let mut pre_bytes = [0u8; 32];
             rng.fill(&mut pre_bytes);
             let preimage = Hash256::from(pre_bytes);
@@ -540,13 +572,8 @@ impl Driver {
             let kind = rng.random_range(0..4);
 
             match kind {
-                // 0 or 1: Public peer (A or C) -> Hosted SDK wallet (0 or 1)
+                // 0 or 1: Any reachable public peer (direct or multi-hop!) -> Hosted SDK wallet
                 0 | 1 => {
-                    let payer = if kind == 0 {
-                        PUBLIC_PAYER_A
-                    } else {
-                        PUBLIC_PAYER_C
-                    };
                     let wallet = rng.random_range(0..2);
                     let tenant_id = &tenant_ids[wallet];
                     self.ensure_wallet_online(wallet)?;
@@ -558,8 +585,28 @@ impl Driver {
                             preimage,
                             reply,
                         })?;
+                    let mut candidates = public_peers.clone();
+                    candidates.shuffle(&mut rng);
+                    let Some(payer) = self.pick_public_payer(&candidates, &inv.invoice_address)?
+                    else {
+                        self.run_tenant_to_tenant_payment(
+                            seq,
+                            1 - wallet,
+                            wallet,
+                            tenant_ids,
+                            tenant_channels,
+                            amount,
+                            payment_hash,
+                            preimage,
+                            &inv.invoice_address,
+                            chaos,
+                            &mut rng,
+                        )?;
+                        succeeded += 1;
+                        continue;
+                    };
 
-                    let fault_roll = if chaos { rng.random_range(0..7) } else { 99 };
+                    let fault_roll = if chaos { rng.random_range(0..9) } else { 99 };
                     match fault_roll {
                         // Long offline past buffer_deadline!
                         0 => {
@@ -628,7 +675,7 @@ impl Driver {
                                 .signing_paused
                                 .set(false);
                         }
-                        // Duplicate submit_channel_signature + duplicate settle_invoice!
+                        // Duplicate submit_channel_signature!
                         2 => {
                             self.wallet_rpc(wallet).set_fault(Some(
                                 LspRpcFault::DuplicateRequest {
@@ -693,6 +740,79 @@ impl Driver {
                                 },
                             )?;
                         }
+                        // Crash & restart LSP node itself while a Deferred payment is buffered!
+                        6 => {
+                            self.wait_tenant_idle(tenant_id)?;
+                            self.runtime.crash_wallet(wallet);
+                            self.evict_tenant_when_idle(tenant_id)?;
+                            let _ = self.pay(
+                                payer,
+                                SendPaymentCommand {
+                                    invoice: Some(inv.invoice_address),
+                                    ..Default::default()
+                                },
+                            )?;
+                            self.until("random LSP crash buffered payment", |s| {
+                                Ok(s.lsp_delivery_now(payment_hash).filter(|d| {
+                                    matches!(d.status, LspPaymentDeliveryStatus::Deferred)
+                                }))
+                            })?;
+                            self.runtime.crash(lsp_node);
+                            crashes_injected += 1;
+                            lsp_crashes_injected += 1;
+                            for _ in 0..4 {
+                                self.step()?;
+                            }
+                            self.runtime.restart(lsp_node);
+                            self.wait_lsp_ready()?;
+                            self.runtime.restart_wallet(wallet);
+                            self.wait_wallet_online(wallet)?;
+                            let _ = self.lsp_call(|reply| {
+                                LspServiceMessage::EnsureTenant(tenant_id.clone(), reply)
+                            })?;
+                            self.runtime.note(format_args!(
+                                "lsp-random #{seq} LSP {} restarted with Deferred {payment_hash}",
+                                NAMES[lsp_node]
+                            ));
+                        }
+                        // Crash & restart LSP node mid-flight while hosted channel awaits signature!
+                        7 => {
+                            self.runtime.wallets.borrow()[wallet]
+                                .signing_paused
+                                .set(true);
+                            let _ = self.pay(
+                                payer,
+                                SendPaymentCommand {
+                                    invoice: Some(inv.invoice_address),
+                                    ..Default::default()
+                                },
+                            )?;
+                            self.until("random LSP mid-flight crash awaits signature", |s| {
+                                Ok(s.tenant_channel_awaiting_signature(
+                                    tenant_id,
+                                    tenant_channels[wallet],
+                                )
+                                .then_some(()))
+                            })?;
+                            self.runtime.crash(lsp_node);
+                            crashes_injected += 1;
+                            lsp_crashes_injected += 1;
+                            for _ in 0..4 {
+                                self.step()?;
+                            }
+                            self.runtime.restart(lsp_node);
+                            self.wait_lsp_ready()?;
+                            let _ = self.lsp_call(|reply| {
+                                LspServiceMessage::EnsureTenant(tenant_id.clone(), reply)
+                            })?;
+                            self.runtime.wallets.borrow()[wallet]
+                                .signing_paused
+                                .set(false);
+                            self.runtime.note(format_args!(
+                                "lsp-random #{seq} LSP {} restarted mid-flight {payment_hash}",
+                                NAMES[lsp_node]
+                            ));
+                        }
                         _ => {
                             let _ = self.pay(
                                 payer,
@@ -743,68 +863,110 @@ impl Driver {
                         NAMES[payer], WALLET_HOSTS[wallet]
                     ));
                 }
-                // 2: Hosted SDK wallet -> Public peer (A or C)
+                // 2: Hosted SDK wallet -> Any reachable public peer (via LSP trampoline + multi-hop!)
                 2 => {
                     let wallet = rng.random_range(0..2);
-                    let payee = if rng.random_bool(0.5) {
-                        PUBLIC_PAYER_A
-                    } else {
-                        PUBLIC_PAYER_C
-                    };
                     self.ensure_wallet_online(wallet)?;
-                    let payee_key = fnn::fiber::Privkey::from([(payee + 1) as u8; 32]);
-                    let invoice = InvoiceBuilder::new(Currency::Fibd)
-                        .amount(Some(amount))
-                        .payment_hash(payment_hash)
-                        .payee_pub_key(self.runtime.peers[payee].into())
-                        .allow_trampoline_routing(true)
-                        .build_with_sign(|msg| {
-                            secp256k1::SECP256K1.sign_ecdsa_recoverable(msg, &payee_key.0)
+                    let mut candidates = public_peers.clone();
+                    candidates.shuffle(&mut rng);
+                    let mut sent_to = None;
+                    for payee in candidates {
+                        if !self.runtime.node_available(payee) {
+                            continue;
+                        }
+                        let payee_key = fnn::fiber::Privkey::from([(payee + 1) as u8; 32]);
+                        let invoice = InvoiceBuilder::new(Currency::Fibd)
+                            .amount(Some(amount))
+                            .payment_hash(payment_hash)
+                            .payee_pub_key(self.runtime.peers[payee].into())
+                            .allow_trampoline_routing(true)
+                            .build_with_sign(|msg| {
+                                secp256k1::SECP256K1.sign_ecdsa_recoverable(msg, &payee_key.0)
+                            })?;
+                        let invoice_str = invoice.to_string();
+                        let mut reply = self.runtime.request(payee, |reply| {
+                            FiberActorCommand::AddInvoice(invoice, Some(preimage), reply)
                         })?;
-                    let invoice_str = invoice.to_string();
-                    let mut reply = self.runtime.request(payee, |reply| {
-                        FiberActorCommand::AddInvoice(invoice, Some(preimage), reply)
-                    })?;
-                    self.until("public payee invoice recorded", |_| {
-                        receive(&mut reply)?.transpose().map_err(Into::into)
-                    })?;
+                        self.until("public payee invoice recorded", |_| {
+                            receive(&mut reply)?.transpose().map_err(Into::into)
+                        })?;
 
-                    if chaos && rng.random_ratio(1, 2) {
-                        self.wallet_rpc(wallet)
-                            .set_fault(Some(LspRpcFault::DuplicateRequest {
-                                method: Some("submit_channel_signature"),
-                                copies: 2,
-                                once: true,
-                            }));
-                        duplicates_injected += 1;
-                    }
-                    let _: GetPaymentCommandResult =
-                        self.wallet_call(wallet, |reply| WalletCommand::SendPayment {
+                        if chaos && rng.random_ratio(1, 2) {
+                            self.wallet_rpc(wallet).set_fault(Some(
+                                LspRpcFault::DuplicateRequest {
+                                    method: Some("submit_channel_signature"),
+                                    copies: 2,
+                                    once: true,
+                                },
+                            ));
+                            duplicates_injected += 1;
+                        }
+                        match self.wallet_call(wallet, |reply| WalletCommand::SendPayment {
                             channel_id: tenant_channels[wallet],
                             invoice: invoice_str,
                             amount,
                             payment_hash,
                             use_trampoline: true,
                             reply,
+                        }) {
+                            Ok(_) => {
+                                sent_to = Some(payee);
+                                break;
+                            }
+                            Err(_) => {
+                                self.wallet_rpc(wallet).set_fault(None);
+                                continue;
+                            }
+                        }
+                    }
+                    if let Some(payee) = sent_to {
+                        self.until("random outbound tenant payment succeeded", |s| {
+                            let payee_paid = s.runtime.nodes.borrow()[payee]
+                                .node
+                                .as_ref()
+                                .and_then(|node| node.store.get_invoice_status(&payment_hash))
+                                == Some(CkbInvoiceStatus::Paid);
+                            Ok(payee_paid.then_some(()))
                         })?;
-                    self.until("random outbound tenant payment succeeded", |s| {
-                        let payee_paid = s.runtime.nodes.borrow()[payee]
-                            .node
-                            .as_ref()
-                            .and_then(|node| node.store.get_invoice_status(&payment_hash))
-                            == Some(CkbInvoiceStatus::Paid);
-                        Ok(payee_paid.then_some(()))
-                    })?;
-                    self.until("tenant payment session marked Success", |s| {
-                        let payment =
-                            s.wallet_payment_status_from_store(&tenant_ids[wallet], payment_hash);
-                        Ok((payment == Some(PaymentStatus::Success)).then_some(()))
-                    })?;
-                    succeeded += 1;
-                    self.runtime.note(format_args!(
-                        "lsp-random #{seq} {}->{} succeeded {payment_hash} amount={amount}",
-                        WALLET_HOSTS[wallet], NAMES[payee]
-                    ));
+                        self.until("tenant payment session marked Success", |s| {
+                            let payment = s.wallet_payment_status_from_store(
+                                &tenant_ids[wallet],
+                                payment_hash,
+                            );
+                            Ok((payment == Some(PaymentStatus::Success)).then_some(()))
+                        })?;
+                        succeeded += 1;
+                        self.runtime.note(format_args!(
+                            "lsp-random #{seq} {}->{} succeeded {payment_hash} amount={amount}",
+                            WALLET_HOSTS[wallet], NAMES[payee]
+                        ));
+                    } else {
+                        let to_wallet = 1 - wallet;
+                        self.ensure_wallet_online(to_wallet)?;
+                        let inv: InvoiceResult = self.wallet_call(to_wallet, |reply| {
+                            WalletCommand::CreateHoldInvoice {
+                                channel_id: tenant_channels[to_wallet],
+                                amount,
+                                payment_hash,
+                                preimage,
+                                reply,
+                            }
+                        })?;
+                        self.run_tenant_to_tenant_payment(
+                            seq,
+                            wallet,
+                            to_wallet,
+                            tenant_ids,
+                            tenant_channels,
+                            amount,
+                            payment_hash,
+                            preimage,
+                            &inv.invoice_address,
+                            chaos,
+                            &mut rng,
+                        )?;
+                        succeeded += 1;
+                    }
                 }
                 // 3: Hosted SDK wallet -> other Hosted SDK wallet via LSP!
                 _ => {
@@ -820,57 +982,38 @@ impl Driver {
                             preimage,
                             reply,
                         })?;
-                    if chaos && rng.random_ratio(1, 2) {
-                        self.wallet_rpc(to_wallet)
-                            .set_fault(Some(LspRpcFault::DelayRequest {
-                                method: Some("submit_channel_signature"),
-                                duration: Duration::from_millis(60),
-                                once: true,
-                            }));
-                    }
-                    let _: GetPaymentCommandResult =
-                        self.wallet_call(from_wallet, |reply| WalletCommand::SendPayment {
-                            channel_id: tenant_channels[from_wallet],
-                            invoice: inv.invoice_address,
-                            amount,
-                            payment_hash,
-                            use_trampoline: false,
-                            reply,
-                        })?;
-                    self.until("tenant-to-tenant hold invoice received", |s| {
-                        Ok((s
-                            .wallet_invoice_status_from_store(&tenant_ids[to_wallet], payment_hash)
-                            .unwrap_or(None)
-                            == Some(CkbInvoiceStatus::Received))
-                        .then_some(()))
-                    })?;
-                    self.wallet_call(to_wallet, |reply| WalletCommand::SettleInvoice {
+                    self.run_tenant_to_tenant_payment(
+                        seq,
+                        from_wallet,
+                        to_wallet,
+                        tenant_ids,
+                        tenant_channels,
+                        amount,
                         payment_hash,
                         preimage,
-                        reply,
-                    })?;
-                    self.until("tenant-to-tenant payment succeeded", |s| {
-                        let paid = s
-                            .wallet_invoice_status_from_store(&tenant_ids[to_wallet], payment_hash)
-                            .unwrap_or(None)
-                            == Some(CkbInvoiceStatus::Paid);
-                        let payer_ok = s.wallet_payment_status_from_store(
-                            &tenant_ids[from_wallet],
-                            payment_hash,
-                        ) == Some(PaymentStatus::Success);
-                        Ok((paid && payer_ok).then_some(()))
-                    })?;
+                        &inv.invoice_address,
+                        chaos,
+                        &mut rng,
+                    )?;
                     succeeded += 1;
-                    self.runtime.note(format_args!(
-                        "lsp-random #{seq} {}->{} succeeded {payment_hash} amount={amount}",
-                        WALLET_HOSTS[from_wallet], WALLET_HOSTS[to_wallet]
-                    ));
                 }
             }
         }
 
+        let mut concurrent_payments = 0usize;
+        if chaos {
+            let (wave_count, wave_crashes, wave_dups, wave_drops) =
+                self.run_random_lsp_concurrent_wave(state, &public_peers, &mut rng)?;
+            concurrent_payments = wave_count;
+            succeeded += wave_count;
+            crashes_injected += wave_crashes;
+            duplicates_injected += wave_dups;
+            responses_dropped += wave_drops;
+        }
+
         for (wallet, &wallet_name) in WALLET_HOSTS.iter().enumerate().take(2) {
             self.ensure_wallet_online(wallet)?;
+            self.wait_tenant_idle(&tenant_ids[wallet])?;
             let channels =
                 self.wallet_call(wallet, |reply| WalletCommand::ListChannels { reply })?;
             ensure!(
@@ -878,17 +1021,448 @@ impl Driver {
                 "{wallet_name} lost its hosted channel"
             );
         }
-        self.verify_lsp_indexes(&[PUBLIC_PAYER_A, LSP_NODE, PUBLIC_PAYER_C], &tenant_ids)?;
+        self.wait_payment_actor(lsp_node)?;
+        let all_public: Vec<usize> = (0..public_nodes).collect();
+        self.verify_lsp_indexes(&all_public, tenant_ids)?;
         self.runtime.note(format_args!(
-            "lsp-random reconciled payments={payments} succeeded={succeeded} expired_long_offline={expired_long_offline} crashes={crashes_injected} duplicates={duplicates_injected} responses_dropped={responses_dropped}"
+            "lsp-random reconciled payments={payments} succeeded={succeeded} concurrent={concurrent_payments} expired_long_offline={expired_long_offline} crashes={crashes_injected} lsp_crashes={lsp_crashes_injected} duplicates={duplicates_injected} responses_dropped={responses_dropped}"
+        ));
+        Ok(RandomLspSummary {
+            payments,
+            succeeded,
+            expired_long_offline,
+            crashes_injected,
+            lsp_crashes_injected,
+            duplicates_injected,
+            responses_dropped,
+            concurrent_payments,
+            self_funded_watchtower: false,
+        })
+    }
+
+    fn run_random_lsp_concurrent_wave(
+        &mut self,
+        state: &RandomLspState,
+        public_peers: &[usize],
+        rng: &mut StdRng,
+    ) -> Result<(usize, usize, usize, usize)> {
+        let lsp_node = state.lsp_node;
+        let tenant_ids = &state.tenant_ids;
+        let tenant_channels = &state.tenant_channels;
+        self.wait_lsp_ready()?;
+        for wallet in 0..2 {
+            self.ensure_wallet_online(wallet)?;
+            let _ = self.lsp_call(|reply| {
+                LspServiceMessage::EnsureTenant(tenant_ids[wallet].clone(), reply)
+            })?;
+            self.wait_tenant_channel_online(&tenant_ids[wallet], tenant_channels[wallet])?;
+        }
+        let _ = lsp_node;
+
+        // Submit up to 3 payments concurrently before settling any of them:
+        // 1) Public -> SDK-0 (with duplicate submit_channel_signature)
+        // 2) Public -> SDK-1 (with DropResponseAfterCommit on submit_channel_signature)
+        // 3) SDK-0 -> SDK-1 (concurrent tenant-to-tenant while both public inbound TLCs are held)
+        let mut inflight: Vec<(Option<usize>, usize, Hash256, Hash256)> = Vec::new();
+        let mut crashes = 0usize;
+        let mut duplicates = 0usize;
+        let mut drops = 0usize;
+
+        for (wallet, &channel_id) in tenant_channels.iter().enumerate().take(2) {
+            let amount = (rng.random_range(120..=300) as u128) * 10_000_000;
+            let mut pre_bytes = [0u8; 32];
+            rng.fill(&mut pre_bytes);
+            let preimage = Hash256::from(pre_bytes);
+            let payment_hash: Hash256 = HashAlgorithm::CkbHash.hash(preimage).into();
+            let inv: InvoiceResult =
+                self.wallet_call(wallet, |reply| WalletCommand::CreateHoldInvoice {
+                    channel_id,
+                    amount,
+                    payment_hash,
+                    preimage,
+                    reply,
+                })?;
+            let mut candidates = public_peers.to_vec();
+            candidates.shuffle(rng);
+            if let Some(payer) = self.pick_public_payer(&candidates, &inv.invoice_address)? {
+                if wallet == 0 {
+                    self.wallet_rpc(wallet)
+                        .set_fault(Some(LspRpcFault::DuplicateRequest {
+                            method: Some("submit_channel_signature"),
+                            copies: 2,
+                            once: true,
+                        }));
+                    duplicates += 1;
+                } else {
+                    self.wallet_rpc(wallet)
+                        .set_fault(Some(LspRpcFault::DropResponseAfterCommit {
+                            method: Some("submit_channel_signature"),
+                            once: true,
+                        }));
+                    drops += 1;
+                }
+                let _ = self.pay(
+                    payer,
+                    SendPaymentCommand {
+                        invoice: Some(inv.invoice_address),
+                        ..Default::default()
+                    },
+                )?;
+                inflight.push((Some(payer), wallet, payment_hash, preimage));
+            }
+        }
+
+        // Concurrent tenant-to-tenant payment while inbound public payments are in flight.
+        let t2t_amount = (rng.random_range(120..=300) as u128) * 10_000_000;
+        let mut pre_bytes = [0u8; 32];
+        rng.fill(&mut pre_bytes);
+        let t2t_preimage = Hash256::from(pre_bytes);
+        let t2t_hash: Hash256 = HashAlgorithm::CkbHash.hash(t2t_preimage).into();
+        let t2t_inv: InvoiceResult =
+            self.wallet_call(1, |reply| WalletCommand::CreateHoldInvoice {
+                channel_id: tenant_channels[1],
+                amount: t2t_amount,
+                payment_hash: t2t_hash,
+                preimage: t2t_preimage,
+                reply,
+            })?;
+        let _: GetPaymentCommandResult =
+            self.wallet_call(0, |reply| WalletCommand::SendPayment {
+                channel_id: tenant_channels[0],
+                invoice: t2t_inv.invoice_address,
+                amount: t2t_amount,
+                payment_hash: t2t_hash,
+                use_trampoline: false,
+                reply,
+            })?;
+        inflight.push((None, 1, t2t_hash, t2t_preimage));
+
+        // Briefly crash & restart SDK-0 while concurrent payments are in flight.
+        self.runtime.crash_wallet(0);
+        crashes += 1;
+        for _ in 0..4 {
+            self.step()?;
+        }
+        self.runtime.restart_wallet(0);
+        self.wait_wallet_online(0)?;
+
+        // Wait until all concurrent payments are held simultaneously before settling any.
+        self.until("all concurrent LSP/SDK hold invoices received", |s| {
+            let all_received = inflight.iter().all(|&(_, wallet, hash, _)| {
+                s.wallet_invoice_status_from_store(&tenant_ids[wallet], hash)
+                    .unwrap_or(None)
+                    == Some(CkbInvoiceStatus::Received)
+            });
+            Ok(all_received.then_some(()))
+        })?;
+
+        for &(_, wallet, hash, preimage) in &inflight {
+            self.wallet_call(wallet, |reply| WalletCommand::SettleInvoice {
+                payment_hash: hash,
+                preimage,
+                reply,
+            })?;
+        }
+        self.until("all concurrent LSP/SDK payments succeeded", |s| {
+            let all_done = inflight.iter().all(|&(payer, wallet, hash, _)| {
+                let paid = s
+                    .wallet_invoice_status_from_store(&tenant_ids[wallet], hash)
+                    .unwrap_or(None)
+                    == Some(CkbInvoiceStatus::Paid);
+                let payer_ok = match payer {
+                    Some(public_payer) => {
+                        s.runtime.payment_status(public_payer, hash) == Some(PaymentStatus::Success)
+                            && s.lsp_delivery_now(hash).is_some_and(|d| {
+                                matches!(d.status, LspPaymentDeliveryStatus::Succeeded)
+                            })
+                    }
+                    None => {
+                        s.wallet_payment_status_from_store(&tenant_ids[0], hash)
+                            == Some(PaymentStatus::Success)
+                    }
+                };
+                paid && payer_ok
+            });
+            Ok(all_done.then_some(()))
+        })?;
+
+        let count = inflight.len();
+        self.runtime.note(format_args!(
+            "lsp-random concurrent wave settled count={count} crashes={crashes} duplicates={duplicates} responses_dropped={drops}"
+        ));
+        Ok((count, crashes, duplicates, drops))
+    }
+
+    pub(super) fn run_random_lsp_offline_force_close_probe(
+        &mut self,
+        seed: u64,
+        state: &RandomLspState,
+        public_nodes: usize,
+    ) -> Result<bool> {
+        let lsp_node = state.lsp_node;
+        let Some(towers) = &self.runtime.watchtowers else {
+            return Ok(false);
+        };
+        if towers[lsp_node].mode != crate::tower::TowerMode::BuiltIn {
+            return Ok(false);
+        }
+        self.start_lsp_watchtower()?;
+        let tenant_id = &state.tenant_ids[0];
+        let channel_id = state.tenant_channels[0];
+        self.ensure_wallet_online(0)?;
+        self.wait_tenant_idle(tenant_id)?;
+        self.wait_tenant_channel_online(tenant_id, channel_id)?;
+
+        let mut rng = StdRng::seed_from_u64(seed ^ 0x6c73_7077_6174_6368);
+        let mut candidates: Vec<usize> = (0..public_nodes).filter(|&n| n != lsp_node).collect();
+        candidates.shuffle(&mut rng);
+
+        // Must be >= EXTERNAL_SELF_FUNDABLE_CKB_MIN_CAPACITY (61 CKB + fee buffer).
+        let mut chosen = None;
+        for amount in [1_000 * 100_000_000u128, 200 * 100_000_000u128] {
+            let mut pre_bytes = [0u8; 32];
+            rng.fill(&mut pre_bytes);
+            let preimage = Hash256::from(pre_bytes);
+            let payment_hash: Hash256 = HashAlgorithm::CkbHash.hash(preimage).into();
+            let inv: InvoiceResult =
+                self.wallet_call(0, |reply| WalletCommand::CreateHoldInvoice {
+                    channel_id,
+                    amount,
+                    payment_hash,
+                    preimage,
+                    reply,
+                })?;
+            if let Some(payer) = self.pick_public_payer(&candidates, &inv.invoice_address)? {
+                chosen = Some((payer, amount, preimage, payment_hash, inv.invoice_address));
+                break;
+            }
+        }
+        let Some((payer, amount, preimage, payment_hash, invoice_address)) = chosen else {
+            return Ok(false);
+        };
+
+        let sent = self.pay(
+            payer,
+            SendPaymentCommand {
+                invoice: Some(invoice_address),
+                ..Default::default()
+            },
+        )?;
+        ensure!(sent == payment_hash);
+        self.until(
+            "random LSP force-close TLC committed on hosted channel",
+            |s| {
+                Ok((s
+                    .wallet_invoice_status_from_store(tenant_id, payment_hash)
+                    .unwrap_or(None)
+                    == Some(CkbInvoiceStatus::Received))
+                .then_some(()))
+            },
+        )?;
+
+        // Crash SDK-0 so it is offline while LSP force-closes the hosted private channel.
+        self.runtime.crash_wallet(0);
+        let shutdown_reply = self.runtime.request(lsp_node, |reply| {
+            FiberActorCommand::ControlFiberChannel(fnn::fiber::channel::ChannelCommandWithId {
+                channel_id,
+                command: fnn::fiber::channel::ChannelCommand::Shutdown(
+                    fnn::fiber::channel::ShutdownCommand {
+                        close_script: None,
+                        fee_rate: None,
+                        force: true,
+                    },
+                    reply,
+                ),
+            })
+        })?;
+        self.reply("random LSP force close hosted channel", shutdown_reply)?;
+        let commitment = self.until("random LSP force close confirmed on chain", |s| {
+            Ok(s.runtime.channel(lsp_node, &channel_id).and_then(|st| {
+                matches!(st.state, ChannelState::Closed(flags) if flags.contains(CloseFlags::UNCOOPERATIVE_LOCAL))
+                    .then(|| st.shutdown_transaction_hash.clone().map(Hash256::from))
+                    .flatten()
+            }))
+        })?;
+        self.runtime.note(format_args!(
+            "lsp-random force-closed hosted channel {channel_id} commitment={commitment} while SDK-0 offline amount={amount}"
+        ));
+
+        // Advance past commitment delay while keeping TLC unexpired.
+        self.advance_clock_past(self.clock_ms());
+
+        // SDK-0 returns online, registers preimage with tenant watchtower, and self-funds
+        // the on-chain settlement with duplicate submit_watchtower_signature injected.
+        self.runtime.restart_wallet(0);
+        self.wait_wallet_online(0)?;
+        self.wallet_call(0, |reply| WalletCommand::CreateWatchPreimage {
+            payment_hash,
+            preimage,
+            reply,
+        })?;
+        let prev_dups = self.wallet_rpc(0).duplicates_sent();
+        self.wallet_rpc(0)
+            .set_fault(Some(LspRpcFault::DuplicateRequest {
+                method: Some("submit_watchtower_signature"),
+                copies: 2,
+                once: true,
+            }));
+        self.until(
+            "random SDK-0 self-funds and settles hosted TLC on-chain via watchtower",
+            |s| {
+                if s.runtime.elapsed().as_millis().is_multiple_of(50) {
+                    s.scan_onchain([lsp_node])?;
+                }
+                let settled = s.runtime.chain.commitment_settled(commitment);
+                let payer_ok =
+                    s.runtime.payment_status(payer, payment_hash) == Some(PaymentStatus::Success);
+                let signed = s.runtime.wallets.borrow()[0].watchtower_sigs_applied >= 1;
+                Ok((settled && payer_ok && signed).then_some(()))
+            },
+        )?;
+        ensure!(
+            self.wallet_rpc(0).duplicates_sent() > prev_dups,
+            "duplicate submit_watchtower_signature did not fire in random LSP probe"
+        );
+        self.wait_payment_actor(lsp_node)?;
+        let _ = simulation::take_tlc_settlements();
+        self.runtime.note(format_args!(
+            "lsp-random self-funded watchtower settled commitment={commitment} payer={} watchtower_sigs={}",
+            NAMES[payer],
+            self.runtime.wallets.borrow()[0].watchtower_sigs_applied
+        ));
+        Ok(true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_tenant_to_tenant_payment(
+        &mut self,
+        seq: usize,
+        from_wallet: usize,
+        to_wallet: usize,
+        tenant_ids: &[TenantId],
+        tenant_channels: &[Hash256],
+        amount: u128,
+        payment_hash: Hash256,
+        preimage: Hash256,
+        invoice_address: &str,
+        chaos: bool,
+        rng: &mut StdRng,
+    ) -> Result<()> {
+        if chaos && rng.random_ratio(1, 2) {
+            self.wallet_rpc(to_wallet)
+                .set_fault(Some(LspRpcFault::DelayRequest {
+                    method: Some("submit_channel_signature"),
+                    duration: Duration::from_millis(60),
+                    once: true,
+                }));
+        }
+        let _: GetPaymentCommandResult =
+            self.wallet_call(from_wallet, |reply| WalletCommand::SendPayment {
+                channel_id: tenant_channels[from_wallet],
+                invoice: invoice_address.to_owned(),
+                amount,
+                payment_hash,
+                use_trampoline: false,
+                reply,
+            })?;
+        self.until("tenant-to-tenant hold invoice received", |s| {
+            Ok((s
+                .wallet_invoice_status_from_store(&tenant_ids[to_wallet], payment_hash)
+                .unwrap_or(None)
+                == Some(CkbInvoiceStatus::Received))
+            .then_some(()))
+        })?;
+        self.wallet_call(to_wallet, |reply| WalletCommand::SettleInvoice {
+            payment_hash,
+            preimage,
+            reply,
+        })?;
+        self.until("tenant-to-tenant payment succeeded", |s| {
+            let paid = s
+                .wallet_invoice_status_from_store(&tenant_ids[to_wallet], payment_hash)
+                .unwrap_or(None)
+                == Some(CkbInvoiceStatus::Paid);
+            let payer_ok = s
+                .wallet_payment_status_from_store(&tenant_ids[from_wallet], payment_hash)
+                == Some(PaymentStatus::Success);
+            Ok((paid && payer_ok).then_some(()))
+        })?;
+        self.runtime.note(format_args!(
+            "lsp-random #{seq} {}->{} succeeded {payment_hash} amount={amount}",
+            WALLET_HOSTS[from_wallet], WALLET_HOSTS[to_wallet]
         ));
         Ok(())
     }
 
+    fn pick_public_payer(&mut self, candidates: &[usize], invoice: &str) -> Result<Option<usize>> {
+        for &payer in candidates {
+            if !self.runtime.node_available(payer) {
+                continue;
+            }
+            let mut reply = self.runtime.request(payer, |reply| {
+                FiberActorCommand::SendPayment(
+                    SendPaymentCommand {
+                        invoice: Some(invoice.to_owned()),
+                        dry_run: true,
+                        ..Default::default()
+                    },
+                    reply,
+                )
+            })?;
+            let result = self.until("dry-run public route to LSP", |_| receive(&mut reply))?;
+            if result.is_ok() {
+                return Ok(Some(payer));
+            }
+        }
+        Ok(None)
+    }
+
+    fn sync_lsp_trampoline_gossip(&mut self, public_nodes: usize) -> Result<()> {
+        let lsp_node = self.lsp_node()?;
+        let lsp_pubkey = self.runtime.peers[lsp_node];
+        let ann = self.until("LSP node announcement available", |s| {
+            let store = s.runtime.store(lsp_node)?;
+            Ok(store
+                .get_latest_node_announcement(&lsp_pubkey)
+                .filter(|node| node.features.supports_trampoline_routing()))
+        })?;
+        for node in 0..public_nodes {
+            if node == lsp_node || !self.runtime.node_available(node) {
+                continue;
+            }
+            let has_ann = self
+                .runtime
+                .store(node)
+                .ok()
+                .and_then(|s| s.get_latest_node_announcement(&lsp_pubkey))
+                .is_some_and(|n| n.features.supports_trampoline_routing());
+            if !has_ann {
+                let slots = self.runtime.nodes.borrow();
+                if let Some(live) = &slots[node].node {
+                    send(
+                        &live.actor,
+                        NetworkActorMessage::new_event(PublicNetworkEvent::GossipMessageUpdates(
+                            GossipMessageUpdates::new(vec![
+                                BroadcastMessageWithTimestamp::NodeAnnouncement(ann.clone()),
+                            ]),
+                        )),
+                    )?;
+                }
+            }
+            self.wait_trampoline_ready(node, lsp_node)?;
+        }
+        Ok(())
+    }
+
+    fn lsp_node(&self) -> Result<usize> {
+        Ok(self.runtime.lsp_node.unwrap_or(FIXTURE_LSP_NODE))
+    }
+
     fn start_lsp_watchtower(&mut self) -> Result<()> {
+        let lsp_node = self.lsp_node()?;
         if let Some(towers) = &self.runtime.watchtowers {
-            towers[LSP_NODE].enabled.send_replace(true);
-            let tower = towers[LSP_NODE].clone();
+            towers[lsp_node].enabled.send_replace(true);
+            let tower = towers[lsp_node].clone();
             self.until("LSP built-in watchtower started", |_| {
                 Ok(tower.actor.borrow().is_some().then_some(()))
             })?;
@@ -957,7 +1531,8 @@ impl Driver {
     }
 
     fn lsp_delivery_now(&self, payment_hash: Hash256) -> Option<LspPaymentDelivery> {
-        let store = self.runtime.store(LSP_NODE).ok()?;
+        let lsp_node = self.lsp_node().ok()?;
+        let store = self.runtime.store(lsp_node).ok()?;
         let lsp_store = store.namespaced(NodeNamespace::lsp_metadata());
         let mut list =
             fnn::lsp::LspPaymentDeliveryStore::list_lsp_payment_deliveries_by_payment_hash(
@@ -970,8 +1545,9 @@ impl Driver {
     }
 
     fn wait_tenant_idle(&mut self, tenant_id: &TenantId) -> Result<()> {
+        let lsp_node = self.lsp_node()?;
         self.until("hosted tenant channels idle", |s| {
-            let store = s.runtime.store(LSP_NODE)?;
+            let store = s.runtime.store(lsp_node)?;
             let lsp_store = store.namespaced(NodeNamespace::lsp_metadata());
             let no_pending_deliveries =
                 fnn::lsp::LspPaymentDeliveryStore::list_pending_lsp_payment_deliveries(&lsp_store)
@@ -1007,15 +1583,16 @@ impl Driver {
         tenant_id: &TenantId,
         channel_id: Hash256,
     ) -> Result<()> {
+        let lsp_node = self.lsp_node()?;
         self.until("hosted tenant channel online on LSP", |s| {
             let lsp_ready = s
                 .runtime
-                .channel(LSP_NODE, &channel_id)
+                .channel(lsp_node, &channel_id)
                 .is_some_and(|state| {
                     state.state == ChannelState::ChannelReady
                         && state.connectivity_state == fnn::fiber::ChannelConnectivityState::Online
                 });
-            let tenant_ready = s.runtime.store(LSP_NODE).ok().is_some_and(|store| {
+            let tenant_ready = s.runtime.store(lsp_node).ok().is_some_and(|store| {
                 let ts = store.namespaced(NodeNamespace::hosted_tenant(tenant_id.as_str()));
                 fnn::fiber::channel::ChannelActorStateStore::get_channel_actor_state(
                     &ts,
@@ -1031,7 +1608,10 @@ impl Driver {
     }
 
     fn tenant_channel_awaiting_signature(&self, tenant_id: &TenantId, channel_id: Hash256) -> bool {
-        let Ok(store) = self.runtime.store(LSP_NODE) else {
+        let Ok(lsp_node) = self.lsp_node() else {
+            return false;
+        };
+        let Ok(store) = self.runtime.store(lsp_node) else {
             return false;
         };
         let tenant_store = store.namespaced(NodeNamespace::hosted_tenant(tenant_id.as_str()));
@@ -1047,7 +1627,8 @@ impl Driver {
         tenant_id: &TenantId,
         payment_hash: Hash256,
     ) -> Result<Option<CkbInvoiceStatus>> {
-        let store = self.runtime.store(LSP_NODE)?;
+        let lsp_node = self.lsp_node()?;
+        let store = self.runtime.store(lsp_node)?;
         let tenant_store = store.namespaced(NodeNamespace::hosted_tenant(tenant_id.as_str()));
         Ok(tenant_store.get_invoice_status(&payment_hash))
     }
@@ -1058,19 +1639,28 @@ impl Driver {
         payment_hash: Hash256,
     ) -> Option<PaymentStatus> {
         use fnn::fiber::payment::PaymentSessionExt;
-        let store = self.runtime.store(LSP_NODE).ok()?;
+        let lsp_node = self.lsp_node().ok()?;
+        let store = self.runtime.store(lsp_node).ok()?;
         let tenant_store = store.namespaced(NodeNamespace::hosted_tenant(tenant_id.as_str()));
         fnn::fiber::graph::NetworkGraphStateStore::get_payment_session(&tenant_store, payment_hash)
             .map(|session| session.effective_status(&tenant_store))
     }
 
-    fn verify_lsp_indexes(&self, public_nodes: &[usize], tenants: &[TenantId]) -> Result<()> {
+    pub(super) fn verify_lsp_indexes(
+        &self,
+        public_nodes: &[usize],
+        tenants: &[TenantId],
+    ) -> Result<()> {
+        let lsp_node = self.lsp_node()?;
         for &node in public_nodes {
+            if !self.runtime.node_available(node) {
+                continue;
+            }
             let store = self.runtime.store(node)?;
             simulation::verify_payment_hash_index(&store)
                 .map_err(|err| anyhow!("{} payment-hash index: {err}", NAMES[node]))?;
         }
-        let lsp_store = self.runtime.store(LSP_NODE)?;
+        let lsp_store = self.runtime.store(lsp_node)?;
         for tenant in tenants {
             let tenant_store = lsp_store.namespaced(NodeNamespace::hosted_tenant(tenant.as_str()));
             simulation::verify_payment_hash_index(&tenant_store)

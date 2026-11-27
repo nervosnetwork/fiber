@@ -92,7 +92,7 @@ impl Driver {
             "accept reply changed temporary channel ID"
         );
         let channel = response.new_channel_id;
-        let attempt = Attempt::new(&self.runtime, order, channel)?;
+        let attempt = Attempt::new(&self.runtime, order, temporary, channel)?;
         if let Some(dropped_funding) = dropped_funding {
             self.until("funding frame is dropped", |s| {
                 Ok(dropped_funding.hit(&s.runtime).then_some(()))
@@ -171,7 +171,7 @@ impl Driver {
         let response = self.reply("accept channel for ID rewrite", reply)?;
         let channel = response.new_channel_id;
         ensure!(response.old_channel_id == temporary && temporary != channel);
-        let attempt = Attempt::new(&self.runtime, order, channel)?;
+        let attempt = Attempt::new(&self.runtime, order, temporary, channel)?;
         self.until("channel ID rewrite interruption", |s| {
             Ok(injection.hit(&s.runtime).then_some(()))
         })?;

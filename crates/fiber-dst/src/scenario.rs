@@ -58,6 +58,8 @@ pub enum Scenario {
         phases: usize,
         /// Policy controlling when a run can inject faults.
         fault_policy: RandomFaultPolicy,
+        /// Whether to co-host an LSP service and external `fiber-lsp-sdk` wallet hosts in the mesh.
+        lsp: bool,
     },
     /// Exercise every fault adapter against real nodes.
     Faults,
@@ -87,13 +89,6 @@ pub enum Scenario {
     /// Inject abrupt crashes, dropped responses, duplicate/conflicting signatures, and
     /// long-offline force-close self-funded watchtower settlement against an external SDK wallet.
     LspSignerFaults,
-    /// Seeded multi-tenant LSP + external SDK wallet workload with optional random chaos faults.
-    LspRandom {
-        /// Number of payments to execute across public peers and hosted SDK wallets.
-        payments: usize,
-        /// Inject random wallet crashes, long-offline expiries, partitions, and duplicate RPCs.
-        chaos: bool,
-    },
 }
 
 /// Exercise real Fiber actors and return the logical trace for cross-process replay.
@@ -123,26 +118,26 @@ pub fn run(scenario: Scenario, seed: u64) -> Result<Vec<String>> {
                 None
             };
             let edges: &[(usize, usize)] = match scenario {
-                Scenario::Multihop | Scenario::LspRandom { .. } => &[(0, 1), (1, 2)],
+                Scenario::Multihop => &[(0, 1), (1, 2)],
                 Scenario::Mpp | Scenario::Swarm => &[(0, 1), (0, 2), (1, 3), (2, 3)],
                 Scenario::Random { .. } => &topology.as_ref().expect("random topology").links,
                 _ => &[(0, 1)],
             };
-            let is_lsp = matches!(
+            let is_lsp_fixture = matches!(
                 scenario,
-                Scenario::LspOfflineDelivery
-                    | Scenario::LspSignerFaults
-                    | Scenario::LspRandom { .. }
+                Scenario::LspOfflineDelivery | Scenario::LspSignerFaults
             );
+            let random_has_lsp = matches!(scenario, Scenario::Random { lsp: true, .. });
+            let has_lsp = is_lsp_fixture || random_has_lsp;
             // Random exploration has a watchdog per stage, including the protocol's MPP hold timer.
-            let duration = if topology.is_some() || matches!(scenario, Scenario::LspRandom { .. }) {
+            let duration = if topology.is_some() {
                 Duration::MAX
             } else {
                 Duration::from_secs(900)
             };
             let continuous = matches!(scenario, Scenario::Random { fault_policy, .. }
             if fault_policy != RandomFaultPolicy::Windows);
-            let tower_mode = if is_lsp {
+            let tower_mode = if is_lsp_fixture {
                 Some(TowerMode::BuiltIn)
             } else {
                 (topology.is_some()
@@ -156,15 +151,18 @@ pub fn run(scenario: Scenario, seed: u64) -> Result<Vec<String>> {
                     TowerMode::External
                 })
             };
-            let lsp = is_lsp.then(|| LspSetup {
-                lsp_node: 1,
-                wallet_count: if matches!(scenario, Scenario::LspRandom { .. }) {
-                    2
+            let lsp = has_lsp.then(|| {
+                let lsp_node = if let Some(topo) = topology.as_ref() {
+                    topo.lsp_node(seed)
                 } else {
                     1
-                },
-                tenant_liquidity: FUNDING_AMOUNT,
-                config: Driver::lsp_config_for_scenario(),
+                };
+                LspSetup {
+                    lsp_node,
+                    wallet_count: if random_has_lsp { 2 } else { 1 },
+                    tenant_liquidity: FUNDING_AMOUNT,
+                    config: Driver::lsp_config_for_scenario(),
+                }
             });
             let runtime = Harness::new(
                 seed,
@@ -174,14 +172,19 @@ pub fn run(scenario: Scenario, seed: u64) -> Result<Vec<String>> {
                 HarnessOptions {
                     duration,
                     // Continuous reconnects need headroom in Turmoil's shared SYN and data queue.
-                    tcp_capacity: (continuous || is_lsp).then_some(512),
+                    tcp_capacity: (continuous || has_lsp).then_some(512),
                     tower_mode,
                     // A peer that misses the terminal abort frame follows its funding timer.
-                    funding_timeout_seconds: matches!(
-                        scenario,
-                        Scenario::ChannelIdRewrite { .. } | Scenario::ParallelFundingCleanup
-                    )
-                    .then_some(1),
+                    funding_timeout_seconds: match scenario {
+                        Scenario::ChannelIdRewrite { .. } | Scenario::ParallelFundingCleanup => {
+                            Some(1)
+                        }
+                        Scenario::Random {
+                            fault_policy: RandomFaultPolicy::Continuous,
+                            ..
+                        } => Some(10),
+                        _ => None,
+                    },
                     lsp,
                 },
             )?;
@@ -204,12 +207,14 @@ pub fn run(scenario: Scenario, seed: u64) -> Result<Vec<String>> {
                     payments,
                     phases,
                     fault_policy,
+                    lsp,
                 } => driver.random(
                     seed,
                     topology.as_ref().expect("random topology"),
                     payments,
                     phases,
                     fault_policy,
+                    lsp,
                 ),
                 Scenario::FundingAbortRecovery => driver.funding_abort_recovery(),
                 Scenario::FundingSignatureReplay => driver.funding_signature_replay(),
@@ -226,7 +231,6 @@ pub fn run(scenario: Scenario, seed: u64) -> Result<Vec<String>> {
                 }),
                 Scenario::LspOfflineDelivery => driver.lsp_offline_delivery(),
                 Scenario::LspSignerFaults => driver.lsp_signer_faults(),
-                Scenario::LspRandom { payments, chaos } => driver.lsp_random(seed, payments, chaos),
                 Scenario::CrashBeforeAck | Scenario::TwoNodeFaults => {
                     let channel = driver.open_channel()?;
                     match scenario {
@@ -320,15 +324,17 @@ impl Driver {
     fn wait_payment_actor(&mut self, from: usize) -> Result<()> {
         let cleanup_deadline = self.runtime.elapsed() + TICK * PHASE_TICKS as u32;
         loop {
-            let count = self
+            let reply = self
                 .runtime
                 .request(from, FiberActorCommand::GetInflightPaymentCount)?;
-            if self.reply("payment actor cleanup", count)? == 0 {
+            let count = self.reply("payment actor cleanup", reply)?;
+            if count == 0 {
                 break;
             }
             ensure!(
                 self.runtime.elapsed() < cleanup_deadline,
-                "payment actor still active"
+                "payment actor still active on {} (count={count})",
+                crate::host::NAMES[from]
             );
         }
         Ok(())

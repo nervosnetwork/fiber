@@ -5,7 +5,7 @@ use fnn::fiber::channel::{ChannelActorState, ChannelActorStateStore};
 use fnn::fiber::{
     AppliedFlags, Attempt, ChannelConnectivityState, ChannelState, Hash256, PaymentStatus, Pubkey,
 };
-use fnn::fiber_types::CloseFlags;
+use fnn::fiber_types::{CloseFlags, RemoveTlcReason};
 use fnn::invoice::{CkbInvoiceStatus, InvoiceStore};
 use fnn::simulation::{self, TlcSettlement};
 
@@ -204,6 +204,81 @@ impl<'a> Ledger<'a> {
                 driver.runtime.note(format_args!(
                     "swarm audited TLC fulfill channel={} payment={} spend={}",
                     edge.channel, tlc.payment_hash, receipt.tx_hash
+                ));
+            }
+        }
+        // A TLC whose off-chain RemoveTlc(Fulfill) was already folded into the confirmed
+        // commitment's balances before AppliedFlags::REMOVE finished has no on-chain TLC cell
+        // receipt, yet both endpoints record the valid preimage in `removed_reason` and Fiber
+        // reconciles it via `collect_onchain_excluded_fulfilled_tlcs`.
+        let mut excluded_fulfills: BTreeMap<TlcKey, (Hash256, [Option<TlcSettlement>; 2])> =
+            BTreeMap::new();
+        for (side, state) in states.into_iter().enumerate() {
+            let node = endpoints[side];
+            for tlc in state.tlc_state.all_tlcs() {
+                let from = endpoints[if tlc.is_offered() { side } else { 1 - side }];
+                let key = TlcKey {
+                    channel: edge.channel,
+                    from,
+                    id: tlc.id(),
+                };
+                if evidence.contains_key(&key) {
+                    continue;
+                }
+                let already_recorded = self.tlcs.get(&key).is_some_and(|fulfillment| {
+                    if tlc.is_offered() {
+                        fulfillment.offered.is_some()
+                    } else {
+                        fulfillment.received.is_some()
+                    }
+                });
+                if already_recorded {
+                    continue;
+                }
+                let Some(RemoveTlcReason::RemoveTlcFulfill(fulfill)) = &tlc.removed_reason else {
+                    continue;
+                };
+                ensure!(
+                    Hash256::from(tlc.hash_algorithm.hash(fulfill.payment_preimage))
+                        == tlc.payment_hash,
+                    "excluded fulfillment preimage does not match payment {}",
+                    tlc.payment_hash
+                );
+                let settlement = TlcSettlement {
+                    node: driver.runtime.peers[node],
+                    channel: edge.channel,
+                    id: tlc.id(),
+                    offered: tlc.is_offered(),
+                    payment: tlc.payment_hash,
+                    amount: tlc.amount,
+                    attempt: tlc.attempt_id,
+                    previous: tlc.forwarding_tlc,
+                };
+                let slot = usize::from(!tlc.is_offered());
+                let entry = excluded_fulfills
+                    .entry(key)
+                    .or_insert_with(|| (fulfill.payment_preimage, [None, None]));
+                ensure!(
+                    entry.0 == fulfill.payment_preimage,
+                    "channel endpoints disagree on excluded fulfillment preimage for TLC {key:?}"
+                );
+                entry.1[slot] = Some(settlement);
+            }
+        }
+        for (key, (_preimage, sides)) in excluded_fulfills {
+            let existing = self.tlcs.get(&key);
+            let offered_present =
+                sides[0].is_some() || existing.is_some_and(|item| item.offered.is_some());
+            let received_present =
+                sides[1].is_some() || existing.is_some_and(|item| item.received.is_some());
+            if !(offered_present && received_present) {
+                continue;
+            }
+            for settlement in sides.into_iter().flatten() {
+                self.record(&driver.runtime.peers, &settlement)?;
+                driver.runtime.note(format_args!(
+                    "swarm audited excluded TLC fulfill channel={} payment={} commitment={commitment}",
+                    edge.channel, settlement.payment
                 ));
             }
         }

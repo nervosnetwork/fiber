@@ -282,10 +282,10 @@ const ASSUME_GOSSIP_ACTOR_ALIVE: &str = "gossip actor must be alive";
 const MAINTAINING_CONNECTIONS_INTERVAL: Duration = Duration::from_secs(1200);
 
 // The duration for which we will check all channels.
-#[cfg(debug_assertions)]
-// use a short interval for debugging build
+#[cfg(any(debug_assertions, feature = "simulation"))]
+// use a short interval for debugging and deterministic simulation builds
 pub(crate) const CHECK_CHANNELS_INTERVAL: Duration = Duration::from_secs(3);
-#[cfg(not(debug_assertions))]
+#[cfg(not(any(debug_assertions, feature = "simulation")))]
 pub(crate) const CHECK_CHANNELS_INTERVAL: Duration = Duration::from_secs(60);
 
 const CHECK_CHANNELS_SHUTDOWN_INTERVAL: Duration = Duration::from_secs(300);
@@ -12051,12 +12051,18 @@ pub(crate) async fn start_hosted_tenant_actor<
     network_graph: Arc<RwLock<NetworkGraph<S>>>,
     default_shutdown_script: Script,
 ) -> Result<FiberActorRef, String> {
-    let actor_name = format!(
-        "HostedTenant {:?}",
-        config
-            .try_public_key()
-            .map_err(|error| format!("failed to read hosted tenant key: {error}"))?
-    );
+    let pubkey = config
+        .try_public_key()
+        .map_err(|error| format!("failed to read hosted tenant key: {error}"))?;
+    #[cfg(feature = "simulation")]
+    let actor_name = {
+        static HOSTED_TENANT_ACTOR_SEQ: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(1);
+        let seq = HOSTED_TENANT_ACTOR_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        format!("HostedTenant {pubkey:?} #{seq}")
+    };
+    #[cfg(not(feature = "simulation"))]
+    let actor_name = format!("HostedTenant {pubkey:?}");
     Actor::spawn_linked(
         Some(actor_name),
         HostedTenantActor::new(

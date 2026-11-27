@@ -22,9 +22,6 @@ make simulate DST_RUNS=10 DST_PAYMENTS=32 DST_PHASES=5
 cargo run --locked -p fiber-dst -- random
 cargo run --locked -p fiber-dst -- random 42 --payments 128 --phases 8
 cargo run --locked -p fiber-dst -- random 6 --payments 32 --phases 5 --chaos
-cargo run --locked -p fiber-dst -- random --chaos-payments
-cargo run --locked -p fiber-dst -- lsp
-cargo run --locked -p fiber-dst -- lsp 7 --payments 16 --chaos
 cargo nextest run --locked -p fiber-dst
 ```
 
@@ -98,7 +95,6 @@ payment-wave driver and settlement auditor.
 | Superseded watchtower round | Delays a bidirectional `CommitmentSignedV2` update and reconnects with a second round variant while dropping `RevokeAndAckV2`, forcing the Watchtower to retain `superseded_remote_settlements` and settle a force-closed superseded commitment in both built-in and external modes. |
 | `lsp-offline-delivery` | Registers an external `fiber-lsp-sdk` wallet over Biscuit-authenticated JSON-RPC (with duplicate `lsp_register_tenant` replay rejected), crashes the wallet and evicts the cold tenant so a public trampoline payment buffers as `Deferred`, crashes and restarts the LSP, verifies replay rejection persists across restart, recovers and settles with duplicate `settle_invoice`, and then holds the wallet offline past `buffer_deadline` to verify clean expiry. |
 | `lsp-signer-faults` | Crashes the external `fiber-lsp-sdk` wallet mid-`AwaitingSignature`, restarts from persisted `sdk_store.bin` and `session_state.json`, drops the RPC response after commit on `submit_channel_signature`, injects duplicate and conflicting signature replays, then force-closes the private channel while the wallet is offline so the returning wallet registers the preimage via `create_preimage` and completes self-funded `ExternalFundingRequired` Watchtower settlement with duplicate `submit_watchtower_signature`. |
-| LSP random chaos (`lsp`) | Runs two public peers (`A`, `C`), a hosted LSP (`B`), and two external `fiber-lsp-sdk` wallets (`SDK-0`, `SDK-1`) across public-to-tenant, tenant-to-public (trampoline), and tenant-to-tenant payments while randomly injecting long-offline buffer expiries, abrupt wallet crashes mid-signing, SDK-LSP network partitions, dropped requests, dropped responses after commit, delays, and duplicate RPCs. |
 | Funding signature replay | Drops the final funding signatures and restarts the first signer. The peer must replay the same signatures before Ready, and a payment must settle on the original funding outpoint. |
 | Funding abort recovery | Drops a funding frame, verifies that both endpoints abort and clear funding state, and retries the open. |
 | Channel ID rewrite | Injects an SQLite sync error in the rewrite and, in a separate run, crashes after commit before notifying the network actor. SQLite reopens with exactly one complete channel ID and matching indexes. The original attempt either becomes usable or aborts cleanly before a new channel settles a payment. |
@@ -144,18 +140,19 @@ until the next commitment.
 
 ## Random exploration
 
-`random` generates a six-to-eight-node topology with a diamond core, funds
-the core and expansion channels, and runs a mix of direct, multihop, and MPP
-payments. The default is 128 orders over eight waves, followed by four
-recovery probes and an on-chain settlement probe. The default CLI policy and
-`--chaos-payments` also run four baseline payments on the core, covering
-bidirectional multihop and MPP before expansion.
+`random` generates a six-to-eight-node topology with a diamond core, co-hosts
+`LspService` on one of the core relay nodes alongside two external
+`fiber-lsp-sdk` wallet hosts (`SDK-0`, `SDK-1`), funds both the public mesh and
+the private hosted channels, and runs a mix of direct, multihop, MPP, and
+trampoline/hosted-tenant payments. The default is 128 public orders over eight
+waves plus interleaved LSP/SDK rounds, followed by four recovery probes and an
+on-chain settlement probe. The default CLI policy also runs four baseline
+payments on the core, covering bidirectional multihop and MPP before expansion.
 
 | Policy | When and where it injects faults |
 | --- | --- |
 | `random` without a flag | Directed boot and funding faults, followed by per-wave node crashes, link partitions, and network mailbox delays. A seed picks a 25%, 50%, or 75% chance for each candidate window. The fixed diamond test keeps all three candidates. |
-| `random --chaos` | The continuous scheduler starts at boot and continues through funding and overlapping payment waves. This is the policy used by `make dst`. |
-| `random --chaos-payments` | Directed boot and funding faults, then the continuous scheduler during the payment workload. |
+| `random --chaos` | The continuous scheduler starts at boot and continues through funding, overlapping payment waves, and the hosted LSP/SDK workload (long-offline buffer expiries, abrupt wallet crashes mid-signing, LSP crashes during `Deferred` delivery, SDK-LSP partitions, dropped requests, dropped responses after commit, delays, and duplicate RPCs). This is the policy used by `make dst`. |
 
 The continuous scheduler samples node crashes, link partitions, TCP
 disconnects, and whole peer-frame drops or delays. It can select an in-flight

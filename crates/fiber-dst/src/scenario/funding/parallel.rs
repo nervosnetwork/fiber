@@ -128,7 +128,9 @@ impl Driver {
         let attempts = offers
             .into_iter()
             .enumerate()
-            .map(|(index, (order, _))| Attempt::new(&self.runtime, order, accepted[&index]))
+            .map(|(index, (order, temporary))| {
+                Attempt::new(&self.runtime, order, temporary, accepted[&index])
+            })
             .collect::<Result<Vec<_>>>()?;
         let ids: BTreeSet<_> = attempts.iter().map(|attempt| attempt.channel).collect();
         ensure!(

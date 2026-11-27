@@ -110,21 +110,32 @@ fn audited_channel_state(
 
 struct Attempt {
     order: FundingOrder,
+    temporary: Hash256,
     channel: Hash256,
     // The acceptor has both funding keys before either side broadcasts.
     initial: Rc<ChannelActorState>,
 }
 
 impl Attempt {
-    fn new(runtime: &Harness, order: FundingOrder, channel: Hash256) -> Result<Self> {
+    fn new(
+        runtime: &Harness,
+        order: FundingOrder,
+        temporary: Hash256,
+        channel: Hash256,
+    ) -> Result<Self> {
         let initial = runtime
             .channel(order.acceptor, &channel)
             .with_context(|| format!("acceptor has no state for funding {channel}"))?;
         Ok(Self {
             order,
+            temporary,
             channel,
             initial,
         })
+    }
+
+    fn aborted_on(&self, runtime: &Harness, node: usize) -> bool {
+        runtime.funding_aborted(node, self.channel) || runtime.funding_aborted(node, self.temporary)
     }
 
     fn outcome(&self, runtime: &Harness) -> Option<Outcome> {
@@ -135,7 +146,7 @@ impl Attempt {
             Some(Outcome::Online)
         } else if [opener, acceptor]
             .into_iter()
-            .all(|node| runtime.funding_aborted(node, self.channel) && runtime.node_available(node))
+            .all(|node| self.aborted_on(runtime, node) && runtime.node_available(node))
         {
             Some(Outcome::Aborted)
         } else {
@@ -156,11 +167,13 @@ impl Attempt {
         if matches!(outcome, Outcome::Aborted) {
             for (owner, peer) in [(opener, acceptor), (acceptor, opener)] {
                 let store = runtime.store(owner)?;
-                ensure!(
-                    audited_channel_state(&store, channel, &runtime.peers[peer])?.is_none(),
-                    "aborted channel {channel} remains on {}",
-                    NAMES[owner]
-                );
+                for id in [channel, self.temporary] {
+                    ensure!(
+                        audited_channel_state(&store, id, &runtime.peers[peer])?.is_none(),
+                        "aborted channel {id} remains on {}",
+                        NAMES[owner]
+                    );
+                }
             }
             ensure!(
                 transactions.is_empty(),
@@ -172,7 +185,7 @@ impl Attempt {
         ensure!(
             [opener, acceptor]
                 .into_iter()
-                .all(|node| !runtime.funding_aborted(node, channel)),
+                .all(|node| !self.aborted_on(runtime, node)),
             "online channel {channel} has an abort receipt"
         );
         let a = runtime
