@@ -3772,7 +3772,7 @@ where
                     }
                 }
 
-                self.retry_hold_tlc_sets(&myself);
+                self.retry_hold_tlc_sets(&myself, false);
             }
             FiberActorCommand::OpenChannel(open_channel, reply) => {
                 let network_graph = self.network_graph.clone();
@@ -5325,33 +5325,48 @@ where
         SettleOnChainFulfilledInvoiceCommand::new(payment_hash, &self.store).run();
     }
 
-    fn retry_hold_tlc_sets(&self, myself: &FiberActorRef) {
+    fn retry_hold_tlc_sets(&self, myself: &FiberActorRef, rearm_timeouts: bool) {
         let current_time = now_timestamp_as_millis_u64();
-        for (payment_hash, hold_tlcs) in self.store.get_node_hold_tlcs() {
-            if self.store.get_preimage(&payment_hash).is_some() {
+        let mut hold_sets: Vec<_> = self.store.get_node_hold_tlcs().into_iter().collect();
+        hold_sets.sort_unstable_by_key(|(payment_hash, _)| *payment_hash);
+
+        for (payment_hash, hold_tlcs) in hold_sets {
+            let has_preimage = self.store.get_preimage(&payment_hash).is_some();
+            if has_preimage {
+                // Give a complete set the chance to enter Received before handling timeouts.
+                // An incomplete MPP set can also have a preimage while its invoice is Open.
                 myself
                     .send_message(FiberActorMessage::new_command(
                         FiberActorCommand::SettleReceivedHoldTlcSet(payment_hash),
                     ))
                     .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+            }
+            if self.store.get_invoice_status(&payment_hash) == Some(CkbInvoiceStatus::Received) {
                 continue;
             }
 
-            let already_timeout = hold_tlcs
-                .iter()
-                .any(|hold_tlc| current_time >= hold_tlc.hold_expire_at);
-            if already_timeout {
-                debug!("Timeout {payment_hash} hold tlcs {}", hold_tlcs.len());
-                for hold_tlc in hold_tlcs {
+            // Preserve set-wide expiry for hold invoices that don't have a preimage yet.
+            let hold_set_expired = !has_preimage
+                && hold_tlcs
+                    .iter()
+                    .any(|hold_tlc| current_time >= hold_tlc.hold_expire_at);
+            for hold_tlc in hold_tlcs {
+                let timeout = move || {
+                    FiberActorMessage::new_command(FiberActorCommand::TimeoutHoldTlc(
+                        payment_hash,
+                        hold_tlc.channel_id,
+                        hold_tlc.tlc_id,
+                    ))
+                };
+                if hold_set_expired || current_time >= hold_tlc.hold_expire_at {
                     myself
-                        .send_message(FiberActorMessage::new_command(
-                            FiberActorCommand::TimeoutHoldTlc(
-                                payment_hash,
-                                hold_tlc.channel_id,
-                                hold_tlc.tlc_id,
-                            ),
-                        ))
+                        .send_message(timeout())
                         .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+                } else if rearm_timeouts {
+                    myself.send_after(
+                        Duration::from_millis(hold_tlc.hold_expire_at - current_time),
+                        timeout,
+                    );
                 }
             }
         }
@@ -5363,8 +5378,8 @@ where
         state: &mut FiberActorState<S, C>,
         payment_hashes: HashSet<PaymentSessionKey>,
     ) {
-        // Trigger hold tlc fulfill retry and timeout checks at startup.
-        self.retry_hold_tlc_sets(myself);
+        // Restore hold timers lost on restart using their original deadlines.
+        self.retry_hold_tlc_sets(myself, true);
         // Recover only channel-owned work and indexed attempts. Scanning payment
         // history here makes every restart grow with the node's lifetime traffic.
         for payment_hash in payment_hashes {
