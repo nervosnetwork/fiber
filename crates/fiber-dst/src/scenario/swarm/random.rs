@@ -372,6 +372,9 @@ impl Driver {
             None
         };
 
+        // Sync missed historical gossip announcements to nodes that crashed during funding
+        // before running healthy recovery probes.
+        self.runtime.sync_gossip()?;
         let probes = [
             order(0, a, b, Kind::Direct, 10_000),
             order(0, d, c, Kind::Direct, 10_000),
@@ -478,8 +481,15 @@ impl Driver {
                         }
                     })
                     .collect();
-                edges.extend(self.parallel_funding(orders, fault, RELAY_FEE_PPM, funding_txs)?);
-                continue;
+                let funded = self.parallel_funding(orders, fault, RELAY_FEE_PPM, funding_txs)?;
+                if !funded.is_empty() {
+                    edges.extend(funded);
+                    continue;
+                }
+                self.runtime.note(format_args!(
+                    "parallel funding {}-{} aborted all attempts under chaos; retrying single open",
+                    NAMES[from], NAMES[to]
+                ));
             }
             let inject_ckb = index == 0 && self.chaos.is_none();
             let fault = if inject_ckb {

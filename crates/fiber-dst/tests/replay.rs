@@ -645,3 +645,20 @@ fn random_chaos_reconciles_public_mesh_with_lsp_and_sdk_wallets() {
     }
     assert_eq!(trace, run_random("4", &options));
 }
+
+#[test]
+fn random_chaos_recovers_immediate_received_invoice_and_outbound_sdk_refund() {
+    let options = ["--payments", "24", "--phases", "4", "--chaos"];
+    // Seed 236: payee crashes after SettleTlcSet marks a single-path non-hold invoice `Received`
+    // and before ChannelActor persists `RemoveTlc(Fulfill)`.
+    let trace_236 = run_random("236", &options);
+    assert!(trace_236.contains("random reconciled workload=24"));
+    assert_eq!(trace_236, run_random("236", &options));
+
+    // Seed 255: hosted SDK wallet outbound payment fails downstream (`RemoveTlc(Fail)` refund)
+    // and must auto-authorize outbound refund cancellation instead of deadlocking.
+    let trace_255 = run_random("255", &options);
+    assert!(trace_255.contains("failed and refunded"));
+    assert!(trace_255.contains("random reconciled workload=24"));
+    assert_eq!(trace_255, run_random("255", &options));
+}

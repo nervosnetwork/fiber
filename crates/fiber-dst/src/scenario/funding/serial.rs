@@ -28,9 +28,9 @@ impl Driver {
         public: bool,
         fault: OpeningFault,
     ) -> Result<Edge> {
-        const MAX_ATTEMPTS: usize = 2;
+        let max_attempts = if self.chaos.is_some() { 6 } else { 2 };
 
-        for retry in 0..MAX_ATTEMPTS {
+        for retry in 0..max_attempts {
             let fault = match fault {
                 OpeningFault::DropAcceptorFrame if retry > 0 => OpeningFault::None,
                 fault => fault,
@@ -46,7 +46,7 @@ impl Driver {
                 return Ok(edge);
             }
             ensure!(
-                retry + 1 < MAX_ATTEMPTS,
+                retry + 1 < max_attempts,
                 "channel {channel} funding aborted on both endpoints"
             );
             self.runtime.note(format_args!(

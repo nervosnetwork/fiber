@@ -920,26 +920,37 @@ impl Driver {
                         }
                     }
                     if let Some(payee) = sent_to {
-                        self.until("random outbound tenant payment succeeded", |s| {
-                            let payee_paid = s.runtime.nodes.borrow()[payee]
-                                .node
-                                .as_ref()
-                                .and_then(|node| node.store.get_invoice_status(&payment_hash))
-                                == Some(CkbInvoiceStatus::Paid);
-                            Ok(payee_paid.then_some(()))
-                        })?;
-                        self.until("tenant payment session marked Success", |s| {
-                            let payment = s.wallet_payment_status_from_store(
-                                &tenant_ids[wallet],
-                                payment_hash,
-                            );
-                            Ok((payment == Some(PaymentStatus::Success)).then_some(()))
-                        })?;
-                        succeeded += 1;
-                        self.runtime.note(format_args!(
-                            "lsp-random #{seq} {}->{} succeeded {payment_hash} amount={amount}",
-                            WALLET_HOSTS[wallet], NAMES[payee]
-                        ));
+                        let outcome =
+                            self.until("random outbound tenant payment finalized", |s| {
+                                let payee_paid =
+                                    s.runtime.nodes.borrow()[payee].node.as_ref().and_then(
+                                        |node| node.store.get_invoice_status(&payment_hash),
+                                    ) == Some(CkbInvoiceStatus::Paid);
+                                let status = s.wallet_payment_status_from_store(
+                                    &tenant_ids[wallet],
+                                    payment_hash,
+                                );
+                                if payee_paid && status == Some(PaymentStatus::Success) {
+                                    return Ok(Some(PaymentStatus::Success));
+                                }
+                                if status == Some(PaymentStatus::Failed) {
+                                    return Ok(Some(PaymentStatus::Failed));
+                                }
+                                Ok(None)
+                            })?;
+                        if outcome == PaymentStatus::Success {
+                            succeeded += 1;
+                            self.runtime.note(format_args!(
+                                "lsp-random #{seq} {}->{} succeeded {payment_hash} amount={amount}",
+                                WALLET_HOSTS[wallet], NAMES[payee]
+                            ));
+                        } else {
+                            self.wait_tenant_idle(&tenant_ids[wallet])?;
+                            self.runtime.note(format_args!(
+                                "lsp-random #{seq} {}->{} failed and refunded {payment_hash} amount={amount}",
+                                WALLET_HOSTS[wallet], NAMES[payee]
+                            ));
+                        }
                     } else {
                         let to_wallet = 1 - wallet;
                         self.ensure_wallet_online(to_wallet)?;

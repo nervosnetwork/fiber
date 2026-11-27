@@ -9,6 +9,7 @@ use fnn::fiber::channel::ChannelActorState;
 use fnn::fiber::gossip::GossipMessageUpdates;
 use fnn::fiber::graph::NetworkGraphStateStore;
 use fnn::fiber::payment::PaymentSessionExt;
+use fnn::fiber::types::BroadcastMessageWithTimestamp;
 use fnn::fiber::{
     ChannelConnectivityState, ChannelState, FiberActorCommand, Hash256, NetworkActorMessage,
     PaymentStatus, Privkey, Pubkey, PublicNetworkEvent,
@@ -45,6 +46,7 @@ pub(crate) struct Harness {
     pub(crate) lsp_node: Option<usize>,
     pub(crate) lsp_slot: LspSlot,
     pub(crate) wallets: Wallets,
+    gossip_history: Vec<BroadcastMessageWithTimestamp>,
 }
 
 struct ChannelSnapshot {
@@ -238,6 +240,7 @@ impl Harness {
             lsp_node,
             lsp_slot,
             wallets,
+            gossip_history: Vec::new(),
         })
     }
 
@@ -286,6 +289,7 @@ impl Harness {
             .flat_map(|slot| std::mem::take(&mut slot.broadcasts))
             .collect();
         if !broadcasts.is_empty() {
+            self.gossip_history.extend(broadcasts.iter().cloned());
             for slot in nodes.iter().filter(|slot| !slot.storage_failed) {
                 if let Some(node) = &slot.node {
                     send(
@@ -297,6 +301,30 @@ impl Harness {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// Replay recorded signed gossip announcements to all online nodes so nodes that were
+    /// crashed during channel funding catch up before healthy recovery probes (matching
+    /// production `GossipActor` active sync on reconnect).
+    pub(crate) fn sync_gossip(&mut self) -> Result<()> {
+        if self.gossip_history.is_empty() {
+            return Ok(());
+        }
+        {
+            let nodes = self.nodes.borrow();
+            for slot in nodes.iter().filter(|slot| !slot.storage_failed) {
+                if let Some(node) = &slot.node {
+                    send(
+                        &node.actor,
+                        NetworkActorMessage::new_event(PublicNetworkEvent::GossipMessageUpdates(
+                            GossipMessageUpdates::new(self.gossip_history.clone()),
+                        )),
+                    )?;
+                }
+            }
+        }
+        self.step()?;
         Ok(())
     }
 

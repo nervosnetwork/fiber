@@ -304,6 +304,17 @@ impl Driver {
                 ));
             }
         }
+        if edges.is_empty() && matches!(fault, BatchFault::Chaos(_)) {
+            if let Some(chaos) = &mut self.chaos {
+                chaos.unprotect_open();
+            }
+            self.runtime.note(format_args!(
+                "parallel funding reconciled attempts={} online=0 aborted={} probes=0",
+                attempts.len(),
+                attempts.len(),
+            ));
+            return Ok(edges);
+        }
         ensure!(
             !edges.is_empty(),
             "parallel funding left no usable channel for {}-{}",
