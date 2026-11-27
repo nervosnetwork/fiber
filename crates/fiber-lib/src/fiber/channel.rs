@@ -659,6 +659,10 @@ where
                         // Both announcement signatures are already final. Reestablishment
                         // replays our cached signature independently; replying here would
                         // make two ready peers echo signatures and rebroadcast gossip forever.
+                        debug_event!(
+                            self.network,
+                            "Ignored AnnouncementSignatures on a ready channel"
+                        );
                         return Ok(());
                     }
                     ChannelState::AwaitingChannelReady(flags)
@@ -7849,6 +7853,18 @@ impl ChannelActorState {
             .expect("public channel info exists")
     }
 
+    /// Recovery replays our announcement signature only while the announcement
+    /// is incomplete. Once we are ChannelReady with the peer's signature it is
+    /// not sent again.
+    pub(crate) fn should_replay_announcement_signature(&self) -> bool {
+        let Some(info) = self.public_channel_info.as_ref() else {
+            return false;
+        };
+        info.local_channel_announcement_signature.is_some()
+            && !(matches!(self.state, ChannelState::ChannelReady)
+                && info.remote_channel_announcement_signature.is_some())
+    }
+
     fn get_remote_channel_announcement_nonce(&self) -> Option<PubNonce> {
         self.public_channel_info
             .as_ref()
@@ -12562,10 +12578,14 @@ where
     fn replay_effects_v2(&self, state: &ChannelActorState) {
         // The remote may have lost its runtime queue while an external
         // announcement signature was pending. Replay our durable signature on
-        // recovery; ordinary ready-channel announcements never echo replies.
+        // recovery until the channel is ready. Not after: a v0.10.1 peer takes a
+        // late AnnouncementSignatures on a ready channel as a new ChannelReady
+        // and moves both commitment numbers without a signed update, so the next
+        // reestablish fails and the channel has to be closed by force.
         if let Some((node_signature, partial_signature)) = state
             .public_channel_info
             .as_ref()
+            .filter(|_| state.should_replay_announcement_signature())
             .and_then(|info| info.local_channel_announcement_signature.clone())
         {
             state.send_message_to_peer(FiberMessage::announcement_signatures(
