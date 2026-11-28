@@ -291,7 +291,7 @@ pub fn run(scenario: Scenario, seed: u64) -> Result<Vec<String>> {
                     "fiber={} seed={seed} scenario={scenario:?}",
                     fnn::get_git_version()
                 ));
-                match scenario {
+                let scenario_result = match scenario {
                     Scenario::WatchtowerSettlement => driver.watchtower_settlement(),
                     Scenario::WatchtowerSuperseded => driver.watchtower_superseded(),
                     Scenario::Faults => driver.faults(),
@@ -357,7 +357,12 @@ pub fn run(scenario: Scenario, seed: u64) -> Result<Vec<String>> {
                             format!("channel state: {:?}", driver.channel_summary(&channel))
                         })
                     }
+                };
+                scenario_result?;
+                if !matches!(scenario, Scenario::ProtocolStateMachineFuzz) {
+                    crate::oracle::OnionErrorOracle::audit(&driver.runtime)?;
                 }
+                Ok(())
             })
         });
         run_result?;

@@ -5,7 +5,7 @@ use fnn::fiber::channel::{ChannelActorState, ChannelActorStateStore};
 use fnn::fiber::{
     AppliedFlags, Attempt, ChannelConnectivityState, ChannelState, Hash256, PaymentStatus, Pubkey,
 };
-use fnn::fiber_types::{CloseFlags, RemoveTlcReason};
+use fnn::fiber_types::{CloseFlags, RemoveTlcReason, TlcErrorCode};
 use fnn::invoice::{CkbInvoiceStatus, InvoiceStore};
 use fnn::simulation::{self, TlcSettlement};
 
@@ -645,6 +645,27 @@ impl<'a> Ledger<'a> {
             .as_ref()
             .map_or(0, |session| session.attempts_count());
         if let Some(session) = session {
+            ensure!(
+                session.last_error_code != Some(TlcErrorCode::InvalidOnionError)
+                    && !session
+                        .last_error
+                        .as_deref()
+                        .is_some_and(|err| err.contains("InvalidOnionError")),
+                "honest payment decoded InvalidOnionError: code={:?}, last_error={:?}",
+                session.last_error_code,
+                session.last_error
+            );
+            for attempt in session.attempts() {
+                ensure!(
+                    !attempt
+                        .last_error
+                        .as_deref()
+                        .is_some_and(|err| err.contains("InvalidOnionError")),
+                    "honest payment attempt {} decoded InvalidOnionError: {:?}",
+                    attempt.id,
+                    attempt.last_error
+                );
+            }
             for attempt in session.attempts().filter(|attempt| attempt.is_success()) {
                 ensure!(success, "failed payment has a successful attempt");
                 ensure!(

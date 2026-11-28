@@ -492,6 +492,23 @@ impl Driver {
             attempt_count == 1,
             "payer 0 retried terminal InvoiceCancelled on alternate route (attempts={attempt_count})"
         );
+        ensure!(
+            session.last_error_code == Some(fnn::fiber_types::TlcErrorCode::InvoiceCancelled),
+            "payer 0 decoded wrong error code across force close: expected Some(InvoiceCancelled), got {:?} (last_error={:?})",
+            session.last_error_code,
+            session.last_error
+        );
+        for attempt in session.attempts() {
+            ensure!(
+                attempt
+                    .last_error
+                    .as_deref()
+                    .is_some_and(|err| err.contains("InvoiceCancelled")),
+                "payer 0 attempt {} decoded wrong error across force close: {:?}",
+                attempt.id,
+                attempt.last_error
+            );
+        }
         self.runtime.note(format_args!(
             "Probe A passed: preserved peer RemoveTlcFail across force close (attempts={attempt_count})"
         ));

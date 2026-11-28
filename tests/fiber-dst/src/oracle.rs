@@ -10,7 +10,7 @@ use fnn::fiber::channel::{ChannelActorState, ChannelActorStateStore};
 use fnn::fiber::graph::NetworkGraphStateStore;
 use fnn::fiber::payment::PaymentSessionExt;
 use fnn::fiber::{ChannelState, Hash256, PaymentStatus};
-use fnn::fiber_types::CloseFlags;
+use fnn::fiber_types::{CloseFlags, TlcErrorCode};
 use fnn::invoice::{CkbInvoiceStatus, InvoiceStore};
 use fnn::lsp::{LspPaymentDeliveryStatus, LspPaymentDeliveryStore, TenantId};
 use fnn::simulation;
@@ -664,5 +664,65 @@ fn audit_store_scope(store: &fnn::store::Store, label: &str) -> Result<()> {
     }
     simulation::verify_payment_hash_index(store)
         .map_err(|err| anyhow::anyhow!("ConsistencyOracle: {label} payment-hash index: {err}"))?;
+    audit_payment_sessions_no_invalid_onion(store, label)?;
+    Ok(())
+}
+
+/// Global Sphinx error-decoding oracle asserting that honest nodes never decode
+/// `TlcErrorCode::InvalidOnionError` on any payment session or attempt.
+pub(crate) struct OnionErrorOracle;
+
+impl OnionErrorOracle {
+    pub(crate) fn audit(harness: &Harness) -> Result<()> {
+        for (node, name) in NAMES.iter().enumerate().take(harness.peers.len()) {
+            if !harness.node_available(node) {
+                continue;
+            }
+            let store = harness.store(node)?;
+            let label = format!("node {name}");
+            audit_payment_sessions_no_invalid_onion(&store, &label)?;
+        }
+        if let Some(lsp_node) = harness.lsp_node {
+            if harness.node_available(lsp_node) {
+                let store = harness.store(lsp_node)?;
+                for ns in store.hosted_tenant_namespaces() {
+                    let tenant_store = store.namespaced(ns.clone());
+                    let label = format!("tenant {ns:?}");
+                    audit_payment_sessions_no_invalid_onion(&tenant_store, &label)?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn audit_payment_sessions_no_invalid_onion(
+    store: &fnn::store::Store,
+    label: &str,
+) -> Result<()> {
+    for session in store.get_all_payment_sessions() {
+        let payment_hash = session.payment_hash();
+        ensure!(
+            session.last_error_code != Some(TlcErrorCode::InvalidOnionError)
+                && !session
+                    .last_error
+                    .as_deref()
+                    .is_some_and(|err| err.contains("InvalidOnionError")),
+            "OnionErrorOracle: {label} payment {payment_hash} decoded InvalidOnionError (code={:?}, last_error={:?})",
+            session.last_error_code,
+            session.last_error
+        );
+        for attempt in session.attempts() {
+            ensure!(
+                !attempt
+                    .last_error
+                    .as_deref()
+                    .is_some_and(|err| err.contains("InvalidOnionError")),
+                "OnionErrorOracle: {label} payment {payment_hash} attempt {} decoded InvalidOnionError (last_error={:?})",
+                attempt.id,
+                attempt.last_error
+            );
+        }
+    }
     Ok(())
 }
