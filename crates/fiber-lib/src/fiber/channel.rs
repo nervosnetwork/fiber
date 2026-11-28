@@ -8011,25 +8011,6 @@ impl ChannelActorState {
         Some(result)
     }
 
-    fn replay_channel_announcement_signatures(&self) {
-        let Some((node_signature, partial_signature)) = self
-            .public_channel_info
-            .as_ref()
-            .and_then(|info| info.local_channel_announcement_signature.clone())
-        else {
-            return;
-        };
-
-        self.send_message_to_peer(FiberMessage::announcement_signatures(
-            AnnouncementSignatures {
-                channel_id: self.get_id(),
-                channel_outpoint: self.must_get_funding_transaction_outpoint(),
-                node_signature,
-                partial_signature,
-            },
-        ));
-    }
-
     fn public_channel_state_mut(&mut self) -> &mut PublicChannelInfo {
         self.public_channel_info
             .as_mut()
@@ -9910,9 +9891,6 @@ impl ChannelActorState {
                     self.send_message_to_peer(message);
                 }
                 if flags.contains(AwaitingChannelReadyFlags::CHANNEL_READY) {
-                    // A previous signature can have been persisted before its frame reached
-                    // the peer. Reuse it across reconnects without signing again.
-                    self.replay_channel_announcement_signatures();
                     self.maybe_channel_is_ready(myself);
                 } else {
                     // Trace the funding tx again
@@ -12522,7 +12500,7 @@ where
                 return Err(invalid("Incompatible V2 funding Ready history"));
             }
             let replay_initial = peer.next_commitment_number == INITIAL_COMMITMENT_NUMBER + 1;
-            self.replay_announcement_signature_v2(state, &peer);
+            let peer_for_announcement = peer.clone();
             state.recovery_peer_v2 = Some(peer);
             self.replay_effects_v2(state);
             if state.ephemeral_config.external_funding.signed_submitted && !state.is_acceptor {
@@ -12542,6 +12520,11 @@ where
                 ));
             }
             state.resume_funding(myself);
+            // Replay cached announcement signature after `resume_funding` so `ChannelReadyV2`
+            // precedes `AnnouncementSignatures` on the wire; otherwise a peer that crashed before
+            // receiving our `ChannelReadyV2` rejects `AnnouncementSignatures` with InvalidState
+            // and stays permanently stuck in `AwaitingChannelReady`.
+            self.replay_announcement_signature_v2(state, &peer_for_announcement);
             return Ok(());
         }
         let local = state.get_local_commitment_number();
@@ -12561,7 +12544,6 @@ where
                 self.store.insert_channel_actor_state(state.clone());
             }
             state.send_message_to_peer(ready);
-            state.replay_channel_announcement_signatures();
             debug_event!(self.network, "Replayed ChannelReady after reestablishment");
         }
         // The peer has not accepted our outstanding CS (`next_commitment_number == local`).
