@@ -10,7 +10,7 @@ use crate::{
     fiber::{
         channel::{ChannelActorMessage, ProcessingChannelError},
         graph::PathFindError,
-        InFlightCkbTxActorMessage, NetworkActorMessage,
+        InFlightCkbTxActorMessage,
     },
 };
 use fiber_types::{Hash256, Pubkey};
@@ -43,10 +43,6 @@ pub enum Error {
     SpawnErr(#[from] SpawnErr),
     #[error("Failed to send channel actor message: {0}")]
     ChannelMessagingErr(#[from] MessagingErr<ChannelActorMessage>),
-    #[error("Failed to send network actor message: {0}")]
-    NetworkMessagingErr(#[from] MessagingErr<NetworkActorMessage>),
-    #[error("Fiber actor messaging error: {0}")]
-    FiberMessagingErr(#[from] MessagingErr<crate::fiber::FiberActorMessage>),
     #[error("Failed to in-flight tx actor message: {0}")]
     InFlightCkbTxActorMessagingErr(#[from] MessagingErr<InFlightCkbTxActorMessage>),
     #[error("Failed to processing channel: {0}")]
