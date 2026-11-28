@@ -427,6 +427,24 @@ fn should_reconcile_closed_channel_without_live_actor(channel_state: ChannelStat
     )
 }
 
+fn matches_cooperative_close_tx(state: &ChannelActorState, tx_hash: &Byte32) -> bool {
+    state
+        .session
+        .closing
+        .as_ref()
+        .and_then(|close| close.transaction.as_ref())
+        .is_some_and(|closing_tx| &closing_tx.calc_tx_hash() == tx_hash)
+}
+
+fn onchain_upstream_relay_already_handled(
+    channel_state: &ChannelActorState,
+    forwarding_tlc_id: u64,
+    reason: &RemoveTlcReason,
+) -> bool {
+    onchain_upstream_removed_reason_matches(channel_state, forwarding_tlc_id, reason)
+        || channel_state.is_closed()
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn count_active_hosted_tlcs<S: ChannelActorStateStore>(
     channel: &ChannelActorState,
@@ -745,6 +763,146 @@ mod tests {
             GossipMessageUpdates::new(Vec::new()),
         ));
         assert!(FiberActorMessage::try_from(message).is_err());
+    }
+
+    fn test_pub_nonce(peer: Pubkey) -> musig2::PubNonce {
+        let compressed = peer.serialize();
+        let mut bytes = [0u8; 66];
+        bytes[..33].copy_from_slice(&compressed);
+        bytes[33..].copy_from_slice(&compressed);
+        musig2::PubNonce::from_bytes(&bytes).expect("valid test pub nonce")
+    }
+
+    #[test]
+    fn to_be_accepted_channels_prune_expired_frees_stale_slots() {
+        // Regression for Bug #6 (GlobalPendingOpenChannelExhaustion):
+        // prune_expired must evict entries at or past ttl_ms while keeping fresh entries.
+        let mut pending = ToBeAcceptedChannels {
+            total_number_limit: 2,
+            total_bytes_limit: 1024 * 1024,
+            ttl_ms: 10_000,
+            map: HashMap::default(),
+        };
+        let peer = Privkey::from_slice(&[31u8; 32]).pubkey();
+        let stale_id = Hash256::from([1u8; 32]);
+        let fresh_id = Hash256::from([2u8; 32]);
+        let dummy_open = OpenChannelV2 {
+            chain_hash: get_chain_hash(),
+            channel_id: stale_id,
+            funding_udt_type_script: None,
+            funding_amount: 100_000_000_000,
+            shutdown_script: Script::default(),
+            reserved_ckb_amount: 0,
+            funding_fee_rate: 1_000,
+            commitment_fee_rate: 1_000,
+            commitment_delay_epoch: 10,
+            max_tlc_value_in_flight: 100_000_000_000,
+            max_tlc_number_in_flight: 16,
+            funding_pubkey: peer,
+            tlc_basepoint: peer,
+            first_per_commitment_point: peer,
+            second_per_commitment_point: peer,
+            channel_announcement_nonce: None,
+            initial_commitment_nonce: test_pub_nonce(peer),
+            channel_flags: crate::fiber::types::ChannelFlags::empty(),
+            channel_features: 1,
+        };
+        pending.map.insert(
+            stale_id,
+            (
+                peer,
+                PendingOpenChannel {
+                    open_channel: dummy_open.clone(),
+                    created_at: 1_000,
+                },
+            ),
+        );
+        pending.map.insert(
+            fresh_id,
+            (
+                peer,
+                PendingOpenChannel {
+                    open_channel: dummy_open,
+                    created_at: 8_000,
+                },
+            ),
+        );
+
+        let expired = pending.prune_expired(12_000);
+        assert_eq!(expired, vec![stale_id]);
+        assert!(!pending.map.contains_key(&stale_id));
+        assert!(pending.map.contains_key(&fresh_id));
+    }
+
+    #[test]
+    fn matches_cooperative_close_tx_detects_signed_closing_tx_hash() {
+        use crate::store::sample::StoreSample;
+        // Regression for Bug #3 (CoopCloseVsForceCloseRace):
+        // handle_remote_channel_shutdown must recognize the channel's persisted cooperative
+        // closing transaction even when the peer withheld its ClosingSignedV2 and broadcast it.
+        let mut channel = ChannelActorState::samples(11)
+            .into_iter()
+            .next()
+            .expect("sample channel");
+        channel.session.closing = None;
+        let peer = Privkey::from_slice(&[33u8; 32]).pubkey();
+        let tx = ckb_types::core::TransactionBuilder::default().build();
+        let expected_hash = tx.hash();
+        let other_hash = Byte32::from_slice(&[9u8; 32]).unwrap();
+        assert!(!matches_cooperative_close_tx(&channel, &expected_hash));
+
+        channel.session.closing = Some(crate::fiber_types::ClosingSessionV2 {
+            peer_wait_started_at: 0,
+            superseded_by_force_close: false,
+            own: crate::fiber_types::SigningNonceV2 {
+                seed: [0u8; 32],
+                channel_id: channel.id,
+                owner: peer,
+                number: 0,
+                purpose: crate::fiber_types::NoncePurposeV2::Closing,
+                public_nonce: test_pub_nonce(peer),
+                context: None,
+                signature: None,
+            },
+            shutdown: crate::fiber_types::gen::fiber::ShutdownV2::default(),
+            remote_shutdown: None,
+            transaction: Some(tx.data()),
+            response: None,
+            remote_response: None,
+        });
+        assert!(matches_cooperative_close_tx(&channel, &expected_hash));
+        assert!(!matches_cooperative_close_tx(&channel, &other_hash));
+    }
+
+    #[test]
+    fn onchain_upstream_relay_already_handled_accepts_closed_upstream_channel() {
+        use crate::store::sample::StoreSample;
+        // Regression for Bug #7 (Adjacent-hop double force-close deadlock):
+        // when the upstream channel is already Closed (e.g. both hops force-closed),
+        // relaying an on-chain downstream TLC removal must treat upstream as already handled
+        // so downstream WAITING_ONCHAIN_SETTLEMENT can complete without deadlocking on mismatched
+        // RemoveTlcFail reason bytes.
+        let mut upstream = ChannelActorState::samples(13)
+            .into_iter()
+            .next()
+            .expect("sample channel");
+        upstream.tlc_state.offered_tlcs.tlcs.clear();
+        upstream.tlc_state.received_tlcs.tlcs.clear();
+        let reason = RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+            TlcErr::new(TlcErrorCode::PermanentChannelFailure),
+            &[0u8; 32],
+        ));
+        upstream.state = ChannelState::ChannelReady;
+        assert!(!onchain_upstream_relay_already_handled(
+            &upstream, 1, &reason,
+        ));
+
+        upstream.state = ChannelState::Closed(
+            CloseFlags::UNCOOPERATIVE_LOCAL | CloseFlags::WAITING_ONCHAIN_SETTLEMENT,
+        );
+        assert!(onchain_upstream_relay_already_handled(
+            &upstream, 1, &reason,
+        ));
     }
 }
 
@@ -2219,6 +2377,7 @@ where
                 external_funding_timeout_seconds: config.external_funding_timeout_seconds,
                 external_funding: Default::default(),
                 is_internal_channel: false,
+                paused_peer_response_wait_ms: 0,
             },
             inflight_payments: Default::default(),
             pending_trampoline_settlements: Default::default(),
@@ -3112,11 +3271,13 @@ where
             if source_attempt_id != attempt_id {
                 return Ok(());
             }
-            // The source determines the local failure; do not trust a stale event reason.
-            remove_tlc_reason = RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
-                TlcErr::new(error_code),
-                &tlc.shared_secret,
-            ));
+            // The source determines the local failure; preserve a peer-recorded error packet
+            // when the excluded TLC already received `RemoveTlcFail` before force-close.
+            let has_recorded_fail = tlc.recorded_fail.is_some();
+            remove_tlc_reason =
+                RemoveTlcReason::RemoveTlcFail(tlc.recorded_fail.unwrap_or_else(|| {
+                    TlcErrPacket::new(TlcErr::new(error_code), &tlc.shared_secret)
+                }));
             // A missing payer record cannot accept this chain outcome. Acknowledge it
             // so CheckChannels stops selecting the same TLC.
             let acknowledge = |reason: RemoveTlcReason| {
@@ -3158,12 +3319,14 @@ where
                 acknowledge(remove_tlc_reason)?;
                 return Ok(());
             }
-            local_error = Some(TlcErr::new_channel_fail(
-                error_code,
-                channel.get_local_pubkey(),
-                channel_outpoint.clone(),
-                None,
-            ));
+            if !has_recorded_fail {
+                local_error = Some(TlcErr::new_channel_fail(
+                    error_code,
+                    channel.get_local_pubkey(),
+                    channel_outpoint.clone(),
+                    None,
+                ));
+            }
             completion = Some(PaymentTlcRemoveContext {
                 channel_id,
                 tlc_id,
@@ -3564,7 +3727,10 @@ where
                 let _ = reply.send(());
             }
             FiberActorCommand::SettleTlcSet(payment_hash, channel_tlc_ids) => {
-                self.settle_tlc_set(myself, state, payment_hash, channel_tlc_ids);
+                let settlements = self.plan_settle_tlc_set(state, payment_hash, channel_tlc_ids);
+                if !settlements.is_empty() {
+                    self.apply_tlc_settlements(myself, state, settlements, None);
+                }
             }
             FiberActorCommand::TimeoutHoldTlc(payment_hash, channel_id, tlc_id) => {
                 self.timeout_hold_tlc(myself, state, payment_hash, channel_id, tlc_id);
@@ -3678,6 +3844,7 @@ where
                 let _ = reply.send(());
             }
             FiberActorCommand::GetPendingAcceptChannels(rpc) => {
+                state.prune_expired_to_be_accepted_channels();
                 let pending = state
                     .to_be_accepted_channels
                     .map
@@ -3792,6 +3959,22 @@ where
             | FiberActorCommand::FailBufferedTrampoline { .. }
             | FiberActorCommand::SettleLspPaymentOutcome { .. }) => {
                 Box::pin(self.handle_trampoline_command(myself, state, command))
+            }
+            #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+            FiberActorCommand::SettleTlcSet(payment_hash, channel_tlc_ids) => {
+                Box::pin(async move {
+                    let settlements =
+                        self.plan_settle_tlc_set(state, payment_hash, channel_tlc_ids);
+                    if !settlements.is_empty() {
+                        crate::simulation::after_invoice_marked_received(
+                            state.get_public_key(),
+                            payment_hash,
+                        )
+                        .await;
+                        self.apply_tlc_settlements(myself, state, settlements, None);
+                    }
+                    Ok(())
+                })
             }
             command => Box::pin(std::future::ready(
                 self.handle_sync_command(myself, state, command),
@@ -3929,6 +4112,7 @@ where
     ) -> crate::Result<()> {
         match command {
             FiberActorCommand::CheckChannels => {
+                state.prune_expired_to_be_accepted_channels();
                 let now = now_timestamp_as_millis_u64();
 
                 for (_pubkey, channel_id, channel_state) in self.store.get_channel_states(None) {
@@ -4236,23 +4420,23 @@ where
                         match result {
                             Ok(()) | Err(ProcessingChannelError::WaitingTlcAck) => true,
                             Err(err) => {
-                                let already_removed_with_same_reason = self
+                                let already_handled_upstream = self
                                     .store
                                     .get_channel_actor_state(&forwarding_channel_id)
                                     .is_some_and(|channel_state| {
-                                        onchain_upstream_removed_reason_matches(
+                                        onchain_upstream_relay_already_handled(
                                             &channel_state,
                                             forwarding_tlc_id,
                                             &reason,
                                         )
                                     });
-                                if !already_removed_with_same_reason {
+                                if !already_handled_upstream {
                                     error!(
                                         "Failed to relay on-chain resolved tlc {:?} upstream to channel {:?}: {}; will retry on next maintenance tick",
                                         forwarding_tlc_id, forwarding_channel_id, err
                                     );
                                 }
-                                already_removed_with_same_reason
+                                already_handled_upstream
                             }
                         }
                     }
@@ -5286,10 +5470,14 @@ where
         // Forwarded offered TLCs relay upstream before the downstream channel is marked removed;
         // source payments and payee invoices are completed locally.
         let mut fulfilled = collect_onchain_fulfilled_tlcs(actor_state, &self.store);
-        fulfilled.extend(collect_onchain_excluded_fulfilled_tlcs(
-            actor_state,
-            &self.store,
-        ));
+        for tlc in collect_onchain_excluded_fulfilled_tlcs(actor_state, &self.store) {
+            if !fulfilled
+                .iter()
+                .any(|existing| existing.tlc_id == tlc.tlc_id)
+            {
+                fulfilled.push(tlc);
+            }
+        }
         let mut invoice_hashes = Vec::new();
         for tlc in fulfilled {
             match tlc.tlc_id {
@@ -5414,10 +5602,13 @@ where
         }
 
         for tlc in collect_onchain_excluded_tlcs(actor_state, &self.store) {
-            let reason = RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
-                TlcErr::new(TlcErrorCode::PermanentChannelFailure),
-                &tlc.shared_secret,
-            ));
+            let session_key = tlc.session_key();
+            let reason = RemoveTlcReason::RemoveTlcFail(tlc.recorded_fail.unwrap_or_else(|| {
+                TlcErrPacket::new(
+                    TlcErr::new(TlcErrorCode::PermanentChannelFailure),
+                    &tlc.shared_secret,
+                )
+            }));
             match tlc.role {
                 OnChainTimeoutTlcRole::Forwarded {
                     forwarding_channel_id,
@@ -5441,7 +5632,7 @@ where
                         .network
                         .send_message(FiberActorMessage::new_event(
                             FiberActorEvent::TlcRemoveReceived(
-                                tlc.session_key(),
+                                session_key,
                                 attempt_id,
                                 reason,
                                 Some((channel_id, tlc.tlc_id)),
@@ -5530,7 +5721,6 @@ where
     }
 
     fn retry_hold_tlc_sets(&self, myself: &FiberActorRef, rearm_timeouts: bool) {
-        let current_time = now_timestamp_as_millis_u64();
         let mut hold_sets: Vec<_> = self.store.get_node_hold_tlcs().into_iter().collect();
         hold_sets.sort_unstable_by_key(|(payment_hash, _)| *payment_hash);
 
@@ -5550,10 +5740,11 @@ where
             }
 
             // Preserve set-wide expiry for hold invoices that don't have a preimage yet.
+            let check_now = now_timestamp_as_millis_u64();
             let hold_set_expired = !has_preimage
                 && hold_tlcs
                     .iter()
-                    .any(|hold_tlc| current_time >= hold_tlc.hold_expire_at);
+                    .any(|hold_tlc| check_now >= hold_tlc.hold_expire_at);
             for hold_tlc in hold_tlcs {
                 let timeout = move || {
                     FiberActorMessage::new_command(FiberActorCommand::TimeoutHoldTlc(
@@ -5562,13 +5753,14 @@ where
                         hold_tlc.tlc_id,
                     ))
                 };
-                if hold_set_expired || current_time >= hold_tlc.hold_expire_at {
+                let arm_now = now_timestamp_as_millis_u64();
+                if hold_set_expired || arm_now >= hold_tlc.hold_expire_at {
                     myself
                         .send_message(timeout())
                         .expect(ASSUME_NETWORK_MYSELF_ALIVE);
                 } else if rearm_timeouts {
                     myself.send_after(
-                        Duration::from_millis(hold_tlc.hold_expire_at - current_time),
+                        Duration::from_millis(hold_tlc.hold_expire_at - arm_now),
                         timeout,
                     );
                 }
@@ -5776,13 +5968,12 @@ where
         self.apply_tlc_settlements(myself, state, settlements, Some(payment_hash));
     }
 
-    fn settle_tlc_set(
+    fn plan_settle_tlc_set(
         &self,
-        myself: FiberActorRef,
-        state: &mut FiberActorState<S, C>,
+        state: &FiberActorState<S, C>,
         payment_hash: Hash256,
         channel_tlc_ids: Vec<(Hash256, u64)>,
-    ) {
+    ) -> Vec<crate::fiber::settle_tlc_set_command::TlcSettlement> {
         let settle_command = if channel_tlc_ids.is_empty() {
             SettleTlcSetCommand::new_hold_tlc_set(payment_hash, &self.store)
         } else {
@@ -5791,28 +5982,12 @@ where
                 .filter(|key| !state.pending_remove_tlcs.contains_key(key))
                 .collect();
             if channel_tlc_ids.is_empty() {
-                return;
+                return Vec::new();
             }
-            let in_flight_fulfills: HashSet<(Hash256, u64)> = state
-                .pending_remove_tlcs
-                .iter()
-                .filter(|(_, kind)| matches!(kind, PendingRemoveTlcKind::Fulfill))
-                .map(|(key, _)| *key)
-                .collect();
-            let allow_received_invoice = self.store.get_invoice_status(&payment_hash)
-                == Some(CkbInvoiceStatus::Received)
-                && self.store.get_preimage(&payment_hash).is_some()
-                && self.store.get_payment_hold_tlcs(payment_hash).is_empty();
-            SettleTlcSetCommand::new_immediate_tlc_set_with_in_flight(
-                payment_hash,
-                channel_tlc_ids,
-                &self.store,
-                allow_received_invoice,
-                &in_flight_fulfills,
-            )
+            SettleTlcSetCommand::new_immediate_tlc_set(payment_hash, channel_tlc_ids, &self.store)
         };
 
-        self.apply_tlc_settlements(myself, state, settle_command.run(), None);
+        settle_command.run()
     }
 
     fn apply_tlc_settlements(
@@ -6078,6 +6253,22 @@ where
             tx_status: TxStatus::Committed(..),
         } = response
         {
+            if matches_cooperative_close_tx(&state, &tx.hash()) {
+                let channel_id = state.get_id();
+                let pubkey = state.get_remote_pubkey();
+                let tx_hash = tx.hash();
+                tracing::debug!(
+                    "channel {channel_id:?} cooperative close tx {tx_hash:?} confirmed on chain"
+                );
+                myself
+                    .send_message(FiberActorMessage::Event(
+                        FiberActorEvent::ClosingTransactionConfirmed(
+                            pubkey, channel_id, tx_hash, false, false,
+                        ),
+                    ))
+                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                return;
+            }
             // we only check remote sent force close transaction here
             if tx.outputs().len() == 1 {
                 if let Some(output) = tx.outputs().get(0) {
@@ -10206,6 +10397,20 @@ where
         }
     }
 
+    fn prune_expired_to_be_accepted_channels(&mut self) {
+        let expired = self
+            .to_be_accepted_channels
+            .prune_expired(now_timestamp_as_millis_u64());
+        for channel_id in expired {
+            self.store.delete_channel_open_record(&channel_id);
+            self.network
+                .send_message(FiberActorMessage::new_notification(
+                    NetworkServiceEvent::ChannelAbandon(channel_id),
+                ))
+                .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+        }
+    }
+
     fn persist_live_channels_offline_for_shutdown(&self) {
         for channel_id in self.channels.keys().copied().collect::<Vec<_>>() {
             let Some(mut channel_state) = self.store.get_channel_actor_state(&channel_id) else {
@@ -10429,6 +10634,7 @@ where
             )));
         }
 
+        self.prune_expired_to_be_accepted_channels();
         let result = self
             .check_feature_compatibility(&peer_pubkey)
             .and_then(|_| {
@@ -12133,12 +12339,14 @@ fn target_default_transport_matches(addr: &Multiaddr) -> bool {
 struct ToBeAcceptedChannels {
     total_number_limit: usize,
     total_bytes_limit: usize,
+    ttl_ms: u64,
     map: HashMap<Hash256, (Pubkey, PendingOpenChannel)>,
 }
 
 #[derive(Debug)]
 struct PendingOpenChannel {
     open_channel: OpenChannelV2,
+    created_at: u64,
 }
 
 impl Default for ToBeAcceptedChannels {
@@ -12146,6 +12354,7 @@ impl Default for ToBeAcceptedChannels {
         Self {
             total_number_limit: usize::MAX,
             total_bytes_limit: usize::MAX,
+            ttl_ms: DEFAULT_TO_BE_ACCEPTED_CHANNEL_TTL_MS,
             map: HashMap::default(),
         }
     }
@@ -12157,9 +12366,15 @@ const DEFAULT_TO_BE_ACCEPTED_CHANNELS_NUMBER_LIMIT: usize = 20;
 const DEFAULT_TO_BE_ACCEPTED_CHANNELS_BYTES_LIMIT: usize = 51200;
 // Remember to sync fiber/config.rs
 const DEFAULT_PENDING_CHANNELS_NUMBER_LIMIT: usize = 100;
+const DEFAULT_TO_BE_ACCEPTED_CHANNEL_TTL_MS: u64 = 300_000;
 
 impl ToBeAcceptedChannels {
     fn new_with_config(config: &FiberConfig) -> Self {
+        let ttl_ms = config
+            .external_funding_timeout_seconds
+            .min(config.funding_timeout_seconds)
+            .saturating_mul(1_000)
+            .max(1_000);
         Self {
             total_number_limit: config
                 .to_be_accepted_channels_number_limit
@@ -12167,8 +12382,22 @@ impl ToBeAcceptedChannels {
             total_bytes_limit: config
                 .to_be_accepted_channels_bytes_limit
                 .unwrap_or(DEFAULT_TO_BE_ACCEPTED_CHANNELS_BYTES_LIMIT),
+            ttl_ms,
             map: HashMap::default(),
         }
+    }
+
+    fn prune_expired(&mut self, now_ms: u64) -> Vec<Hash256> {
+        let expired: Vec<Hash256> = self
+            .map
+            .iter()
+            .filter(|(_, (_, entry))| now_ms.saturating_sub(entry.created_at) >= self.ttl_ms)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in &expired {
+            self.map.remove(id);
+        }
+        expired
     }
 
     fn remove(&mut self, id: &Hash256) -> Option<(Pubkey, PendingOpenChannel)> {
@@ -12226,8 +12455,16 @@ impl ToBeAcceptedChannels {
             "Channel from {:?} of id {:?} is now awaiting to be accepted: {:?}",
             &pubkey, &id, &open_channel
         );
-        self.map
-            .insert(id, (pubkey, PendingOpenChannel { open_channel }));
+        self.map.insert(
+            id,
+            (
+                pubkey,
+                PendingOpenChannel {
+                    open_channel,
+                    created_at: now_timestamp_as_millis_u64(),
+                },
+            ),
+        );
         Ok(())
     }
 }

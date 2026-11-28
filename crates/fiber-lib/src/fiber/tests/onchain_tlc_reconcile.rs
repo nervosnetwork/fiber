@@ -5096,3 +5096,305 @@ fn test_excluded_remove_wait_prev_ack_offered_tlcs_remain_reconcilable() {
         .insert(AppliedFlags::REMOVE);
     assert!(collect_onchain_excluded_fulfilled_tlcs(&state, &store).is_empty());
 }
+
+#[test]
+fn test_excluded_acknowledged_removal_with_empty_outbox_reconciles_and_preserves_fail_packet() {
+    let store = MockStore::new();
+    let channel_id = gen_rand_sha256_hash();
+    let fail_hash = gen_rand_sha256_hash();
+    let fail_packet = TlcErrPacket::new(
+        TlcErr::new(TlcErrorCode::InvoiceCancelled),
+        &TEST_SHARED_SECRET,
+    );
+    let mut failed_tlc = tlc_info(
+        TLCId::Offered(0),
+        TlcStatus::Outbound(OutboundTlcStatus::RemoveWaitAck),
+        fail_hash,
+        HashAlgorithm::CkbHash,
+    );
+    failed_tlc.attempt_id = Some(1);
+    failed_tlc.removed_reason = Some(RemoveTlcReason::RemoveTlcFail(fail_packet.clone()));
+    failed_tlc.applied_flags = AppliedFlags::empty();
+    // Simulate a crash right after `accept_ack_v2` persisted `removed_confirmed_at`
+    // and before `update_tlc_status_on_ack` populated `session.remove_effects`.
+    failed_tlc.removed_confirmed_at = Some(1);
+
+    let mut state = closed_state_with_offered_local_announced(
+        channel_id,
+        CloseFlags::UNCOOPERATIVE_LOCAL | CloseFlags::WAITING_ONCHAIN_SETTLEMENT,
+        failed_tlc.clone(),
+    );
+
+    let preimage = gen_rand_sha256_hash();
+    let fulfill_hash = HashAlgorithm::Sha256.hash(preimage).into();
+    let mut fulfilled_tlc = failed_tlc.clone();
+    fulfilled_tlc.tlc_id = TLCId::Offered(1);
+    fulfilled_tlc.payment_hash = fulfill_hash;
+    fulfilled_tlc.hash_algorithm = HashAlgorithm::Sha256;
+    fulfilled_tlc.attempt_id = Some(2);
+    fulfilled_tlc.removed_reason = Some(RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+        payment_preimage: preimage,
+    }));
+    fulfilled_tlc.removed_confirmed_at = Some(1);
+    state
+        .tlc_state
+        .offered_tlcs
+        .tlcs
+        .push(fulfilled_tlc.clone());
+
+    install_unit_snapshot(
+        &mut state,
+        &store,
+        false,
+        SettlementData {
+            local_amount: 100_000,
+            remote_amount: 100_000,
+            tlcs: vec![],
+        },
+    );
+
+    // With empty `session.remove_effects`, both acknowledged removals must still be collected,
+    // and the failed TLC must preserve its exact peer error packet.
+    let excluded_fails = collect_onchain_excluded_tlcs(&state, &store);
+    assert_eq!(excluded_fails.len(), 1);
+    assert_eq!(excluded_fails[0].tlc_id, TLCId::Offered(0));
+    assert_eq!(excluded_fails[0].recorded_fail, Some(fail_packet));
+
+    let excluded_fulfills = collect_onchain_excluded_fulfilled_tlcs(&state, &store);
+    assert_eq!(excluded_fulfills.len(), 1);
+    assert_eq!(excluded_fulfills[0].tlc_id, TLCId::Offered(1));
+    assert_eq!(excluded_fulfills[0].preimage, preimage);
+
+    // Once queued in `session.remove_effects`, normal outbox replay owns delivery and the
+    // excluded collectors must not emit duplicate deliveries.
+    state.session.remove_effects.push((failed_tlc, Some(1)));
+    state.session.remove_effects.push((fulfilled_tlc, Some(2)));
+    assert!(collect_onchain_excluded_tlcs(&state, &store).is_empty());
+    assert!(collect_onchain_excluded_fulfilled_tlcs(&state, &store).is_empty());
+}
+
+#[tokio::test]
+async fn test_actorless_reconciliation_delivers_excluded_fulfilled_tlc_upstream() {
+    for removed_confirmed_at in [None, Some(1)] {
+        let mut node = NetworkNode::new().await;
+        let downstream_id = gen_rand_sha256_hash();
+        let upstream_id = gen_rand_sha256_hash();
+        let preimage = gen_rand_sha256_hash();
+        let payment_hash: Hash256 = HashAlgorithm::CkbHash.hash(preimage).into();
+
+        let mut downstream = empty_channel_state(downstream_id);
+        let waiting_flags = CloseFlags::UNCOOPERATIVE_LOCAL
+            | CloseFlags::WAITING_ONCHAIN_SETTLEMENT
+            | CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED;
+        downstream.state = ChannelState::Closed(waiting_flags);
+        downstream.shutdown_transaction_hash = Some(gen_rand_sha256_hash().into());
+        let mut offered = tlc_info(
+            TLCId::Offered(0),
+            TlcStatus::Outbound(OutboundTlcStatus::RemoveWaitPrevAck),
+            payment_hash,
+            HashAlgorithm::CkbHash,
+        );
+        offered.forwarding_tlc = Some((upstream_id, 0));
+        offered.removed_reason = Some(RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+            payment_preimage: preimage,
+        }));
+        offered.removed_confirmed_at = removed_confirmed_at;
+        offered.applied_flags = AppliedFlags::empty();
+        downstream.tlc_state.add_offered_tlc(offered);
+        node.store
+            .insert_channel_actor_state_for_test(downstream.clone());
+
+        // Verified shutdown snapshot omits the offered TLC, and there is NO separate
+        // `onchain_tlc_settlement` proof in the store.
+        node.store.store_shutdown_settlement_record(
+            &downstream_id,
+            &ShutdownSettlementRecord {
+                shutdown_tx_hash: downstream.shutdown_transaction_hash.clone().unwrap(),
+                for_remote: false,
+                commitment_number: 1,
+                settlement_data: SettlementData {
+                    local_amount: 1000,
+                    remote_amount: 1000,
+                    tlcs: vec![],
+                },
+            },
+        );
+
+        let mut upstream = empty_channel_state(upstream_id);
+        upstream.state = ChannelState::ChannelReady;
+        upstream.tlc_state.add_received_tlc(tlc_info(
+            TLCId::Received(0),
+            TlcStatus::Inbound(InboundTlcStatus::Committed),
+            payment_hash,
+            HashAlgorithm::CkbHash,
+        ));
+        node.store.insert_channel_actor_state_for_test(upstream);
+
+        // No live ChannelActor exists for `downstream_id`; actorless reconciliation must deliver
+        // the stored preimage upstream before finalizing the closed channel.
+        for _ in 0..3 {
+            node.network_actor
+                .send_message(NetworkActorMessage::new_command(
+                    FiberActorCommand::CheckChannels,
+                ))
+                .unwrap();
+            node.node_info().await;
+        }
+        wait_for_settlement_completion(&node, downstream_id).await;
+
+        let upstream = node.store.get_channel_actor_state(&upstream_id).unwrap();
+        assert_eq!(
+            upstream.retryable_tlc_operations,
+            std::collections::VecDeque::from([RetryableTlcOperation::RemoveTlc(
+                TLCId::Received(0),
+                RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+                    payment_preimage: preimage,
+                }),
+            )]),
+            "actorless reconciliation must relay excluded fulfillment preimage upstream (removed_confirmed_at={removed_confirmed_at:?})"
+        );
+        let downstream = node.store.get_channel_actor_state(&downstream_id).unwrap();
+        assert!(downstream
+            .tlc_state
+            .get(&TLCId::Offered(0))
+            .unwrap()
+            .applied_flags
+            .contains(AppliedFlags::REMOVE));
+        node.stop().await;
+    }
+}
+
+#[tokio::test]
+async fn test_excluded_peer_fail_preserves_invoice_cancelled_without_retrying() {
+    use crate::fiber::graph::NetworkGraphStateStore;
+    use crate::fiber::payment::SendPaymentDataBuilder;
+    use fiber_types::{AttemptStatus, PaymentHopData, PaymentSession, PaymentStatus};
+
+    let mut node = NetworkNode::new().await;
+    let channel_id = gen_rand_sha256_hash();
+    let payment_hash = gen_rand_sha256_hash();
+    let target = gen_rand_fiber_public_key();
+
+    let mut dummy_tlc = tlc_info(
+        TLCId::Offered(0),
+        TlcStatus::Outbound(OutboundTlcStatus::RemoveWaitPrevAck),
+        payment_hash,
+        HashAlgorithm::CkbHash,
+    );
+    dummy_tlc.attempt_id = Some(1);
+    let mut state = closed_state_with_offered_local_announced(
+        channel_id,
+        CloseFlags::UNCOOPERATIVE_LOCAL
+            | CloseFlags::WAITING_ONCHAIN_SETTLEMENT
+            | CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED,
+        dummy_tlc,
+    );
+    let source = state.get_local_pubkey();
+    let funding_outpoint = state.get_funding_transaction_outpoint().unwrap();
+
+    // Give the payment session retries remaining (`try_limit = 3`, `tried_times = 1`).
+    // If reconciliation overwrote `InvoiceCancelled` with `PermanentChannelFailure`,
+    // `PaymentActor` would keep retrying instead of failing with `InvoiceCancelled`.
+    let mut session = PaymentSession {
+        request: SendPaymentDataBuilder::new(target, 1000, payment_hash)
+            .max_fee_amount(Some(100))
+            .build()
+            .unwrap(),
+        status: PaymentStatus::Inflight,
+        last_error: None,
+        last_error_code: None,
+        try_limit: 3,
+        created_at: 0,
+        last_updated_at: 0,
+        cached_attempts: vec![],
+    };
+    let mut attempt = session.new_attempt(
+        1,
+        source,
+        target,
+        vec![
+            PaymentHopData {
+                amount: 1000,
+                next_hop: Some(target),
+                funding_tx_hash: funding_outpoint.tx_hash().into(),
+                ..Default::default()
+            },
+            PaymentHopData {
+                amount: 1000,
+                ..Default::default()
+            },
+        ],
+    );
+    attempt.set_inflight_status();
+    attempt.session_key = [0x11; 32];
+    attempt.try_limit = 3;
+    attempt.tried_times = 1;
+    let secp = secp256k1::Secp256k1::new();
+    let session_sk = secp256k1::SecretKey::from_slice(&attempt.session_key).unwrap();
+    let target_pk = secp256k1::PublicKey::from_slice(&target.0).unwrap();
+    let hop_shared_secret =
+        fiber_sphinx::OnionSharedSecretIter::new([target_pk].iter(), session_sk, &secp)
+            .next()
+            .unwrap()
+            .unwrap();
+    let recorded_packet = TlcErrPacket::new(
+        TlcErr::new(TlcErrorCode::InvoiceCancelled),
+        &hop_shared_secret,
+    );
+    assert_eq!(
+        recorded_packet
+            .decode(&attempt.session_key, attempt.hops_public_keys())
+            .expect("valid onion error packet")
+            .error
+            .error_code,
+        TlcErrorCode::InvoiceCancelled
+    );
+
+    session.append_attempt(attempt.clone());
+    node.store.insert_payment_session(session);
+    node.store.insert_attempt(attempt);
+
+    {
+        let tlc = state.tlc_state.get_mut(&TLCId::Offered(0)).unwrap();
+        tlc.removed_reason = Some(RemoveTlcReason::RemoveTlcFail(recorded_packet));
+        tlc.applied_flags = AppliedFlags::empty();
+        tlc.removed_confirmed_at = None;
+    }
+    state.shutdown_transaction_hash = Some(gen_rand_sha256_hash().into());
+    node.store
+        .insert_channel_actor_state_for_test(state.clone());
+    node.store.store_shutdown_settlement_record(
+        &channel_id,
+        &ShutdownSettlementRecord {
+            shutdown_tx_hash: state.shutdown_transaction_hash.clone().unwrap(),
+            for_remote: false,
+            commitment_number: 1,
+            settlement_data: SettlementData {
+                local_amount: 1000,
+                remote_amount: 1000,
+                tlcs: vec![],
+            },
+        },
+    );
+
+    node.network_actor
+        .send_message(NetworkActorMessage::new_command(
+            FiberActorCommand::CheckChannels,
+        ))
+        .unwrap();
+    wait_for_settlement_completion(&node, channel_id).await;
+
+    let final_attempt = node.store.get_attempt(payment_hash, 1).unwrap();
+    assert_eq!(final_attempt.status, AttemptStatus::Failed);
+    assert_eq!(
+        final_attempt.tried_times, 1,
+        "must not retry after InvoiceCancelled"
+    );
+    let final_session = node.store.get_payment_session(payment_hash).unwrap();
+    assert_eq!(final_session.status, PaymentStatus::Failed);
+    assert_eq!(
+        final_session.last_error_code,
+        Some(TlcErrorCode::InvoiceCancelled)
+    );
+    node.stop().await;
+}

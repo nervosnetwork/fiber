@@ -759,35 +759,6 @@ impl<S: SignerStore> ChannelSigner<S> {
             .await
     }
 
-    /// Atomically authorize cancellation for any pending outbound TLCs that `snapshot`
-    /// provably refunds back into `local_amount`.
-    pub(crate) async fn authorize_outbound_refunds(
-        &self,
-        snapshot: &crate::OwnedSettlementBinding,
-        for_remote: bool,
-    ) -> Result<(), SignerError> {
-        loop {
-            let (encoded, mut state) = self.load_signing_state().await?;
-            let Some(commitment) = state.commitment.as_mut() else {
-                return Ok(());
-            };
-            let refunds = commitment.refundable_pending_outbound_tlcs(snapshot, for_remote);
-            if refunds.is_empty() {
-                return Ok(());
-            }
-            for payment_hash in refunds {
-                commitment.resolve(payment_hash, None)?;
-            }
-            state.revision = state
-                .revision
-                .checked_add(1)
-                .ok_or_else(|| crate::commitment::invalid("state revision overflow"))?;
-            if self.store_signing_state(encoded.as_deref(), &state).await? {
-                return Ok(());
-            }
-        }
-    }
-
     async fn update_commitment(
         &self,
         update: impl Fn(&mut crate::commitment::CommitmentState) -> Result<(), SignerError>,
@@ -819,6 +790,31 @@ impl<S: SignerStore> ChannelSigner<S> {
         context: crate::CommitmentContext,
         now_ms: u64,
     ) -> Result<PreparedSigning, SignerError> {
+        self.prepare_commitment_inner(content, context, now_ms, false)
+            .await
+    }
+
+    /// Like [`Self::prepare_commitment`], but stages inferred `Resolution::Cancel` updates in
+    /// memory for pending outbound TLCs that `context.settlement` provably refunds back into
+    /// `local_amount`. Those cancellations are only persisted atomically if `sign_commitment`
+    /// executes; dismissing or aborting the prepared signing leaves the signer store untouched.
+    pub(crate) async fn prepare_commitment_allowing_outbound_refunds(
+        &self,
+        content: ChannelSigningContent,
+        context: crate::CommitmentContext,
+        now_ms: u64,
+    ) -> Result<PreparedSigning, SignerError> {
+        self.prepare_commitment_inner(content, context, now_ms, true)
+            .await
+    }
+
+    async fn prepare_commitment_inner(
+        &self,
+        content: ChannelSigningContent,
+        context: crate::CommitmentContext,
+        now_ms: u64,
+        allow_outbound_refunds: bool,
+    ) -> Result<PreparedSigning, SignerError> {
         let prepared = self.prepare_inner(content).await?;
         let (_, state) = self.load_signing_state().await?;
         state.validate_revision_and_nonce(&prepared)?;
@@ -836,6 +832,16 @@ impl<S: SignerStore> ChannelSigner<S> {
             &commitment.parameters,
             &self.key_material,
         )?;
+        let mut inferred_outbound_refunds = Vec::new();
+        if allow_outbound_refunds {
+            let for_remote =
+                context.transition == fiber_types::ChannelSigningTransition::SendCommitmentSigned;
+            inferred_outbound_refunds =
+                commitment.refundable_pending_outbound_tlcs(&context.settlement, for_remote);
+            for payment_hash in &inferred_outbound_refunds {
+                commitment.resolve(*payment_hash, None)?;
+            }
+        }
         let review = commitment.validate(
             &prepared.content,
             &context,
@@ -853,6 +859,7 @@ impl<S: SignerStore> ChannelSigner<S> {
                 review,
                 context,
                 validated_at_ms: now_ms,
+                inferred_outbound_refunds,
             },
         })
     }
@@ -1229,6 +1236,7 @@ impl<S: SignerStore> ChannelSigner<S> {
         let PreparedValidation::Commitment {
             context,
             validated_at_ms,
+            inferred_outbound_refunds,
             ..
         } = &prepared.validation
         else {
@@ -1244,6 +1252,9 @@ impl<S: SignerStore> ChannelSigner<S> {
         let mut commitment = state
             .commitment
             .ok_or_else(|| crate::commitment::invalid("missing approved opening terms"))?;
+        for payment_hash in inferred_outbound_refunds {
+            commitment.resolve(*payment_hash, None)?;
+        }
         let binding = self
             .load_binding()
             .await?

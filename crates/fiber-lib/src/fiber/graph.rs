@@ -1137,17 +1137,26 @@ where
         // Prefer higher liquidity, capacity, and fresher updates when path costs tie.
         // The channel index is a HashSet, so finish with a stable outpoint order.
         channels.sort_unstable_by(|(_, _, a, a_update), (_, _, b, b_update)| {
-            b_update
-                .outbound_liquidity
-                .cmp(&a_update.outbound_liquidity)
-                .then_with(|| b.capacity().cmp(&a.capacity()))
-                .then_with(|| {
-                    b.channel_last_update_time()
-                        .cmp(&a.channel_last_update_time())
-                })
-                .then_with(|| a.out_point().cmp(b.out_point()))
+            Self::compare_inbound_channel_candidates(a, a_update, b, b_update)
         });
         channels.into_iter()
+    }
+
+    pub(crate) fn compare_inbound_channel_candidates(
+        a: &ChannelInfo,
+        a_update: &ChannelUpdateInfo,
+        b: &ChannelInfo,
+        b_update: &ChannelUpdateInfo,
+    ) -> std::cmp::Ordering {
+        b_update
+            .outbound_liquidity
+            .cmp(&a_update.outbound_liquidity)
+            .then_with(|| b.capacity().cmp(&a.capacity()))
+            .then_with(|| {
+                b.channel_last_update_time()
+                    .cmp(&a.channel_last_update_time())
+            })
+            .then_with(|| a.out_point().cmp(b.out_point()))
     }
 
     pub fn get_source_pubkey(&self) -> Pubkey {

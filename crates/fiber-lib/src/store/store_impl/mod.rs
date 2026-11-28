@@ -1972,6 +1972,23 @@ impl ChannelActorStateStore for Store {
             .collect()
     }
 
+    fn get_channel_ids_by_payment_hash(&self, payment_hash: &Hash256) -> Vec<Hash256> {
+        let prefix = [&[PAYMENT_HASH_CHANNEL_ID_PREFIX][..], payment_hash.as_ref()].concat();
+        let take_prefix = prefix.clone();
+        self.collect_iterator(
+            prefix,
+            IteratorDirection::Forward,
+            Box::new(move |key| key.starts_with(&take_prefix)),
+            0,
+        )
+        .into_iter()
+        .filter_map(|kv| {
+            let channel_id: [u8; 32] = kv.key.get(33..)?.try_into().ok()?;
+            Some(channel_id.into())
+        })
+        .collect()
+    }
+
     fn other_channel_has_pending_payment_hash(
         &self,
         payment_hash: &Hash256,

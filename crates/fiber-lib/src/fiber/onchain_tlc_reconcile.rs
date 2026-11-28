@@ -14,7 +14,7 @@ use fiber_types::watchtower::settlement_data_witness;
 use fiber_types::{
     AppliedFlags, ChannelData, ChannelFeatures, ChannelState, CloseFlags, Hash256, HashAlgorithm,
     InboundTlcStatus, OutboundTlcStatus, Pubkey, RemoveTlcFulfill, RemoveTlcReason, SettlementData,
-    TLCId, TlcErrorCode, TlcInfo,
+    TLCId, TlcErrPacket, TlcErrorCode, TlcInfo,
 };
 use musig2::{secp::Point, KeyAggContext};
 use serde::{Deserialize, Serialize};
@@ -313,13 +313,17 @@ impl OnChainConfirmedPayerTlc {
 }
 
 /// An offered TLC failed by an on-chain timeout or exclusion from a confirmed commitment.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct OnChainTimeoutSettledTlc {
     pub upstream_tlc_key: Option<crate::fiber_types::UpstreamTlcKey>,
     /// The downstream TLC on the force-closed channel that must be marked removed locally.
     pub tlc_id: TLCId,
     pub payment_hash: Hash256,
     pub shared_secret: [u8; 32],
+    /// Exact peer error packet when the excluded TLC already received `RemoveTlcFail` before
+    /// force-close, so downstream terminal failures like `InvoiceCancelled` are preserved instead
+    /// of being overwritten with a synthetic channel failure.
+    pub recorded_fail: Option<TlcErrPacket>,
     pub role: OnChainTimeoutTlcRole,
 }
 
@@ -558,6 +562,14 @@ fn settlement_record_includes_tlc(
     })
 }
 
+fn has_pending_remove_effect(state: &ChannelActorState, tlc: &TlcInfo) -> bool {
+    state
+        .session
+        .remove_effects
+        .iter()
+        .any(|(effect, _)| effect.tlc_id == tlc.tlc_id && effect.payment_hash == tlc.payment_hash)
+}
+
 /// Offered updates excluded by a confirmed force close can no longer be paid on this channel.
 /// A missing snapshot or the synthetic zero-valued revocation scope is not exclusion evidence.
 pub(crate) fn collect_onchain_excluded_tlcs(
@@ -573,9 +585,12 @@ pub(crate) fn collect_onchain_excluded_tlcs(
         .tlcs
         .iter()
         .filter(|tlc| {
-            // A confirmed or already-applied removal has no remaining effects to reconcile here.
+            // An already-applied removal or one already queued in `remove_effects` has no
+            // remaining effects to reconcile here. A crash between setting `removed_confirmed_at`
+            // and populating `remove_effects` leaves `AppliedFlags::REMOVE` clear and the outbox
+            // empty, so it must still be delivered before finalizing the close.
             !tlc.applied_flags.contains(AppliedFlags::REMOVE)
-                && tlc.removed_confirmed_at.is_none()
+                && (tlc.removed_confirmed_at.is_none() || !has_pending_remove_effect(state, tlc))
                 && (
                     // Uncommitted outgoing adds excluded from the confirmed commitment cannot pay.
                     (tlc.outbound_status() == OutboundTlcStatus::LocalAnnounced
@@ -594,6 +609,10 @@ pub(crate) fn collect_onchain_excluded_tlcs(
             tlc_id: tlc.tlc_id,
             payment_hash: tlc.payment_hash,
             shared_secret: tlc.shared_secret,
+            recorded_fail: match &tlc.removed_reason {
+                Some(RemoveTlcReason::RemoveTlcFail(packet)) => Some(packet.clone()),
+                _ => None,
+            },
             role: match tlc.forwarding_tlc {
                 // Forwarded payments must propagate the failure to the upstream channel.
                 Some((forwarding_channel_id, forwarding_tlc_id)) => {
@@ -625,15 +644,23 @@ pub(crate) fn collect_onchain_excluded_fulfilled_tlcs(
         .offered_tlcs
         .tlcs
         .iter()
-        .filter(|tlc| {
-            !tlc.applied_flags.contains(AppliedFlags::REMOVE)
-                && tlc.removed_confirmed_at.is_none()
-                && !settlement_record_includes_tlc(&record, tlc.tlc_id)
-        })
         .filter_map(|tlc| {
+            if tlc.applied_flags.contains(AppliedFlags::REMOVE) {
+                return None;
+            }
+            // Check `RemoveTlcFulfill` before scanning the snapshot so unfulfilled offers are
+            // skipped in O(1) rather than scanning `record.settlement_data.tlcs`.
             let Some(RemoveTlcReason::RemoveTlcFulfill(fulfill)) = &tlc.removed_reason else {
                 return None;
             };
+            // A crash between setting `removed_confirmed_at` and enqueueing `remove_effects`
+            // leaves `AppliedFlags::REMOVE` clear and the outbox empty; still deliver it here.
+            if tlc.removed_confirmed_at.is_some() && has_pending_remove_effect(state, tlc) {
+                return None;
+            }
+            if settlement_record_includes_tlc(&record, tlc.tlc_id) {
+                return None;
+            }
             if Hash256::from(tlc.hash_algorithm.hash(fulfill.payment_preimage)) != tlc.payment_hash
             {
                 return None;
@@ -696,6 +723,7 @@ pub(crate) fn collect_onchain_timeout_settled_tlcs(
                 tlc_id: tlc.tlc_id,
                 payment_hash: tlc.payment_hash,
                 shared_secret: tlc.shared_secret,
+                recorded_fail: None,
                 role,
             })
         })
