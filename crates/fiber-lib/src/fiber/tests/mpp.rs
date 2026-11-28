@@ -1,4 +1,4 @@
-use crate::fiber::channel::tests::TestChannelCommand;
+use crate::tests::TestChannelCommand;
 use secp256k1::SECP256K1;
 use std::{collections::HashMap, time::Duration};
 use tracing::debug;

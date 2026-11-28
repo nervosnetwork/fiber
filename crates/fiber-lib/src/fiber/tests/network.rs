@@ -5,8 +5,8 @@ use crate::fiber::channel::{
 use crate::fiber::fee::MAX_FUNDING_FEE_RATE;
 use crate::fiber::network::get_chain_hash;
 use crate::fiber::network::onchain_upstream_removed_reason_matches;
-use crate::fiber::network::tests::TestCommand;
 use crate::fiber::tests::settle_tlc_set_command_tests::create_test_channel_state_with_tlc;
+use crate::tests::TestCommand;
 use crate::{
     ckb::{
         tests::test_utils::{

@@ -1,4 +1,5 @@
 use super::*;
+use crate::tests::TestCommand;
 
 #[cfg(not(target_arch = "wasm32"))]
 #[tokio::test]
@@ -209,26 +210,6 @@ fn public_messages_cannot_be_derived_as_fiber_messages() {
         GossipMessageUpdates::new(Vec::new()),
     ));
     assert!(FiberActorMessage::try_from(message).is_err());
-}
-
-/// Test-only commands accepted through `FiberActorCommand::Test`.
-#[derive(Debug)]
-pub enum TestCommand {
-    InstallChannelActor(Hash256, ActorRef<ChannelActorMessage>, RpcReplyPort<()>),
-    SetMessageHold(TestFiberMessageHold, RpcReplyPort<()>),
-    TakeHeldMessages(RpcReplyPort<Vec<FiberMessageWithTarget>>),
-    ReleaseHeldMessages(RpcReplyPort<Result<(), String>>),
-    HeldMessageCount(RpcReplyPort<usize>),
-    SetTrampolineSettlementPaused(bool, RpcReplyPort<()>),
-    GetPaymentActor(
-        PaymentSessionKey,
-        RpcReplyPort<Option<ActorRef<PaymentActorMessage>>>,
-    ),
-    SetPaymentActor(
-        PaymentSessionKey,
-        ActorRef<PaymentActorMessage>,
-        RpcReplyPort<()>,
-    ),
 }
 
 /// Test-only state carried by `FiberActorState`.

@@ -179,10 +179,8 @@ impl Fixture {
         args.push(features.bits());
         let mut lock = get_script_by_contract(Contract::CommitmentLock, &args);
         let mut tracked =
-            crate::fiber::onchain_tlc_reconcile::tests::verified_tracked_settlement_tlcs(
-                &lock, &channel, for_remote,
-            )
-            .expect("verified TLC identities");
+            crate::tests::verified_tracked_settlement_tlcs(&lock, &channel, for_remote)
+                .expect("verified TLC identities");
         let witness = subsequent.then(|| {
             let mut witness =
                 SettlementWitness::build_from_witness(&[&[0], witness_bytes.as_slice()].concat())
@@ -883,12 +881,8 @@ fn external_final_settlement_uses_base_key_through_transaction_builder() {
             args.extend_from_slice(&[0, ChannelFeatures::V2.bits()]);
             let lock = output.lock().as_builder().args(args.pack()).build();
             fixture.tracked =
-                crate::fiber::onchain_tlc_reconcile::tests::verified_tracked_settlement_tlcs(
-                    &lock,
-                    &fixture.channel,
-                    for_remote,
-                )
-                .expect("empty snapshot is verified");
+                crate::tests::verified_tracked_settlement_tlcs(&lock, &fixture.channel, for_remote)
+                    .expect("empty snapshot is verified");
             fixture.cell.output = output.as_builder().lock(lock).build().into();
             fixture.witness = subsequent.then(|| {
                 SettlementWitness::build_from_witness(&[&[0], witness_bytes.as_slice()].concat())
@@ -1693,10 +1687,8 @@ fn build_custom_ckb_fixture(
     args.push(0);
     args.push(ChannelFeatures::V2.bits());
     let mut lock = get_script_by_contract(Contract::CommitmentLock, &args);
-    let mut tracked = crate::fiber::onchain_tlc_reconcile::tests::verified_tracked_settlement_tlcs(
-        &lock, &channel, for_remote,
-    )
-    .expect("verified TLC identities");
+    let mut tracked = crate::tests::verified_tracked_settlement_tlcs(&lock, &channel, for_remote)
+        .expect("verified TLC identities");
     let witness = subsequent.then(|| {
         let mut witness =
             SettlementWitness::build_from_witness(&[&[0], witness_bytes.as_slice()].concat())

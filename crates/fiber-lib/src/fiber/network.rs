@@ -422,7 +422,7 @@ fn should_reconcile_closed_channel_without_live_actor(channel_state: ChannelStat
 }
 
 #[cfg(test)]
-pub(crate) mod tests;
+mod tests;
 
 /// Handles a `FundingError` with retry logic.  If the error is temporary and
 /// retries remain, schedules a delayed retry via `send_after` using the
@@ -1046,7 +1046,7 @@ pub enum FiberActorCommand {
     },
     /// Test-only actuators. The payload and its handlers live in `tests`.
     #[cfg(test)]
-    Test(tests::TestCommand),
+    Test(crate::tests::TestCommand),
     // For internal use and debugging only. Most of the messages requires some
     // changes to local state. Even if we can send a message to a peer, some
     // part of the local state is not changed.
@@ -3324,11 +3324,11 @@ where
                 Self::handle_network_peer_and_message_command(state, command),
             ),
             #[cfg(test)]
-            command @ FiberActorCommand::Test(tests::TestCommand::ReleaseHeldMessages(..)) => {
-                Box::pin(Self::handle_network_peer_and_message_command(
-                    state, command,
-                ))
-            }
+            command @ FiberActorCommand::Test(crate::tests::TestCommand::ReleaseHeldMessages(
+                ..,
+            )) => Box::pin(Self::handle_network_peer_and_message_command(
+                state, command,
+            )),
             command @ (FiberActorCommand::CheckChannels
             | FiberActorCommand::OpenChannel(..)
             | FiberActorCommand::AcceptChannel(..)
@@ -3387,7 +3387,7 @@ where
                 Box::pin(state.send_fiber_message(&target, message)).await?;
             }
             #[cfg(test)]
-            FiberActorCommand::Test(tests::TestCommand::ReleaseHeldMessages(reply)) => {
+            FiberActorCommand::Test(crate::tests::TestCommand::ReleaseHeldMessages(reply)) => {
                 NetworkActor::release_held_messages(state, reply).await;
             }
             FiberActorCommand::ActivateInProcessPeer(pubkey, reply) => {

@@ -3782,7 +3782,7 @@ fn update_channel_timestamp(
 
 #[cfg(all(test, feature = "watchtower", not(target_arch = "wasm32")))]
 #[cfg(test)]
-pub(crate) mod tests;
+mod tests;
 
 #[cfg(test)]
 mod test_helpers;

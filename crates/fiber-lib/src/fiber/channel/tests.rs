@@ -891,23 +891,13 @@ impl ChannelActorState {
     }
 }
 
-/// Test-only channel actor messages accepted through `ChannelActorMessage::Test`.
-#[derive(Debug)]
-pub enum TestChannelMessage {
-    GetPendingMessages(RpcReplyPort<TestPendingMessages>),
-}
-
-/// Test-only channel commands accepted through `ChannelCommand::Test`.
-#[derive(Debug)]
-pub enum TestChannelCommand {
-    /// Pause local processing until the test releases the returned sender.
-    Pause(RpcReplyPort<oneshot::Sender<()>>),
-}
-
-pub(crate) fn handle_test_message(state: &mut ChannelActorState, message: TestChannelMessage) {
+pub(crate) fn handle_test_message(
+    state: &mut ChannelActorState,
+    message: crate::tests::TestChannelMessage,
+) {
     match message {
-        TestChannelMessage::GetPendingMessages(reply) => {
-            let _ = reply.send(TestPendingMessages {
+        crate::tests::TestChannelMessage::GetPendingMessages(reply) => {
+            let _ = reply.send(crate::tests::TestPendingMessages {
                 pending_peer_message_count: state.pending_messages.peer_messages.len(),
                 has_pending_peer_commitment: state
                     .pending_messages
@@ -919,9 +909,9 @@ pub(crate) fn handle_test_message(state: &mut ChannelActorState, message: TestCh
     }
 }
 
-pub(crate) async fn handle_test_command(command: TestChannelCommand) {
+pub(crate) async fn handle_test_command(command: crate::tests::TestChannelCommand) {
     match command {
-        TestChannelCommand::Pause(reply) => {
+        crate::tests::TestChannelCommand::Pause(reply) => {
             let (release, wait) = oneshot::channel();
             let _ = reply.send(release);
             let _ = wait.await;

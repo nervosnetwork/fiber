@@ -196,7 +196,7 @@ pub enum CchMessage {
 
     /// Test-only messages. The payload and its handler live in `tests`.
     #[cfg(test)]
-    Test(tests::TestMessage),
+    Test(crate::tests::TestMessage),
 }
 
 impl From<CchTrackingEvent> for CchMessage {
@@ -2643,4 +2643,4 @@ pub(crate) fn redacted_store_change_summary(change: &StoreChange) -> RedactedSto
 }
 
 #[cfg(test)]
-pub(crate) mod tests;
+mod tests;

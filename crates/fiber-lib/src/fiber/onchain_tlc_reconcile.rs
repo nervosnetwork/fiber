@@ -793,6 +793,3 @@ pub(crate) fn can_reconcile_onchain_fulfillment(tlc: &TlcInfo) -> bool {
         )
     }
 }
-
-#[cfg(test)]
-pub(crate) mod tests;

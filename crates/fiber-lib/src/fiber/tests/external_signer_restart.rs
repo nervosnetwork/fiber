@@ -1,4 +1,4 @@
-use crate::fiber::channel::tests::TestChannelMessage;
+use crate::tests::TestChannelMessage;
 use ckb_types::{
     core::FeeRate,
     packed::{Script, Transaction},
@@ -3054,7 +3054,7 @@ async fn test_external_signer_resume_refreshes_and_enforces_remaining_peer_wait(
             let pending = call!(
                 tenant_actor,
                 |tx| crate::fiber::channel::ChannelActorMessage::Test(
-                    crate::fiber::channel::tests::TestChannelMessage::GetPendingMessages(tx),
+                    crate::tests::TestChannelMessage::GetPendingMessages(tx),
                 )
             )
             .unwrap();

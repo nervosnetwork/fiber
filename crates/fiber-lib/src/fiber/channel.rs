@@ -193,13 +193,6 @@ pub(crate) fn funding_timeout_check_delay(
         .map(|delay| delay.saturating_add(FUNDING_TIMEOUT_CHECK_DELAY_GRACE))
 }
 
-#[cfg(test)]
-#[derive(Clone, Debug)]
-pub struct TestPendingMessages {
-    pub pending_peer_message_count: usize,
-    pub has_pending_peer_commitment: bool,
-}
-
 #[derive(Debug)]
 pub enum ChannelActorMessage {
     /// Command are the messages that are sent to the channel actor to perform some action.
@@ -214,7 +207,7 @@ pub enum ChannelActorMessage {
     SignerNotification(SignerNotification),
     /// Test-only messages. The payload and its handler live in `tests`.
     #[cfg(test)]
-    Test(tests::TestChannelMessage),
+    Test(crate::tests::TestChannelMessage),
 }
 
 impl Display for ChannelActorMessage {
@@ -279,7 +272,7 @@ pub enum ChannelCommand {
     TestBarrier(RpcReplyPort<()>),
     /// Test-only commands. The payload and its handler live in `tests`.
     #[cfg(test)]
-    Test(tests::TestChannelCommand),
+    Test(crate::tests::TestChannelCommand),
     /// Disable outbound TLCs in the actor without advertising the fixture change.
     #[cfg(any(test, feature = "bench"))]
     TestDisableTlc(RpcReplyPort<()>),
@@ -13023,7 +13016,7 @@ impl ChannelActorState {
 }
 
 #[cfg(test)]
-pub(crate) mod tests;
+mod tests;
 
 impl ChannelActorState {
     fn allocate_v2(

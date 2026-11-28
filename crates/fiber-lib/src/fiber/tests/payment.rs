@@ -1,5 +1,4 @@
 #![allow(clippy::needless_range_loop)]
-use crate::fiber::channel::tests::TestChannelCommand;
 use crate::fiber::channel::*;
 use crate::fiber::config::DEFAULT_FINAL_TLC_EXPIRY_DELTA;
 use crate::fiber::config::DEFAULT_TLC_EXPIRY_DELTA;
@@ -7,7 +6,6 @@ use crate::fiber::config::DEFAULT_TLC_FEE_PROPORTIONAL_MILLIONTHS;
 use crate::fiber::config::MAX_PAYMENT_TLC_EXPIRY_LIMIT;
 use crate::fiber::config::MIN_TLC_EXPIRY_DELTA;
 use crate::fiber::graph::NetworkGraphStateStore;
-use crate::fiber::network::tests::TestCommand;
 use crate::fiber::network::*;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::fiber::onchain_tlc_reconcile::OnChainTlcSettlement;
@@ -39,6 +37,8 @@ use crate::rpc::payment::{GetPaymentCommandResult, SendPaymentWithRouterParams};
 use crate::tasks::cancel_tasks_and_wait_for_completion;
 use crate::test_utils::init_tracing;
 use crate::tests::test_utils::*;
+use crate::tests::TestChannelCommand;
+use crate::tests::TestCommand;
 #[cfg(feature = "watchtower")]
 use crate::watchtower::WatchtowerStore;
 use crate::NetworkServiceEvent;

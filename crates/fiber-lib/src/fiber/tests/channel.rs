@@ -67,7 +67,7 @@ use fiber_types::{
     TlcStatus, NO_SHARED_SECRET,
 };
 
-use crate::fiber::network::tests::TestCommand;
+use crate::tests::TestCommand;
 use fiber_types::{CloseFlags, FeatureVector};
 use molecule::bytes::BytesMut;
 use musig2::secp::{Point, Scalar};

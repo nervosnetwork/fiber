@@ -58,7 +58,7 @@ use crate::store::open_store;
 use crate::store::NodeNamespace;
 use crate::tests::test_utils::{NetworkNode, NetworkNodeConfigBuilder};
 // Browser tests disable Watchtower; gate its integration fixtures with the same feature.
-use crate::fiber::network::tests::TestCommand;
+use crate::tests::TestCommand;
 #[cfg(feature = "watchtower")]
 use crate::watchtower::WatchtowerStore;
 use crate::{gen_rand_fiber_public_key, gen_rand_sha256_hash};

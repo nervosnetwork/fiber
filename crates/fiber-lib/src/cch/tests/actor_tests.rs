@@ -10,7 +10,6 @@
 //! ReceiveBTC Flow (User receives BTC via Lightning, pays Fiber invoice):
 //!   Pending → IncomingAccepted → OutgoingInFlight → OutgoingSuccess → Success
 
-use crate::cch::actor::tests::TestMessage;
 use crate::cch::{
     actions::CchOrderAction,
     actor::{CchActor, CchArgs, CchMessage, LndInvoiceClient, BTC_BLOCK_TIME_MILLIS},
@@ -36,6 +35,7 @@ use crate::store::{
     Store,
 };
 use crate::tests::test_utils::{generate_store, TempDir};
+use crate::tests::TestMessage;
 use crate::time::{Duration, SystemTime, UNIX_EPOCH};
 use fiber_types::{
     AttemptStatus, CchInvoice, CchOrder, CchOrderStatus, CchReceiveBtcOrderCreation,
