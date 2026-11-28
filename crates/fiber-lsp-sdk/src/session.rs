@@ -684,15 +684,21 @@ impl<S: SignerStore> HostedSession<S> {
                     ))
                 }
             };
+            let settlement_binding = settlement.clone().ok_or_else(|| {
+                SessionError::Invalid("missing commitment settlement".to_string())
+            })?;
+            // HostedTenant cannot transition an outbound payment to `Failed` (or retry a failed
+            // attempt) until the external signer signs the commitment removing the failed TLC.
+            // Stage cancellation in memory only when every unresolved removed TLC is outbound and
+            // provably refunded back to `local_amount`; `sign_commitment` persists it atomically
+            // with the signature if and only if the request is actually signed.
             signer
-                .prepare_commitment(
+                .prepare_commitment_allowing_outbound_refunds(
                     content,
                     crate::CommitmentContext {
                         transition,
                         session,
-                        settlement: settlement.clone().ok_or_else(|| {
-                            SessionError::Invalid("missing commitment settlement".to_string())
-                        })?,
+                        settlement: settlement_binding,
                     },
                     now_ms,
                 )

@@ -7391,6 +7391,120 @@ async fn test_announcement_signature_replay_finishes_a_one_sided_opening() {
 }
 
 #[tokio::test]
+async fn test_reestablish_in_awaiting_channel_ready_sends_channel_ready_before_announcement_signatures(
+) {
+    init_tracing();
+
+    // Regression: when A is in AwaitingChannelReady(OUR_CHANNEL_READY | THEIR_CHANNEL_READY)
+    // with a cached local_channel_announcement_signature, and B crashed before receiving A's
+    // ChannelReadyV2 (so B is still in AwaitingChannelReady(OUR_CHANNEL_READY)), reestablish on A
+    // must send ChannelReadyV2 BEFORE AnnouncementSignatures on the wire. Otherwise B rejects the
+    // early AnnouncementSignatures with InvalidState and stays permanently stuck.
+    let (a, b, id) = create_nodes_with_established_channel(100000000000, 11800000000, true).await;
+    let mut a_awaiting = a.get_channel_actor_state(id);
+    let mut b_awaiting = b.get_channel_actor_state(id);
+
+    a_awaiting.state = ChannelState::AwaitingChannelReady(
+        AwaitingChannelReadyFlags::OUR_CHANNEL_READY
+            | AwaitingChannelReadyFlags::THEIR_CHANNEL_READY,
+    );
+    a_awaiting.commitment_numbers = fiber_types::CommitmentNumbers {
+        local: fiber_types::INITIAL_COMMITMENT_NUMBER + 1,
+        remote: fiber_types::INITIAL_COMMITMENT_NUMBER + 1,
+    };
+    {
+        let info = a_awaiting
+            .public_channel_info
+            .as_mut()
+            .expect("public channel");
+        info.channel_announcement = None;
+        info.remote_channel_announcement_signature = None;
+        assert!(info.local_channel_announcement_signature.is_some());
+    }
+
+    b_awaiting.state =
+        ChannelState::AwaitingChannelReady(AwaitingChannelReadyFlags::OUR_CHANNEL_READY);
+    b_awaiting.commitment_numbers = fiber_types::CommitmentNumbers {
+        local: fiber_types::INITIAL_COMMITMENT_NUMBER + 1,
+        remote: fiber_types::INITIAL_COMMITMENT_NUMBER + 1,
+    };
+    b_awaiting.session.remote_ready = None;
+    {
+        let info = b_awaiting
+            .public_channel_info
+            .as_mut()
+            .expect("public channel");
+        info.channel_announcement = None;
+        info.remote_channel_announcement_signature = None;
+    }
+
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let (network, _task) = Actor::spawn(None, CapturingNetworkActor, captured.clone())
+        .await
+        .unwrap();
+    let (myself, _handle) = Actor::spawn(None, NoopChannelActor, ()).await.unwrap();
+    let actor = ChannelActor::new(a.pubkey, b.pubkey, network.clone(), a.store.clone(), None);
+    let mut state = recovery_state(&a, &a_awaiting, &network);
+    actor
+        .handle_peer_message(
+            &myself,
+            &mut state,
+            FiberChannelMessage::ReestablishChannelV2(v2_reestablish_handshake(&b_awaiting)),
+        )
+        .await
+        .unwrap();
+    let sent = take_captured_actor_messages(&network, &captured).await;
+
+    let ready_pos = sent
+        .iter()
+        .position(|m| {
+            matches!(
+                m.message,
+                FiberMessage::ChannelNormalOperation(FiberChannelMessage::ChannelReadyV2(_))
+            )
+        })
+        .expect("reestablish in AwaitingChannelReady must replay ChannelReadyV2");
+    let ann_pos = sent
+        .iter()
+        .position(|m| {
+            matches!(
+                m.message,
+                FiberMessage::ChannelNormalOperation(FiberChannelMessage::AnnouncementSignatures(
+                    _
+                ))
+            )
+        })
+        .expect("reestablish in AwaitingChannelReady must replay cached AnnouncementSignatures");
+    assert!(
+        ready_pos < ann_pos,
+        "ChannelReadyV2 (idx {ready_pos}) must precede AnnouncementSignatures (idx {ann_pos}) on the wire: {sent:?}"
+    );
+
+    // Feed the replayed frames in wire order into B (which had not seen A's ChannelReadyV2 yet)
+    // and verify B accepts both frames without InvalidState and reaches ChannelReady.
+    let b_captured = Arc::new(Mutex::new(Vec::new()));
+    let (b_network, _b_task) = Actor::spawn(None, CapturingNetworkActor, b_captured.clone())
+        .await
+        .unwrap();
+    b_awaiting.network = Some(b_network.clone().into());
+    b_awaiting.private_key = Some(b.private_key.clone());
+    let b_actor = ChannelActor::new(b.pubkey, a.pubkey, b_network.clone(), b.store.clone(), None);
+    for msg in sent {
+        if let FiberMessage::ChannelNormalOperation(
+            frame @ (FiberChannelMessage::ChannelReadyV2(_)
+            | FiberChannelMessage::AnnouncementSignatures(_)),
+        ) = msg.message
+        {
+            b_actor
+                .handle_peer_message(&myself, &mut b_awaiting, frame)
+                .await
+                .expect("B must accept replayed ChannelReadyV2 then AnnouncementSignatures");
+        }
+    }
+    assert_eq!(b_awaiting.state, ChannelState::ChannelReady);
+}
+
+#[tokio::test]
 async fn test_shutting_down_recovery_does_not_replay_announcement_signature() {
     init_tracing();
 

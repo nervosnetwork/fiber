@@ -4319,3 +4319,80 @@ async fn external_funding_status_result_handler_timeout_tlc_and_single_output_se
         tlc_funded.as_slice()
     );
 }
+
+#[tokio::test]
+async fn allows_inflight_inbound_tlc_after_cancellation_without_allowing_fulfillment_or_replay() {
+    let f = Fixture::new(false).await;
+    f.sign(true, 0, f.opening()).await;
+    f.sign(false, 0, f.opening()).await;
+
+    let terms = f.terms(true);
+    let payment_hash = terms.payment_hash;
+    f.signer
+        .authorize_invoice(terms, [9; 32].into())
+        .await
+        .unwrap();
+
+    // User cancels the hold invoice locally while LSP already has AddTlc in flight on the wire.
+    f.signer.authorize_cancellation(payment_hash).await.unwrap();
+
+    // Both lanes must be able to commit the single in-flight inbound TLC so the channel can emit
+    // RemoveTlc(InvoiceCancelled) instead of deadlocking forever.
+    f.sign(true, 1, f.incoming(true)).await;
+    f.sign(false, 1, f.incoming(false)).await;
+
+    // Cancellation stays irreversible: fulfillment and paying local balance must still be rejected.
+    assert!(f
+        .signer
+        .authorize_fulfillment(payment_hash, [9; 32].into())
+        .await
+        .is_err());
+    let paid = SettlementData {
+        local_amount: 450,
+        remote_amount: 550,
+        tlcs: vec![],
+    };
+    let (content, context) = f.request(true, 2, paid).await;
+    f.assert_rejected(content, context, "balances do not match")
+        .await;
+
+    // Refunding back to remote succeeds on both lanes.
+    f.sign(true, 2, f.opening()).await;
+    f.sign(false, 2, f.opening()).await;
+
+    // Once retired, any replay (even with a fresh TLC id) must be rejected on both lanes.
+    let mut replay_tlc = f.tlc(true, true);
+    replay_tlc.tlc_id = TLCId::Received(99);
+    let replay = SettlementData {
+        local_amount: 400,
+        remote_amount: 550,
+        tlcs: vec![replay_tlc],
+    };
+    let (content, context) = f.request(true, 3, replay).await;
+    f.assert_rejected(content, context, "replay").await;
+
+    // Also verify cross-lane replay defense: if remote lane retired id=1 before local lane saw it,
+    // local lane must reject a different inbound TLC id for the same invoice hash.
+    let f2 = Fixture::new(false).await;
+    f2.sign(true, 0, f2.opening()).await;
+    f2.sign(false, 0, f2.opening()).await;
+    let terms2 = f2.terms(true);
+    let hash2 = terms2.payment_hash;
+    f2.signer
+        .authorize_invoice(terms2, [9; 32].into())
+        .await
+        .unwrap();
+    f2.signer.authorize_cancellation(hash2).await.unwrap();
+    f2.sign(true, 1, f2.incoming(true)).await;
+    f2.sign(true, 2, f2.opening()).await;
+
+    let mut diff_tlc = f2.tlc(true, false);
+    diff_tlc.tlc_id = TLCId::Offered(99);
+    let diff = SettlementData {
+        local_amount: 400,
+        remote_amount: 550,
+        tlcs: vec![diff_tlc],
+    };
+    let (content, context) = f2.request(false, 1, diff).await;
+    f2.assert_rejected(content, context, "replay").await;
+}

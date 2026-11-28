@@ -129,6 +129,7 @@ pub(crate) enum PreparedValidation {
         context: crate::CommitmentContext,
         review: crate::CommitmentReview,
         validated_at_ms: u64,
+        inferred_outbound_refunds: Vec<fiber_types::Hash256>,
     },
     Revocation {
         state: crate::commitment::CommitmentState,

@@ -6,6 +6,7 @@ use crate::{
         onchain_tlc_reconcile::{
             onchain_fulfilled_preimage, resolve_onchain_tlc, OnChainTlcResolution,
         },
+        types::HoldTlc,
     },
     invoice::{CkbInvoice, CkbInvoiceStatus, InvoiceStore, PreimageStore},
     utils::payment::is_invoice_fulfilled,
@@ -34,6 +35,7 @@ pub struct TlcSettlementContext {
     channel_id: Hash256,
     id: u64,
     amount: u128,
+    expiry: u64,
     total_amount: Option<u128>,
     shared_secret: [u8; 32],
 }
@@ -44,6 +46,7 @@ impl TlcSettlementContext {
             channel_id,
             id: tlc_info.id(),
             amount: tlc_info.amount,
+            expiry: tlc_info.expiry,
             total_amount: tlc_info.total_amount,
             shared_secret: tlc_info.shared_secret,
         }
@@ -159,6 +162,43 @@ where
             return self.skip_all();
         }
 
+        // For immediate single-path invoices, persist the selected `(channel_id, tlc_id)` in
+        // `payment_hold_tlcs` before transitioning the invoice from `Open` to `Received`.
+        // If a crash occurred between persisting that selection and marking the invoice `Received`,
+        // only the already-selected live TLC may proceed; competing TLCs are rejected.
+        let mut persisted_single_path_holds = Vec::new();
+        let mut pre_rejected = Vec::new();
+        if !self.is_hold_tlc_set && !invoice.allow_mpp() && invoice_status == CkbInvoiceStatus::Open
+        {
+            persisted_single_path_holds = self
+                .store
+                .get_payment_hold_tlcs(self.payment_hash)
+                .into_iter()
+                .filter(|hold| {
+                    make_sttlement_context(hold.channel_id, hold.tlc_id, self.store).is_some()
+                })
+                .collect();
+            if !persisted_single_path_holds.is_empty() {
+                let mut kept = Vec::new();
+                let mut disallowed = Vec::new();
+                for tlc in std::mem::take(&mut self.tlcs) {
+                    if persisted_single_path_holds
+                        .iter()
+                        .any(|hold| hold.channel_id == tlc.channel_id && hold.tlc_id == tlc.id)
+                    {
+                        kept.push(tlc);
+                    } else {
+                        disallowed.push(tlc);
+                    }
+                }
+                self.tlcs = kept;
+                pre_rejected = self.reject_tlcs(disallowed, TlcErrorCode::HoldTlcTimeout);
+                if self.tlcs.is_empty() {
+                    return pre_rejected;
+                }
+            }
+        }
+
         // For an already-Received invoice with a known preimage (e.g. crash recovery or retry
         // after some MPP parts were already fulfilled and removed from payment_hold_tlcs), account
         // for any TLCs already fulfilling on channels. Also account for committed received TLCs on
@@ -178,8 +218,31 @@ where
             already_fulfilled_count,
             already_fulfilled_amount,
         );
+        rejected.extend(pre_rejected);
         if self.tlcs.is_empty() {
             return rejected;
+        }
+
+        // Persist the selected TLC for immediate single-path invoices before marking the invoice
+        // `Received` so crash recovery via `SettleReceivedHoldTlcSet` can only ever recover this
+        // exact selection, while any competing TLC arriving after `Received` is always rejected.
+        if !self.is_hold_tlc_set && !invoice.allow_mpp() && invoice_status == CkbInvoiceStatus::Open
+        {
+            for tlc in &self.tlcs {
+                if !persisted_single_path_holds
+                    .iter()
+                    .any(|hold| hold.channel_id == tlc.channel_id && hold.tlc_id == tlc.id)
+                {
+                    self.store.insert_payment_hold_tlc(
+                        self.payment_hash,
+                        HoldTlc {
+                            channel_id: tlc.channel_id,
+                            tlc_id: tlc.id,
+                            hold_expire_at: tlc.expiry,
+                        },
+                    );
+                }
+            }
         }
 
         // Now we are sure the invoice is fulfilled, and `self.tlcs` is ready to be settled.
@@ -211,7 +274,10 @@ where
         let required_amount = invoice.amount.unwrap_or_default();
         let mut count = 0usize;
         let mut amount = 0u128;
-        for (_, channel_id, _) in self.store.get_channel_states(None) {
+        for channel_id in self
+            .store
+            .get_channel_ids_by_payment_hash(&self.payment_hash)
+        {
             let Some(state) = self.store.get_channel_actor_state(&channel_id) else {
                 continue;
             };
@@ -373,7 +439,7 @@ where
                 }
             }
             CkbInvoiceStatus::Received => {
-                if self.is_hold_tlc_set {
+                if self.is_hold_tlc_set || self.allow_received_invoice {
                     Ok(())
                 } else {
                     Err(TlcErrorCode::HoldTlcTimeout)
@@ -515,9 +581,9 @@ fn collect_onchain_fulfilled_received_tlcs(
     payment_hash: Hash256,
 ) -> Vec<TlcInfo> {
     store
-        .get_channel_states(None)
+        .get_channel_ids_by_payment_hash(&payment_hash)
         .into_iter()
-        .filter_map(|(_, channel_id, _)| store.get_channel_actor_state(&channel_id))
+        .filter_map(|channel_id| store.get_channel_actor_state(&channel_id))
         .flat_map(|state| {
             let channel_id = state.get_id();
             let waiting_forward_tlc_tasks = state.core.waiting_forward_tlc_tasks;

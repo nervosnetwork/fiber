@@ -14,7 +14,7 @@ use fiber_types::watchtower::settlement_data_witness;
 use fiber_types::{
     AppliedFlags, ChannelData, ChannelFeatures, ChannelState, CloseFlags, Hash256, HashAlgorithm,
     InboundTlcStatus, OutboundTlcStatus, Pubkey, RemoveTlcFulfill, RemoveTlcReason, SettlementData,
-    TLCId, TlcErrorCode, TlcInfo,
+    TLCId, TlcErr, TlcErrPacket, TlcErrorCode, TlcInfo,
 };
 use musig2::{secp::Point, KeyAggContext};
 use serde::{Deserialize, Serialize};
@@ -313,13 +313,17 @@ impl OnChainConfirmedPayerTlc {
 }
 
 /// An offered TLC failed by an on-chain timeout or exclusion from a confirmed commitment.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct OnChainTimeoutSettledTlc {
     pub upstream_tlc_key: Option<crate::fiber_types::UpstreamTlcKey>,
     /// The downstream TLC on the force-closed channel that must be marked removed locally.
     pub tlc_id: TLCId,
     pub payment_hash: Hash256,
     pub shared_secret: [u8; 32],
+    /// Exact peer error packet when the excluded TLC already received `RemoveTlcFail` before
+    /// force-close, so downstream terminal failures like `InvoiceCancelled` are preserved instead
+    /// of being overwritten with a synthetic channel failure.
+    pub recorded_fail: Option<TlcErrPacket>,
     pub role: OnChainTimeoutTlcRole,
 }
 
@@ -329,6 +333,31 @@ impl OnChainTimeoutSettledTlc {
             payment_hash: self.payment_hash,
             upstream_tlc_key: self.upstream_tlc_key,
         }
+    }
+
+    /// Build the upstream or local `RemoveTlcReason` for this on-chain failed TLC.
+    ///
+    /// For a forwarded TLC that already recorded a downstream `RemoveTlcFail` packet before
+    /// force-close, wrap it with this hop's shared secret via [`TlcErrPacket::backward`] so
+    /// upstream nodes and the origin payer peel every onion layer identically to normal
+    /// forwarding. If wrapping fails (for example, if a peer sent a non-forwardable plaintext
+    /// error packet), fall back to a fresh error packet originated at this hop.
+    pub(crate) fn remove_reason(&self, fallback_error_code: TlcErrorCode) -> RemoveTlcReason {
+        let packet = match (&self.role, &self.recorded_fail) {
+            (OnChainTimeoutTlcRole::Forwarded { .. }, Some(packet)) => packet
+                .clone()
+                .backward(&self.shared_secret)
+                .unwrap_or_else(|err| {
+                    warn!(
+                        "Failed to wrap recorded downstream fail packet for forwarded TLC {:?} ({}): {:?}; falling back to {:?}",
+                        self.tlc_id, self.payment_hash, err, fallback_error_code
+                    );
+                    TlcErrPacket::new(TlcErr::new(fallback_error_code), &self.shared_secret)
+                }),
+            (OnChainTimeoutTlcRole::OriginPayer { .. }, Some(packet)) => packet.clone(),
+            (_, None) => TlcErrPacket::new(TlcErr::new(fallback_error_code), &self.shared_secret),
+        };
+        RemoveTlcReason::RemoveTlcFail(packet)
     }
 }
 
@@ -516,22 +545,18 @@ pub(crate) fn confirm_onchain_payer_fulfill(
     true
 }
 
-/// Offered updates excluded by a confirmed force close can no longer be paid on this channel.
-/// A missing snapshot or the synthetic zero-valued revocation scope is not exclusion evidence.
-pub(crate) fn collect_onchain_excluded_tlcs(
+fn verified_non_revoked_shutdown_record(
     state: &ChannelActorState,
     store: &impl ChannelActorStateStore,
-) -> Vec<OnChainTimeoutSettledTlc> {
+) -> Option<fiber_types::ShutdownSettlementRecord> {
     // This state is entered only after the force-close transaction is confirmed.
     // Together with its verified snapshot it proves exclusion, independently of
     // whether the peer has withdrawn its remaining commitment balance cells.
     if !state.is_waiting_onchain_settlement() {
-        return vec![];
+        return None;
     }
     // A missing or mismatched shutdown snapshot cannot prove exclusion.
-    let Some(record) = state.load_shutdown_settlement_record(store) else {
-        return vec![];
-    };
+    let record = state.load_shutdown_settlement_record(store)?;
     // Zero amounts identify the synthetic revocation scope, not a real snapshot.
     if (record.settlement_data.local_amount == 0 && record.settlement_data.remote_amount == 0)
         // Revocation data describes the peer's commitments, never our local commitment.
@@ -543,37 +568,76 @@ pub(crate) fn collect_onchain_excluded_tlcs(
                 })
             }))
     {
-        return vec![];
+        return None;
     }
+    Some(record)
+}
+
+fn settlement_record_includes_tlc(
+    record: &fiber_types::ShutdownSettlementRecord,
+    tlc_id: TLCId,
+) -> bool {
+    record.settlement_data.tlcs.iter().any(|included| {
+        let local_id = if record.for_remote {
+            included.tlc_id
+        } else {
+            included.tlc_id.flip()
+        };
+        local_id == tlc_id
+    })
+}
+
+fn has_pending_remove_effect(state: &ChannelActorState, tlc: &TlcInfo) -> bool {
+    state
+        .session
+        .remove_effects
+        .iter()
+        .any(|(effect, _)| effect.tlc_id == tlc.tlc_id && effect.payment_hash == tlc.payment_hash)
+}
+
+/// Offered updates excluded by a confirmed force close can no longer be paid on this channel.
+/// A missing snapshot or the synthetic zero-valued revocation scope is not exclusion evidence.
+pub(crate) fn collect_onchain_excluded_tlcs(
+    state: &ChannelActorState,
+    store: &impl ChannelActorStateStore,
+) -> Vec<OnChainTimeoutSettledTlc> {
+    let Some(record) = verified_non_revoked_shutdown_record(state, store) else {
+        return vec![];
+    };
     state
         .tlc_state
         .offered_tlcs
         .tlcs
         .iter()
         .filter(|tlc| {
-            // Only uncommitted outgoing updates are candidates for this failure path.
-            tlc.outbound_status() == OutboundTlcStatus::LocalAnnounced
-                // Do not apply failure again to a TLC already being removed.
-                && tlc.removed_reason.is_none()
-                // A confirmed removal has no remaining effects to reconcile here.
-                && tlc.removed_confirmed_at.is_none()
+            // An already-applied removal or one already queued in `remove_effects` has no
+            // remaining effects to reconcile here. A crash between setting `removed_confirmed_at`
+            // and populating `remove_effects` leaves `AppliedFlags::REMOVE` clear and the outbox
+            // empty, so it must still be delivered before finalizing the close.
+            !tlc.applied_flags.contains(AppliedFlags::REMOVE)
+                && (tlc.removed_confirmed_at.is_none() || !has_pending_remove_effect(state, tlc))
+                && (
+                    // Uncommitted outgoing adds excluded from the confirmed commitment cannot pay.
+                    (tlc.outbound_status() == OutboundTlcStatus::LocalAnnounced
+                        && tlc.removed_reason.is_none())
+                        // Peer-failed removals already folded out of the confirmed commitment
+                        // refunded our balance on-chain; finish delivering the failure locally.
+                        || matches!(tlc.removed_reason, Some(RemoveTlcReason::RemoveTlcFail(_)))
+                )
         })
         .filter(|tlc| {
             // Included TLCs must follow normal on-chain resolution, even if LocalAnnounced.
-            !record.settlement_data.tlcs.iter().any(|included| {
-                let local_id = if record.for_remote {
-                    included.tlc_id
-                } else {
-                    included.tlc_id.flip()
-                };
-                local_id == tlc.tlc_id
-            })
+            !settlement_record_includes_tlc(&record, tlc.tlc_id)
         })
         .map(|tlc| OnChainTimeoutSettledTlc {
             upstream_tlc_key: tlc.upstream_tlc_key,
             tlc_id: tlc.tlc_id,
             payment_hash: tlc.payment_hash,
             shared_secret: tlc.shared_secret,
+            recorded_fail: match &tlc.removed_reason {
+                Some(RemoveTlcReason::RemoveTlcFail(packet)) => Some(packet.clone()),
+                _ => None,
+            },
             role: match tlc.forwarding_tlc {
                 // Forwarded payments must propagate the failure to the upstream channel.
                 Some((forwarding_channel_id, forwarding_tlc_id)) => {
@@ -587,6 +651,53 @@ pub(crate) fn collect_onchain_excluded_tlcs(
                     attempt_id: tlc.attempt_id,
                 },
             },
+        })
+        .collect()
+}
+
+/// Offered fulfillments already folded into a confirmed commitment's balances before the
+/// off-chain remove handshake finished must still settle upstream or notify the payer.
+pub(crate) fn collect_onchain_excluded_fulfilled_tlcs(
+    state: &ChannelActorState,
+    store: &impl ChannelActorStateStore,
+) -> Vec<OnChainFulfilledTlc> {
+    let Some(record) = verified_non_revoked_shutdown_record(state, store) else {
+        return vec![];
+    };
+    state
+        .tlc_state
+        .offered_tlcs
+        .tlcs
+        .iter()
+        .filter_map(|tlc| {
+            if tlc.applied_flags.contains(AppliedFlags::REMOVE) {
+                return None;
+            }
+            // Check `RemoveTlcFulfill` before scanning the snapshot so unfulfilled offers are
+            // skipped in O(1) rather than scanning `record.settlement_data.tlcs`.
+            let Some(RemoveTlcReason::RemoveTlcFulfill(fulfill)) = &tlc.removed_reason else {
+                return None;
+            };
+            // A crash between setting `removed_confirmed_at` and enqueueing `remove_effects`
+            // leaves `AppliedFlags::REMOVE` clear and the outbox empty; still deliver it here.
+            if tlc.removed_confirmed_at.is_some() && has_pending_remove_effect(state, tlc) {
+                return None;
+            }
+            if settlement_record_includes_tlc(&record, tlc.tlc_id) {
+                return None;
+            }
+            if Hash256::from(tlc.hash_algorithm.hash(fulfill.payment_preimage)) != tlc.payment_hash
+            {
+                return None;
+            }
+            Some(OnChainFulfilledTlc {
+                upstream_tlc_key: tlc.upstream_tlc_key,
+                tlc_id: tlc.tlc_id,
+                forwarding_tlc: tlc.forwarding_tlc,
+                payment_hash: tlc.payment_hash,
+                attempt_id: tlc.attempt_id,
+                preimage: fulfill.payment_preimage,
+            })
         })
         .collect()
 }
@@ -637,6 +748,7 @@ pub(crate) fn collect_onchain_timeout_settled_tlcs(
                 tlc_id: tlc.tlc_id,
                 payment_hash: tlc.payment_hash,
                 shared_secret: tlc.shared_secret,
+                recorded_fail: None,
                 role,
             })
         })
