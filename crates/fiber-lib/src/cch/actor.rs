@@ -194,13 +194,9 @@ pub enum CchMessage {
     /// Expire an active order after its configured expiry window elapses.
     ExpireOrder(Hash256),
 
-    /// Test-only message to insert an order directly into the database
+    /// Test-only messages. The payload and its handler live in `tests`.
     #[cfg(test)]
-    InsertOrder(CchOrder, RpcReplyPort<Result<(), CchError>>),
-
-    /// Test-only readiness probe for startup recovery.
-    #[cfg(test)]
-    GetStartupRecoveryStatus(RpcReplyPort<bool>),
+    Test(tests::TestMessage),
 }
 
 impl From<CchTrackingEvent> for CchMessage {
@@ -950,16 +946,8 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
                 Ok(())
             }
             #[cfg(test)]
-            CchMessage::InsertOrder(order, port) => {
-                let result = state.store.insert_cch_order(order).map_err(Into::into);
-                if !port.is_closed() {
-                    let _ = port.send(result);
-                }
-                Ok(())
-            }
-            #[cfg(test)]
-            CchMessage::GetStartupRecoveryStatus(port) => {
-                let _ = port.send(state.startup_recovery_in_progress);
+            CchMessage::Test(message) => {
+                crate::cch::actor::tests::handle_test_message(state, message);
                 Ok(())
             }
         }
@@ -2655,4 +2643,4 @@ pub(crate) fn redacted_store_change_summary(change: &StoreChange) -> RedactedSto
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

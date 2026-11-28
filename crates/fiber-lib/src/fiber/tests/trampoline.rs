@@ -11,6 +11,7 @@ use crate::fiber::delivery::{
     SettledPaymentOutcome, TrampolineForwardingRequest,
 };
 use crate::fiber::graph::*;
+use crate::fiber::network::tests::TestCommand;
 use crate::fiber::network::{
     BufferedTrampolineUpstreamStatus, DebugEvent, FiberActorCommand, NetworkActorMessage,
     PublicNetworkCommand, SendOnionPacketCommand,
@@ -45,8 +46,8 @@ use tracing::{debug, error};
 
 async fn set_test_trampoline_settlement_paused(node: &NetworkNode, paused: bool) {
     call!(node.network_actor, |reply| {
-        NetworkActorMessage::new_command(FiberActorCommand::SetTestTrampolineSettlementPaused(
-            paused, reply,
+        NetworkActorMessage::new_command(FiberActorCommand::Test(
+            TestCommand::SetTrampolineSettlementPaused(paused, reply),
         ))
     })
     .expect("network actor alive");

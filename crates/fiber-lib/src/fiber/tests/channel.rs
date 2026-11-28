@@ -67,6 +67,7 @@ use fiber_types::{
     TlcStatus, NO_SHARED_SECRET,
 };
 
+use crate::fiber::network::tests::TestCommand;
 use fiber_types::{CloseFlags, FeatureVector};
 use molecule::bytes::BytesMut;
 use musig2::secp::{Point, Scalar};
@@ -106,9 +107,9 @@ impl Actor for CapturingNetworkActor {
             )) => {
                 messages.lock().expect("capture lock").push(message);
             }
-            NetworkActorMessage::Fiber(FiberActorMessage::Command(
-                FiberActorCommand::GetTestHeldFiberMessageCount(reply),
-            )) => {
+            NetworkActorMessage::Fiber(FiberActorMessage::Command(FiberActorCommand::Test(
+                TestCommand::HeldMessageCount(reply),
+            ))) => {
                 let _ = reply.send(messages.lock().expect("capture lock").len());
             }
             _ => {}
@@ -183,8 +184,8 @@ async fn test_stealth_disable_survives_interleaved_channel_maintenance() {
     a.network_actor = real_network;
     ractor::call_t!(
         a.network_actor,
-        |reply| NetworkActorMessage::new_command(FiberActorCommand::GetTestHeldFiberMessageCount(
-            reply
+        |reply| NetworkActorMessage::new_command(FiberActorCommand::Test(
+            TestCommand::HeldMessageCount(reply)
         )),
         5000
     )
@@ -231,7 +232,9 @@ async fn take_captured_actor_messages(
 ) -> Vec<FiberMessageWithTarget> {
     let message_count = tokio::time::timeout(event_wait_timeout(), async {
         call!(network, |reply| {
-            NetworkActorMessage::new_command(FiberActorCommand::GetTestHeldFiberMessageCount(reply))
+            NetworkActorMessage::new_command(FiberActorCommand::Test(
+                TestCommand::HeldMessageCount(reply),
+            ))
         })
     })
     .await
@@ -390,7 +393,9 @@ async fn take_held_fiber_messages_bounded(
 ) -> Vec<FiberMessageWithTarget> {
     tokio::time::timeout(event_wait_timeout(), async {
         call!(node.network_actor, |reply| {
-            NetworkActorMessage::new_command(FiberActorCommand::TakeTestHeldFiberMessages(reply))
+            NetworkActorMessage::new_command(FiberActorCommand::Test(
+                TestCommand::TakeHeldMessages(reply),
+            ))
         })
     })
     .await

@@ -422,7 +422,7 @@ fn should_reconcile_closed_channel_without_live_actor(channel_state: ChannelStat
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 /// Handles a `FundingError` with retry logic.  If the error is temporary and
 /// retries remain, schedules a delayed retry via `send_after` using the
@@ -1044,18 +1044,9 @@ pub enum FiberActorCommand {
         hold_payment_hash: Option<Hash256>,
         result: Result<(), ProcessingChannelError>,
     },
+    /// Test-only actuators. The payload and its handlers live in `tests`.
     #[cfg(test)]
-    InstallTestChannelActor(Hash256, ActorRef<ChannelActorMessage>, RpcReplyPort<()>),
-    #[cfg(test)]
-    SetTestFiberMessageHold(TestFiberMessageHold, RpcReplyPort<()>),
-    #[cfg(test)]
-    TakeTestHeldFiberMessages(RpcReplyPort<Vec<FiberMessageWithTarget>>),
-    #[cfg(test)]
-    ReleaseTestHeldFiberMessages(RpcReplyPort<Result<(), String>>),
-    #[cfg(test)]
-    GetTestHeldFiberMessageCount(RpcReplyPort<usize>),
-    #[cfg(test)]
-    SetTestTrampolineSettlementPaused(bool, RpcReplyPort<()>),
+    Test(tests::TestCommand),
     // For internal use and debugging only. Most of the messages requires some
     // changes to local state. Even if we can send a message to a peer, some
     // part of the local state is not changed.
@@ -1158,17 +1149,6 @@ pub enum FiberActorCommand {
     ),
     // Get the count of inflight payments
     GetInflightPaymentCount(RpcReplyPort<Result<u32, String>>),
-    #[cfg(test)]
-    GetPaymentActor(
-        PaymentSessionKey,
-        RpcReplyPort<Option<ActorRef<PaymentActorMessage>>>,
-    ),
-    #[cfg(test)]
-    TestSetPaymentActor(
-        PaymentSessionKey,
-        ActorRef<PaymentActorMessage>,
-        RpcReplyPort<()>,
-    ),
 
     AddInvoice(
         CkbInvoice,
@@ -1710,7 +1690,7 @@ impl PartialEq for FiberActorRef {
 
 impl Eq for FiberActorRef {}
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FiberMessageWithTarget {
     pub target: Pubkey,
     pub message: FiberMessage,
@@ -1894,11 +1874,7 @@ where
             #[cfg(not(target_arch = "wasm32"))]
             deferred_hosted_trampoline_settlements: Default::default(),
             #[cfg(test)]
-            test_fiber_message_hold: None,
-            #[cfg(test)]
-            test_held_fiber_messages: Default::default(),
-            #[cfg(test)]
-            test_trampoline_settlement_paused: false,
+            test_state: Default::default(),
         }
     }
 
@@ -3038,25 +3014,7 @@ where
     ) -> crate::Result<()> {
         match command {
             #[cfg(test)]
-            FiberActorCommand::SetTestFiberMessageHold(hold, reply) => {
-                state.test_fiber_message_hold = Some(hold);
-                let _ = reply.send(());
-            }
-            #[cfg(test)]
-            FiberActorCommand::TakeTestHeldFiberMessages(reply) => {
-                state.test_fiber_message_hold = None;
-                let messages = state.test_held_fiber_messages.drain(..).collect();
-                let _ = reply.send(messages);
-            }
-            #[cfg(test)]
-            FiberActorCommand::GetTestHeldFiberMessageCount(reply) => {
-                let _ = reply.send(state.test_held_fiber_messages.len());
-            }
-            #[cfg(test)]
-            FiberActorCommand::SetTestTrampolineSettlementPaused(paused, reply) => {
-                state.test_trampoline_settlement_paused = paused;
-                let _ = reply.send(());
-            }
+            FiberActorCommand::Test(command) => NetworkActor::handle_test_command(state, command),
             FiberActorCommand::RegisterInProcessPeer {
                 pubkey,
                 actor,
@@ -3194,11 +3152,6 @@ where
                     }
                 }
             }
-            #[cfg(test)]
-            FiberActorCommand::InstallTestChannelActor(channel_id, actor, reply) => {
-                state.channels.insert(channel_id, actor);
-                let _ = reply.send(());
-            }
             FiberActorCommand::SettleTlcSet(payment_hash, channel_tlc_ids) => {
                 self.settle_tlc_set(myself, state, payment_hash, channel_tlc_ids);
             }
@@ -3300,15 +3253,6 @@ where
             FiberActorCommand::GetInflightPaymentCount(reply) => {
                 let _ = reply.send(Ok(state.inflight_payments.len() as u32));
             }
-            #[cfg(test)]
-            FiberActorCommand::GetPaymentActor(hash, reply) => {
-                let _ = reply.send(state.inflight_payments.get(&hash).cloned());
-            }
-            #[cfg(test)]
-            FiberActorCommand::TestSetPaymentActor(hash, actor, reply) => {
-                assert!(state.inflight_payments.insert(hash, actor).is_none());
-                let _ = reply.send(());
-            }
             FiberActorCommand::GetPendingAcceptChannels(rpc) => {
                 let pending = state
                     .to_be_accepted_channels
@@ -3380,9 +3324,11 @@ where
                 Self::handle_network_peer_and_message_command(state, command),
             ),
             #[cfg(test)]
-            command @ FiberActorCommand::ReleaseTestHeldFiberMessages(..) => Box::pin(
-                Self::handle_network_peer_and_message_command(state, command),
-            ),
+            command @ FiberActorCommand::Test(tests::TestCommand::ReleaseHeldMessages(..)) => {
+                Box::pin(Self::handle_network_peer_and_message_command(
+                    state, command,
+                ))
+            }
             command @ (FiberActorCommand::CheckChannels
             | FiberActorCommand::OpenChannel(..)
             | FiberActorCommand::AcceptChannel(..)
@@ -3434,56 +3380,15 @@ where
         match command {
             FiberActorCommand::SendFiberMessage(message_with_target) => {
                 #[cfg(test)]
-                if state
-                    .test_fiber_message_hold
-                    .as_ref()
-                    .is_some_and(|hold| hold.matches(&message_with_target))
-                {
-                    let remaining = state
-                        .test_fiber_message_hold
-                        .as_ref()
-                        .expect("matching test hold")
-                        .remaining
-                        .get()
-                        - 1;
-                    if let Some(remaining) = NonZeroUsize::new(remaining) {
-                        state
-                            .test_fiber_message_hold
-                            .as_mut()
-                            .expect("matching test hold")
-                            .remaining = remaining;
-                    } else {
-                        state.test_fiber_message_hold = None;
-                    }
-                    state
-                        .test_held_fiber_messages
-                        .push_back(message_with_target);
+                if tests::hold_fiber_message(state, &message_with_target) {
                     return Ok(());
                 }
                 let FiberMessageWithTarget { target, message } = message_with_target;
                 Box::pin(state.send_fiber_message(&target, message)).await?;
             }
             #[cfg(test)]
-            FiberActorCommand::ReleaseTestHeldFiberMessages(reply) => {
-                state.test_fiber_message_hold = None;
-                while let Some(FiberMessageWithTarget { target, message }) =
-                    state.test_held_fiber_messages.pop_front()
-                {
-                    if let Err(error) = Box::pin(state.send_fiber_message(&target, message)).await {
-                        let remaining = state.test_held_fiber_messages.len();
-                        let noun = if remaining == 1 {
-                            "message"
-                        } else {
-                            "messages"
-                        };
-                        let _ = reply.send(Err(format!(
-                            "failed to release held Fiber message: {error}; \
-                             {remaining} unattempted {noun} remains queued"
-                        )));
-                        return Ok(());
-                    }
-                }
-                let _ = reply.send(Ok(()));
+            FiberActorCommand::Test(tests::TestCommand::ReleaseHeldMessages(reply)) => {
+                NetworkActor::release_held_messages(state, reply).await;
             }
             FiberActorCommand::ActivateInProcessPeer(pubkey, reply) => {
                 let result = if !state.in_process_peers.contains_key(&pubkey) {
@@ -7463,11 +7368,7 @@ pub struct FiberActorState<S, C> {
     #[cfg(not(target_arch = "wasm32"))]
     deferred_hosted_trampoline_settlements: HashSet<PaymentSessionKey>,
     #[cfg(test)]
-    test_fiber_message_hold: Option<TestFiberMessageHold>,
-    #[cfg(test)]
-    test_held_fiber_messages: VecDeque<FiberMessageWithTarget>,
-    #[cfg(test)]
-    test_trampoline_settlement_paused: bool,
+    test_state: tests::TestState,
 }
 
 #[derive(Debug, Clone)]
@@ -10032,7 +9933,7 @@ where
         }
 
         #[cfg(test)]
-        if self.test_trampoline_settlement_paused
+        if self.test_state.trampoline_settlement_paused
             && session.status.is_final()
             && session.request.trampoline_context.is_some()
         {

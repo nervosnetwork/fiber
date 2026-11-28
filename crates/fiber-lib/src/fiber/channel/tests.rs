@@ -890,3 +890,41 @@ impl ChannelActorState {
         self.validate_session()
     }
 }
+
+/// Test-only channel actor messages accepted through `ChannelActorMessage::Test`.
+#[derive(Debug)]
+pub enum TestChannelMessage {
+    GetPendingMessages(RpcReplyPort<TestPendingMessages>),
+}
+
+/// Test-only channel commands accepted through `ChannelCommand::Test`.
+#[derive(Debug)]
+pub enum TestChannelCommand {
+    /// Pause local processing until the test releases the returned sender.
+    Pause(RpcReplyPort<oneshot::Sender<()>>),
+}
+
+pub(crate) fn handle_test_message(state: &mut ChannelActorState, message: TestChannelMessage) {
+    match message {
+        TestChannelMessage::GetPendingMessages(reply) => {
+            let _ = reply.send(TestPendingMessages {
+                pending_peer_message_count: state.pending_messages.peer_messages.len(),
+                has_pending_peer_commitment: state
+                    .pending_messages
+                    .peer_messages
+                    .iter()
+                    .any(|(m, _)| matches!(m, FiberChannelMessage::CommitmentSignedV2(_))),
+            });
+        }
+    }
+}
+
+pub(crate) async fn handle_test_command(command: TestChannelCommand) {
+    match command {
+        TestChannelCommand::Pause(reply) => {
+            let (release, wait) = oneshot::channel();
+            let _ = reply.send(release);
+            let _ = wait.await;
+        }
+    }
+}

@@ -43,6 +43,8 @@ use jsonrpsee::{
     rpc_params, server::ServerHandle,
 };
 
+#[cfg(test)]
+use crate::fiber::network::tests::TestCommand;
 use ractor::RpcReplyPort;
 use ractor::{call, Actor, ActorRef};
 use rand::distr::{Alphanumeric, SampleString};
@@ -782,14 +784,16 @@ impl NetworkNode {
         let remaining = NonZeroUsize::new(count).expect("positive hold count");
         tokio::time::timeout(event_wait_timeout(), async {
             call!(self.network_actor, |reply| {
-                NetworkActorMessage::new_command(FiberActorCommand::SetTestFiberMessageHold(
-                    TestFiberMessageHold {
-                        target,
-                        channel_id,
-                        kind,
-                        remaining,
-                    },
-                    reply,
+                NetworkActorMessage::new_command(FiberActorCommand::Test(
+                    TestCommand::SetMessageHold(
+                        TestFiberMessageHold {
+                            target,
+                            channel_id,
+                            kind,
+                            remaining,
+                        },
+                        reply,
+                    ),
                 ))
             })
         })
@@ -816,8 +820,8 @@ impl NetworkNode {
     pub async fn release_held_fiber_messages(&self) {
         tokio::time::timeout(event_wait_timeout(), async {
             call!(self.network_actor, |reply| {
-                NetworkActorMessage::new_command(FiberActorCommand::ReleaseTestHeldFiberMessages(
-                    reply,
+                NetworkActorMessage::new_command(FiberActorCommand::Test(
+                    TestCommand::ReleaseHeldMessages(reply),
                 ))
             })
         })
@@ -831,8 +835,8 @@ impl NetworkNode {
     pub async fn discard_held_fiber_messages(&self) {
         let _ = tokio::time::timeout(event_wait_timeout(), async {
             call!(self.network_actor, |reply| {
-                NetworkActorMessage::new_command(FiberActorCommand::TakeTestHeldFiberMessages(
-                    reply,
+                NetworkActorMessage::new_command(FiberActorCommand::Test(
+                    TestCommand::TakeHeldMessages(reply),
                 ))
             })
         })
@@ -845,8 +849,8 @@ impl NetworkNode {
     pub async fn get_held_fiber_message_count(&self) -> usize {
         tokio::time::timeout(event_wait_timeout(), async {
             call!(self.network_actor, |reply| {
-                NetworkActorMessage::new_command(FiberActorCommand::GetTestHeldFiberMessageCount(
-                    reply,
+                NetworkActorMessage::new_command(FiberActorCommand::Test(
+                    TestCommand::HeldMessageCount(reply),
                 ))
             })
         })

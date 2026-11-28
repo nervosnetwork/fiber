@@ -58,6 +58,7 @@ use crate::store::open_store;
 use crate::store::NodeNamespace;
 use crate::tests::test_utils::{NetworkNode, NetworkNodeConfigBuilder};
 // Browser tests disable Watchtower; gate its integration fixtures with the same feature.
+use crate::fiber::network::tests::TestCommand;
 #[cfg(feature = "watchtower")]
 use crate::watchtower::WatchtowerStore;
 use crate::{gen_rand_fiber_public_key, gen_rand_sha256_hash};
@@ -352,10 +353,8 @@ async fn assert_uncommitted_remove_relay(
         .unwrap();
         ractor::call!(
             node.network_actor,
-            |reply| NetworkActorMessage::new_command(FiberActorCommand::InstallTestChannelActor(
-                channel_id,
-                actor.clone(),
-                reply
+            |reply| NetworkActorMessage::new_command(FiberActorCommand::Test(
+                TestCommand::InstallChannelActor(channel_id, actor.clone(), reply)
             ))
         )
         .unwrap();
@@ -3316,8 +3315,8 @@ async fn test_scenario_f_live_actor_and_no_actor_recovery_and_finalization() {
 
         ractor::call!(
             node.network_actor,
-            |reply| NetworkActorMessage::new_command(FiberActorCommand::InstallTestChannelActor(
-                channel_id, actor_ref, reply
+            |reply| NetworkActorMessage::new_command(FiberActorCommand::Test(
+                TestCommand::InstallChannelActor(channel_id, actor_ref, reply)
             ))
         )
         .unwrap();
@@ -3922,8 +3921,8 @@ async fn assert_excluded_payer_reconciliation(
         live_ref = Some(actor.clone());
         ractor::call!(
             node.network_actor,
-            |reply| NetworkActorMessage::new_command(FiberActorCommand::InstallTestChannelActor(
-                channel_id, actor, reply
+            |reply| NetworkActorMessage::new_command(FiberActorCommand::Test(
+                TestCommand::InstallChannelActor(channel_id, actor, reply)
             ))
         )
         .unwrap();
@@ -4253,8 +4252,8 @@ async fn assert_timeout_payer_reconciliation(live_actor: bool, kind: TimeoutPaye
         .unwrap();
         ractor::call!(
             node.network_actor,
-            |reply| NetworkActorMessage::new_command(FiberActorCommand::InstallTestChannelActor(
-                channel_id, actor, reply
+            |reply| NetworkActorMessage::new_command(FiberActorCommand::Test(
+                TestCommand::InstallChannelActor(channel_id, actor, reply)
             ))
         )
         .unwrap();
@@ -4859,8 +4858,8 @@ async fn assert_excluded_payer_with_unclaimed_balance(
         live_ref = Some(actor.clone());
         ractor::call!(
             node.network_actor,
-            |reply| NetworkActorMessage::new_command(FiberActorCommand::InstallTestChannelActor(
-                channel_id, actor, reply
+            |reply| NetworkActorMessage::new_command(FiberActorCommand::Test(
+                TestCommand::InstallChannelActor(channel_id, actor, reply)
             ))
         )
         .unwrap();

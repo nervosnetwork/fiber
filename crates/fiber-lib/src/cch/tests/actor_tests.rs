@@ -10,6 +10,7 @@
 //! ReceiveBTC Flow (User receives BTC via Lightning, pays Fiber invoice):
 //!   Pending → IncomingAccepted → OutgoingInFlight → OutgoingSuccess → Success
 
+use crate::cch::actor::tests::TestMessage;
 use crate::cch::{
     actions::CchOrderAction,
     actor::{CchActor, CchArgs, CchMessage, LndInvoiceClient, BTC_BLOCK_TIME_MILLIS},
@@ -1263,7 +1264,10 @@ impl TestHarness {
 
     /// Insert an order directly into the database (for testing without LND)
     async fn insert_order_directly(&self, order: CchOrder) -> Result<(), CchError> {
-        call!(self.actor, CchMessage::InsertOrder, order).expect("actor call failed")
+        call!(self.actor, |tx| CchMessage::Test(TestMessage::InsertOrder(
+            order, tx
+        )))
+        .expect("actor call failed")
     }
 }
 
@@ -1331,7 +1335,10 @@ impl StoreBackedTestHarness {
     }
 
     async fn insert_order_directly(&self, order: CchOrder) -> Result<(), CchError> {
-        call!(self.actor, CchMessage::InsertOrder, order).expect("actor call failed")
+        call!(self.actor, |tx| CchMessage::Test(TestMessage::InsertOrder(
+            order, tx
+        )))
+        .expect("actor call failed")
     }
 }
 
@@ -1419,7 +1426,7 @@ async fn wait_for_startup_recovery(actor: &ActorRef<CchMessage>) {
     loop {
         let in_progress = actor
             .call(
-                CchMessage::GetStartupRecoveryStatus,
+                |tx| CchMessage::Test(TestMessage::GetStartupRecoveryStatus(tx)),
                 Some(Duration::from_secs(1)),
             )
             .await

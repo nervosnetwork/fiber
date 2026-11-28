@@ -5,6 +5,7 @@ use crate::fiber::channel::{
 use crate::fiber::fee::MAX_FUNDING_FEE_RATE;
 use crate::fiber::network::get_chain_hash;
 use crate::fiber::network::onchain_upstream_removed_reason_matches;
+use crate::fiber::network::tests::TestCommand;
 use crate::fiber::tests::settle_tlc_set_command_tests::create_test_channel_state_with_tlc;
 use crate::{
     ckb::{
@@ -309,7 +310,9 @@ async fn test_fiber_message_hold_release_retains_unattempted_messages_after_send
 
     let result = tokio::time::timeout(event_wait_timeout(), async {
         call!(node.network_actor, |reply| {
-            NetworkActorMessage::new_command(FiberActorCommand::ReleaseTestHeldFiberMessages(reply))
+            NetworkActorMessage::new_command(FiberActorCommand::Test(
+                TestCommand::ReleaseHeldMessages(reply),
+            ))
         })
     })
     .await
@@ -321,7 +324,9 @@ async fn test_fiber_message_hold_release_retains_unattempted_messages_after_send
 
     let remaining = tokio::time::timeout(event_wait_timeout(), async {
         call!(node.network_actor, |reply| {
-            NetworkActorMessage::new_command(FiberActorCommand::TakeTestHeldFiberMessages(reply))
+            NetworkActorMessage::new_command(FiberActorCommand::Test(
+                TestCommand::TakeHeldMessages(reply),
+            ))
         })
     })
     .await
@@ -433,11 +438,11 @@ async fn relay_onchain_tlc_remove_does_not_block_network_actor() {
     .expect("spawn delayed channel actor");
 
     call!(node.network_actor, |reply| {
-        NetworkActorMessage::new_command(FiberActorCommand::InstallTestChannelActor(
+        NetworkActorMessage::new_command(FiberActorCommand::Test(TestCommand::InstallChannelActor(
             forwarding_channel_id,
             channel_actor,
             reply,
-        ))
+        )))
     })
     .expect("network actor alive");
 

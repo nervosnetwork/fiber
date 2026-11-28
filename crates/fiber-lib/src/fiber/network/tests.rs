@@ -210,3 +210,133 @@ fn public_messages_cannot_be_derived_as_fiber_messages() {
     ));
     assert!(FiberActorMessage::try_from(message).is_err());
 }
+
+/// Test-only commands accepted through `FiberActorCommand::Test`.
+#[derive(Debug)]
+pub enum TestCommand {
+    InstallChannelActor(Hash256, ActorRef<ChannelActorMessage>, RpcReplyPort<()>),
+    SetMessageHold(TestFiberMessageHold, RpcReplyPort<()>),
+    TakeHeldMessages(RpcReplyPort<Vec<FiberMessageWithTarget>>),
+    ReleaseHeldMessages(RpcReplyPort<Result<(), String>>),
+    HeldMessageCount(RpcReplyPort<usize>),
+    SetTrampolineSettlementPaused(bool, RpcReplyPort<()>),
+    GetPaymentActor(
+        PaymentSessionKey,
+        RpcReplyPort<Option<ActorRef<PaymentActorMessage>>>,
+    ),
+    SetPaymentActor(
+        PaymentSessionKey,
+        ActorRef<PaymentActorMessage>,
+        RpcReplyPort<()>,
+    ),
+}
+
+/// Test-only state carried by `FiberActorState`.
+#[derive(Default)]
+pub(crate) struct TestState {
+    pub(crate) message_hold: Option<TestFiberMessageHold>,
+    pub(crate) held_messages: VecDeque<FiberMessageWithTarget>,
+    pub(crate) trampoline_settlement_paused: bool,
+}
+
+impl<S, C> NetworkActor<S, C>
+where
+    S: NetworkActorStateStore
+        + ChannelActorStateStore
+        + ChannelOpenRecordStore
+        + NetworkGraphStateStore
+        + GossipMessageStore
+        + PreimageStore
+        + InvoiceStore
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+    C: CkbChainClient + Clone + Send + Sync + 'static,
+{
+    pub(crate) fn handle_test_command(state: &mut FiberActorState<S, C>, command: TestCommand) {
+        match command {
+            TestCommand::InstallChannelActor(channel_id, actor, reply) => {
+                state.channels.insert(channel_id, actor);
+                let _ = reply.send(());
+            }
+            TestCommand::SetMessageHold(hold, reply) => {
+                state.test_state.message_hold = Some(hold);
+                let _ = reply.send(());
+            }
+            TestCommand::TakeHeldMessages(reply) => {
+                state.test_state.message_hold = None;
+                let messages = state.test_state.held_messages.drain(..).collect();
+                let _ = reply.send(messages);
+            }
+            TestCommand::HeldMessageCount(reply) => {
+                let _ = reply.send(state.test_state.held_messages.len());
+            }
+            TestCommand::SetTrampolineSettlementPaused(paused, reply) => {
+                state.test_state.trampoline_settlement_paused = paused;
+                let _ = reply.send(());
+            }
+            TestCommand::GetPaymentActor(hash, reply) => {
+                let _ = reply.send(state.inflight_payments.get(&hash).cloned());
+            }
+            TestCommand::SetPaymentActor(hash, actor, reply) => {
+                assert!(state.inflight_payments.insert(hash, actor).is_none());
+                let _ = reply.send(());
+            }
+            // Routed to the async command handler instead.
+            TestCommand::ReleaseHeldMessages(_) => {}
+        }
+    }
+
+    pub(crate) async fn release_held_messages(
+        state: &mut FiberActorState<S, C>,
+        reply: RpcReplyPort<Result<(), String>>,
+    ) {
+        state.test_state.message_hold = None;
+        while let Some(FiberMessageWithTarget { target, message }) =
+            state.test_state.held_messages.pop_front()
+        {
+            if let Err(error) = Box::pin(state.send_fiber_message(&target, message)).await {
+                let remaining = state.test_state.held_messages.len();
+                let noun = if remaining == 1 {
+                    "message"
+                } else {
+                    "messages"
+                };
+                let _ = reply.send(Err(format!(
+                    "failed to release held Fiber message: {error}; \
+                     {remaining} unattempted {noun} remains queued"
+                )));
+                return;
+            }
+        }
+        let _ = reply.send(Ok(()));
+    }
+}
+
+/// Hold an outbound Fiber message when the test asked for it. Returns true when held.
+pub(crate) fn hold_fiber_message<S, C>(
+    state: &mut FiberActorState<S, C>,
+    message: &FiberMessageWithTarget,
+) -> bool {
+    let Some(hold) = state.test_state.message_hold.as_ref() else {
+        return false;
+    };
+    if !hold.matches(message) {
+        return false;
+    }
+    let remaining = hold.remaining.get() - 1;
+    match NonZeroUsize::new(remaining) {
+        Some(remaining) => {
+            state
+                .test_state
+                .message_hold
+                .as_mut()
+                .expect("matching test hold")
+                .remaining = remaining;
+        }
+        None => state.test_state.message_hold = None,
+    }
+    state.test_state.held_messages.push_back(message.clone());
+    true
+}

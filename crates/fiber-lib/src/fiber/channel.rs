@@ -212,8 +212,9 @@ pub enum ChannelActorMessage {
     /// Signature results delivered asynchronously by the channel signer
     /// (local immediate send-to-self, or external submit via network/RPC).
     SignerNotification(SignerNotification),
+    /// Test-only messages. The payload and its handler live in `tests`.
     #[cfg(test)]
-    TestGetPendingMessages(RpcReplyPort<TestPendingMessages>),
+    Test(tests::TestChannelMessage),
 }
 
 impl Display for ChannelActorMessage {
@@ -226,7 +227,7 @@ impl Display for ChannelActorMessage {
                 write!(f, "SignerNotification.{notification:?}")
             }
             #[cfg(test)]
-            Self::TestGetPendingMessages(_) => write!(f, "TestGetPendingMessages"),
+            Self::Test(_) => write!(f, "Test"),
         }
     }
 }
@@ -276,9 +277,9 @@ pub enum ChannelCommand {
     SetDeferPeerTlcUpdates(bool),
     #[cfg(any(test, feature = "bench"))]
     TestBarrier(RpcReplyPort<()>),
-    /// Pause local processing until the test releases the returned sender.
+    /// Test-only commands. The payload and its handler live in `tests`.
     #[cfg(test)]
-    TestPause(RpcReplyPort<oneshot::Sender<()>>),
+    Test(tests::TestChannelCommand),
     /// Disable outbound TLCs in the actor without advertising the fixture change.
     #[cfg(any(test, feature = "bench"))]
     TestDisableTlc(RpcReplyPort<()>),
@@ -309,7 +310,7 @@ impl Display for ChannelCommand {
             #[cfg(any(test, feature = "bench"))]
             ChannelCommand::TestBarrier(_) => write!(f, "TestBarrier"),
             #[cfg(test)]
-            ChannelCommand::TestPause(_) => write!(f, "TestPause"),
+            ChannelCommand::Test(_) => write!(f, "Test"),
             #[cfg(any(test, feature = "bench"))]
             ChannelCommand::TestDisableTlc(_) => write!(f, "TestDisableTlc"),
             #[cfg(any(test, feature = "bench"))]
@@ -3174,10 +3175,8 @@ where
                 Ok(())
             }
             #[cfg(test)]
-            ChannelCommand::TestPause(reply) => {
-                let (release, wait) = oneshot::channel();
-                let _ = reply.send(release);
-                let _ = wait.await;
+            ChannelCommand::Test(command) => {
+                tests::handle_test_command(command).await;
                 Ok(())
             }
             #[cfg(any(test, feature = "bench"))]
@@ -5436,15 +5435,8 @@ where
 
         match message {
             #[cfg(test)]
-            ChannelActorMessage::TestGetPendingMessages(reply) => {
-                let _ = reply.send(TestPendingMessages {
-                    pending_peer_message_count: state.pending_messages.peer_messages.len(),
-                    has_pending_peer_commitment: state
-                        .pending_messages
-                        .peer_messages
-                        .iter()
-                        .any(|(m, _)| matches!(m, FiberChannelMessage::CommitmentSignedV2(_))),
-                });
+            ChannelActorMessage::Test(message) => {
+                tests::handle_test_message(state, message);
             }
             ChannelActorMessage::PeerMessage(message) => {
                 if let Err(error) =

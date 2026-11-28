@@ -1,3 +1,4 @@
+use crate::fiber::channel::tests::TestChannelMessage;
 use ckb_types::{
     core::FeeRate,
     packed::{Script, Transaction},
@@ -2187,7 +2188,10 @@ async fn test_external_signer_buffer_overflow_disconnects_and_recovers() {
             )
         })
         .await;
-    let buffered = call!(actor, ChannelActorMessage::TestGetPendingMessages).unwrap();
+    let buffered = call!(actor, |tx| ChannelActorMessage::Test(
+        TestChannelMessage::GetPendingMessages(tx)
+    ))
+    .unwrap();
     assert_eq!(buffered.pending_peer_message_count, 0);
     let persisted = tenant.get_channel_actor_state(channel_id);
     assert!(persisted.reestablishing);
@@ -3049,7 +3053,9 @@ async fn test_external_signer_resume_refreshes_and_enforces_remaining_peer_wait(
             let tenant_actor = tenant.get_channel_actor(channel_id).await.unwrap();
             let pending = call!(
                 tenant_actor,
-                crate::fiber::channel::ChannelActorMessage::TestGetPendingMessages
+                |tx| crate::fiber::channel::ChannelActorMessage::Test(
+                    crate::fiber::channel::tests::TestChannelMessage::GetPendingMessages(tx),
+                )
             )
             .unwrap();
             pending.pending_peer_message_count >= 2
