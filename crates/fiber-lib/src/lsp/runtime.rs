@@ -38,25 +38,6 @@ pub struct HostedTenantRuntime {
 }
 
 impl HostedTenantRuntime {
-    #[cfg(test)]
-    pub(crate) fn network_backed(
-        tenant_pubkey: Pubkey,
-        network_actor: ActorRef<NetworkActorMessage>,
-    ) -> Self {
-        Self {
-            tenant_pubkey,
-            runtime_actor: FiberActorRef::from_network(&network_actor),
-            public_network_actor: None,
-            rpc_context: None,
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn with_rpc_context(mut self, rpc_context: HostedTenantRpcContext) -> Self {
-        self.rpc_context = Some(rpc_context);
-        self
-    }
-
     fn is_running(&self) -> bool {
         self.runtime_actor.get_status() < ActorStatus::Stopping
     }
@@ -438,3 +419,6 @@ impl TenantSupervisor {
         }
     }
 }
+
+#[cfg(test)]
+pub(crate) mod tests;

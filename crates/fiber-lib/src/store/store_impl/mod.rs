@@ -324,32 +324,6 @@ impl Store {
         ChannelStates::new(self, self.channel_cache.as_ref())
     }
 
-    #[cfg(test)]
-    pub(crate) fn channel_cache_len(&self) -> usize {
-        self.channel_states().cache_len()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn channel_cache_peek(&self, id: &Hash256) -> Option<ChannelActorState> {
-        self.channel_states().cache_peek(id)
-    }
-
-    /// Drop every cached snapshot, as if the store had just been opened (tests only).
-    #[cfg(test)]
-    pub(crate) fn clear_channel_cache(&self) {
-        if let Some(cache) = &self.channel_cache {
-            cache.clear();
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn channel_cache_and_record(
-        &self,
-        id: &Hash256,
-    ) -> Option<(ChannelActorState, Option<ChannelActorState>)> {
-        self.channel_states().cache_and_record(id)
-    }
-
     #[cfg(feature = "watchtower")]
     fn watchtower_write_lock(&self, node_id: &NodeId) -> Arc<parking_lot::Mutex<()>> {
         self.watchtower_write_locks
@@ -1099,11 +1073,6 @@ impl StoreChangePort {
         self.subscribers
             .lock()
             .retain(|deliver| deliver(change.clone()));
-    }
-
-    #[cfg(test)]
-    pub(crate) fn subscriber_count(&self) -> usize {
-        self.subscribers.lock().len()
     }
 }
 
@@ -3813,4 +3782,4 @@ fn update_channel_timestamp(
 
 #[cfg(all(test, feature = "watchtower", not(target_arch = "wasm32")))]
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

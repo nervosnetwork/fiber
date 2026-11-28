@@ -1,6 +1,4 @@
 use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent};
-#[cfg(test)]
-use std::sync::atomic::{AtomicU64, Ordering};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{debug, error};
 
@@ -12,9 +10,6 @@ pub(crate) fn log_actor_failed(who: impl std::fmt::Debug, err: impl std::fmt::De
 pub struct RootActor;
 
 pub type RootActorMessage = String;
-
-#[cfg(test)]
-static NEXT_TEST_ROOT_ACTOR_ID: AtomicU64 = AtomicU64::new(0);
 
 impl RootActor {
     pub async fn start(
@@ -33,15 +28,6 @@ impl RootActor {
             .await
             .expect("start root actor")
             .0
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn start_for_test(
-        tracker: TaskTracker,
-        token: CancellationToken,
-    ) -> ActorRef<RootActorMessage> {
-        let id = NEXT_TEST_ROOT_ACTOR_ID.fetch_add(1, Ordering::Relaxed);
-        Self::start_named(Some(format!("test root actor {id}")), tracker, token).await
     }
 }
 
@@ -106,4 +92,4 @@ impl Actor for RootActor {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

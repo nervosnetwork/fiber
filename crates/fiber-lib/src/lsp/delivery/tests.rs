@@ -194,3 +194,23 @@ fn list_pending_uses_pending_index_without_decoding_final_deliveries() {
 
     assert!(reopened.list_pending().unwrap().is_empty());
 }
+
+impl<S: LspPaymentDeliveryStore> LspPaymentDeliveryManager<S> {
+    /// Test convenience for the common CKB single-channel case.
+    #[cfg(test)]
+    pub fn accept(
+        &self,
+        registration: &LspInvoiceRegistration,
+        tenant: &crate::lsp::HostedTenantRecord,
+        channel_id: Hash256,
+        request: TrampolineForwardingRequest,
+        now: u64,
+    ) -> Result<LspPaymentDelivery, String> {
+        let channel = TenantChannelRecord {
+            channel_id,
+            funding_udt_type_script: request.udt_type_script.clone(),
+            bound_at: 0,
+        };
+        self.accept_on_channel(registration, tenant, &channel, request, now)
+    }
+}

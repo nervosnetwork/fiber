@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use tokio::sync::oneshot;
 
 use super::*;
@@ -99,3 +101,15 @@ async fn root_actor_does_not_panic_when_linked_child_fails() {
     root.send_message("root should still accept messages".to_string())
         .expect("root actor should remain alive after linked child failure");
 }
+
+impl RootActor {
+    pub(crate) async fn start_for_test(
+        tracker: TaskTracker,
+        token: CancellationToken,
+    ) -> ActorRef<RootActorMessage> {
+        let id = NEXT_TEST_ROOT_ACTOR_ID.fetch_add(1, Ordering::Relaxed);
+        Self::start_named(Some(format!("test root actor {id}")), tracker, token).await
+    }
+}
+
+static NEXT_TEST_ROOT_ACTOR_ID: AtomicU64 = AtomicU64::new(0);

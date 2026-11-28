@@ -1,3 +1,4 @@
+use super::*;
 use std::sync::{mpsc, Arc, Barrier};
 use std::time::Duration;
 
@@ -98,4 +99,41 @@ fn one_node_preimage_gc_does_not_block_another_node_writer() {
         Some(writer_preimage),
         "another node's preimage write must complete independently"
     );
+}
+
+impl StoreChangePort {
+    pub(crate) fn subscriber_count(&self) -> usize {
+        self.subscribers.lock().len()
+    }
+}
+
+impl Store {
+    pub(crate) fn channel_cache_and_record(
+        &self,
+        id: &Hash256,
+    ) -> Option<(ChannelActorState, Option<ChannelActorState>)> {
+        self.channel_states().cache_and_record(id)
+    }
+}
+
+impl Store {
+    /// Drop every cached snapshot, as if the store had just been opened (tests only).
+    #[cfg(test)]
+    pub(crate) fn clear_channel_cache(&self) {
+        if let Some(cache) = &self.channel_cache {
+            cache.clear();
+        }
+    }
+}
+
+impl Store {
+    pub(crate) fn channel_cache_peek(&self, id: &Hash256) -> Option<ChannelActorState> {
+        self.channel_states().cache_peek(id)
+    }
+}
+
+impl Store {
+    pub(crate) fn channel_cache_len(&self) -> usize {
+        self.channel_states().cache_len()
+    }
 }

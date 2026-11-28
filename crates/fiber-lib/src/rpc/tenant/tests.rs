@@ -472,3 +472,54 @@ async fn query_tenant_target_policy_is_fail_closed() {
         .expect("query must fail");
     assert!(error.to_string().contains("tenant id"), "{error}");
 }
+
+/// Operator-only methods that ask for tenant routing inputs anyway.
+///
+/// These handlers receive `Extensions` or an injected
+/// [`fiber_json_types::RpcContext`] and route (or validate) tenant state, but a
+/// tenant token cannot reach them. Declaring them keeps the difference between
+/// "not exposed" and "deliberately operator-only" reviewable:
+/// `operator_methods_that_can_route_tenants_are_declared` fails when a method
+/// asks for routing inputs without being classified either way.
+const TENANT_ROUTING_OPERATOR_METHODS: &[(&str, &str)] = &[
+    (
+        "abandon_channel",
+        "routes tenant requests, but abandoning a hosted channel while the LSP is still \
+         negotiating the funding would desync its channel-open record",
+    ),
+    (
+        "accept_channel",
+        "routes tenant requests, but it lacks the private-channel guard `open_channel` has; \
+         not exposed until that guard exists",
+    ),
+    (
+        "build_router",
+        "routes tenant requests, but tenant payments route implicitly through `send_payment`, \
+         so building routers stays operator-only by design",
+    ),
+    (
+        "open_channel",
+        "routes tenant requests, but a hosted tenant has no wallet to fund from; hosted \
+         channels open through `open_channel_with_external_funding`",
+    ),
+    (
+        "send_payment_with_router",
+        "routes tenant requests, but tenant payments use `send_payment`'s auto-routing, so \
+         explicit routers stay operator-only by design",
+    ),
+    (
+        "update_local_settlement",
+        "operates on the tenant watchtower namespace selected by RpcContext; tenants submit \
+         signatures instead of updating settlement state",
+    ),
+    (
+        "update_pending_remote_settlement",
+        "operates on the tenant watchtower namespace selected by RpcContext; tenants submit \
+         signatures instead of updating settlement state",
+    ),
+    (
+        "update_revocation",
+        "operates on the tenant watchtower namespace selected by RpcContext; tenants submit \
+         signatures instead of updating revocation state",
+    ),
+];

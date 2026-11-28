@@ -178,10 +178,11 @@ impl Fixture {
         args.push(0);
         args.push(features.bits());
         let mut lock = get_script_by_contract(Contract::CommitmentLock, &args);
-        let mut tracked = crate::fiber::onchain_tlc_reconcile::verified_tracked_settlement_tlcs(
-            &lock, &channel, for_remote,
-        )
-        .expect("verified TLC identities");
+        let mut tracked =
+            crate::fiber::onchain_tlc_reconcile::tests::verified_tracked_settlement_tlcs(
+                &lock, &channel, for_remote,
+            )
+            .expect("verified TLC identities");
         let witness = subsequent.then(|| {
             let mut witness =
                 SettlementWitness::build_from_witness(&[&[0], witness_bytes.as_slice()].concat())
@@ -882,7 +883,7 @@ fn external_final_settlement_uses_base_key_through_transaction_builder() {
             args.extend_from_slice(&[0, ChannelFeatures::V2.bits()]);
             let lock = output.lock().as_builder().args(args.pack()).build();
             fixture.tracked =
-                crate::fiber::onchain_tlc_reconcile::verified_tracked_settlement_tlcs(
+                crate::fiber::onchain_tlc_reconcile::tests::verified_tracked_settlement_tlcs(
                     &lock,
                     &fixture.channel,
                     for_remote,
@@ -1231,7 +1232,7 @@ fn external_pending_request_expires_after_ttl_and_enforces_backoff() {
 
     // Mid-TTL sync must NOT renew created_at_ms or drop the request.
     let mid_ttl = created_at_ms + crate::ckb::held_cells::WATCHTOWER_HOLD_MS / 2;
-    crate::watchtower::actor::expire_external_signing_requests(
+    crate::watchtower::actor::tests::expire_external_signing_requests(
         &fixture.events,
         &fixture.store,
         &channels,
@@ -1255,7 +1256,7 @@ fn external_pending_request_expires_after_ttl_and_enforces_backoff() {
 
     // Past TTL: unsigned request must expire and arm backoff.
     let expired_at = created_at_ms + crate::ckb::held_cells::WATCHTOWER_HOLD_MS;
-    crate::watchtower::actor::expire_external_signing_requests(
+    crate::watchtower::actor::tests::expire_external_signing_requests(
         &fixture.events,
         &fixture.store,
         &channels,
@@ -1324,7 +1325,7 @@ fn external_pending_request_expires_after_ttl_and_enforces_backoff() {
             Ok::<_, std::convert::Infallible>(())
         })
         .unwrap();
-    crate::watchtower::actor::expire_external_signing_requests(
+    crate::watchtower::actor::tests::expire_external_signing_requests(
         &fixture.events,
         &fixture.store,
         &channels,
@@ -1692,7 +1693,7 @@ fn build_custom_ckb_fixture(
     args.push(0);
     args.push(ChannelFeatures::V2.bits());
     let mut lock = get_script_by_contract(Contract::CommitmentLock, &args);
-    let mut tracked = crate::fiber::onchain_tlc_reconcile::verified_tracked_settlement_tlcs(
+    let mut tracked = crate::fiber::onchain_tlc_reconcile::tests::verified_tracked_settlement_tlcs(
         &lock, &channel, for_remote,
     )
     .expect("verified TLC identities");
@@ -2609,7 +2610,7 @@ fn external_funding_watchtower_request_never_touches_operator_held_cells() {
 
     // Syncing holds before and after TTL expiry must neither lock unheld_utxo nor release operator_utxo.
     let channels = fixture.store.get_watch_channels_with_nodes();
-    crate::watchtower::actor::expire_external_signing_requests(
+    crate::watchtower::actor::tests::expire_external_signing_requests(
         &fixture.events,
         &fixture.store,
         &channels,
@@ -2629,7 +2630,7 @@ fn external_funding_watchtower_request_never_touches_operator_held_cells() {
             Ok::<_, std::convert::Infallible>(())
         })
         .unwrap();
-    crate::watchtower::actor::expire_external_signing_requests(
+    crate::watchtower::actor::tests::expire_external_signing_requests(
         &fixture.events,
         &fixture.store,
         &channels,
@@ -2809,7 +2810,7 @@ fn external_funding_eviction_clears_last_applied_while_confirmed_spend_preserves
                 let expired_at = crate::now_timestamp_as_millis_u64()
                     + crate::ckb::held_cells::WATCHTOWER_HOLD_MS
                     + 10_000;
-                crate::watchtower::actor::expire_external_signing_requests(
+                crate::watchtower::actor::tests::expire_external_signing_requests(
                     &fixture.events,
                     &fixture.store,
                     &channels,

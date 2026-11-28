@@ -68,3 +68,8 @@ fn test_v2_session_aggregation_guard_and_independent_directions() {
     )
     .is_err());
 }
+
+fn valid_nonce(record: &SigningNonceV2, key: &Privkey) -> bool {
+    record.public_nonce == secret_nonce(record, key).public_nonce()
+        && (record.signature.is_none() || record.context.is_some())
+}

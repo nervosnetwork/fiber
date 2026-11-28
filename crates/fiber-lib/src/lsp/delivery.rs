@@ -480,24 +480,6 @@ impl<S: LspPaymentDeliveryStore> LspPaymentDeliveryManager<S> {
         Ok(delivery)
     }
 
-    /// Test convenience for the common CKB single-channel case.
-    #[cfg(test)]
-    pub fn accept(
-        &self,
-        registration: &LspInvoiceRegistration,
-        tenant: &super::HostedTenantRecord,
-        channel_id: Hash256,
-        request: TrampolineForwardingRequest,
-        now: u64,
-    ) -> Result<LspPaymentDelivery, String> {
-        let channel = TenantChannelRecord {
-            channel_id,
-            funding_udt_type_script: request.udt_type_script.clone(),
-            bound_at: 0,
-        };
-        self.accept_on_channel(registration, tenant, &channel, request, now)
-    }
-
     /// Persist a delivery routed over the exact tenant channel selected for
     /// the incoming asset.
     pub fn accept_on_channel(
@@ -648,4 +630,4 @@ impl<S: LspPaymentDeliveryStore> LspPaymentDeliveryManager<S> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

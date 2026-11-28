@@ -54,12 +54,6 @@ fn secret_nonce(record: &SigningNonceV2, key: &Privkey) -> SecNonce {
     fiber_types::channel_v2_validation::secret_nonce_v2(record, key)
 }
 
-#[cfg(test)]
-pub(super) fn valid_nonce(record: &SigningNonceV2, key: &Privkey) -> bool {
-    record.public_nonce == secret_nonce(record, key).public_nonce()
-        && (record.signature.is_none() || record.context.is_some())
-}
-
 pub(super) fn allocate_nonce(
     channel_id: Hash256,
     owner: Pubkey,

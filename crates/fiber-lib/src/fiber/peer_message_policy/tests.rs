@@ -348,3 +348,27 @@ fn zero_ban_threshold_never_bans() {
     }
     assert!(!policy.is_banned(&peer, 0));
 }
+
+impl PeerMessagePolicy {
+    pub(crate) fn in_flight(&self) -> (u32, u64) {
+        (
+            self.ingress.in_flight_messages,
+            self.ingress.in_flight_bytes,
+        )
+    }
+}
+
+impl PeerMessagePolicy {
+    pub(crate) fn with_limits(
+        max_entries: usize,
+        max_in_flight_messages: u32,
+        max_in_flight_bytes: u64,
+    ) -> Self {
+        Self::new(PeerMessagePolicyConfig {
+            max_tracked_peers: max_entries.max(1),
+            max_in_flight_messages,
+            max_in_flight_bytes,
+            ..PeerMessagePolicyConfig::default()
+        })
+    }
+}

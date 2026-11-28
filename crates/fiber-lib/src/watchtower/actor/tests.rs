@@ -262,7 +262,7 @@ fn tracked_settlement_tlcs_accepts_private_key_only_channel() {
     let commitment_lock = get_script_by_contract(Contract::CommitmentLock, &lock_args);
 
     assert_eq!(
-        crate::fiber::onchain_tlc_reconcile::verified_tracked_settlement_tlcs(
+        crate::fiber::onchain_tlc_reconcile::tests::verified_tracked_settlement_tlcs(
             &commitment_lock,
             &channel_data,
             false
@@ -1215,7 +1215,7 @@ fn test_fresh_channel_pre_tlc_commitment_builds_settlement() {
     args.push(ChannelFeatures::V2.bits());
     let commitment_lock = get_script_by_contract(Contract::CommitmentLock, &args);
     assert_eq!(
-        crate::fiber::onchain_tlc_reconcile::verified_tracked_settlement_tlcs(
+        crate::fiber::onchain_tlc_reconcile::tests::verified_tracked_settlement_tlcs(
             &commitment_lock,
             &channel_data,
             true
@@ -1279,4 +1279,15 @@ fn test_fresh_channel_pre_tlc_commitment_builds_settlement() {
     assert_eq!(&actual[offset..offset + witness.len()], witness.as_slice());
     let remaining_capacity: u64 = tx.outputs().get(0).unwrap().capacity().unpack();
     assert_eq!(remaining_capacity, 100_000_000_000);
+}
+
+pub(crate) fn expire_external_signing_requests<S: WatchtowerStore>(
+    events: &crate::signing::SigningEvents,
+    store: &S,
+    channels: &[(NodeId, ChannelData)],
+    now_ms: u64,
+) {
+    for (node, channel) in channels {
+        expire_channel_external_signing_requests(events, store, node, &channel.channel_id, now_ms);
+    }
 }

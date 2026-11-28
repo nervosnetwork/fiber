@@ -1,3 +1,14 @@
+use std::net::SocketAddr;
+
+use anyhow::Result;
+use jsonrpsee::server::{stop_channel, ServerHandle};
+use jsonrpsee::Methods;
+use tokio::net::TcpListener;
+
+use super::{spawn_listener, ListenerConfig};
+use crate::rpc::biscuit::BiscuitAuth;
+use std::sync::Arc;
+
 use std::time::Duration;
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
@@ -360,4 +371,30 @@ fn test_is_public_addr() {
     assert!(!is_public_addr("[::1]:0").unwrap());
     assert!(is_public_addr("0.0.0.0:0").unwrap());
     assert!(!is_public_addr("127.0.0.1:0").unwrap());
+}
+
+pub(crate) async fn start_server(
+    addr: &str,
+    auth: Option<BiscuitAuth>,
+    methods: impl Into<Methods>,
+    cors_enabled: bool,
+    cors_allowed_origins: Vec<String>,
+) -> Result<(ServerHandle, SocketAddr)> {
+    let listener = TcpListener::bind(addr).await?;
+    let listen_addr = listener.local_addr()?;
+    let (stop_handle, handle) = stop_channel();
+    let enable_auth = auth.is_some();
+    spawn_listener(
+        listener,
+        Arc::new(auth.unwrap_or_else(BiscuitAuth::without_pubkey)),
+        enable_auth,
+        methods.into(),
+        stop_handle,
+        ListenerConfig {
+            ws_only: false,
+            cors_enabled,
+            cors_allowed_origins,
+        },
+    );
+    Ok((handle, listen_addr))
 }

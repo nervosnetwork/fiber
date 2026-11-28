@@ -815,3 +815,78 @@ fn reject_invalid_script_hash_type_in_channel_validation_and_tenant_opening() {
         .tenant_opening_result(Transaction::default())
         .is_err());
 }
+
+impl ChannelActorState {
+    /// Give synthetic on-chain fixtures genuine signed V2 bootstrap history.
+    #[cfg(test)]
+    pub(crate) fn sign_test_bootstrap_v2(&mut self) -> ProcessingChannelResult {
+        let state = self.state;
+        let tlcs = std::mem::take(&mut self.tlc_state);
+        self.state = ChannelState::NegotiatingFunding(NegotiatingFundingFlags::empty());
+        self.funding_tx.get_or_insert_with(Default::default);
+        self.local_channel_public_keys = self.signer.as_ref().unwrap().get_base_public_keys();
+        let remote_signer = fiber_types::InMemorySigner::generate_from_seed(&[1; 32]);
+        self.remote_channel_public_keys = Some(remote_signer.get_base_public_keys());
+        self.commitment_numbers = fiber_types::CommitmentNumbers {
+            local: 1,
+            remote: 1,
+        };
+        self.musig2_agg_context_local_first = OnceLock::new();
+        self.musig2_agg_context_remote_first = OnceLock::new();
+        let mut peer = self.clone();
+        peer.channel_signer = ChannelSigner::local(remote_signer.clone());
+        peer.signer = Some(remote_signer);
+        peer.local_channel_public_keys = peer.signer.as_ref().unwrap().get_base_public_keys();
+        peer.remote_channel_public_keys = Some(self.local_channel_public_keys.clone());
+        peer.to_local_amount = self.to_remote_amount;
+        peer.to_remote_amount = self.to_local_amount;
+        peer.local_reserved_ckb_amount = self.remote_reserved_ckb_amount;
+        peer.remote_reserved_ckb_amount = self.local_reserved_ckb_amount;
+        self.session = new_session(
+            self.id,
+            &self
+                .channel_signer
+                .local_material()
+                .ok_or_else(|| invalid("External signing required"))?
+                .funding_key,
+            None,
+        );
+        let local_nonce = self.session.own.public_nonce.clone();
+        peer.session = new_session(
+            peer.id,
+            &peer.signer.as_ref().unwrap().funding_key,
+            Some(local_nonce),
+        );
+        let remote_nonce = peer.session.own.public_nonce.clone();
+        let session = &mut self.session;
+        session.remote_nonce = Some(remote_nonce.clone());
+        session.bootstrap_remote_nonce = Some(remote_nonce);
+        let (ours, _) = self.prepare_outgoing_v2(true)?;
+        let (theirs, _) = peer.prepare_outgoing_v2(true)?;
+        let verified = self.stage_incoming_v2(&theirs, true)?;
+        self.accept_commitment_v2(&theirs, true, verified)?;
+        let verified = peer.stage_incoming_v2(&ours, true)?;
+        peer.accept_commitment_v2(&ours, true, verified)?;
+        self.commitment_numbers = fiber_types::CommitmentNumbers {
+            local: 2,
+            remote: 2,
+        };
+        peer.commitment_numbers = self.commitment_numbers;
+        self.ready_wire_message()?;
+        let FiberMessage::ChannelNormalOperation(FiberChannelMessage::ChannelReadyV2(ready)) =
+            peer.ready_wire_message()?
+        else {
+            return Err(invalid("Expected V2 bootstrap Ready"));
+        };
+        let session = &mut self.session;
+        session.remote_number = ready.next_commitment_number;
+        session.remote_nonce = Some(ready.next_commitment_nonce.clone());
+        session.remote_ready = Some(ready.into());
+        if tlcs.waiting_ack {
+            self.prepare_outgoing_v2(false)?;
+        }
+        self.tlc_state = tlcs;
+        self.state = state;
+        self.validate_session()
+    }
+}

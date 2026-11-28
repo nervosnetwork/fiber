@@ -666,11 +666,6 @@ where
     }
 
     #[cfg(test)]
-    pub(crate) fn get_extended_actor(&self) -> &ActorRef<ExtendedGossipMessageStoreMessage> {
-        &self.extended_store.actor
-    }
-
-    #[cfg(test)]
     pub(crate) fn get_store(&self) -> &S {
         &self.extended_store.store
     }
@@ -4533,4 +4528,4 @@ impl ServiceProtocol for GossipProtocolHandle {
     async fn notify(&mut self, _context: &mut ProtocolContext, _token: u64) {}
 }
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

@@ -171,3 +171,13 @@ fn test_delayed_outbound_queue_rejects_global_byte_budget_overflow() {
         "queued bytes across peers must be globally capped"
     );
 }
+
+impl<S, C> GossipService<S, C>
+where
+    S: GossipMessageStore + Clone + Send + Sync + 'static,
+    C: CkbChainClient + Clone + Send + Sync + 'static,
+{
+    pub(crate) fn get_extended_actor(&self) -> &ActorRef<ExtendedGossipMessageStoreMessage> {
+        &self.extended_store.actor
+    }
+}

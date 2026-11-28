@@ -42,14 +42,6 @@ impl LspDeliveryPort {
         })
     }
 
-    #[cfg(test)]
-    pub(crate) fn without_fast_path(actor: ActorRef<LspServiceMessage>) -> Arc<Self> {
-        Arc::new(Self {
-            actor,
-            metadata_store: None,
-        })
-    }
-
     fn has_active_hosted_delivery(
         store: &Store,
         session_key: PaymentSessionKey,
@@ -127,3 +119,6 @@ impl HostedDeliveryPort for LspDeliveryPort {
         let _ = self.actor.send_message(message);
     }
 }
+
+#[cfg(test)]
+pub(crate) mod tests;

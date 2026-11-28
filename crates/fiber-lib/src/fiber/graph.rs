@@ -602,11 +602,6 @@ where
         self.channel_stats.clone()
     }
 
-    #[cfg(test)]
-    pub(crate) fn set_fixed_rand_expiry_delta(&mut self, expiry_delta: u64) {
-        self.fixed_rand_expiry_delta = Some(expiry_delta);
-    }
-
     pub(crate) fn reset_channel_stats_for_direct_channel(
         &mut self,
         channel_outpoint: &OutPoint,
@@ -3196,3 +3191,6 @@ pub trait NetworkGraphStateStore {
     fn get_pending_attempts_by_channel_outpoint(&self, channel_outpoint: &OutPoint)
         -> Vec<Attempt>;
 }
+
+#[cfg(test)]
+pub(crate) mod tests;

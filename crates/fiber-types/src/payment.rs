@@ -1065,22 +1065,6 @@ impl PaymentSession {
         self.cached_attempts.iter()
     }
 
-    #[cfg(test)]
-    pub fn all_attempts_with_status(&self) -> Vec<(u64, AttemptStatus, Option<String>, u32, u128)> {
-        self.cached_attempts
-            .iter()
-            .map(|a| {
-                (
-                    a.id,
-                    a.status,
-                    a.last_error.clone(),
-                    a.tried_times,
-                    a.route.receiver_amount(),
-                )
-            })
-            .collect()
-    }
-
     pub fn attempts_count(&self) -> usize {
         self.cached_attempts.len()
     }
@@ -1281,3 +1265,6 @@ pub enum Direction {
     Forward,
     Backward,
 }
+
+#[cfg(test)]
+mod tests;

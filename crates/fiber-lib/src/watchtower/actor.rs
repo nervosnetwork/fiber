@@ -996,18 +996,6 @@ pub(crate) fn expire_channel_external_signing_requests<S: WatchtowerStore>(
     );
 }
 
-#[cfg(test)]
-pub(crate) fn expire_external_signing_requests<S: WatchtowerStore>(
-    events: &crate::signing::SigningEvents,
-    store: &S,
-    channels: &[(NodeId, ChannelData)],
-    now_ms: u64,
-) {
-    for (node, channel) in channels {
-        expire_channel_external_signing_requests(events, store, node, &channel.channel_id, now_ms);
-    }
-}
-
 /// Holds the cells `tx` spends (`held_cells`), and locks them in `cell_collector` for the rest of
 /// this round.
 fn hold_sent(tx: &TransactionView, cell_collector: &mut dyn CellCollector) {
@@ -4463,7 +4451,7 @@ fn mul(
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 #[cfg(all(test, feature = "watchtower"))]
 #[path = "external_signing_tests.rs"]

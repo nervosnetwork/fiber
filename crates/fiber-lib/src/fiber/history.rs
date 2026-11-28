@@ -157,13 +157,6 @@ impl InternalResult {
         }
     }
 
-    #[cfg(test)]
-    pub fn fail_range_pairs(&mut self, nodes: &[SessionRouteNode], start: usize, end: usize) {
-        for index in start.max(1)..=end {
-            self.fail_pair(nodes, index);
-        }
-    }
-
     fn error_channel_is_adjacent_to_hop(
         nodes: &[SessionRouteNode],
         index: usize,
@@ -791,3 +784,6 @@ where
         }
     }
 }
+
+#[cfg(test)]
+pub(crate) mod tests;

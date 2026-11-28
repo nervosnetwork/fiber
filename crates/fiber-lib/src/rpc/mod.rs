@@ -149,33 +149,6 @@ pub mod server {
         cors_allowed_origins: Vec<String>,
     }
 
-    #[cfg(test)]
-    pub(super) async fn start_server(
-        addr: &str,
-        auth: Option<BiscuitAuth>,
-        methods: impl Into<Methods>,
-        cors_enabled: bool,
-        cors_allowed_origins: Vec<String>,
-    ) -> Result<(ServerHandle, SocketAddr)> {
-        let listener = TcpListener::bind(addr).await?;
-        let listen_addr = listener.local_addr()?;
-        let (stop_handle, handle) = stop_channel();
-        let enable_auth = auth.is_some();
-        spawn_listener(
-            listener,
-            Arc::new(auth.unwrap_or_else(BiscuitAuth::without_pubkey)),
-            enable_auth,
-            methods.into(),
-            stop_handle,
-            ListenerConfig {
-                ws_only: false,
-                cors_enabled,
-                cors_allowed_origins,
-            },
-        );
-        Ok((handle, listen_addr))
-    }
-
     fn spawn_listener(
         listener: TcpListener,
         auth: Arc<BiscuitAuth>,
@@ -660,5 +633,5 @@ pub mod server {
 
     #[cfg(test)]
     #[path = "tests.rs"]
-    mod tests;
+    pub(crate) mod tests;
 }

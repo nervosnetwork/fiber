@@ -278,20 +278,6 @@ impl PeerMessagePolicy {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn with_limits(
-        max_entries: usize,
-        max_in_flight_messages: u32,
-        max_in_flight_bytes: u64,
-    ) -> Self {
-        Self::new(PeerMessagePolicyConfig {
-            max_tracked_peers: max_entries.max(1),
-            max_in_flight_messages,
-            max_in_flight_bytes,
-            ..PeerMessagePolicyConfig::default()
-        })
-    }
-
     fn insert_entry(&mut self, peer: Pubkey, entry: PeerMessagePolicyEntry) {
         if let Some(banned_until_ms) = entry.banned_until_ms {
             self.banned_expirations.insert((banned_until_ms, peer));
@@ -438,14 +424,6 @@ impl PeerMessagePolicy {
     pub(crate) fn release_ingress(&mut self, bytes: u64) {
         self.ingress.release(bytes);
     }
-
-    #[cfg(test)]
-    pub(crate) fn in_flight(&self) -> (u32, u64) {
-        (
-            self.ingress.in_flight_messages,
-            self.ingress.in_flight_bytes,
-        )
-    }
 }
 
 impl Default for PeerMessagePolicy {
@@ -455,4 +433,4 @@ impl Default for PeerMessagePolicy {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
