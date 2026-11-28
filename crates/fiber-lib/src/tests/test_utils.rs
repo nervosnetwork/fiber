@@ -8,6 +8,8 @@ use crate::fiber::gossip::get_gossip_actor_name;
 use crate::fiber::gossip::GossipActorMessage;
 use crate::fiber::graph::NetworkGraphStateStore;
 use crate::fiber::network::*;
+#[cfg(test)]
+use crate::fiber::onchain_tlc_reconcile::TrackedSettlementTlc;
 use crate::fiber::payment::PaymentSessionExt;
 use crate::fiber::payment::SendPaymentCommand;
 use crate::fiber::payment::SendPaymentWithRouterCommand;
@@ -27,12 +29,16 @@ use crate::rpc::config::RpcConfig;
 use crate::rpc::invoice::{InvoiceResult, NewInvoiceParams};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::rpc::server::start_rpc;
+#[cfg(test)]
+use crate::tests::hooks::TestCommand;
 use ckb_sdk::core::TransactionBuilder;
 use ckb_types::core::FeeRate;
 use ckb_types::{
     core::{tx_pool::TxStatus, TransactionView},
     packed::{OutPoint, Script},
 };
+#[cfg(test)]
+use fiber_types::ChannelData;
 use fiber_types::TLCId;
 use fiber_types::TlcInfo;
 #[cfg(not(target_arch = "wasm32"))]
@@ -782,14 +788,16 @@ impl NetworkNode {
         let remaining = NonZeroUsize::new(count).expect("positive hold count");
         tokio::time::timeout(event_wait_timeout(), async {
             call!(self.network_actor, |reply| {
-                NetworkActorMessage::new_command(FiberActorCommand::SetTestFiberMessageHold(
-                    TestFiberMessageHold {
-                        target,
-                        channel_id,
-                        kind,
-                        remaining,
-                    },
-                    reply,
+                NetworkActorMessage::new_command(FiberActorCommand::Test(
+                    TestCommand::SetMessageHold(
+                        TestFiberMessageHold {
+                            target,
+                            channel_id,
+                            kind,
+                            remaining,
+                        },
+                        reply,
+                    ),
                 ))
             })
         })
@@ -816,8 +824,8 @@ impl NetworkNode {
     pub async fn release_held_fiber_messages(&self) {
         tokio::time::timeout(event_wait_timeout(), async {
             call!(self.network_actor, |reply| {
-                NetworkActorMessage::new_command(FiberActorCommand::ReleaseTestHeldFiberMessages(
-                    reply,
+                NetworkActorMessage::new_command(FiberActorCommand::Test(
+                    TestCommand::ReleaseHeldMessages(reply),
                 ))
             })
         })
@@ -831,8 +839,8 @@ impl NetworkNode {
     pub async fn discard_held_fiber_messages(&self) {
         let _ = tokio::time::timeout(event_wait_timeout(), async {
             call!(self.network_actor, |reply| {
-                NetworkActorMessage::new_command(FiberActorCommand::TakeTestHeldFiberMessages(
-                    reply,
+                NetworkActorMessage::new_command(FiberActorCommand::Test(
+                    TestCommand::TakeHeldMessages(reply),
                 ))
             })
         })
@@ -845,8 +853,8 @@ impl NetworkNode {
     pub async fn get_held_fiber_message_count(&self) -> usize {
         tokio::time::timeout(event_wait_timeout(), async {
             call!(self.network_actor, |reply| {
-                NetworkActorMessage::new_command(FiberActorCommand::GetTestHeldFiberMessageCount(
-                    reply,
+                NetworkActorMessage::new_command(FiberActorCommand::Test(
+                    TestCommand::HeldMessageCount(reply),
                 ))
             })
         })
@@ -2519,4 +2527,26 @@ async fn test_connect_to_other_node_on_additional_listening_address() {
 async fn test_restart_network_node() {
     let mut node = NetworkNode::new().await;
     node.restart().await;
+}
+
+/// Re-verify a settlement witness against the channel commitment lock, as the
+/// watchtower does, and return the TLCs it settles.
+#[cfg(test)]
+pub(crate) fn verified_tracked_settlement_tlcs(
+    lock: &Script,
+    channel: &ChannelData,
+    expected_remote: bool,
+) -> Option<Vec<TrackedSettlementTlc>> {
+    let (for_remote, _, snapshot) =
+        crate::fiber::onchain_tlc_reconcile::verify_and_select_settlement_data(channel, lock)?;
+    if for_remote != expected_remote {
+        return None;
+    }
+    Some(
+        crate::fiber::onchain_tlc_reconcile::tracked_settlement_tlcs(
+            snapshot,
+            for_remote,
+            channel.channel_features,
+        ),
+    )
 }

@@ -57,7 +57,7 @@ impl Fixture {
             )
             .unwrap();
         let (handle, address) =
-            crate::rpc::server::start_server("127.0.0.1:0", auth, module, false, vec![])
+            crate::rpc::server::tests::start_server("127.0.0.1:0", auth, module, false, vec![])
                 .await
                 .unwrap();
         Self {

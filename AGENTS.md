@@ -169,7 +169,16 @@ impl Actor for MyActor {
 - Explain "why" in comments, not just "what"
 
 ### Testing Conventions
-- Unit tests in same file: `#[cfg(test)] mod tests { ... }`
+- Tests never share a file with the code under test. Declare `#[cfg(test)] mod tests;`
+  and put the tests in a sibling `tests.rs`:
+  - `src/foo.rs` -> `src/foo/tests.rs`
+  - `src/foo/mod.rs` -> `src/foo/tests.rs`
+  - crate root (`src/lib.rs`, `src/main.rs`) -> `src/tests.rs`
+- A second test suite for the same module gets its own file named after the module
+  (`src/foo/bar_tests.rs`) instead of another inline module.
+- Several test files under one module become `src/foo/tests/mod.rs` with `mod bar;`.
+- Test-only helpers, fixtures, `#[cfg(test)]` constants and test hooks stay in the
+  tests module or `src/tests/`; do not grow test-only variants in production types.
 - Integration tests in `tests/` directory
 - Use descriptive test names: `test_channel_open_accept_flow`
 - Mock actors and external dependencies

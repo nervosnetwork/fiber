@@ -1,3 +1,7 @@
+#[cfg(test)]
+pub mod hooks;
+#[cfg(test)]
+pub use hooks::*;
 pub mod gen_utils;
 pub use gen_utils::*;
 pub mod rpc_utils;

@@ -37,6 +37,8 @@ use crate::rpc::payment::{GetPaymentCommandResult, SendPaymentWithRouterParams};
 use crate::tasks::cancel_tasks_and_wait_for_completion;
 use crate::test_utils::init_tracing;
 use crate::tests::test_utils::*;
+use crate::tests::TestChannelCommand;
+use crate::tests::TestCommand;
 #[cfg(feature = "watchtower")]
 use crate::watchtower::WatchtowerStore;
 use crate::NetworkServiceEvent;
@@ -121,7 +123,7 @@ async fn test_review_late_update_preserves_trampoline_error_packet() {
     // Keep the upstream removal in the channel state until the packet is inspected.
     let upstream_channel = payer.get_channel_actor(channel_id).await.unwrap();
     let release = ractor::call!(upstream_channel, |reply| ChannelActorMessage::Command(
-        ChannelCommand::TestPause(reply)
+        ChannelCommand::Test(TestChannelCommand::Pause(reply))
     ))
     .unwrap();
     let mut request = SendPaymentCommand {
@@ -164,11 +166,11 @@ async fn test_review_late_update_preserves_trampoline_error_packet() {
     old.stop(None);
     task.await.unwrap();
     ractor::call!(relay.network_actor, |reply| {
-        NetworkActorMessage::new_command(FiberActorCommand::TestSetPaymentActor(
+        NetworkActorMessage::new_command(FiberActorCommand::Test(TestCommand::SetPaymentActor(
             hash.into(),
             old.clone(),
             reply,
-        ))
+        )))
     })
     .unwrap();
     let wakeups = || {
@@ -184,7 +186,10 @@ async fn test_review_late_update_preserves_trampoline_error_packet() {
     for message in wakeups() {
         relay.network_actor.send_message(message).unwrap();
         let current = ractor::call!(relay.network_actor, |reply| {
-            NetworkActorMessage::new_command(FiberActorCommand::GetPaymentActor(hash.into(), reply))
+            NetworkActorMessage::new_command(FiberActorCommand::Test(TestCommand::GetPaymentActor(
+                hash.into(),
+                reply,
+            )))
         })
         .unwrap();
         assert_eq!(
@@ -216,7 +221,10 @@ async fn test_review_late_update_preserves_trampoline_error_packet() {
     for message in wakeups() {
         relay.network_actor.send_message(message).unwrap();
         let current = ractor::call!(relay.network_actor, |reply| {
-            NetworkActorMessage::new_command(FiberActorCommand::GetPaymentActor(hash.into(), reply))
+            NetworkActorMessage::new_command(FiberActorCommand::Test(TestCommand::GetPaymentActor(
+                hash.into(),
+                reply,
+            )))
         })
         .unwrap();
         assert!(
@@ -246,7 +254,10 @@ async fn test_review_payment_actor_panic_does_not_loop() {
     let old = ractor::call_t!(
         payer.network_actor,
         |reply| {
-            NetworkActorMessage::new_command(FiberActorCommand::GetPaymentActor(hash.into(), reply))
+            NetworkActorMessage::new_command(FiberActorCommand::Test(TestCommand::GetPaymentActor(
+                hash.into(),
+                reply,
+            )))
         },
         5000
     )
@@ -265,9 +276,8 @@ async fn test_review_payment_actor_panic_does_not_loop() {
             let actor = ractor::call_t!(
                 payer.network_actor,
                 |reply| {
-                    NetworkActorMessage::new_command(FiberActorCommand::GetPaymentActor(
-                        hash.into(),
-                        reply,
+                    NetworkActorMessage::new_command(FiberActorCommand::Test(
+                        TestCommand::GetPaymentActor(hash.into(), reply),
                     ))
                 },
                 1000
@@ -291,7 +301,10 @@ async fn test_review_payment_actor_panic_does_not_loop() {
     let current = ractor::call_t!(
         payer.network_actor,
         |reply| {
-            NetworkActorMessage::new_command(FiberActorCommand::GetPaymentActor(hash.into(), reply))
+            NetworkActorMessage::new_command(FiberActorCommand::Test(TestCommand::GetPaymentActor(
+                hash.into(),
+                reply,
+            )))
         },
         5000
     )
@@ -344,7 +357,9 @@ async fn assert_durable_channel_admission(queued: bool) {
     }
     let release = ractor::call_t!(
         channel,
-        |reply| ChannelActorMessage::Command(ChannelCommand::TestPause(reply)),
+        |reply| ChannelActorMessage::Command(ChannelCommand::Test(TestChannelCommand::Pause(
+            reply
+        ))),
         5000
     )
     .unwrap();

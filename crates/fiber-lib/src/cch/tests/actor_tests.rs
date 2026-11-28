@@ -35,6 +35,7 @@ use crate::store::{
     Store,
 };
 use crate::tests::test_utils::{generate_store, TempDir};
+use crate::tests::TestMessage;
 use crate::time::{Duration, SystemTime, UNIX_EPOCH};
 use fiber_types::{
     AttemptStatus, CchInvoice, CchOrder, CchOrderStatus, CchReceiveBtcOrderCreation,
@@ -1263,7 +1264,10 @@ impl TestHarness {
 
     /// Insert an order directly into the database (for testing without LND)
     async fn insert_order_directly(&self, order: CchOrder) -> Result<(), CchError> {
-        call!(self.actor, CchMessage::InsertOrder, order).expect("actor call failed")
+        call!(self.actor, |tx| CchMessage::Test(TestMessage::InsertOrder(
+            order, tx
+        )))
+        .expect("actor call failed")
     }
 }
 
@@ -1331,7 +1335,10 @@ impl StoreBackedTestHarness {
     }
 
     async fn insert_order_directly(&self, order: CchOrder) -> Result<(), CchError> {
-        call!(self.actor, CchMessage::InsertOrder, order).expect("actor call failed")
+        call!(self.actor, |tx| CchMessage::Test(TestMessage::InsertOrder(
+            order, tx
+        )))
+        .expect("actor call failed")
     }
 }
 
@@ -1419,7 +1426,7 @@ async fn wait_for_startup_recovery(actor: &ActorRef<CchMessage>) {
     loop {
         let in_progress = actor
             .call(
-                CchMessage::GetStartupRecoveryStatus,
+                |tx| CchMessage::Test(TestMessage::GetStartupRecoveryStatus(tx)),
                 Some(Duration::from_secs(1)),
             )
             .await

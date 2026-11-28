@@ -189,14 +189,6 @@ impl ChannelUpdateRateLimitConfig {
         ChannelUpdateLimiter::new(self.clone())
     }
 
-    #[cfg(test)]
-    pub(crate) fn build_limiter_with_max_entries(
-        &self,
-        max_entries: usize,
-    ) -> ChannelUpdateLimiter {
-        ChannelUpdateLimiter::with_max_entries(self.clone(), max_entries)
-    }
-
     pub(crate) fn is_disabled(&self) -> bool {
         self.interval_ms == 0 || self.burst == 0
     }
@@ -608,11 +600,6 @@ impl ChannelUpdateLimiter {
             !entry.bucket.is_full()
         });
     }
-
-    #[cfg(test)]
-    pub(crate) fn tracked_keys(&self) -> usize {
-        self.buckets.len()
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -792,3 +779,6 @@ impl Default for GossipPolicyState {
         Self::new(GossipPolicyConfig::default())
     }
 }
+
+#[cfg(test)]
+pub(crate) mod tests;

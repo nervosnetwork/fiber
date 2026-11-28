@@ -1,9 +1,9 @@
 mod actor;
 mod signer;
-mod store;
-
 #[cfg(test)]
 pub(crate) use actor::build_settlement_transaction;
+mod store;
+
 pub use actor::{WatchtowerActor, WatchtowerMessage, DEFAULT_WATCHTOWER_CHECK_INTERVAL_SECONDS};
 pub use fiber_types::ChannelData;
 pub use signer::{

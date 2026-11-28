@@ -1,3 +1,4 @@
+use crate::tests::TestChannelCommand;
 use secp256k1::SECP256K1;
 use std::{collections::HashMap, time::Duration};
 use tracing::debug;
@@ -3781,7 +3782,9 @@ async fn test_send_mpp_can_retry() {
     let first_hop = node_0.get_channel_actor(channels[0]).await.unwrap();
     let release = ractor::call_t!(
         first_hop,
-        |reply| ChannelActorMessage::Command(ChannelCommand::TestPause(reply)),
+        |reply| ChannelActorMessage::Command(ChannelCommand::Test(TestChannelCommand::Pause(
+            reply
+        ))),
         5000
     )
     .expect("pause first-hop channel");

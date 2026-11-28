@@ -23,6 +23,7 @@ use crate::gen_rand_fiber_public_key;
 use crate::gen_rand_secp256k1_keypair_tuple;
 use crate::invoice::{Currency, InvoiceBuilder, InvoiceStore, PreimageStore};
 use crate::tests::test_utils::*;
+use crate::tests::TestCommand;
 use crate::{
     create_channel_with_nodes, gen_rand_fiber_private_key, gen_rand_sha256_hash,
     now_timestamp_as_millis_u64, ChannelParameters, NetworkServiceEvent, HUGE_CKB_AMOUNT,
@@ -45,8 +46,8 @@ use tracing::{debug, error};
 
 async fn set_test_trampoline_settlement_paused(node: &NetworkNode, paused: bool) {
     call!(node.network_actor, |reply| {
-        NetworkActorMessage::new_command(FiberActorCommand::SetTestTrampolineSettlementPaused(
-            paused, reply,
+        NetworkActorMessage::new_command(FiberActorCommand::Test(
+            TestCommand::SetTrampolineSettlementPaused(paused, reply),
         ))
     })
     .expect("network actor alive");
