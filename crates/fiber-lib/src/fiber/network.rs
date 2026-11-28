@@ -421,9 +421,112 @@ fn should_reconcile_closed_channel_without_live_actor(channel_state: ChannelStat
     )
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+fn count_active_hosted_tlcs<S: ChannelActorStateStore>(
+    channel: &ChannelActorState,
+    store: &S,
+) -> usize {
+    // Cooperative close cannot settle TLCs on-chain, and a force-closed channel whose on-chain
+    // settlement has completed with no unresolved TLCs is also idle.
+    if let ChannelState::Closed(flags) = channel.state {
+        if flags.contains(CloseFlags::COOPERATIVE)
+            || (!channel.is_waiting_onchain_settlement()
+                && !has_unresolved_onchain_tlcs(channel, store))
+        {
+            return 0;
+        }
+    }
+    // Failed/cancelled TLCs remain in `tlc_state` with `removed_confirmed_at` and
+    // `AppliedFlags::REMOVE` until the next commitment calls `clean_up_failed_tlcs`.
+    channel
+        .tlc_state
+        .all_tlcs()
+        .filter(|tlc| {
+            !(tlc.removed_confirmed_at.is_some()
+                && tlc.applied_flags.contains(AppliedFlags::REMOVE))
+        })
+        .count()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn hosted_tenant_activity_ignores_applied_removed_tlcs_and_settled_closed_channels() {
+        use crate::store::sample::StoreSample;
+        use fiber_types::{
+            ChannelState, CloseFlags, CommitmentNumbers, HashAlgorithm, InboundTlcStatus, TLCId,
+            TlcInfo, TlcStatus,
+        };
+
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let store = crate::store::open_store(temp_dir.path()).expect("open store");
+        let mut channel = ChannelActorState::samples(7)
+            .into_iter()
+            .next()
+            .expect("sample channel");
+        channel.state = ChannelState::ChannelReady;
+        channel.tlc_state.offered_tlcs.tlcs.clear();
+        channel.tlc_state.received_tlcs.tlcs.clear();
+
+        let make_tlc =
+            |id: u64, removed_confirmed_at: Option<u64>, applied_flags: AppliedFlags| TlcInfo {
+                status: TlcStatus::Inbound(InboundTlcStatus::Committed),
+                tlc_id: TLCId::Received(id),
+                amount: 1_000,
+                payment_hash: Hash256::from([id as u8; 32]),
+                total_amount: None,
+                payment_secret: None,
+                attempt_id: None,
+                expiry: 1_000_000,
+                hash_algorithm: HashAlgorithm::CkbHash,
+                onion_packet: None,
+                shared_secret: [0u8; 32],
+                is_trampoline_hop: false,
+                created_at: CommitmentNumbers::default(),
+                removed_reason: None,
+                forwarding_tlc: None,
+                removed_confirmed_at,
+                applied_flags,
+                upstream_tlc_key: None,
+            };
+
+        // 1. Confirmed AND applied failed/cancelled TLCs awaiting next commitment cleanup are idle.
+        channel.tlc_state.received_tlcs.tlcs.push(make_tlc(
+            1,
+            Some(12345),
+            AppliedFlags::ADD | AppliedFlags::REMOVE,
+        ));
+        assert_eq!(count_active_hosted_tlcs(&channel, &store), 0);
+
+        // 2. Confirmed removal that has not been applied yet is still active.
+        channel
+            .tlc_state
+            .received_tlcs
+            .tlcs
+            .push(make_tlc(2, Some(12345), AppliedFlags::ADD));
+        assert_eq!(count_active_hosted_tlcs(&channel, &store), 1);
+
+        // 3. Live uncommitted/active TLC is still active.
+        channel
+            .tlc_state
+            .received_tlcs
+            .tlcs
+            .push(make_tlc(3, None, AppliedFlags::ADD));
+        assert_eq!(count_active_hosted_tlcs(&channel, &store), 2);
+
+        // 4. Force-closed channel awaiting on-chain settlement remains busy.
+        channel.state = ChannelState::Closed(
+            CloseFlags::UNCOOPERATIVE_LOCAL | CloseFlags::WAITING_ONCHAIN_SETTLEMENT,
+        );
+        assert_eq!(count_active_hosted_tlcs(&channel, &store), 2);
+
+        // 5. Cooperatively closed channel is idle.
+        channel.state = ChannelState::Closed(CloseFlags::COOPERATIVE);
+        assert_eq!(count_active_hosted_tlcs(&channel, &store), 0);
+    }
 
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
@@ -8329,7 +8432,7 @@ where
             .store
             .get_all_channel_states()
             .into_iter()
-            .map(|channel| channel.tlc_state.all_tlcs().count())
+            .map(|channel| count_active_hosted_tlcs(&channel, &self.store))
             .sum();
         HostedTenantActivity {
             inflight_payments: self.inflight_payments.len(),
