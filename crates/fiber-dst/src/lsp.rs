@@ -321,7 +321,7 @@ impl LspRpcClient {
     }
 }
 
-/// One-shot crash fault injected at exact persistence/RPC boundaries inside `WalletHost`.
+/// One-shot fault injected at exact persistence/RPC/confirmation boundaries inside `WalletHost`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SdkSignerFault {
     /// Crash the SDK wallet immediately after `confirm()` mutates in-memory signer state,
@@ -330,6 +330,115 @@ pub(crate) enum SdkSignerFault {
     /// Crash the SDK wallet immediately after `confirm()` persists `sdk_store.bin` to disk,
     /// BEFORE transmitting `submit_channel_signature` to the LSP.
     CrashAfterPersistBeforeSubmit,
+    /// Dismiss the next `ProcessOutcome::NeedConfirmation` without calling `confirm()`, and
+    /// assert that persistent signer state is bit-for-bit unchanged (Zero-Mutation Oracle).
+    DismissNextConfirmation,
+    /// Tamper the next `SignatureRequired` settlement balance from the LSP before passing it to
+    /// `handle_channel_status`, asserting that the SDK rejects it with zero store mutation.
+    TamperNextCommitmentBalance,
+}
+
+/// Persistent refusal selector injected inside `WalletHost`.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RefusalTarget {
+    /// Refuse every channel signing transition and watchtower external-funding request.
+    All,
+    /// Refuse a specific `ChannelSigningTransition` (e.g. `SendClosingSigned`, `SendCommitmentSigned`).
+    Transition(ChannelSigningTransition),
+    /// Skip `submit_signed_funding_tx` after opening commitments complete so funding stalls pre-submission.
+    OpeningFundingSubmit,
+    /// Refuse watchtower `ExternalFundingRequired` signing requests.
+    WatchtowerExternalFunding,
+}
+
+/// One-shot Byzantine LSP response tamper injected before SDK validation, paired with the
+/// Zero-Mutation Store Oracle asserting persistent signer state is unchanged on rejection.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LspTamperKind {
+    /// Mutate `settlement.remote_amount` by signed `delta`.
+    CommitmentBalance { delta: i128 },
+    /// Mutate `settlement.tlcs[0].payment_amount` by signed `delta`.
+    SettlementTlcAmount { delta: i128 },
+    /// Mutate `settlement.tlcs[0].expiry` by signed `delta`.
+    SettlementTlcExpiry { delta: i64 },
+    /// Drop `settlement.tlcs[0]` from the commitment snapshot.
+    DropFirstTlc,
+    /// Mutate `content.slot.commitment_number` by signed `delta`.
+    BadCommitmentNumber { delta: i64 },
+    /// Mutate watchtower `ExternalFundingRequired` payout output capacity to steal `extra_fee`.
+    WatchtowerFeeDrain { extra_fee: u64 },
+    /// Mutate watchtower `inputs[0].since` and `required_expiry_since` to an invalid `since`.
+    WatchtowerWrongSince { since: u64 },
+    /// Mutate watchtower payout output lock script to an unapproved destination.
+    WatchtowerWrongDestination,
+    /// Inject an unexpected extra input into the watchtower settlement transaction.
+    WatchtowerExtraInput,
+    /// Mutate cooperative close transaction output 0 capacity to steal funds.
+    ClosingOutputTamper { drain_shannons: u64 },
+    /// Mutate `open_channel_with_external_funding`'s `unsigned_funding_tx` output 0 capacity/lock.
+    OpeningFundingOutputTamper,
+}
+
+/// Persistent adversarial policy controlling `WalletHost` refusal, slow-signer delays,
+/// and Byzantine LSP response tampering.
+#[allow(dead_code)]
+#[derive(Clone, Debug, Default)]
+pub(crate) struct SdkAdversarialPolicy {
+    pub refusal: Option<RefusalTarget>,
+    pub poll_delay: Duration,
+    pub sign_delay: Duration,
+    pub watchtower_delay: Duration,
+    pub lsp_tamper: Option<LspTamperKind>,
+}
+
+/// Payload generator for concurrent TCP JSON-RPC flood attacks against the simulated LSP.
+#[allow(dead_code)]
+#[derive(Clone, Debug)]
+pub(crate) enum RpcFloodKind {
+    /// Send `total_requests` valid JSON-RPC calls to `method` with `params` (using `token` or current session token).
+    ValidBurst {
+        token: Option<String>,
+        method: &'static str,
+        params: Value,
+    },
+    /// Send malformed JSON-RPC payload strings inside a valid wire envelope.
+    MalformedJson { raw_payload: String },
+    /// Send raw TCP frames with `declared_len` prefix and `payload_len` bytes to exercise frame guards.
+    OversizedFrame {
+        declared_len: u32,
+        payload_len: usize,
+    },
+    /// Concurrently replay the wallet's last `lsp_register_tenant` request.
+    ReplayedLastRegistration,
+    /// Concurrently replay the wallet's last `submit_channel_signature` request.
+    ReplayedLastChannelSig,
+    /// Concurrently invoke `method` with a revoked or invalid Biscuit bearer token.
+    RevokedToken {
+        token: String,
+        method: &'static str,
+        params: Value,
+    },
+}
+
+/// Configuration for a concurrent JSON-RPC flood executed from `WalletHost`.
+#[allow(dead_code)]
+#[derive(Clone, Debug)]
+pub(crate) struct RpcFloodSpec {
+    pub concurrency: usize,
+    pub total_requests: usize,
+    pub kind: RpcFloodKind,
+}
+
+/// Deterministic outcome summary of an `RpcFlood` run.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct RpcFloodReport {
+    pub sent: usize,
+    pub ok: usize,
+    pub rpc_errors: usize,
+    pub transport_errors: usize,
 }
 
 pub(crate) struct WalletSlot {
@@ -338,9 +447,18 @@ pub(crate) struct WalletSlot {
     pub tenant_id: Option<TenantId>,
     pub bound_channels: Vec<Hash256>,
     pub commands: Option<mpsc::UnboundedSender<WalletCommand>>,
+    pub signing_policy: Rc<Cell<SigningPolicy>>,
     pub signing_paused: Rc<Cell<bool>>,
     pub sdk_fault: Rc<Cell<Option<SdkSignerFault>>>,
+    #[allow(dead_code)]
+    pub sdk_policy: Rc<RefCell<SdkAdversarialPolicy>>,
     pub sdk_faults_hit: u64,
+    pub sdk_rejections_verified: u64,
+    #[allow(dead_code)]
+    pub sdk_refusals_hit: u64,
+    #[allow(dead_code)]
+    pub sdk_watchtower_rejections_verified: u64,
+    pub sdk_confirmations_dismissed: u64,
     pub rpc: LspRpcControl,
     pub channel_sigs_applied: u64,
     pub channel_sigs_already_applied: u64,
@@ -361,9 +479,15 @@ impl Default for WalletSlot {
             tenant_id: None,
             bound_channels: Vec::new(),
             commands: None,
+            signing_policy: Rc::new(Cell::new(SigningPolicy::Always)),
             signing_paused: Rc::new(Cell::new(false)),
             sdk_fault: Rc::new(Cell::new(None)),
+            sdk_policy: Rc::new(RefCell::new(SdkAdversarialPolicy::default())),
             sdk_faults_hit: 0,
+            sdk_rejections_verified: 0,
+            sdk_refusals_hit: 0,
+            sdk_watchtower_rejections_verified: 0,
+            sdk_confirmations_dismissed: 0,
             rpc: LspRpcControl::default(),
             channel_sigs_applied: 0,
             channel_sigs_already_applied: 0,
@@ -435,6 +559,19 @@ pub(crate) enum WalletCommand {
         preimage: Hash256,
         reply: oneshot::Sender<Result<()>>,
     },
+    SetSigningPolicy {
+        policy: SigningPolicy,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    #[allow(dead_code)]
+    CurrentToken {
+        reply: oneshot::Sender<Result<Option<String>>>,
+    },
+    #[allow(dead_code)]
+    RpcFlood {
+        spec: RpcFloodSpec,
+        reply: oneshot::Sender<Result<RpcFloodReport>>,
+    },
 }
 
 struct SimChainVerifier {
@@ -483,6 +620,8 @@ struct SimOpeningAdapter<'a> {
     store_file: &'a Path,
     pending_outbound: &'a BTreeMap<Hash256, Hash256>,
     local_initiated_close: &'a BTreeSet<Hash256>,
+    tamper_opening_output: std::sync::atomic::AtomicBool,
+    opening_tamper_applied: std::sync::atomic::AtomicBool,
 }
 
 #[async_trait::async_trait]
@@ -492,14 +631,40 @@ impl TenantOpeningRpc for SimOpeningAdapter<'_> {
         token: &str,
         request: OpenChannelWithExternalFundingParams,
     ) -> Result<OpenChannelWithExternalFundingResult, SessionError> {
-        self.rpc
+        let mut result: OpenChannelWithExternalFundingResult = self
+            .rpc
             .call(
                 Some(token),
                 "open_channel_with_external_funding",
                 json!([request]),
             )
             .await
-            .map_err(|err| SessionError::Invalid(err.to_string()))
+            .map_err(|err| SessionError::Invalid(err.to_string()))?;
+        if self
+            .tamper_opening_output
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            let tx: Transaction = result.unsigned_funding_tx.clone().into();
+            let mut outputs: Vec<_> = tx.raw().outputs().into_iter().collect();
+            if let Some(first) = outputs.first_mut() {
+                let cap: u64 = first.capacity().unpack();
+                *first = first
+                    .clone()
+                    .as_builder()
+                    .capacity(cap.saturating_sub(100_000_000))
+                    .build();
+                result.unsigned_funding_tx = tx
+                    .into_view()
+                    .as_advanced_builder()
+                    .set_outputs(outputs)
+                    .build()
+                    .data()
+                    .into();
+                self.opening_tamper_applied
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        Ok(result)
     }
 }
 
@@ -693,8 +858,9 @@ impl WalletHost {
                 .await
                 .map_err(|err| anyhow!("create RootSigner: {err}"))?
         };
+        let initial_policy = self.wallets.borrow()[self.index].signing_policy.get();
         let mut session = HostedSession::new(root_signer)
-            .with_policy(SigningPolicy::Always)
+            .with_policy(initial_policy)
             .with_state(persisted_state);
         persist_wallet_files(
             &store,
@@ -706,7 +872,7 @@ impl WalletHost {
         )?;
 
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
-        let (generation, rpc_control, signing_paused, sdk_fault) = {
+        let (generation, rpc_control, signing_paused, sdk_fault, sdk_policy) = {
             let mut wallets = self.wallets.borrow_mut();
             let slot = &mut wallets[self.index];
             slot.generation += 1;
@@ -719,6 +885,7 @@ impl WalletHost {
                 slot.rpc.clone(),
                 slot.signing_paused.clone(),
                 slot.sdk_fault.clone(),
+                slot.sdk_policy.clone(),
             )
         };
         record(
@@ -1067,11 +1234,23 @@ impl WalletHost {
                             rpc.control.flush_events(&self.trace);
                             let _ = reply.send(res);
                         }
+                        WalletCommand::SetSigningPolicy { policy, reply } => {
+                            self.wallets.borrow()[self.index].signing_policy.set(policy);
+                            session = session.with_policy(policy);
+                            let _ = reply.send(Ok(()));
+                        }
+                        WalletCommand::CurrentToken { reply } => {
+                            let _ = reply.send(Ok(session.tenant_token().map(str::to_owned)));
+                        }
+                        WalletCommand::RpcFlood { spec, reply } => {
+                            let res = self.run_rpc_flood(&session, spec).await;
+                            let _ = reply.send(res);
+                        }
                     }
                 }
                 _ = poll_tick.tick() => {
                     if !signing_paused.get() && session.tenant_token().is_some() {
-                        if let Ok(true) = self.poll_all_channels(
+                        match self.poll_all_channels(
                             &mut session,
                             &store,
                             &store_file,
@@ -1081,12 +1260,17 @@ impl WalletHost {
                             &rpc,
                             &wallet_lock,
                             &sdk_fault,
+                            &sdk_policy,
                         ).await {
-                            let mut wallets = self.wallets.borrow_mut();
-                            let slot = &mut wallets[self.index];
-                            slot.online = false;
-                            slot.commands = None;
-                            return Ok(());
+                            Ok(true) => {
+                                let mut wallets = self.wallets.borrow_mut();
+                                let slot = &mut wallets[self.index];
+                                slot.online = false;
+                                slot.commands = None;
+                                return Ok(());
+                            }
+                            Ok(false) => {}
+                            Err(err) => return Err(err),
                         }
                     }
                 }
@@ -1230,6 +1414,9 @@ impl WalletHost {
             max_tlc_number_in_flight: None,
             external_channel_signer: Some(fiber_lsp_sdk::json::open_material_to_rpc(&material)),
         };
+        let sdk_policy = self.wallets.borrow()[self.index].sdk_policy.clone();
+        let arm_opening_tamper =
+            sdk_policy.borrow().lsp_tamper == Some(LspTamperKind::OpeningFundingOutputTamper);
         let adapter = SimOpeningAdapter {
             rpc,
             session_file,
@@ -1237,16 +1424,57 @@ impl WalletHost {
             store_file,
             pending_outbound,
             local_initiated_close,
+            tamper_opening_output: std::sync::atomic::AtomicBool::new(arm_opening_tamper),
+            opening_tamper_applied: std::sync::atomic::AtomicBool::new(false),
         };
         let mut open_result = None;
         for attempt in 0..4 {
+            let store_before = store.snapshot().map_err(|err| {
+                anyhow!("snapshot signer store before open_tenant_channel: {err}")
+            })?;
             match session
                 .open_tenant_channel(request.clone(), &network, &adapter, &adapter, &adapter)
                 .await
             {
                 Ok(result) => {
+                    if adapter
+                        .opening_tamper_applied
+                        .load(std::sync::atomic::Ordering::SeqCst)
+                    {
+                        sdk_policy.borrow_mut().lsp_tamper = None;
+                        bail!(
+                            "ORACLE VIOLATION: SDK accepted tampered OpeningFundingOutputTamper channel={}",
+                            Hash256::from(result.channel_id)
+                        );
+                    }
                     open_result = Some(result);
                     break;
+                }
+                Err(err)
+                    if adapter
+                        .opening_tamper_applied
+                        .load(std::sync::atomic::Ordering::SeqCst) =>
+                {
+                    sdk_policy.borrow_mut().lsp_tamper = None;
+                    let store_after = store.snapshot().map_err(|e| {
+                        anyhow!("snapshot signer store after OpeningFundingOutputTamper: {e}")
+                    })?;
+                    if store_after != store_before {
+                        bail!(
+                            "ORACLE VIOLATION: SDK rejected OpeningFundingOutputTamper ({err}) yet mutated persistent signer store"
+                        );
+                    }
+                    self.wallets.borrow_mut()[self.index].sdk_rejections_verified += 1;
+                    record(
+                        &self.trace,
+                        format_args!(
+                            "{} SDK rejected tampered OpeningFundingOutputTamper with zero store mutation",
+                            WALLET_HOSTS[self.index]
+                        ),
+                    );
+                    return Err(anyhow!(
+                        "SDK rejected tampered OpeningFundingOutputTamper: {err}"
+                    ));
                 }
                 Err(err)
                     if attempt < 3
@@ -1284,6 +1512,7 @@ impl WalletHost {
             .to_owned();
         let unsigned_tx: Transaction = result.unsigned_funding_tx.into();
         let no_sdk_fault = Cell::new(None);
+        let sdk_policy = self.wallets.borrow()[self.index].sdk_policy.clone();
         for _ in 0..400 {
             let _ = self
                 .poll_channel(
@@ -1297,6 +1526,7 @@ impl WalletHost {
                     &token,
                     channel_id,
                     &no_sdk_fault,
+                    &sdk_policy,
                 )
                 .await;
             let signer = session
@@ -1322,6 +1552,17 @@ impl WalletHost {
                     )
                     .await?;
                 if matches!(status.status, ChannelSigningStatus::NoSignatureRequired) {
+                    if sdk_policy.borrow().refusal == Some(RefusalTarget::OpeningFundingSubmit) {
+                        self.wallets.borrow_mut()[self.index].sdk_refusals_hit += 1;
+                        record(
+                            &self.trace,
+                            format_args!(
+                                "{} refused OpeningFundingSubmit channel={channel_id}",
+                                WALLET_HOSTS[self.index]
+                            ),
+                        );
+                        return Ok(channel_id);
+                    }
                     let signed_tx = unsigned_tx
                         .as_advanced_builder()
                         .set_witnesses(vec![Bytes::default()])
@@ -1379,6 +1620,7 @@ impl WalletHost {
         rpc: &LspRpcClient,
         wallet_lock: &Script,
         sdk_fault: &Cell<Option<SdkSignerFault>>,
+        sdk_policy: &RefCell<SdkAdversarialPolicy>,
     ) -> Result<bool> {
         let res = self
             .poll_all_channels_inner(
@@ -1391,6 +1633,7 @@ impl WalletHost {
                 rpc,
                 wallet_lock,
                 sdk_fault,
+                sdk_policy,
             )
             .await;
         rpc.control.flush_events(&self.trace);
@@ -1409,6 +1652,7 @@ impl WalletHost {
         rpc: &LspRpcClient,
         wallet_lock: &Script,
         sdk_fault: &Cell<Option<SdkSignerFault>>,
+        sdk_policy: &RefCell<SdkAdversarialPolicy>,
     ) -> Result<bool> {
         let Some(mut token) = session.tenant_token().map(str::to_owned) else {
             return Ok(false);
@@ -1427,6 +1671,7 @@ impl WalletHost {
                     &token,
                     channel_id,
                     sdk_fault,
+                    sdk_policy,
                 )
                 .await
             {
@@ -1459,6 +1704,9 @@ impl WalletHost {
                         }
                     }
                 }
+                Err(err) if err.to_string().contains("ORACLE VIOLATION") => {
+                    return Err(err);
+                }
                 Err(err) => {
                     if err.to_string().contains("SDK ") {
                         record(
@@ -1480,9 +1728,13 @@ impl WalletHost {
                     &token,
                     channel_id,
                     wallet_lock,
+                    sdk_policy,
                 )
                 .await
             {
+                if err.to_string().contains("ORACLE VIOLATION") {
+                    return Err(err);
+                }
                 if is_auth_rejection(&err) {
                     record(
                         &self.trace,
@@ -1535,7 +1787,12 @@ impl WalletHost {
         token: &str,
         channel_id: Hash256,
         sdk_fault: &Cell<Option<SdkSignerFault>>,
+        sdk_policy: &RefCell<SdkAdversarialPolicy>,
     ) -> Result<bool> {
+        let poll_delay = sdk_policy.borrow().poll_delay;
+        if !poll_delay.is_zero() {
+            tokio::time::sleep(poll_delay).await;
+        }
         // Query RPC evidence for any pending outbound payments before signing
         // TLC removals (matching production external-signer wallet preimage verification).
         let pending_hashes: Vec<Hash256> = pending_outbound.keys().copied().collect();
@@ -1576,7 +1833,9 @@ impl WalletHost {
                     }
                     pending_outbound.remove(&payment_hash);
                     updated = true;
-                } else if payment.status == JsonPaymentStatus::Failed {
+                } else if payment.status == JsonPaymentStatus::Failed
+                    && sdk_fault.get() != Some(SdkSignerFault::DismissNextConfirmation)
+                {
                     for bound_channel in sorted_bindings(session.state()) {
                         let signer = session
                             .channel_signer(bound_channel)
@@ -1617,6 +1876,21 @@ impl WalletHost {
                 }]),
             )
             .await?;
+
+        if let ChannelSigningStatus::SignatureRequired { transition, .. } = &result.status {
+            let refusal = sdk_policy.borrow().refusal;
+            if matches_channel_refusal(refusal, *transition) {
+                self.wallets.borrow_mut()[self.index].sdk_refusals_hit += 1;
+                record(
+                    &self.trace,
+                    format_args!(
+                        "{} refused channel signing transition={transition:?} channel={channel_id}",
+                        WALLET_HOSTS[self.index]
+                    ),
+                );
+                return Ok(false);
+            }
+        }
 
         let is_closing = matches!(
             &result.status,
@@ -1686,11 +1960,81 @@ impl WalletHost {
             }
         }
 
+        let mut status = result.status;
+        let mut tamper_label: Option<&'static str> = None;
+        if sdk_fault.get() == Some(SdkSignerFault::TamperNextCommitmentBalance) {
+            if let ChannelSigningStatus::SignatureRequired {
+                settlement: Some(ref mut settlement),
+                ..
+            } = status
+            {
+                sdk_fault.set(None);
+                settlement.remote_amount = settlement.remote_amount.saturating_add(1);
+                tamper_label = Some("TamperNextCommitmentBalance");
+                record(
+                    &self.trace,
+                    format_args!(
+                        "{} injected Byzantine TamperNextCommitmentBalance channel={channel_id}",
+                        WALLET_HOSTS[self.index]
+                    ),
+                );
+            }
+        } else {
+            let tamper = sdk_policy.borrow().lsp_tamper;
+            if let Some(tamper) = tamper {
+                if let Some(label) = apply_channel_tamper(&mut status, tamper) {
+                    sdk_policy.borrow_mut().lsp_tamper = None;
+                    tamper_label = Some(label);
+                    record(
+                        &self.trace,
+                        format_args!(
+                            "{} injected Byzantine {label} ({tamper:?}) channel={channel_id}",
+                            WALLET_HOSTS[self.index]
+                        ),
+                    );
+                }
+            }
+        }
+
+        let store_before = store
+            .snapshot()
+            .map_err(|err| anyhow!("snapshot signer store before handle_channel_status: {err}"))?;
         let now_ms = fnn::now_timestamp_as_millis_u64();
-        let outcome = session
-            .handle_channel_status(channel_id, result.status, now_ms)
+        let outcome = match session
+            .handle_channel_status(channel_id, status, now_ms)
             .await
-            .map_err(|err| anyhow!("SDK handle_channel_status({channel_id}): {err}"))?;
+        {
+            Ok(outcome) => {
+                if let Some(label) = tamper_label {
+                    bail!(
+                        "ORACLE VIOLATION: SDK accepted tampered channel status ({label}) on channel={channel_id}"
+                    );
+                }
+                outcome
+            }
+            Err(err) => {
+                let store_after = store
+                    .snapshot()
+                    .map_err(|e| anyhow!("snapshot signer store after rejection: {e}"))?;
+                if store_after != store_before {
+                    bail!(
+                        "ORACLE VIOLATION: SDK handle_channel_status({channel_id}) failed ({err}) yet mutated persistent signer store"
+                    );
+                }
+                self.wallets.borrow_mut()[self.index].sdk_rejections_verified += 1;
+                if let Some(label) = tamper_label {
+                    record(
+                        &self.trace,
+                        format_args!(
+                            "{} SDK rejected tampered {label} with zero store mutation channel={channel_id}",
+                            WALLET_HOSTS[self.index]
+                        ),
+                    );
+                    return Ok(false);
+                }
+                return Err(anyhow!("SDK handle_channel_status({channel_id}): {err}"));
+            }
+        };
         if matches!(
             outcome,
             ProcessOutcome::ReadyToSubmit(SubmitParams::Channel(_))
@@ -1706,6 +2050,30 @@ impl WalletHost {
                 ),
             );
             return Ok(true);
+        }
+        if matches!(outcome, ProcessOutcome::NeedConfirmation(_))
+            && sdk_fault.get() == Some(SdkSignerFault::DismissNextConfirmation)
+        {
+            sdk_fault.set(None);
+            let store_after = store
+                .snapshot()
+                .map_err(|e| anyhow!("snapshot signer store after confirmation dismissal: {e}"))?;
+            if store_after != store_before {
+                bail!(
+                    "ORACLE VIOLATION: SDK mutated persistent signer store before user confirmation on channel={channel_id}"
+                );
+            }
+            let mut wallets = self.wallets.borrow_mut();
+            wallets[self.index].sdk_faults_hit += 1;
+            wallets[self.index].sdk_confirmations_dismissed += 1;
+            record(
+                &self.trace,
+                format_args!(
+                    "{} dismissed NeedConfirmation with zero store mutation channel={channel_id}",
+                    WALLET_HOSTS[self.index]
+                ),
+            );
+            return Ok(false);
         }
         // Persist SDK nonces & signing state immediately before transmitting any signature.
         persist_wallet_files(
@@ -1730,6 +2098,10 @@ impl WalletHost {
                         ),
                     );
                     return Ok(true);
+                }
+                let sign_delay = sdk_policy.borrow().sign_delay;
+                if !sign_delay.is_zero() {
+                    tokio::time::sleep(sign_delay).await;
                 }
                 self.wallets.borrow_mut()[self.index].last_channel_sig = Some(params.clone());
                 let res: SubmitChannelSignatureResult = rpc
@@ -1795,6 +2167,8 @@ impl WalletHost {
                             );
                             return Ok(true);
                         }
+                        SdkSignerFault::DismissNextConfirmation
+                        | SdkSignerFault::TamperNextCommitmentBalance => {}
                     }
                 }
                 persist_wallet_files(
@@ -1805,6 +2179,10 @@ impl WalletHost {
                     local_initiated_close,
                     session_file,
                 )?;
+                let sign_delay = sdk_policy.borrow().sign_delay;
+                if !sign_delay.is_zero() {
+                    tokio::time::sleep(sign_delay).await;
+                }
                 self.wallets.borrow_mut()[self.index].last_channel_sig = Some(params.clone());
                 let res: SubmitChannelSignatureResult = rpc
                     .call(Some(token), "submit_channel_signature", json!([params]))
@@ -1843,8 +2221,9 @@ impl WalletHost {
         token: &str,
         channel_id: Hash256,
         wallet_lock: &Script,
+        sdk_policy: &RefCell<SdkAdversarialPolicy>,
     ) -> Result<()> {
-        let result: GetWatchtowerSigningStatusResult = match rpc
+        let mut result: GetWatchtowerSigningStatusResult = match rpc
             .call(
                 Some(token),
                 "get_watchtower_signing_status",
@@ -1866,12 +2245,27 @@ impl WalletHost {
             }
             WatchtowerSigningStatus::ExternalFundingRequired { .. } => {}
         }
+        let refusal = sdk_policy.borrow().refusal;
+        if matches!(
+            refusal,
+            Some(RefusalTarget::All | RefusalTarget::WatchtowerExternalFunding)
+        ) {
+            self.wallets.borrow_mut()[self.index].sdk_refusals_hit += 1;
+            record(
+                &self.trace,
+                format_args!(
+                    "{} refused WatchtowerExternalFunding channel={channel_id}",
+                    WALLET_HOSTS[self.index]
+                ),
+            );
+            return Ok(());
+        }
         let WatchtowerSigningStatus::ExternalFundingRequired { content, .. } = &result.status
         else {
             return Ok(());
         };
         let template_tx: Transaction = content.transaction.clone().into();
-        let Some((funded_tx, fee)) =
+        let Some((mut funded_tx, fee)) =
             fund_external_funding_template(&template_tx, wallet_lock.clone(), WATCHTOWER_MAX_FEE)?
         else {
             return Ok(());
@@ -1929,9 +2323,41 @@ impl WalletHost {
             additional_inputs: Vec::new(),
             cell_deps,
         };
+        let tamper_label = {
+            let tamper = sdk_policy.borrow().lsp_tamper;
+            match tamper {
+                Some(
+                    kind @ (LspTamperKind::WatchtowerFeeDrain { .. }
+                    | LspTamperKind::WatchtowerWrongSince { .. }
+                    | LspTamperKind::WatchtowerWrongDestination
+                    | LspTamperKind::WatchtowerExtraInput),
+                ) => {
+                    sdk_policy.borrow_mut().lsp_tamper = None;
+                    let label = apply_watchtower_tamper(
+                        &mut result.status,
+                        &template_tx,
+                        &mut funded_tx,
+                        wallet_lock,
+                        kind,
+                    );
+                    record(
+                        &self.trace,
+                        format_args!(
+                            "{} injected Byzantine {label} ({kind:?}) channel={channel_id}",
+                            WALLET_HOSTS[self.index]
+                        ),
+                    );
+                    Some(label)
+                }
+                _ => None,
+            }
+        };
+        let store_before = store.snapshot().map_err(|err| {
+            anyhow!("snapshot signer store before handle_watchtower_status_result: {err}")
+        })?;
         let now_ms = fnn::now_timestamp_as_millis_u64();
         let mut handler = NoopWatchtowerEventHandler;
-        let (_health, outcome) = session
+        let (_health, outcome) = match session
             .handle_watchtower_status_result(
                 result,
                 now_ms,
@@ -1940,7 +2366,38 @@ impl WalletHost {
                 &mut handler,
             )
             .await
-            .map_err(|err| anyhow!("SDK handle_watchtower_status_result: {err}"))?;
+        {
+            Ok(ok) => {
+                if let Some(label) = tamper_label {
+                    bail!(
+                        "ORACLE VIOLATION: SDK accepted tampered watchtower tx ({label}) on channel={channel_id}"
+                    );
+                }
+                ok
+            }
+            Err(err) => {
+                let store_after = store.snapshot().map_err(|e| {
+                    anyhow!("snapshot signer store after watchtower rejection: {e}")
+                })?;
+                if store_after != store_before {
+                    bail!(
+                        "ORACLE VIOLATION: SDK handle_watchtower_status_result({channel_id}) failed ({err}) yet mutated persistent signer store"
+                    );
+                }
+                if let Some(label) = tamper_label {
+                    self.wallets.borrow_mut()[self.index].sdk_watchtower_rejections_verified += 1;
+                    record(
+                        &self.trace,
+                        format_args!(
+                            "{} SDK rejected tampered {label} with zero store mutation channel={channel_id}",
+                            WALLET_HOSTS[self.index]
+                        ),
+                    );
+                    return Ok(());
+                }
+                return Err(anyhow!("SDK handle_watchtower_status_result: {err}"));
+            }
+        };
         persist_wallet_files(
             store,
             store_file,
@@ -1972,6 +2429,10 @@ impl WalletHost {
             ProcessOutcome::Idle => return Ok(()),
             other => bail!("unexpected watchtower signing outcome: {other:?}"),
         };
+        let watchtower_delay = sdk_policy.borrow().watchtower_delay;
+        if !watchtower_delay.is_zero() {
+            tokio::time::sleep(watchtower_delay).await;
+        }
         let res: SubmitWatchtowerSignatureResult = rpc
             .call(Some(token), "submit_watchtower_signature", json!([params]))
             .await?;
@@ -1992,6 +2453,444 @@ impl WalletHost {
             ),
         );
         Ok(())
+    }
+
+    async fn run_rpc_flood(
+        &self,
+        session: &HostedSession<MemoryStore>,
+        spec: RpcFloodSpec,
+    ) -> Result<RpcFloodReport> {
+        let lsp_host = NAMES[self.lsp_index];
+        let concurrency = spec.concurrency.max(1);
+        let total = spec.total_requests;
+        let current_token = session.tenant_token().map(str::to_owned);
+
+        enum FloodRequest {
+            Envelope(String),
+            Oversized {
+                declared_len: u32,
+                payload_len: usize,
+            },
+        }
+
+        let template = match spec.kind {
+            RpcFloodKind::ValidBurst {
+                token,
+                method,
+                params,
+            } => {
+                let auth_token = token.or(current_token);
+                let payload = json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": method,
+                    "params": params,
+                })
+                .to_string();
+                FloodRequest::Envelope(serde_json::to_string(&WireRpcEnvelope {
+                    token: auth_token,
+                    payload,
+                })?)
+            }
+            RpcFloodKind::MalformedJson { raw_payload } => {
+                FloodRequest::Envelope(serde_json::to_string(&WireRpcEnvelope {
+                    token: current_token,
+                    payload: raw_payload,
+                })?)
+            }
+            RpcFloodKind::OversizedFrame {
+                declared_len,
+                payload_len,
+            } => FloodRequest::Oversized {
+                declared_len,
+                payload_len,
+            },
+            RpcFloodKind::ReplayedLastRegistration => {
+                let params = self.wallets.borrow()[self.index]
+                    .last_registration
+                    .clone()
+                    .context("no previous registration to flood-replay")?;
+                let admin_token = self.admin_token()?;
+                let payload = json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "lsp_register_tenant",
+                    "params": [params],
+                })
+                .to_string();
+                FloodRequest::Envelope(serde_json::to_string(&WireRpcEnvelope {
+                    token: Some(admin_token),
+                    payload,
+                })?)
+            }
+            RpcFloodKind::ReplayedLastChannelSig => {
+                let params = self.wallets.borrow()[self.index]
+                    .last_channel_sig
+                    .clone()
+                    .context("no previous channel signature to flood-replay")?;
+                let token = current_token.context("wallet not registered")?;
+                let payload = json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "submit_channel_signature",
+                    "params": [params],
+                })
+                .to_string();
+                FloodRequest::Envelope(serde_json::to_string(&WireRpcEnvelope {
+                    token: Some(token),
+                    payload,
+                })?)
+            }
+            RpcFloodKind::RevokedToken {
+                token,
+                method,
+                params,
+            } => {
+                let payload = json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": method,
+                    "params": params,
+                })
+                .to_string();
+                FloodRequest::Envelope(serde_json::to_string(&WireRpcEnvelope {
+                    token: Some(token),
+                    payload,
+                })?)
+            }
+        };
+
+        enum ReqOutcome {
+            Ok,
+            RpcError,
+            TransportError,
+        }
+
+        let mut report = RpcFloodReport::default();
+        let mut inflight = JoinSet::new();
+        let mut launched = 0usize;
+
+        let spawn_one = |inflight: &mut JoinSet<ReqOutcome>, template: &FloodRequest| match template
+        {
+            FloodRequest::Envelope(envelope) => {
+                let envelope = envelope.clone();
+                inflight.spawn_local(async move {
+                    let res = tokio::time::timeout(RPC_TIMEOUT, async {
+                        let mut socket = TcpStream::connect((lsp_host, LSP_RPC_PORT)).await?;
+                        write_message(&mut socket, &envelope).await?;
+                        read_message(&mut socket).await
+                    })
+                    .await;
+                    match res {
+                        Ok(Ok(body)) => match serde_json::from_str::<Value>(&body) {
+                            Ok(val)
+                                if val.get("error").is_none() && val.get("result").is_some() =>
+                            {
+                                ReqOutcome::Ok
+                            }
+                            _ => ReqOutcome::RpcError,
+                        },
+                        _ => ReqOutcome::TransportError,
+                    }
+                });
+            }
+            FloodRequest::Oversized {
+                declared_len,
+                payload_len,
+            } => {
+                let declared_len = *declared_len;
+                let payload_len = *payload_len;
+                inflight.spawn_local(async move {
+                    let res = tokio::time::timeout(RPC_TIMEOUT, async {
+                        let mut socket = TcpStream::connect((lsp_host, LSP_RPC_PORT)).await?;
+                        socket.write_u32(declared_len).await?;
+                        if payload_len > 0 {
+                            let bytes = vec![b'x'; payload_len];
+                            socket.write_all(&bytes).await?;
+                        }
+                        read_message(&mut socket).await
+                    })
+                    .await;
+                    match res {
+                        Ok(Ok(body)) => match serde_json::from_str::<Value>(&body) {
+                            Ok(val)
+                                if val.get("error").is_none() && val.get("result").is_some() =>
+                            {
+                                ReqOutcome::Ok
+                            }
+                            _ => ReqOutcome::RpcError,
+                        },
+                        _ => ReqOutcome::TransportError,
+                    }
+                });
+            }
+        };
+
+        while launched < total && inflight.len() < concurrency {
+            spawn_one(&mut inflight, &template);
+            launched += 1;
+        }
+        while let Some(res) = inflight.join_next().await {
+            report.sent += 1;
+            match res {
+                Ok(ReqOutcome::Ok) => report.ok += 1,
+                Ok(ReqOutcome::RpcError) => report.rpc_errors += 1,
+                Ok(ReqOutcome::TransportError) | Err(_) => report.transport_errors += 1,
+            }
+            if launched < total {
+                spawn_one(&mut inflight, &template);
+                launched += 1;
+            }
+        }
+        record(
+            &self.trace,
+            format_args!(
+                "{} RpcFlood complete sent={} ok={} rpc_err={} transport_err={}",
+                WALLET_HOSTS[self.index],
+                report.sent,
+                report.ok,
+                report.rpc_errors,
+                report.transport_errors
+            ),
+        );
+        Ok(report)
+    }
+}
+
+fn matches_channel_refusal(
+    refusal: Option<RefusalTarget>,
+    transition: ChannelSigningTransition,
+) -> bool {
+    match refusal {
+        Some(RefusalTarget::All) => true,
+        Some(RefusalTarget::Transition(expected)) => expected == transition,
+        _ => false,
+    }
+}
+
+fn add_signed_u128(value: u128, delta: i128) -> u128 {
+    if delta >= 0 {
+        value.saturating_add(delta as u128)
+    } else {
+        value.saturating_sub(delta.unsigned_abs())
+    }
+}
+
+fn add_signed_u64(value: u64, delta: i64) -> u64 {
+    if delta >= 0 {
+        value.saturating_add(delta as u64)
+    } else {
+        value.saturating_sub(delta.unsigned_abs())
+    }
+}
+
+fn apply_channel_tamper(
+    status: &mut ChannelSigningStatus,
+    kind: LspTamperKind,
+) -> Option<&'static str> {
+    match (status, kind) {
+        (
+            ChannelSigningStatus::SignatureRequired {
+                settlement: Some(ref mut settlement),
+                ..
+            },
+            LspTamperKind::CommitmentBalance { delta },
+        ) => {
+            let next = add_signed_u128(settlement.remote_amount, delta);
+            settlement.remote_amount = if next == settlement.remote_amount {
+                settlement.remote_amount.saturating_add(1)
+            } else {
+                next
+            };
+            Some("CommitmentBalance")
+        }
+        (
+            ChannelSigningStatus::SignatureRequired {
+                settlement: Some(ref mut settlement),
+                ..
+            },
+            LspTamperKind::SettlementTlcAmount { delta },
+        ) => {
+            let first = settlement.tlcs.first_mut()?;
+            let next = add_signed_u128(first.payment_amount, delta);
+            first.payment_amount = if next == first.payment_amount {
+                first.payment_amount.saturating_add(1)
+            } else {
+                next
+            };
+            Some("SettlementTlcAmount")
+        }
+        (
+            ChannelSigningStatus::SignatureRequired {
+                settlement: Some(ref mut settlement),
+                ..
+            },
+            LspTamperKind::SettlementTlcExpiry { delta },
+        ) => {
+            let first = settlement.tlcs.first_mut()?;
+            let next = add_signed_u64(first.expiry, delta);
+            first.expiry = if next == first.expiry {
+                first.expiry.saturating_add(1)
+            } else {
+                next
+            };
+            Some("SettlementTlcExpiry")
+        }
+        (
+            ChannelSigningStatus::SignatureRequired {
+                settlement: Some(ref mut settlement),
+                ..
+            },
+            LspTamperKind::DropFirstTlc,
+        ) => {
+            if settlement.tlcs.is_empty() {
+                return None;
+            }
+            settlement.tlcs.remove(0);
+            Some("DropFirstTlc")
+        }
+        (
+            ChannelSigningStatus::SignatureRequired {
+                ref mut content, ..
+            },
+            LspTamperKind::BadCommitmentNumber { delta },
+        ) => {
+            let orig = content.slot.commitment_number;
+            let next = add_signed_u64(orig, delta);
+            content.slot.commitment_number = if next == orig { orig ^ 1 } else { next };
+            Some("BadCommitmentNumber")
+        }
+        (
+            ChannelSigningStatus::SignatureRequired {
+                ref mut content, ..
+            },
+            LspTamperKind::ClosingOutputTamper { drain_shannons },
+        ) => {
+            let fiber_json_types::Musig2SignableContent::CooperativeCloseTransaction {
+                ref mut transaction,
+            } = content.content
+            else {
+                return None;
+            };
+            let tx: Transaction = transaction.clone().into();
+            let mut outputs: Vec<_> = tx.raw().outputs().into_iter().collect();
+            let first = outputs.first_mut()?;
+            let cap: u64 = first.capacity().unpack();
+            *first = first
+                .clone()
+                .as_builder()
+                .capacity(cap.saturating_sub(drain_shannons.max(1)))
+                .build();
+            let tampered = tx
+                .into_view()
+                .as_advanced_builder()
+                .set_outputs(outputs)
+                .build()
+                .data();
+            *transaction = tampered.into();
+            Some("ClosingOutputTamper")
+        }
+        _ => None,
+    }
+}
+
+fn apply_watchtower_tamper(
+    status: &mut WatchtowerSigningStatus,
+    template_tx: &Transaction,
+    funded_tx: &mut Transaction,
+    wallet_lock: &Script,
+    kind: LspTamperKind,
+) -> &'static str {
+    match kind {
+        LspTamperKind::WatchtowerFeeDrain { extra_fee } => {
+            let mut outputs: Vec<_> = funded_tx.raw().outputs().into_iter().collect();
+            if let Some(payout) = outputs.last_mut() {
+                let cap: u64 = payout.capacity().unpack();
+                let drained = cap.saturating_sub(extra_fee.max(1));
+                *payout = payout.clone().as_builder().capacity(drained).build();
+                *funded_tx = funded_tx
+                    .clone()
+                    .into_view()
+                    .as_advanced_builder()
+                    .set_outputs(outputs)
+                    .build()
+                    .data();
+            }
+            "WatchtowerFeeDrain"
+        }
+        LspTamperKind::WatchtowerWrongSince { since } => {
+            let mut inputs: Vec<CellInput> = funded_tx.raw().inputs().into_iter().collect();
+            if let Some(first) = inputs.first_mut() {
+                *first = first.clone().as_builder().since(since).build();
+                *funded_tx = funded_tx
+                    .clone()
+                    .into_view()
+                    .as_advanced_builder()
+                    .set_inputs(inputs)
+                    .build()
+                    .data();
+            }
+            if let WatchtowerSigningStatus::ExternalFundingRequired {
+                ref mut content,
+                ref mut required_expiry_since,
+                ..
+            } = status
+            {
+                let mut tmpl_inputs: Vec<CellInput> =
+                    template_tx.raw().inputs().into_iter().collect();
+                if let Some(first) = tmpl_inputs.first_mut() {
+                    *first = first.clone().as_builder().since(since).build();
+                    let tampered_template = template_tx
+                        .clone()
+                        .into_view()
+                        .as_advanced_builder()
+                        .set_inputs(tmpl_inputs)
+                        .build()
+                        .data();
+                    content.transaction = tampered_template.into();
+                }
+                if since != 0 {
+                    *required_expiry_since = Some(since);
+                }
+            }
+            "WatchtowerWrongSince"
+        }
+        LspTamperKind::WatchtowerWrongDestination => {
+            let mut outputs: Vec<_> = funded_tx.raw().outputs().into_iter().collect();
+            if let Some(payout) = outputs.last_mut() {
+                let bogus_lock = Script::new_builder()
+                    .code_hash(wallet_lock.code_hash())
+                    .hash_type(wallet_lock.hash_type())
+                    .args([0xdeu8, 0xad, 0xbe, 0xef].pack())
+                    .build();
+                *payout = payout.clone().as_builder().lock(bogus_lock).build();
+                *funded_tx = funded_tx
+                    .clone()
+                    .into_view()
+                    .as_advanced_builder()
+                    .set_outputs(outputs)
+                    .build()
+                    .data();
+            }
+            "WatchtowerWrongDestination"
+        }
+        LspTamperKind::WatchtowerExtraInput => {
+            let mut inputs: Vec<CellInput> = funded_tx.raw().inputs().into_iter().collect();
+            let bogus_outpoint = OutPoint::new(
+                ckb_types::packed::Byte32::from_slice(&[0xfe; 32]).unwrap(),
+                7,
+            );
+            inputs.push(CellInput::new(bogus_outpoint, 0));
+            *funded_tx = funded_tx
+                .clone()
+                .into_view()
+                .as_advanced_builder()
+                .set_inputs(inputs)
+                .build()
+                .data();
+            "WatchtowerExtraInput"
+        }
+        _ => "UnknownWatchtowerTamper",
     }
 }
 

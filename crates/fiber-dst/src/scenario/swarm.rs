@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 use std::time::Duration;
 
 use anyhow::{bail, ensure, Context, Result};
+use fnn::fiber::channel::ChannelActorStateStore;
 use fnn::fiber::config::DEFAULT_HOLD_TLC_TIMEOUT;
 use fnn::fiber::graph::NetworkGraphStateStore;
 use fnn::fiber::network::SendPaymentResponse;
@@ -27,6 +28,7 @@ use ledger::Ledger;
 
 const RELAY_FEE_PPM: u128 = 1_000;
 const MPP_AMOUNT: u128 = FUNDING_AMOUNT * 6 / 5;
+const MAX_ONCHAIN_DRAIN_MS: u128 = 2_000_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Kind {
@@ -185,9 +187,11 @@ impl Driver {
             .map(|window| window.end)
             .max()
             .unwrap_or_default();
-        // A partial MPP may legitimately hold funds until the protocol timer expires.
+        // A partial MPP may legitimately hold funds until the protocol timer expires,
+        // even in a wave with zero injected fault windows if one shard fails on liquidity.
+        let has_mpp = payments.iter().any(|p| p.order.kind == Kind::Mpp);
         let budget = TICK * PHASE_TICKS as u32
-            + if faults.is_empty() && self.chaos.is_none() {
+            + if faults.is_empty() && self.chaos.is_none() && !has_mpp {
                 Duration::ZERO
             } else {
                 Duration::from_millis(DEFAULT_HOLD_TLC_TIMEOUT)
@@ -198,6 +202,9 @@ impl Driver {
             .max()
             .unwrap_or_default();
         let mut max_ticks = last_order + (budget.as_millis() / TICK.as_millis()) as usize;
+        let hard_max_ticks = last_order + (MAX_ONCHAIN_DRAIN_MS / TICK.as_millis()) as usize;
+        let mut last_onchain_state = (0usize, usize::MAX, false);
+        let mut nudged_final_delay = false;
         let mut peak = 0;
         let mut faults_during_payment = false;
         let mut completed = vec![false; payments.len()];
@@ -329,12 +336,33 @@ impl Driver {
                 && tick >= last_fault
                 && chaos_drained
                 && self.runtime.watchtowers.is_some()
+                && max_ticks < hard_max_ticks
             {
                 if let Some(expiry) = ledger.next_onchain_expiry(self) {
                     // The fault schedule uses Turmoil elapsed time. Only the Unix clock
                     // shared by Fiber and the synthetic CKB advances between faults.
+                    last_onchain_state = self.onchain_drain_state();
+                    nudged_final_delay = false;
                     self.advance_clock_past(expiry);
-                    max_ticks += PHASE_TICKS;
+                    max_ticks = (max_ticks + PHASE_TICKS).min(hard_max_ticks);
+                } else {
+                    let current = self.onchain_drain_state();
+                    if current.0 > last_onchain_state.0
+                        || (current.2 && current.1 < last_onchain_state.1)
+                    {
+                        last_onchain_state = current;
+                        nudged_final_delay = false;
+                        max_ticks = (max_ticks + PHASE_TICKS).min(hard_max_ticks);
+                        self.runtime.note(format_args!(
+                            "swarm {phase} extending drain budget on on-chain progress settlements={} unresolved_tlcs={}",
+                            current.0, current.1
+                        ));
+                    } else if current.2 && !nudged_final_delay {
+                        last_onchain_state = current;
+                        nudged_final_delay = true;
+                        self.advance_clock_past(self.clock_ms());
+                        max_ticks = (max_ticks + PHASE_TICKS).min(hard_max_ticks);
+                    }
                 }
             }
         }
@@ -379,6 +407,63 @@ impl Driver {
             .as_ref()
             .context("payer offline")?;
         Ok(session.effective_status(&payer.store))
+    }
+
+    /// Snapshot on-chain drain progress across all online nodes:
+    /// `(confirmed_settlement_txs, unresolved_onchain_tlcs, any_waiting_onchain_settlement)`.
+    fn onchain_drain_state(&self) -> (usize, usize, bool) {
+        let mut settled_txs = 0usize;
+        let mut unresolved_tlcs = 0usize;
+        let mut any_waiting = false;
+        let mut seen_commitments = BTreeSet::new();
+        for node in 0..self.runtime.peers.len() {
+            let Ok(store) = self.runtime.store(node) else {
+                continue;
+            };
+            for state in store.get_all_channel_states() {
+                if !state.is_closed() {
+                    continue;
+                }
+                let waiting = state.is_waiting_onchain_settlement();
+                if waiting {
+                    any_waiting = true;
+                }
+                let Some(commitment) = state.shutdown_transaction_hash.clone().map(Hash256::from)
+                else {
+                    continue;
+                };
+                if seen_commitments.insert(commitment) {
+                    settled_txs += self.runtime.chain.commitment_settlements(commitment).len();
+                }
+                if waiting {
+                    let channel_id = state.get_id();
+                    if let Some(record) = store.get_shutdown_settlement_record(&channel_id) {
+                        if Hash256::from(record.shutdown_tx_hash) == commitment {
+                            unresolved_tlcs += record
+                                .settlement_data
+                                .tlcs
+                                .iter()
+                                .filter(|tlc| {
+                                    let id = if record.for_remote {
+                                        tlc.tlc_id
+                                    } else {
+                                        tlc.tlc_id.flip()
+                                    };
+                                    store
+                                        .get_onchain_tlc_settlement(
+                                            &channel_id,
+                                            id,
+                                            &tlc.payment_hash,
+                                        )
+                                        .is_none()
+                                })
+                                .count();
+                        }
+                    }
+                }
+            }
+        }
+        (settled_txs, unresolved_tlcs, any_waiting)
     }
 }
 

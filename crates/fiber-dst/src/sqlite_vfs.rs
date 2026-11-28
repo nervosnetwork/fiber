@@ -50,6 +50,8 @@ struct DiskState {
     armed: Option<DiskFault>,
     batch: Option<BatchTarget>,
     hit: Option<DiskFault>,
+    write_ops: u64,
+    batch_commits: u64,
 }
 
 thread_local! {
@@ -81,7 +83,8 @@ impl BatchCommitHook for BatchFaults {
         has_put_prefix: &dyn Fn(&[u8]) -> bool,
         has_delete_prefix: &dyn Fn(&[u8]) -> bool,
     ) -> Option<Box<dyn Any>> {
-        let state = lock(&self.0);
+        let mut state = lock(&self.0);
+        state.batch_commits = state.batch_commits.saturating_add(1);
         if state.armed.is_some()
             && state.batch.as_ref().is_some_and(|target| {
                 target.put_prefix.as_deref().is_none_or(has_put_prefix)
@@ -129,19 +132,18 @@ impl SimulatedDisk {
 
     /// Arm one write or sync failure and clear the previous receipt.
     pub fn arm(&self, fault: DiskFault) {
-        *lock(&self.0.state) = DiskState {
-            armed: Some(fault),
-            ..DiskState::default()
-        };
+        let mut state = lock(&self.0.state);
+        state.armed = Some(fault);
+        state.batch = None;
+        state.hit = None;
     }
 
     /// Arm an error for a matching batch. It is consumed when the VFS delivers the error.
     pub fn arm_batch(&self, fault: DiskFault, target: BatchTarget) {
-        *lock(&self.0.state) = DiskState {
-            armed: Some(fault),
-            batch: Some(target),
-            hit: None,
-        };
+        let mut state = lock(&self.0.state);
+        state.armed = Some(fault);
+        state.batch = Some(target);
+        state.hit = None;
     }
 
     /// Return the fault actually delivered to SQLite.
@@ -149,9 +151,22 @@ impl SimulatedDisk {
         lock(&self.0.state).hit
     }
 
+    /// Total VFS write calls executed on this simulated node's SQLite files.
+    pub fn write_ops(&self) -> u64 {
+        lock(&self.0.state).write_ops
+    }
+
+    /// Total store write-batch commits executed on this simulated node.
+    pub fn batch_commits(&self) -> u64 {
+        lock(&self.0.state).batch_commits
+    }
+
     /// Clear the pending fault and receipt before restarting a node.
     pub fn clear(&self) {
-        *lock(&self.0.state) = DiskState::default();
+        let mut state = lock(&self.0.state);
+        state.armed = None;
+        state.batch = None;
+        state.hit = None;
     }
 }
 
@@ -262,6 +277,9 @@ unsafe extern "C" fn open(
 
 fn fault(disk: &Mutex<DiskState>, sync: bool) -> Option<c_int> {
     let mut state = lock(disk);
+    if !sync {
+        state.write_ops = state.write_ops.saturating_add(1);
+    }
     let plan = state.armed?;
     if state.batch.is_some() && !ACTIVE_BATCH.with(|active| ptr::eq(active.get(), disk)) {
         return None;

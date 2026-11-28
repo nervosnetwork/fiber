@@ -9,7 +9,10 @@ use fnn::simulation::{
 use ractor::ActorCell;
 
 use crate::chain_fault::{ChainEndpoint, ChainFault};
-use crate::host::{FrameDelay, FrameLoss, LinkControl, TcpFault};
+use crate::host::{
+    AdversarialDelayRule, BlackholeRule, DuplicateRule, FrameDelay, FrameLoss, FrameMatcher,
+    InjectedWireAction, LinkControl, TcpFault,
+};
 use crate::sqlite_vfs::{BatchTarget, DiskFault};
 
 use crate::harness::Harness;
@@ -62,6 +65,33 @@ pub(in crate::scenario) enum Fault {
         point: ProtocolPoint,
         preceding_hits: usize,
     },
+    #[allow(dead_code)]
+    BlackholePeer {
+        from: usize,
+        to: usize,
+        matcher: FrameMatcher,
+    },
+    #[allow(dead_code)]
+    DuplicatePeerFrame {
+        from: usize,
+        to: usize,
+        matcher: FrameMatcher,
+        copies: usize,
+        max_triggers: Option<usize>,
+    },
+    #[allow(dead_code)]
+    AdversarialDelayPeerFrame {
+        from: usize,
+        to: usize,
+        rule: AdversarialDelayRule,
+    },
+    #[allow(dead_code)]
+    FloodWire {
+        from: usize,
+        to: usize,
+        actions: Vec<InjectedWireAction>,
+        allow_malformed_disconnect: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -70,6 +100,9 @@ pub(in crate::scenario) enum ProtocolPoint {
     ForwardFulfill,
     FundingPersisted,
     ChannelIdRewritten,
+    RemoveConfirmedBeforeRelay,
+    PeerFailRecordedBeforeAck,
+    InvoiceMarkedReceived,
 }
 
 pub(in crate::scenario) enum MailboxTarget {
@@ -115,6 +148,29 @@ pub(in crate::scenario) enum Injection {
     },
     Mailbox(MailboxDelay),
     ProtocolPause(RefCell<CommitmentPause>),
+    #[allow(dead_code)]
+    BlackholePeer {
+        control: LinkControl,
+        previously_blackholed: u64,
+    },
+    #[allow(dead_code)]
+    DuplicatePeerFrame {
+        control: LinkControl,
+        previously_duplicated: u64,
+    },
+    #[allow(dead_code)]
+    AdversarialDelayPeerFrame {
+        control: LinkControl,
+        previously_delayed: u64,
+    },
+    #[allow(dead_code)]
+    FloodWire {
+        sender: LinkControl,
+        receiver: LinkControl,
+        previously_sent: u64,
+        previously_malformed: u64,
+        allow_malformed_disconnect: bool,
+    },
 }
 
 impl Fault {
@@ -240,8 +296,89 @@ impl Fault {
                             preceding_hits,
                         )
                     }
+                    ProtocolPoint::RemoveConfirmedBeforeRelay => {
+                        fnn::simulation::pause_after_remove_confirmed(peer, channel, preceding_hits)
+                    }
+                    ProtocolPoint::PeerFailRecordedBeforeAck => {
+                        fnn::simulation::pause_after_peer_fail_recorded(
+                            peer,
+                            channel,
+                            preceding_hits,
+                        )
+                    }
+                    ProtocolPoint::InvoiceMarkedReceived => {
+                        fnn::simulation::pause_after_invoice_marked_received(
+                            peer,
+                            channel,
+                            preceding_hits,
+                        )
+                    }
                 };
                 Injection::ProtocolPause(RefCell::new(pause))
+            }
+            Self::BlackholePeer { from, to, matcher } => {
+                // Persistent drop on the receiver's read loop while TCP stays open.
+                let control = harness.links[&(to, from)].clone();
+                let previously_blackholed = control.blackholed_frames();
+                control.set_blackhole(Some(BlackholeRule { matcher }));
+                Injection::BlackholePeer {
+                    control,
+                    previously_blackholed,
+                }
+            }
+            Self::DuplicatePeerFrame {
+                from,
+                to,
+                matcher,
+                copies,
+                max_triggers,
+            } => {
+                let control = harness.links[&(from, to)].clone();
+                let previously_duplicated = control.duplicated_frames();
+                control.set_duplicate(Some(DuplicateRule {
+                    matcher,
+                    copies,
+                    remaining: max_triggers,
+                }));
+                Injection::DuplicatePeerFrame {
+                    control,
+                    previously_duplicated,
+                }
+            }
+            Self::AdversarialDelayPeerFrame { from, to, rule } => {
+                let control = if rule.out_of_order {
+                    harness.links[&(to, from)].clone()
+                } else {
+                    harness.links[&(from, to)].clone()
+                };
+                let previously_delayed = control.adv_delayed_frames();
+                control.set_adv_delay(Some(rule));
+                Injection::AdversarialDelayPeerFrame {
+                    control,
+                    previously_delayed,
+                }
+            }
+            Self::FloodWire {
+                from,
+                to,
+                ref actions,
+                allow_malformed_disconnect,
+            } => {
+                let sender = harness.links[&(from, to)].clone();
+                let receiver = harness.links[&(to, from)].clone();
+                let previously_sent = sender.injected_sent();
+                let previously_malformed = receiver.malformed_disconnects();
+                if allow_malformed_disconnect {
+                    receiver.set_allow_malformed_disconnect(true);
+                }
+                sender.push_wire_actions(actions.iter().cloned());
+                Injection::FloodWire {
+                    sender,
+                    receiver,
+                    previously_sent,
+                    previously_malformed,
+                    allow_malformed_disconnect,
+                }
             }
         })
     }
@@ -269,6 +406,28 @@ impl Injection {
             } => control.blocked() > *previously_blocked,
             Self::Mailbox(delay) => delay.hits() > 0,
             Self::ProtocolPause(pause) => pause.borrow_mut().reached(),
+            Self::BlackholePeer {
+                control,
+                previously_blackholed,
+            } => control.blackholed_frames() > *previously_blackholed,
+            Self::DuplicatePeerFrame {
+                control,
+                previously_duplicated,
+            } => control.duplicated_frames() > *previously_duplicated,
+            Self::AdversarialDelayPeerFrame {
+                control,
+                previously_delayed,
+            } => control.adv_delayed_frames() > *previously_delayed,
+            Self::FloodWire {
+                sender,
+                receiver,
+                previously_sent,
+                previously_malformed,
+                ..
+            } => {
+                sender.injected_sent() > *previously_sent
+                    || receiver.malformed_disconnects() > *previously_malformed
+            }
         }
     }
 
@@ -343,6 +502,20 @@ impl Injection {
             Self::Writer { control, .. } => control.pause_writer(false),
             Self::Mailbox(delay) => drop(delay),
             Self::ProtocolPause(pause) => drop(pause),
+            Self::BlackholePeer { control, .. } => control.set_blackhole(None),
+            Self::DuplicatePeerFrame { control, .. } => control.set_duplicate(None),
+            Self::AdversarialDelayPeerFrame { control, .. } => control.set_adv_delay(None),
+            Self::FloodWire {
+                sender,
+                receiver,
+                allow_malformed_disconnect,
+                ..
+            } => {
+                sender.clear_wire_actions();
+                if allow_malformed_disconnect {
+                    receiver.set_allow_malformed_disconnect(false);
+                }
+            }
         }
     }
 }

@@ -5,7 +5,8 @@ use std::rc::Rc;
 use std::time::{Duration, UNIX_EPOCH};
 
 use anyhow::{anyhow, ensure, Context, Result};
-use fnn::fiber::channel::ChannelActorState;
+use ckb_types::prelude::*;
+use fnn::fiber::channel::{ChannelActorState, ChannelActorStateStore};
 use fnn::fiber::gossip::GossipMessageUpdates;
 use fnn::fiber::graph::NetworkGraphStateStore;
 use fnn::fiber::payment::PaymentSessionExt;
@@ -14,7 +15,9 @@ use fnn::fiber::{
     ChannelConnectivityState, ChannelState, FiberActorCommand, Hash256, NetworkActorMessage,
     PaymentStatus, Privkey, Pubkey, PublicNetworkEvent,
 };
+use fnn::lsp::{LspPaymentDeliveryStore, LspServiceMessage, TenantRegistryStore};
 use fnn::simulation;
+use fnn::store::NodeNamespace;
 
 use crate::chain::SimulatedChain;
 use crate::chain_fault::{ChainFaultHit, SimulatedChainAccess};
@@ -50,6 +53,7 @@ pub(crate) struct Harness {
     pub(crate) lsp_node: Option<usize>,
     pub(crate) lsp_slot: LspSlot,
     pub(crate) wallets: Wallets,
+    pub(crate) step_count: u64,
     gossip_history: Vec<BroadcastMessageWithTimestamp>,
 }
 
@@ -244,6 +248,7 @@ impl Harness {
             lsp_node,
             lsp_slot,
             wallets,
+            step_count: 0,
             gossip_history: Vec::new(),
         })
     }
@@ -260,6 +265,7 @@ impl Harness {
     }
 
     pub(crate) fn step(&mut self) -> Result<()> {
+        self.step_count += 1;
         self.world
             .step()
             .map_err(|error| anyhow!(error.to_string()))?;
@@ -590,6 +596,179 @@ impl Harness {
             .as_ref()
             .map(|handle| handle.actor.clone())
             .context("LSP service is offline")
+    }
+
+    /// Snapshot the latest signed local commitment transaction for `channel` on `node`
+    /// with its resolved FundingLock (and optional UDT) cell deps, suitable for
+    /// stale-commitment broadcast testing via `SimulatedChain::submit_raw_transaction`.
+    #[allow(dead_code)]
+    pub(crate) fn snapshot_commitment_tx(
+        &self,
+        node: usize,
+        channel: &Hash256,
+    ) -> Result<ckb_types::core::TransactionView> {
+        let state = self
+            .channel(node, channel)
+            .with_context(|| format!("missing channel {channel} on {}", NAMES[node]))?;
+        let tx = state.latest_commitment_transaction().with_context(|| {
+            format!(
+                "no local commitment transaction for channel {channel} on {}",
+                NAMES[node]
+            )
+        })?;
+        let cell_deps = fnn::ckb::contracts::get_cell_deps_sync(
+            vec![fnn::ckb::contracts::Contract::FundingLock],
+            &state.funding_udt_type_script,
+        )
+        .map_err(|err| anyhow!("resolve commitment cell deps: {err}"))?;
+        let raw_tx = tx.raw().as_builder().cell_deps(cell_deps).build();
+        Ok(tx.as_builder().raw(raw_tx).build().into_view())
+    }
+
+    /// Inject a batch of gossip updates directly into the target nodes' network actors.
+    #[allow(dead_code)]
+    pub(crate) fn inject_gossip(
+        &mut self,
+        targets: &[usize],
+        messages: Vec<BroadcastMessageWithTimestamp>,
+    ) -> Result<()> {
+        if messages.is_empty() {
+            return Ok(());
+        }
+        let nodes = self.nodes.borrow();
+        for &target in targets {
+            let Some(slot) = nodes.get(target) else {
+                continue;
+            };
+            if slot.storage_failed {
+                continue;
+            }
+            if let Some(node) = &slot.node {
+                send(
+                    &node.actor,
+                    NetworkActorMessage::new_event(PublicNetworkEvent::GossipMessageUpdates(
+                        GossipMessageUpdates::new(messages.clone()),
+                    )),
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Sample deterministic resource and DoS-bound metrics across all simulated nodes and LSP.
+    #[allow(dead_code)]
+    pub(crate) fn sample_resources(&self) -> Result<crate::oracle::ResourceSnapshot> {
+        let mut snapshot = crate::oracle::ResourceSnapshot {
+            sim_steps: self.step_count,
+            ..Default::default()
+        };
+        let nodes = self.nodes.borrow();
+        for node_idx in 0..self.peers.len() {
+            let slot = &nodes[node_idx];
+            if let Some(live) = slot.node.as_ref().filter(|_| !slot.storage_failed) {
+                let states = live.store.get_all_channel_states();
+                let open = states.iter().filter(|st| !st.is_closed()).count();
+                let opening = states
+                    .iter()
+                    .filter(|st| !st.is_closed() && st.state != ChannelState::ChannelReady)
+                    .count();
+                snapshot.open_channels.insert(node_idx, open);
+                snapshot
+                    .pending_channels
+                    .insert(node_idx, opening.max(slot.pending_channels.len()));
+                snapshot
+                    .actor_children
+                    .insert(node_idx, live.actor.get_cell().get_children().len());
+            }
+            snapshot
+                .sqlite_write_ops
+                .insert(node_idx, self.disks[node_idx].write_ops());
+            snapshot
+                .sqlite_batch_commits
+                .insert(node_idx, self.disks[node_idx].batch_commits());
+            let db_path = self.storage_root.join(NAMES[node_idx]).join("data.sqlite");
+            if db_path.exists() {
+                if let Ok(conn) = rusqlite::Connection::open_with_flags(
+                    &db_path,
+                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+                ) {
+                    if let Ok(rows) = conn.query_row("SELECT count(*) FROM kv_store", [], |row| {
+                        row.get::<_, i64>(0)
+                    }) {
+                        snapshot.store_rows.insert(node_idx, rows.max(0) as u64);
+                    }
+                    let page_count = conn
+                        .query_row("PRAGMA page_count", [], |row| row.get::<_, i64>(0))
+                        .unwrap_or(0)
+                        .max(0) as u64;
+                    let page_size = conn
+                        .query_row("PRAGMA page_size", [], |row| row.get::<_, i64>(0))
+                        .unwrap_or(0)
+                        .max(0) as u64;
+                    snapshot
+                        .store_bytes
+                        .insert(node_idx, page_count.saturating_mul(page_size));
+                }
+            }
+        }
+        drop(nodes);
+
+        if let Some(lsp_idx) = self.lsp_node {
+            if self.node_available(lsp_idx) {
+                let store = self.store(lsp_idx)?;
+                let lsp_store = store.namespaced(NodeNamespace::lsp_metadata());
+                snapshot.lsp_pending_deliveries = lsp_store
+                    .list_pending_lsp_payment_deliveries()
+                    .map(|list| list.len())
+                    .unwrap_or(0);
+                snapshot.lsp_registered_tenants =
+                    lsp_store.list_tenants().map(|list| list.len()).unwrap_or(0);
+                if self.lsp_slot.borrow().is_some() {
+                    // Count hosted tenant namespaces that currently have an online/syncing channel
+                    // without injecting actor messages during a read-only sample.
+                    snapshot.lsp_active_tenants = store
+                        .hosted_tenant_namespaces()
+                        .into_iter()
+                        .filter(|ns| {
+                            let ts = store.namespaced(ns.clone());
+                            ts.get_all_channel_states().iter().any(|st| {
+                                !st.is_closed()
+                                    && st.connectivity_state != ChannelConnectivityState::Offline
+                            })
+                        })
+                        .count();
+                }
+            }
+        }
+        Ok(snapshot)
+    }
+
+    /// Sample resources and also query `LspServiceMessage::GetStatus` for exact active/registered
+    /// tenant counts (stepping the simulation until the LSP actor replies).
+    #[allow(dead_code)]
+    pub(crate) fn sample_resources_exact(&mut self) -> Result<crate::oracle::ResourceSnapshot> {
+        let mut snapshot = self.sample_resources()?;
+        if let Ok(actor) = self.lsp_actor() {
+            let (tx, mut rx) = oneshot::channel();
+            actor
+                .send_message(LspServiceMessage::GetStatus(tx.into()))
+                .map_err(|err| anyhow!("query LSP service status: {err}"))?;
+            for _ in 0..200 {
+                match rx.try_recv() {
+                    Ok(status) => {
+                        snapshot.lsp_active_tenants = status.active_tenants;
+                        snapshot.lsp_registered_tenants = status.registered_tenants;
+                        return Ok(snapshot);
+                    }
+                    Err(oneshot::error::TryRecvError::Empty) => {
+                        self.step()?;
+                    }
+                    Err(err) => return Err(err.into()),
+                }
+            }
+            anyhow::bail!("timed out querying LspServiceMessage::GetStatus");
+        }
+        Ok(snapshot)
     }
 }
 

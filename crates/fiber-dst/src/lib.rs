@@ -8,6 +8,7 @@ mod harness;
 mod host;
 mod lsp;
 mod lsp_runtime;
+mod oracle;
 mod scenario;
 mod sqlite_vfs;
 mod tower;

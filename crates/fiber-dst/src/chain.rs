@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, RwLock as StdRwLock};
 
 use ckb_types::{
-    core::tx_pool::TxStatus,
+    core::{tx_pool::TxStatus, TransactionView},
     packed::{CellDep, CellOutput, OutPoint, Script},
     prelude::{Builder, Entity, Unpack},
 };
@@ -87,9 +87,14 @@ impl SimulatedChain {
     pub fn watchtower_wallet_capacity(&self, key: Privkey) -> u128 {
         let signer = LocalSigner::new(key.into());
         let lock = get_script_by_contract(Contract::Secp256k1Lock, signer.pubkey_hash());
+        self.lock_capacity(&lock)
+    }
+
+    /// Sum the live native CKB capacity held by `lock` on the simulated chain.
+    pub fn lock_capacity(&self, lock: &Script) -> u128 {
         live_cells(&self.state.read().unwrap())
             .into_iter()
-            .filter(|cell| cell.output.lock() == lock && cell.output.type_().is_none())
+            .filter(|cell| cell.output.lock() == *lock && cell.output.type_().is_none())
             .map(|cell| u128::from(Unpack::<u64>::unpack(&cell.output.capacity())))
             .sum()
     }
@@ -98,6 +103,15 @@ impl SimulatedChain {
     pub fn commitment_spend(&self, commitment: Hash256) -> Option<Hash256> {
         let outpoint = OutPoint::new(commitment.into(), 0);
         self.confirmed_spend(&outpoint)
+    }
+
+    /// Return a confirmed transaction by hash if present on the simulated chain.
+    pub fn confirmed_transaction(&self, tx_hash: Hash256) -> Option<TransactionView> {
+        let state = self.state.read().unwrap();
+        let record = state.txs.get(&tx_hash)?;
+        matches!(record.tx_status, TxStatus::Committed(..))
+            .then(|| record.transaction.clone())
+            .flatten()
     }
 
     /// Return the confirmed spend of the channel's funding output.
@@ -292,6 +306,19 @@ impl SimulatedChain {
     pub fn wallet_lock_script(key: Privkey) -> Script {
         let signer = LocalSigner::new(key.into());
         get_script_by_contract(Contract::Secp256k1Lock, signer.pubkey_hash())
+    }
+
+    /// Submit a raw signed transaction directly to the shared simulated chain.
+    #[allow(dead_code)]
+    pub fn submit_raw_transaction(&self, tx: TransactionView) -> anyhow::Result<Hash256> {
+        let hash: Hash256 = tx.hash().into();
+        self.clock.activate();
+        self.state
+            .write()
+            .unwrap()
+            .submit_transaction(tx)
+            .map_err(|error| anyhow::anyhow!("submit_raw_transaction({hash}): {error}"))?;
+        Ok(hash)
     }
 }
 

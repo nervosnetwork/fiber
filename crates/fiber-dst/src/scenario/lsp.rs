@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use anyhow::{anyhow, ensure, Context, Result};
 use fiber_json_types::{
-    CkbInvoiceStatus as JsonInvoiceStatus, GetInvoiceResult, GetPaymentCommandResult,
-    InvoiceResult, PaymentStatus as JsonPaymentStatus,
+    ChannelSigningTransition, CkbInvoiceStatus as JsonInvoiceStatus, GetInvoiceResult,
+    GetPaymentCommandResult, InvoiceResult, PaymentStatus as JsonPaymentStatus,
 };
 use fnn::fiber::gossip::{GossipMessageStore, GossipMessageUpdates};
 use fnn::fiber::payment::SendPaymentCommand;
@@ -25,7 +25,10 @@ use tokio::sync::oneshot;
 
 use crate::chain_fault::{ChainEndpoint, ChainFault};
 use crate::host::{send, NAMES};
-use crate::lsp::{LspRpcFault, SdkSignerFault, WalletCommand, WALLET_HOSTS};
+use crate::lsp::{
+    LspRpcFault, LspTamperKind, RefusalTarget, RpcFloodKind, RpcFloodSpec, SdkSignerFault,
+    WalletCommand, WALLET_HOSTS,
+};
 use crate::sqlite_vfs::DiskFault;
 
 use super::funding::OpeningFault;
@@ -621,6 +624,21 @@ impl Driver {
 
         let public_peers: Vec<usize> = (0..public_nodes).filter(|&n| n != lsp_node).collect();
         let mut rng = StdRng::seed_from_u64(seed ^ 0x6c73_702d_6473);
+        let mut adv_rng = StdRng::seed_from_u64(seed ^ 0x6164_766c_7370_6473);
+        let slow_window = (chaos && payments > 0).then(|| {
+            let start = adv_rng.random_range(0..payments);
+            let end = (start + adv_rng.random_range(2..=3)).min(payments);
+            let wallet = adv_rng.random_range(0..2);
+            (start, end, wallet)
+        });
+        let rejections_before: u64 = self
+            .runtime
+            .wallets
+            .borrow()
+            .iter()
+            .take(2)
+            .map(|w| w.sdk_rejections_verified)
+            .sum();
         let mut succeeded = 0usize;
         let mut cancelled_invoices = 0usize;
         let mut expired_long_offline = 0usize;
@@ -631,6 +649,28 @@ impl Driver {
         let mut responses_dropped = 0usize;
 
         for seq in 0..payments {
+            if let Some((start, end, slow_wallet)) = slow_window {
+                if seq == start {
+                    let poll_ms = adv_rng.random_range(15..=60);
+                    let sign_ms = adv_rng.random_range(15..=60);
+                    {
+                        let wallets = self.runtime.wallets.borrow();
+                        let mut policy = wallets[slow_wallet].sdk_policy.borrow_mut();
+                        policy.poll_delay = Duration::from_millis(poll_ms);
+                        policy.sign_delay = Duration::from_millis(sign_ms);
+                    }
+                    self.coverage.hit("lsp_slow_signer");
+                    self.runtime.note(format_args!(
+                        "lsp-random #{seq} armed SlowSigner {} poll={poll_ms}ms sign={sign_ms}ms",
+                        WALLET_HOSTS[slow_wallet]
+                    ));
+                } else if seq == end {
+                    let wallets = self.runtime.wallets.borrow();
+                    let mut policy = wallets[slow_wallet].sdk_policy.borrow_mut();
+                    policy.poll_delay = Duration::ZERO;
+                    policy.sign_delay = Duration::ZERO;
+                }
+            }
             // Keep amounts modest (10..60 CKB) so multi-hop public channels retain liquidity
             // across the combined public + LSP workload.
             let amount = (rng.random_range(100..=600) as u128) * 10_000_000;
@@ -690,17 +730,27 @@ impl Driver {
                             )?;
                             let deferred =
                                 self.until("random long-offline payment buffered", |s| {
-                                    Ok(s.lsp_delivery_now(payment_hash).filter(|d| {
+                                    if let Some(d) = s.lsp_delivery_now(payment_hash).filter(|d| {
                                         matches!(d.status, LspPaymentDeliveryStatus::Deferred)
-                                    }))
+                                    }) {
+                                        return Ok(Some(Some(d)));
+                                    }
+                                    if s.runtime.payment_status(payer, payment_hash)
+                                        == Some(PaymentStatus::Failed)
+                                    {
+                                        return Ok(Some(None));
+                                    }
+                                    Ok(None)
                                 })?;
-                            self.advance_clock_past(deferred.buffer_deadline);
-                            self.until("random long-offline payment expired", |s| {
-                                Ok((s.runtime.payment_status(payer, payment_hash)
-                                    == Some(PaymentStatus::Failed))
-                                .then_some(()))
-                            })?;
-                            expired_long_offline += 1;
+                            if let Some(deferred) = deferred {
+                                self.advance_clock_past(deferred.buffer_deadline);
+                                self.until("random long-offline payment expired", |s| {
+                                    Ok((s.runtime.payment_status(payer, payment_hash)
+                                        == Some(PaymentStatus::Failed))
+                                    .then_some(()))
+                                })?;
+                                expired_long_offline += 1;
+                            }
                             self.runtime.restart_wallet(wallet);
                             self.wait_wallet_online(wallet)?;
                             let _ = self.lsp_call(|reply| {
@@ -726,10 +776,24 @@ impl Driver {
                                     ..Default::default()
                                 },
                             )?;
-                            self.until("random abrupt crash awaits signature", |s| {
-                                Ok(s.tenant_any_channel_awaiting_signature(tenant_id)
-                                    .then_some(()))
-                            })?;
+                            let reached =
+                                self.until("random abrupt crash awaits signature", |s| {
+                                    if s.tenant_any_channel_awaiting_signature(tenant_id) {
+                                        return Ok(Some(true));
+                                    }
+                                    if s.runtime.payment_status(payer, payment_hash)
+                                        == Some(PaymentStatus::Failed)
+                                    {
+                                        return Ok(Some(false));
+                                    }
+                                    Ok(None)
+                                })?;
+                            if !reached {
+                                self.runtime.wallets.borrow()[wallet]
+                                    .signing_paused
+                                    .set(false);
+                                continue;
+                            }
                             self.runtime.crash_wallet(wallet);
                             crashes_injected += 1;
                             for _ in 0..rng.random_range(3..=8) {
@@ -743,6 +807,9 @@ impl Driver {
                         }
                         // Duplicate submit_channel_signature!
                         2 => {
+                            if adv_rng.random_ratio(1, 3) {
+                                self.arm_random_channel_tamper(wallet, &mut adv_rng);
+                            }
                             self.wallet_rpc(wallet).set_fault(Some(
                                 LspRpcFault::DuplicateRequest {
                                     method: Some("submit_channel_signature"),
@@ -761,6 +828,9 @@ impl Driver {
                         }
                         // Drop response after commit on submit_channel_signature!
                         3 => {
+                            if adv_rng.random_ratio(1, 3) {
+                                self.arm_random_channel_tamper(wallet, &mut adv_rng);
+                            }
                             self.wallet_rpc(wallet).set_fault(Some(
                                 LspRpcFault::DropResponseAfterCommit {
                                     method: Some("submit_channel_signature"),
@@ -793,6 +863,9 @@ impl Driver {
                         }
                         // Drop one outgoing RPC request so wallet retries on next poll!
                         5 => {
+                            if adv_rng.random_ratio(1, 3) {
+                                self.arm_random_channel_tamper(wallet, &mut adv_rng);
+                            }
                             self.wallet_rpc(wallet)
                                 .set_fault(Some(LspRpcFault::DropRequest {
                                     method: Some("submit_channel_signature"),
@@ -818,11 +891,32 @@ impl Driver {
                                     ..Default::default()
                                 },
                             )?;
-                            self.until("random LSP crash buffered payment", |s| {
-                                Ok(s.lsp_delivery_now(payment_hash).filter(|d| {
-                                    matches!(d.status, LspPaymentDeliveryStatus::Deferred)
-                                }))
-                            })?;
+                            let buffered =
+                                self.until("random LSP crash buffered payment", |s| {
+                                    if s.lsp_delivery_now(payment_hash).is_some_and(|d| {
+                                        matches!(d.status, LspPaymentDeliveryStatus::Deferred)
+                                    }) {
+                                        return Ok(Some(true));
+                                    }
+                                    if s.runtime.payment_status(payer, payment_hash)
+                                        == Some(PaymentStatus::Failed)
+                                    {
+                                        return Ok(Some(false));
+                                    }
+                                    Ok(None)
+                                })?;
+                            if !buffered {
+                                self.runtime.restart_wallet(wallet);
+                                self.wait_wallet_online(wallet)?;
+                                let _ = self.lsp_call(|reply| {
+                                    LspServiceMessage::EnsureTenant(tenant_id.clone(), reply)
+                                })?;
+                                self.wait_tenant_channel_online(
+                                    tenant_id,
+                                    tenant_channels[wallet],
+                                )?;
+                                continue;
+                            }
                             self.runtime.crash(lsp_node);
                             crashes_injected += 1;
                             lsp_crashes_injected += 1;
@@ -854,10 +948,24 @@ impl Driver {
                                     ..Default::default()
                                 },
                             )?;
-                            self.until("random LSP mid-flight crash awaits signature", |s| {
-                                Ok(s.tenant_any_channel_awaiting_signature(tenant_id)
-                                    .then_some(()))
-                            })?;
+                            let reached =
+                                self.until("random LSP mid-flight crash awaits signature", |s| {
+                                    if s.tenant_any_channel_awaiting_signature(tenant_id) {
+                                        return Ok(Some(true));
+                                    }
+                                    if s.runtime.payment_status(payer, payment_hash)
+                                        == Some(PaymentStatus::Failed)
+                                    {
+                                        return Ok(Some(false));
+                                    }
+                                    Ok(None)
+                                })?;
+                            if !reached {
+                                self.runtime.wallets.borrow()[wallet]
+                                    .signing_paused
+                                    .set(false);
+                                continue;
+                            }
                             self.runtime.crash(lsp_node);
                             crashes_injected += 1;
                             lsp_crashes_injected += 1;
@@ -880,7 +988,7 @@ impl Driver {
                         // Cancel hold invoice (either while Received or while Deferred!) -> fails upstream cleanly.
                         8 => {
                             let cancel_while_deferred = rng.random_bool(0.5);
-                            if cancel_while_deferred {
+                            let reached = if cancel_while_deferred {
                                 self.wait_tenant_idle(tenant_id)?;
                                 self.evict_tenant_when_idle(tenant_id)?;
                                 let _ = self.pay(
@@ -890,14 +998,24 @@ impl Driver {
                                         ..Default::default()
                                     },
                                 )?;
-                                self.until("random cancel-deferred payment buffered", |s| {
-                                    Ok(s.lsp_delivery_now(payment_hash).filter(|d| {
-                                        matches!(d.status, LspPaymentDeliveryStatus::Deferred)
-                                    }))
-                                })?;
+                                let buffered =
+                                    self.until("random cancel-deferred payment buffered", |s| {
+                                        if s.lsp_delivery_now(payment_hash).is_some_and(|d| {
+                                            matches!(d.status, LspPaymentDeliveryStatus::Deferred)
+                                        }) {
+                                            return Ok(Some(true));
+                                        }
+                                        if s.runtime.payment_status(payer, payment_hash)
+                                            == Some(PaymentStatus::Failed)
+                                        {
+                                            return Ok(Some(false));
+                                        }
+                                        Ok(None)
+                                    })?;
                                 let _ = self.lsp_call(|reply| {
                                     LspServiceMessage::EnsureTenant(tenant_id.clone(), reply)
                                 })?;
+                                buffered
                             } else {
                                 let _ = self.pay(
                                     payer,
@@ -907,12 +1025,22 @@ impl Driver {
                                     },
                                 )?;
                                 self.until("random cancel-received hold invoice received", |s| {
-                                    Ok((s
-                                        .wallet_invoice_status_from_store(tenant_id, payment_hash)
+                                    if s.wallet_invoice_status_from_store(tenant_id, payment_hash)
                                         .unwrap_or(None)
-                                        == Some(CkbInvoiceStatus::Received))
-                                    .then_some(()))
-                                })?;
+                                        == Some(CkbInvoiceStatus::Received)
+                                    {
+                                        return Ok(Some(true));
+                                    }
+                                    if s.runtime.payment_status(payer, payment_hash)
+                                        == Some(PaymentStatus::Failed)
+                                    {
+                                        return Ok(Some(false));
+                                    }
+                                    Ok(None)
+                                })?
+                            };
+                            if !reached {
+                                continue;
                             }
                             let _ =
                                 self.wallet_call(wallet, |reply| WalletCommand::CancelInvoice {
@@ -947,9 +1075,22 @@ impl Driver {
                                     ..Default::default()
                                 },
                             )?;
-                            self.until("SDK SkipPersistAfterConfirmCrash triggered", |s| {
-                                Ok((!s.runtime.wallets.borrow()[wallet].online).then_some(()))
-                            })?;
+                            let crashed =
+                                self.until("SDK SkipPersistAfterConfirmCrash triggered", |s| {
+                                    if !s.runtime.wallets.borrow()[wallet].online {
+                                        return Ok(Some(true));
+                                    }
+                                    if s.runtime.payment_status(payer, payment_hash)
+                                        == Some(PaymentStatus::Failed)
+                                    {
+                                        return Ok(Some(false));
+                                    }
+                                    Ok(None)
+                                })?;
+                            if !crashed {
+                                self.runtime.wallets.borrow()[wallet].sdk_fault.set(None);
+                                continue;
+                            }
                             sdk_faults_injected += 1;
                             crashes_injected += 1;
                             self.runtime.restart_wallet(wallet);
@@ -967,9 +1108,22 @@ impl Driver {
                                     ..Default::default()
                                 },
                             )?;
-                            self.until("SDK CrashAfterPersistBeforeSubmit triggered", |s| {
-                                Ok((!s.runtime.wallets.borrow()[wallet].online).then_some(()))
-                            })?;
+                            let crashed =
+                                self.until("SDK CrashAfterPersistBeforeSubmit triggered", |s| {
+                                    if !s.runtime.wallets.borrow()[wallet].online {
+                                        return Ok(Some(true));
+                                    }
+                                    if s.runtime.payment_status(payer, payment_hash)
+                                        == Some(PaymentStatus::Failed)
+                                    {
+                                        return Ok(Some(false));
+                                    }
+                                    Ok(None)
+                                })?;
+                            if !crashed {
+                                self.runtime.wallets.borrow()[wallet].sdk_fault.set(None);
+                                continue;
+                            }
                             sdk_faults_injected += 1;
                             crashes_injected += 1;
                             self.runtime.restart_wallet(wallet);
@@ -990,10 +1144,24 @@ impl Driver {
                                     ..Default::default()
                                 },
                             )?;
-                            self.until("random token-revoke awaits signature", |s| {
-                                Ok(s.tenant_any_channel_awaiting_signature(tenant_id)
-                                    .then_some(()))
-                            })?;
+                            let reached =
+                                self.until("random token-revoke awaits signature", |s| {
+                                    if s.tenant_any_channel_awaiting_signature(tenant_id) {
+                                        return Ok(Some(true));
+                                    }
+                                    if s.runtime.payment_status(payer, payment_hash)
+                                        == Some(PaymentStatus::Failed)
+                                    {
+                                        return Ok(Some(false));
+                                    }
+                                    Ok(None)
+                                })?;
+                            if !reached {
+                                self.runtime.wallets.borrow()[wallet]
+                                    .signing_paused
+                                    .set(false);
+                                continue;
+                            }
                             let new_epoch = self.lsp_call(|reply| {
                                 LspServiceMessage::RevokeTenantTokens(tenant_id.clone(), reply)
                             })?;
@@ -1025,21 +1193,33 @@ impl Driver {
                                     ..Default::default()
                                 },
                             )?;
-                            self.until("LSP SQLite disk fault hit", |s| {
-                                Ok(s.runtime.disks[lsp_node].hit().map(|_| ()))
+                            let fault_hit = self.until("LSP SQLite disk fault hit", |s| {
+                                if s.runtime.disks[lsp_node].hit().is_some() {
+                                    return Ok(Some(true));
+                                }
+                                if s.runtime.payment_status(payer, payment_hash)
+                                    == Some(PaymentStatus::Failed)
+                                {
+                                    return Ok(Some(false));
+                                }
+                                Ok(None)
                             })?;
-                            // Wait a few ticks for any actor panic/stop to propagate, then recover cleanly.
+                            if !fault_hit {
+                                self.runtime.disks[lsp_node].clear();
+                                continue;
+                            }
+                            // Crash the node BEFORE clearing the simulated disk fault (matching
+                            // `Injection::heal` for SQLite faults) so no in-flight panic on the
+                            // damaged store races with `disk.clear()`, then restart cleanly.
                             for _ in 0..4 {
                                 self.step()?;
                             }
+                            self.runtime.crash(lsp_node);
                             self.runtime.disks[lsp_node].clear();
-                            if !self.runtime.node_available(lsp_node) {
-                                self.runtime.crash(lsp_node);
-                                self.runtime.restart(lsp_node);
-                                lsp_crashes_injected += 1;
-                                crashes_injected += 1;
-                                self.wait_lsp_ready()?;
-                            }
+                            self.runtime.restart(lsp_node);
+                            lsp_crashes_injected += 1;
+                            crashes_injected += 1;
+                            self.wait_lsp_ready()?;
                             let _ = self.lsp_call(|reply| {
                                 LspServiceMessage::EnsureTenant(tenant_id.clone(), reply)
                             })?;
@@ -1068,6 +1248,9 @@ impl Driver {
                             }
                         }
                         _ => {
+                            if chaos && adv_rng.random_ratio(1, 3) {
+                                self.arm_random_channel_tamper(wallet, &mut adv_rng);
+                            }
                             let _ = self.pay(
                                 payer,
                                 SendPaymentCommand {
@@ -1078,13 +1261,23 @@ impl Driver {
                         }
                     }
 
-                    self.until("random inbound hold invoice received", |s| {
-                        Ok((s
-                            .wallet_invoice_status_from_store(tenant_id, payment_hash)
+                    let received = self.until("random inbound hold invoice received", |s| {
+                        if s.wallet_invoice_status_from_store(tenant_id, payment_hash)
                             .unwrap_or(None)
-                            == Some(CkbInvoiceStatus::Received))
-                        .then_some(()))
+                            == Some(CkbInvoiceStatus::Received)
+                        {
+                            return Ok(Some(true));
+                        }
+                        if s.runtime.payment_status(payer, payment_hash)
+                            == Some(PaymentStatus::Failed)
+                        {
+                            return Ok(Some(false));
+                        }
+                        Ok(None)
                     })?;
+                    if !received {
+                        continue;
+                    }
                     if chaos && rng.random_ratio(1, 3) {
                         self.wallet_rpc(wallet)
                             .set_fault(Some(LspRpcFault::DuplicateRequest {
@@ -1155,6 +1348,9 @@ impl Driver {
                             ));
                             duplicates_injected += 1;
                         }
+                        if chaos && adv_rng.random_ratio(1, 3) {
+                            self.arm_random_channel_tamper(wallet, &mut adv_rng);
+                        }
                         match self.wallet_call(wallet, |reply| WalletCommand::SendPayment {
                             channel_id: tenant_channels[wallet],
                             invoice: invoice_str,
@@ -1169,6 +1365,10 @@ impl Driver {
                             }
                             Err(_) => {
                                 self.wallet_rpc(wallet).set_fault(None);
+                                self.runtime.wallets.borrow()[wallet]
+                                    .sdk_policy
+                                    .borrow_mut()
+                                    .lsp_tamper = None;
                                 continue;
                             }
                         }
@@ -1245,6 +1445,9 @@ impl Driver {
                             preimage,
                             reply,
                         })?;
+                    if chaos && adv_rng.random_ratio(1, 3) {
+                        self.arm_random_channel_tamper(to_wallet, &mut adv_rng);
+                    }
                     self.run_tenant_to_tenant_payment(
                         seq,
                         from_wallet,
@@ -1263,10 +1466,25 @@ impl Driver {
             }
         }
 
+        // Always clear adversarial SDK policies before concurrent wave / final drain.
+        self.clear_sdk_policies();
+        let rejections_after: u64 = self
+            .runtime
+            .wallets
+            .borrow()
+            .iter()
+            .take(2)
+            .map(|w| w.sdk_rejections_verified)
+            .sum();
+        self.coverage.add(
+            "lsp_channel_tamper_rejected",
+            rejections_after.saturating_sub(rejections_before),
+        );
+
         let mut concurrent_payments = 0usize;
         if chaos {
             let (wave_count, wave_cancelled, wave_crashes, wave_sdk_faults, wave_dups, wave_drops) =
-                self.run_random_lsp_concurrent_wave(state, &public_peers, &mut rng)?;
+                self.run_random_lsp_concurrent_wave(seed, state, &public_peers, &mut rng)?;
             concurrent_payments = wave_count;
             succeeded += wave_count.saturating_sub(wave_cancelled);
             cancelled_invoices += wave_cancelled;
@@ -1279,6 +1497,7 @@ impl Driver {
             succeeded += 1;
         }
 
+        self.clear_sdk_policies();
         for (wallet, &wallet_name) in WALLET_HOSTS.iter().enumerate().take(2) {
             self.ensure_wallet_online(wallet)?;
             self.wait_tenant_idle(&tenant_ids[wallet])?;
@@ -1329,6 +1548,7 @@ impl Driver {
     #[allow(clippy::type_complexity)]
     fn run_random_lsp_concurrent_wave(
         &mut self,
+        seed: u64,
         state: &RandomLspState,
         public_peers: &[usize],
         rng: &mut StdRng,
@@ -1344,13 +1564,11 @@ impl Driver {
             })?;
             self.wait_tenant_channel_online(&tenant_ids[wallet], tenant_channels[wallet])?;
         }
-        let _ = lsp_node;
 
-        // Submit 6 concurrent payments across SDK-0 (dual-channel) & SDK-1 before settling any:
+        // Submit 5 concurrent payments across SDK-0 (dual-channel) & SDK-1 before settling any:
         // - 2x Public -> SDK-0 (on primary + secondary channels)
         // - 2x Public -> SDK-1 (one settled, one cancelled via cancel_invoice)
         // - 1x SDK-0 -> SDK-1 (concurrent tenant-to-tenant)
-        // - 1x SDK-0 -> Public peer (concurrent outbound trampoline)
         let mut inflight: Vec<(Option<usize>, usize, Hash256, Hash256, bool)> = Vec::new();
         let mut crashes = 0usize;
         let mut sdk_faults = 0usize;
@@ -1432,6 +1650,33 @@ impl Driver {
             })?;
         inflight.push((None, 1, t2t_hash, t2t_preimage, false));
 
+        // Overlap live public-mesh Chaos (non-LSP relay crashes, partitions, frame drops,
+        // disconnects, and adversarial P2P faults) with in-flight concurrent LSP/SDK signing,
+        // a short SDK refusal window, an LSP JSON-RPC flood, and Byzantine balance tampering!
+        let mut lsp_chaos = super::faults::Chaos::new(seed ^ 0x6c73_7063_6861_6f73)
+            .with_adversarial(seed ^ 0x6c73_7063_6861_6f73);
+        lsp_chaos.protect_node(Some(lsp_node));
+        lsp_chaos.stop_at(self.runtime.elapsed() + Duration::from_millis(220));
+        self.chaos = Some(lsp_chaos);
+        self.coverage.hit("public_chaos_during_lsp");
+
+        let mut wave_adv_rng = StdRng::seed_from_u64(seed ^ 0x6164_7677_6176_6573);
+        let refusal_target = if wave_adv_rng.random_bool(0.5) {
+            RefusalTarget::Transition(ChannelSigningTransition::SendCommitmentSigned)
+        } else {
+            RefusalTarget::All
+        };
+        let refusals_before = self.runtime.wallets.borrow()[1].sdk_refusals_hit;
+        self.runtime.wallets.borrow()[1]
+            .sdk_policy
+            .borrow_mut()
+            .refusal = Some(refusal_target);
+
+        let tamper_before = self.runtime.wallets.borrow()[1].sdk_rejections_verified;
+        self.runtime.wallets.borrow()[1]
+            .sdk_fault
+            .set(Some(SdkSignerFault::TamperNextCommitmentBalance));
+
         // Arm an SDK post-persist pre-RPC crash on SDK-0 while concurrent payments are signing!
         self.runtime.wallets.borrow()[0]
             .sdk_fault
@@ -1456,71 +1701,168 @@ impl Driver {
         self.runtime.restart_wallet(0);
         self.wait_wallet_online(0)?;
 
-        // Wait until all concurrent payments are held simultaneously before settling/cancelling.
-        self.until("all concurrent LSP/SDK hold invoices received", |s| {
-            let all_received = inflight.iter().all(|&(_, wallet, hash, _, _)| {
-                s.wallet_invoice_status_from_store(&tenant_ids[wallet], hash)
-                    .unwrap_or(None)
-                    == Some(CkbInvoiceStatus::Received)
-            });
-            Ok(all_received.then_some(()))
-        })?;
+        // Hold the short refusal window across ~100ms total while overlapping public mesh chaos,
+        // then clear it so SDK-1 recovers cleanly without hanging or mutating state.
+        let refusal_deadline = self.runtime.elapsed() + Duration::from_millis(100);
+        while self.runtime.elapsed() < refusal_deadline
+            && self.runtime.wallets.borrow()[1].sdk_refusals_hit == refusals_before
+        {
+            self.step()?;
+        }
+        self.runtime.wallets.borrow()[1]
+            .sdk_policy
+            .borrow_mut()
+            .refusal = None;
+        let refusals_hit = self.runtime.wallets.borrow()[1]
+            .sdk_refusals_hit
+            .saturating_sub(refusals_before);
+        self.coverage.hit("lsp_short_refusal_window");
+        self.coverage.add("lsp_short_refusal_hit", refusals_hit);
 
-        // Busy tenant with held TLCs / active deliveries MUST reject eviction!
-        let busy_evict = self
-            .lsp_call_raw(|reply| LspServiceMessage::EvictTenant(tenant_ids[1].clone(), reply))?;
+        // Fire a lightweight concurrent RpcFlood burst (12 MalformedJson + 8 ReplayedLastRegistration)
+        // from SDK-2 against the live LSP server while concurrent payments & chaos are in flight.
+        self.ensure_wallet_online(2)?;
+        let malformed_report = self.wallet_call(2, |reply| WalletCommand::RpcFlood {
+            spec: RpcFloodSpec {
+                concurrency: 6,
+                total_requests: 12,
+                kind: RpcFloodKind::MalformedJson {
+                    raw_payload: "{\"jsonrpc\":\"2.0\",\"method\":".to_owned(),
+                },
+            },
+            reply,
+        })?;
         ensure!(
-            busy_evict.is_err(),
-            "EvictTenant unexpectedly evicted busy tenant SDK-1 with held concurrent payments"
+            malformed_report.sent == 12 && malformed_report.ok == 0,
+            "unexpected MalformedJson RpcFlood outcome during random chaos: {malformed_report:?}"
+        );
+        let replay_report = self.wallet_call(2, |reply| WalletCommand::RpcFlood {
+            spec: RpcFloodSpec {
+                concurrency: 4,
+                total_requests: 8,
+                kind: RpcFloodKind::ReplayedLastRegistration,
+            },
+            reply,
+        })?;
+        ensure!(
+            replay_report.sent == 8 && replay_report.ok == 0,
+            "unexpected ReplayedLastRegistration RpcFlood outcome during random chaos: {replay_report:?}"
+        );
+        self.coverage.hit("lsp_rpc_flood_rejected");
+        self.runtime.note(format_args!(
+            "lsp-random concurrent RpcFlood rejected malformed={malformed_report:?} replay={replay_report:?} short_refusal_hits={refusals_hit}"
+        ));
+
+        // Ensure all adversarial policies are cleared before draining the concurrent wave.
+        self.clear_sdk_policies();
+
+        // Wait until concurrent public-mesh chaos drains and every in-flight payment either
+        // reaches Received or failed cleanly under public relay faults.
+        self.until(
+            "concurrent public chaos drains and all LSP/SDK hold invoices reach Received or Failed",
+            |s| {
+                let chaos_drained = s
+                    .chaos
+                    .as_ref()
+                    .is_none_or(|c| c.quiescent(s.runtime.elapsed()));
+                let all_ready = inflight.iter().all(|&(payer, wallet, hash, _, _)| {
+                    let received = s
+                        .wallet_invoice_status_from_store(&tenant_ids[wallet], hash)
+                        .unwrap_or(None)
+                        == Some(CkbInvoiceStatus::Received);
+                    let failed_in_transit = payer.is_some_and(|p| {
+                        s.runtime.payment_status(p, hash) == Some(PaymentStatus::Failed)
+                    });
+                    received || failed_in_transit
+                });
+                Ok((chaos_drained && all_ready).then_some(()))
+            },
+        )?;
+        self.chaos.take();
+        self.runtime.wallets.borrow()[1].sdk_fault.set(None);
+        let tamper_after = self.runtime.wallets.borrow()[1].sdk_rejections_verified;
+        self.coverage.add(
+            "sdk_tamper_rejected",
+            tamper_after.saturating_sub(tamper_before),
         );
 
-        for &(_, wallet, hash, preimage, will_cancel) in &inflight {
+        // Busy tenant with held TLCs / active deliveries MUST reject eviction!
+        let sdk1_has_received = inflight.iter().any(|&(_, wallet, hash, _, _)| {
+            wallet == 1
+                && self
+                    .wallet_invoice_status_from_store(&tenant_ids[1], hash)
+                    .unwrap_or(None)
+                    == Some(CkbInvoiceStatus::Received)
+        });
+        if sdk1_has_received {
+            let busy_evict = self.lsp_call_raw(|reply| {
+                LspServiceMessage::EvictTenant(tenant_ids[1].clone(), reply)
+            })?;
+            ensure!(
+                busy_evict.is_err(),
+                "EvictTenant unexpectedly evicted busy tenant SDK-1 with held concurrent payments"
+            );
+        }
+
+        let mut settled_or_cancelled = Vec::with_capacity(inflight.len());
+        for &(payer, wallet, hash, preimage, will_cancel) in &inflight {
+            let received = self
+                .wallet_invoice_status_from_store(&tenant_ids[wallet], hash)
+                .unwrap_or(None)
+                == Some(CkbInvoiceStatus::Received);
+            if !received {
+                settled_or_cancelled.push((payer, wallet, hash, true));
+                continue;
+            }
             if will_cancel {
                 let _ = self.wallet_call(wallet, |reply| WalletCommand::CancelInvoice {
                     payment_hash: hash,
                     reply,
                 })?;
                 cancelled += 1;
+                settled_or_cancelled.push((payer, wallet, hash, true));
             } else {
                 self.wallet_call(wallet, |reply| WalletCommand::SettleInvoice {
                     payment_hash: hash,
                     preimage,
                     reply,
                 })?;
+                settled_or_cancelled.push((payer, wallet, hash, false));
             }
         }
         self.until("all concurrent LSP/SDK payments finalized", |s| {
-            let all_done = inflight
-                .iter()
-                .all(|&(payer, wallet, hash, _, will_cancel)| {
-                    if will_cancel {
-                        let payer_failed = payer.is_some_and(|p| {
-                            s.runtime.payment_status(p, hash) == Some(PaymentStatus::Failed)
-                        });
-                        let delivery_failed = s.lsp_delivery_now(hash).is_some_and(|d| {
-                            matches!(d.status, LspPaymentDeliveryStatus::Failed { .. })
-                        });
-                        return payer_failed && delivery_failed;
-                    }
-                    let paid = s
-                        .wallet_invoice_status_from_store(&tenant_ids[wallet], hash)
-                        .unwrap_or(None)
-                        == Some(CkbInvoiceStatus::Paid);
-                    let payer_ok = match payer {
-                        Some(public_payer) => {
-                            s.runtime.payment_status(public_payer, hash)
-                                == Some(PaymentStatus::Success)
-                                && s.lsp_delivery_now(hash).is_some_and(|d| {
-                                    matches!(d.status, LspPaymentDeliveryStatus::Succeeded)
-                                })
+            let all_done =
+                settled_or_cancelled
+                    .iter()
+                    .all(|&(payer, wallet, hash, expect_failed)| {
+                        if expect_failed {
+                            let payer_failed = payer.is_some_and(|p| {
+                                s.runtime.payment_status(p, hash) == Some(PaymentStatus::Failed)
+                            });
+                            let delivery_failed = s.lsp_delivery_now(hash).is_none_or(|d| {
+                                matches!(d.status, LspPaymentDeliveryStatus::Failed { .. })
+                            });
+                            return payer_failed && delivery_failed;
                         }
-                        None => {
-                            s.wallet_payment_status_from_store(&tenant_ids[0], hash)
-                                == Some(PaymentStatus::Success)
-                        }
-                    };
-                    paid && payer_ok
-                });
+                        let paid = s
+                            .wallet_invoice_status_from_store(&tenant_ids[wallet], hash)
+                            .unwrap_or(None)
+                            == Some(CkbInvoiceStatus::Paid);
+                        let payer_ok = match payer {
+                            Some(public_payer) => {
+                                s.runtime.payment_status(public_payer, hash)
+                                    == Some(PaymentStatus::Success)
+                                    && s.lsp_delivery_now(hash).is_some_and(|d| {
+                                        matches!(d.status, LspPaymentDeliveryStatus::Succeeded)
+                                    })
+                            }
+                            None => {
+                                s.wallet_payment_status_from_store(&tenant_ids[0], hash)
+                                    == Some(PaymentStatus::Success)
+                            }
+                        };
+                        paid && payer_ok
+                    });
             Ok(all_done.then_some(()))
         })?;
 
@@ -1773,10 +2115,28 @@ impl Driver {
         // watchtower creates an ExternalFundingRequired request, expires it past TTL, and enters
         // WatchtowerSigningStatus::Backoff before SDK-0 observes Backoff and recovers!
         let exercise_backoff = seed.is_multiple_of(4);
+        let mut wt_adv_rng = StdRng::seed_from_u64(seed ^ 0x7774_6164_7674_616d);
+        let wt_tamper = match wt_adv_rng.random_range(0..4) {
+            0 => LspTamperKind::WatchtowerFeeDrain {
+                extra_fee: 10_000_000,
+            },
+            1 => LspTamperKind::WatchtowerWrongSince {
+                since: 0x4000_0000_0000_0001,
+            },
+            2 => LspTamperKind::WatchtowerWrongDestination,
+            _ => LspTamperKind::WatchtowerExtraInput,
+        };
+        let wt_rejections_before =
+            self.runtime.wallets.borrow()[0].sdk_watchtower_rejections_verified;
         self.runtime.restart_wallet(0);
         self.wait_wallet_online(0)?;
         if exercise_backoff {
             self.runtime.wallets.borrow()[0].signing_paused.set(true);
+        } else {
+            self.runtime.wallets.borrow()[0]
+                .sdk_policy
+                .borrow_mut()
+                .lsp_tamper = Some(wt_tamper);
         }
         for &(_, _, preimage, payment_hash) in &held_tlcs {
             self.wallet_call(0, |reply| WalletCommand::CreateWatchPreimage {
@@ -1811,6 +2171,10 @@ impl Driver {
             ));
             // Advance past 5-minute initial backoff so fresh ExternalFundingRequired requests resume.
             self.advance_clock_past(self.clock_ms().saturating_add(6 * 60 * 1000));
+            self.runtime.wallets.borrow()[0]
+                .sdk_policy
+                .borrow_mut()
+                .lsp_tamper = Some(wt_tamper);
         }
         let prev_dups = self.wallet_rpc(0).duplicates_sent();
         self.wallet_rpc(0)
@@ -1854,6 +2218,12 @@ impl Driver {
                 Ok((settled && all_payers_ok && signed).then_some(()))
             },
         )?;
+        self.clear_sdk_policies();
+        let wt_rejections_delta = self.runtime.wallets.borrow()[0]
+            .sdk_watchtower_rejections_verified
+            .saturating_sub(wt_rejections_before);
+        self.coverage
+            .add("lsp_watchtower_tamper_rejected", wt_rejections_delta);
         self.runtime.chain_access[lsp_node].set(ChainFault::Healthy);
         ensure!(
             self.wallet_rpc(0).duplicates_sent() > prev_dups,
@@ -1991,11 +2361,11 @@ impl Driver {
         Ok(())
     }
 
-    fn lsp_node(&self) -> Result<usize> {
+    pub(super) fn lsp_node(&self) -> Result<usize> {
         Ok(self.runtime.lsp_node.unwrap_or(FIXTURE_LSP_NODE))
     }
 
-    fn start_lsp_watchtower(&mut self) -> Result<()> {
+    pub(super) fn start_lsp_watchtower(&mut self) -> Result<()> {
         let lsp_node = self.lsp_node()?;
         if let Some(towers) = &self.runtime.watchtowers {
             towers[lsp_node].enabled.send_replace(true);
@@ -2013,7 +2383,7 @@ impl Driver {
         })
     }
 
-    fn wait_wallet_online(&mut self, wallet: usize) -> Result<()> {
+    pub(super) fn wait_wallet_online(&mut self, wallet: usize) -> Result<()> {
         self.until("external SDK wallet online", |s| {
             Ok(s.runtime.wallets.borrow()[wallet].online.then_some(()))
         })
@@ -2027,7 +2397,7 @@ impl Driver {
         Ok(())
     }
 
-    fn wait_trampoline_ready(&mut self, payer: usize, lsp: usize) -> Result<()> {
+    pub(super) fn wait_trampoline_ready(&mut self, payer: usize, lsp: usize) -> Result<()> {
         let lsp_pubkey = self.runtime.peers[lsp];
         self.until("public payer learns LSP trampoline feature", |s| {
             let store = s.runtime.store(payer)?;
@@ -2042,7 +2412,7 @@ impl Driver {
         self.runtime.wallets.borrow()[wallet].rpc.clone()
     }
 
-    fn wallet_call<T>(
+    pub(super) fn wallet_call<T>(
         &mut self,
         wallet: usize,
         command: impl FnOnce(oneshot::Sender<Result<T>>) -> WalletCommand,
@@ -2053,7 +2423,7 @@ impl Driver {
         })
     }
 
-    fn lsp_call<T>(
+    pub(super) fn lsp_call<T>(
         &mut self,
         command: impl FnOnce(ractor::RpcReplyPort<Result<T, String>>) -> LspServiceMessage,
     ) -> Result<T> {
@@ -2086,7 +2456,7 @@ impl Driver {
         list.pop()
     }
 
-    fn wait_tenant_idle(&mut self, tenant_id: &TenantId) -> Result<()> {
+    pub(super) fn wait_tenant_idle(&mut self, tenant_id: &TenantId) -> Result<()> {
         let lsp_node = self.lsp_node()?;
         self.until("hosted tenant channels idle", |s| {
             let store = s.runtime.store(lsp_node)?;
@@ -2120,7 +2490,7 @@ impl Driver {
         anyhow::bail!("timed out evicting hosted tenant {tenant_id}")
     }
 
-    fn wait_tenant_channel_online(
+    pub(super) fn wait_tenant_channel_online(
         &mut self,
         tenant_id: &TenantId,
         channel_id: Hash256,
@@ -2184,7 +2554,7 @@ impl Driver {
         .is_some_and(|state| state.signing_context.is_awaiting_signature())
     }
 
-    fn wallet_invoice_status_from_store(
+    pub(super) fn wallet_invoice_status_from_store(
         &self,
         tenant_id: &TenantId,
         payment_hash: Hash256,
@@ -2195,7 +2565,7 @@ impl Driver {
         Ok(tenant_store.get_invoice_status(&payment_hash))
     }
 
-    fn wallet_payment_status_from_store(
+    pub(super) fn wallet_payment_status_from_store(
         &self,
         tenant_id: &TenantId,
         payment_hash: Hash256,
@@ -2235,6 +2605,40 @@ impl Driver {
         let mut config = fnn::lsp::LspConfig::default();
         config.max_buffer_duration_ms = LSP_BUFFER_DURATION_MS;
         config
+    }
+
+    fn arm_random_channel_tamper(&self, wallet: usize, rng: &mut StdRng) {
+        let wallets = self.runtime.wallets.borrow();
+        let Some(slot) = wallets.get(wallet) else {
+            return;
+        };
+        if slot.sdk_fault.get().is_some() {
+            return;
+        }
+        let mut policy = slot.sdk_policy.borrow_mut();
+        if policy.lsp_tamper.is_some() {
+            return;
+        }
+        let kind = match rng.random_range(0..5) {
+            0 => LspTamperKind::CommitmentBalance { delta: 1 },
+            1 => LspTamperKind::SettlementTlcAmount { delta: 1 },
+            2 => LspTamperKind::SettlementTlcExpiry { delta: 1_000 },
+            3 => LspTamperKind::DropFirstTlc,
+            _ => LspTamperKind::BadCommitmentNumber { delta: 1 },
+        };
+        policy.lsp_tamper = Some(kind);
+    }
+
+    fn clear_sdk_policies(&self) {
+        let wallets = self.runtime.wallets.borrow();
+        for slot in wallets.iter() {
+            let mut policy = slot.sdk_policy.borrow_mut();
+            policy.refusal = None;
+            policy.poll_delay = Duration::ZERO;
+            policy.sign_delay = Duration::ZERO;
+            policy.watchtower_delay = Duration::ZERO;
+            policy.lsp_tamper = None;
+        }
     }
 }
 

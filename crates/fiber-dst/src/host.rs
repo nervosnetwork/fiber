@@ -1,5 +1,5 @@
 use std::cell::{Cell, RefCell};
-use std::collections::{hash_map::DefaultHasher, BTreeSet};
+use std::collections::{hash_map::DefaultHasher, BTreeSet, VecDeque};
 use std::future::Future;
 use std::hash::{Hash, Hasher};
 use std::io;
@@ -87,6 +87,173 @@ pub(crate) struct FrameDelay {
     pub duration: Duration,
 }
 
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FrameKindFilter {
+    Any,
+    OpenChannelV2,
+    AcceptChannelV2,
+    TxUpdate,
+    TxSignatures,
+    TxCompleteV2,
+    TxAbort,
+    AddTlc,
+    RemoveTlc,
+    CommitmentSignedV2,
+    RevokeAndAckV2,
+    ChannelReadyV2,
+    ReestablishChannelV2,
+    ShutdownV2,
+    ClosingSignedV2,
+    AnnouncementSignatures,
+    UpdateTlcInfo,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct FrameMatcher {
+    pub kind: FrameKindFilter,
+    pub channel_id: Option<Hash256>,
+}
+
+#[allow(dead_code)]
+impl FrameMatcher {
+    pub fn any() -> Self {
+        Self {
+            kind: FrameKindFilter::Any,
+            channel_id: None,
+        }
+    }
+
+    pub fn kind(kind: FrameKindFilter) -> Self {
+        Self {
+            kind,
+            channel_id: None,
+        }
+    }
+
+    pub fn channel(kind: FrameKindFilter, channel_id: Hash256) -> Self {
+        Self {
+            kind,
+            channel_id: Some(channel_id),
+        }
+    }
+
+    pub fn matches(&self, message: &FiberMessage) -> bool {
+        let kind_matches = match self.kind {
+            FrameKindFilter::Any => true,
+            FrameKindFilter::OpenChannelV2 => {
+                matches!(message, FiberMessage::ChannelInitializationV2(_))
+            }
+            FrameKindFilter::AcceptChannelV2 => matches!(
+                message,
+                FiberMessage::ChannelNormalOperation(FiberChannelMessage::AcceptChannelV2(_))
+            ),
+            FrameKindFilter::TxUpdate => matches!(
+                message,
+                FiberMessage::ChannelNormalOperation(FiberChannelMessage::TxUpdate(_))
+            ),
+            FrameKindFilter::TxSignatures => matches!(
+                message,
+                FiberMessage::ChannelNormalOperation(FiberChannelMessage::TxSignatures(_))
+            ),
+            FrameKindFilter::TxCompleteV2 => matches!(
+                message,
+                FiberMessage::ChannelNormalOperation(FiberChannelMessage::TxCompleteV2(_))
+            ),
+            FrameKindFilter::TxAbort => matches!(
+                message,
+                FiberMessage::ChannelNormalOperation(FiberChannelMessage::TxAbort(_))
+            ),
+            FrameKindFilter::AddTlc => matches!(
+                message,
+                FiberMessage::ChannelNormalOperation(FiberChannelMessage::AddTlc(_))
+            ),
+            FrameKindFilter::RemoveTlc => matches!(
+                message,
+                FiberMessage::ChannelNormalOperation(FiberChannelMessage::RemoveTlc(_))
+            ),
+            FrameKindFilter::CommitmentSignedV2 => matches!(
+                message,
+                FiberMessage::ChannelNormalOperation(FiberChannelMessage::CommitmentSignedV2(_))
+            ),
+            FrameKindFilter::RevokeAndAckV2 => matches!(
+                message,
+                FiberMessage::ChannelNormalOperation(FiberChannelMessage::RevokeAndAckV2(_))
+            ),
+            FrameKindFilter::ChannelReadyV2 => matches!(
+                message,
+                FiberMessage::ChannelNormalOperation(FiberChannelMessage::ChannelReadyV2(_))
+            ),
+            FrameKindFilter::ReestablishChannelV2 => matches!(
+                message,
+                FiberMessage::ChannelNormalOperation(FiberChannelMessage::ReestablishChannelV2(_))
+            ),
+            FrameKindFilter::ShutdownV2 => matches!(
+                message,
+                FiberMessage::ChannelNormalOperation(FiberChannelMessage::ShutdownV2(_))
+            ),
+            FrameKindFilter::ClosingSignedV2 => matches!(
+                message,
+                FiberMessage::ChannelNormalOperation(FiberChannelMessage::ClosingSignedV2(_))
+            ),
+            FrameKindFilter::AnnouncementSignatures => matches!(
+                message,
+                FiberMessage::ChannelNormalOperation(FiberChannelMessage::AnnouncementSignatures(
+                    _
+                ))
+            ),
+            FrameKindFilter::UpdateTlcInfo => matches!(
+                message,
+                FiberMessage::ChannelNormalOperation(FiberChannelMessage::UpdateTlcInfo(_))
+            ),
+        };
+        if !kind_matches {
+            return false;
+        }
+        let Some(expected_channel) = self.channel_id else {
+            return true;
+        };
+        match message {
+            FiberMessage::ChannelInitializationV2(open) => open.channel_id == expected_channel,
+            FiberMessage::ChannelNormalOperation(channel_msg) => {
+                channel_msg.get_channel_id() == expected_channel
+            }
+            FiberMessage::Init(_) => false,
+        }
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct BlackholeRule {
+    pub matcher: FrameMatcher,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DuplicateRule {
+    pub matcher: FrameMatcher,
+    pub copies: usize,
+    pub remaining: Option<usize>,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct AdversarialDelayRule {
+    pub matcher: FrameMatcher,
+    pub duration: Duration,
+    pub out_of_order: bool,
+    pub persistent: bool,
+}
+
+#[allow(dead_code, clippy::large_enum_variant)]
+#[derive(Clone, Debug)]
+pub(crate) enum InjectedWireAction {
+    SendFrame(FiberMessage),
+    SendRawFrame { declared_len: u32, payload: Vec<u8> },
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct LinkControl {
     reset: watch::Sender<()>,
@@ -98,6 +265,18 @@ pub(crate) struct LinkControl {
     dropped_frames: Rc<Cell<u64>>,
     frame_delay: Rc<Cell<Option<FrameDelay>>>,
     delayed_frames: Rc<Cell<u64>>,
+    blackhole: Rc<Cell<Option<BlackholeRule>>>,
+    blackholed_frames: Rc<Cell<u64>>,
+    duplicate: Rc<Cell<Option<DuplicateRule>>>,
+    duplicated_frames: Rc<Cell<u64>>,
+    adv_delay: Rc<Cell<Option<AdversarialDelayRule>>>,
+    adv_delayed_frames: Rc<Cell<u64>>,
+    allow_malformed_disconnect: Rc<Cell<bool>>,
+    malformed_disconnects: Rc<Cell<u64>>,
+    last_captured: Rc<RefCell<Option<FiberMessage>>>,
+    injected_queue: Rc<RefCell<VecDeque<InjectedWireAction>>>,
+    injected_notify: watch::Sender<u64>,
+    injected_sent: Rc<Cell<u64>>,
 }
 
 impl LinkControl {
@@ -127,6 +306,139 @@ impl LinkControl {
 
     pub fn delayed_frames(&self) -> u64 {
         self.delayed_frames.get()
+    }
+
+    #[allow(dead_code)]
+    pub fn set_blackhole(&self, rule: Option<BlackholeRule>) {
+        self.blackhole.set(rule);
+    }
+
+    #[allow(dead_code)]
+    pub fn blackholed_frames(&self) -> u64 {
+        self.blackholed_frames.get()
+    }
+
+    #[allow(dead_code)]
+    pub fn set_duplicate(&self, rule: Option<DuplicateRule>) {
+        self.duplicate.set(rule);
+    }
+
+    #[allow(dead_code)]
+    pub fn duplicated_frames(&self) -> u64 {
+        self.duplicated_frames.get()
+    }
+
+    #[allow(dead_code)]
+    pub fn set_adv_delay(&self, rule: Option<AdversarialDelayRule>) {
+        self.adv_delay.set(rule);
+    }
+
+    #[allow(dead_code)]
+    pub fn adv_delayed_frames(&self) -> u64 {
+        self.adv_delayed_frames.get()
+    }
+
+    #[allow(dead_code)]
+    pub fn set_allow_malformed_disconnect(&self, allow: bool) {
+        self.allow_malformed_disconnect.set(allow);
+    }
+
+    #[allow(dead_code)]
+    pub fn malformed_disconnects(&self) -> u64 {
+        self.malformed_disconnects.get()
+    }
+
+    #[allow(dead_code)]
+    pub fn last_captured(&self) -> Option<FiberMessage> {
+        self.last_captured.borrow().clone()
+    }
+
+    #[allow(dead_code)]
+    pub fn push_wire_action(&self, action: InjectedWireAction) {
+        self.injected_queue.borrow_mut().push_back(action);
+        self.injected_notify
+            .send_modify(|seq| *seq = seq.wrapping_add(1));
+    }
+
+    #[allow(dead_code)]
+    pub fn push_wire_actions(&self, actions: impl IntoIterator<Item = InjectedWireAction>) {
+        let mut queue = self.injected_queue.borrow_mut();
+        let before = queue.len();
+        queue.extend(actions);
+        if queue.len() > before {
+            drop(queue);
+            self.injected_notify
+                .send_modify(|seq| *seq = seq.wrapping_add(1));
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn clear_wire_actions(&self) {
+        self.injected_queue.borrow_mut().clear();
+    }
+
+    #[allow(dead_code)]
+    pub fn injected_sent(&self) -> u64 {
+        self.injected_sent.get()
+    }
+
+    fn pop_wire_action(&self) -> Option<InjectedWireAction> {
+        self.injected_queue.borrow_mut().pop_front()
+    }
+
+    fn capture_received_frame(&self, message: &FiberMessage) {
+        *self.last_captured.borrow_mut() = Some(message.clone());
+    }
+
+    fn blackhole_received_frame(&self, message: &FiberMessage) -> bool {
+        let hit = self
+            .blackhole
+            .get()
+            .is_some_and(|rule| rule.matcher.matches(message));
+        if hit {
+            self.blackholed_frames.set(self.blackholed_frames.get() + 1);
+        }
+        hit
+    }
+
+    fn duplicate_copies(&self, message: &FiberMessage) -> usize {
+        let Some(mut rule) = self.duplicate.get() else {
+            return 1;
+        };
+        if rule.remaining == Some(0) {
+            self.duplicate.set(None);
+            return 1;
+        }
+        if !rule.matcher.matches(message) {
+            return 1;
+        }
+        let copies = rule.copies.max(1);
+        if let Some(remaining) = rule.remaining.as_mut() {
+            if *remaining <= 1 {
+                self.duplicate.set(None);
+            } else {
+                *remaining -= 1;
+                self.duplicate.set(Some(rule));
+            }
+        }
+        if copies > 1 {
+            self.duplicated_frames
+                .set(self.duplicated_frames.get() + (copies - 1) as u64);
+        }
+        copies
+    }
+
+    fn next_adv_delay(&self, message: &FiberMessage, out_of_order: bool) -> Option<Duration> {
+        let rule = self.adv_delay.get()?;
+        if rule.out_of_order != out_of_order || !rule.matcher.matches(message) {
+            return None;
+        }
+        if !rule.persistent {
+            self.adv_delay.set(None);
+        }
+        self.adv_delayed_frames
+            .set(self.adv_delayed_frames.get() + 1);
+        Some(rule.duration)
     }
 
     fn next_frame_delay(&self) -> Option<Duration> {
@@ -527,35 +839,116 @@ impl Host {
         let (mut reader, mut writer) = socket.into_split();
         let read = async {
             reader_gate.await?;
+            let mut deferred = tokio::task::JoinSet::new();
             loop {
-                let len = reader.read_u32().await? as usize;
-                anyhow::ensure!(len <= MAX_FRAME_SIZE, "oversized Fiber frame");
+                let len = tokio::select! {
+                    biased;
+                    Some(result) = deferred.join_next(), if !deferred.is_empty() => {
+                        result.context("deferred peer frame task failed")??;
+                        continue;
+                    }
+                    len = reader.read_u32() => len? as usize,
+                };
+                if len > MAX_FRAME_SIZE {
+                    if peer.control.allow_malformed_disconnect.get() {
+                        peer.control
+                            .malformed_disconnects
+                            .set(peer.control.malformed_disconnects.get() + 1);
+                        record(
+                            &self.trace,
+                            format_args!(
+                                "{} disconnected {} on oversized Fiber frame len={len}",
+                                NAMES[self.index], NAMES[peer.index]
+                            ),
+                        );
+                        return Ok(());
+                    }
+                    bail!("oversized Fiber frame");
+                }
                 let mut bytes = vec![0; len];
                 reader.read_exact(&mut bytes).await?;
                 peer.control.fail(TcpFault::Read)?;
-                let message = FiberMessage::from_molecule_slice(&bytes)?;
+                let message = match FiberMessage::from_molecule_slice(&bytes) {
+                    Ok(message) => message,
+                    Err(error) => {
+                        if peer.control.allow_malformed_disconnect.get() {
+                            peer.control
+                                .malformed_disconnects
+                                .set(peer.control.malformed_disconnects.get() + 1);
+                            record(
+                                &self.trace,
+                                format_args!(
+                                    "{} disconnected {} on malformed Fiber frame: {error}",
+                                    NAMES[self.index], NAMES[peer.index]
+                                ),
+                            );
+                            return Ok(());
+                        }
+                        return Err(error.into());
+                    }
+                };
+                peer.control.capture_received_frame(&message);
                 let kind = frame_kind(&message);
                 let mut digest = DefaultHasher::new();
                 bytes.hash(&mut digest);
+                let digest = digest.finish();
+                if peer.control.blackhole_received_frame(&message) {
+                    record(
+                        &self.trace,
+                        format_args!(
+                            "{} blackholed peer frame from {} {kind} {digest:016x}",
+                            NAMES[self.index], NAMES[peer.index]
+                        ),
+                    );
+                    continue;
+                }
                 if peer.control.drop_received_frame(&message) {
                     record(
                         &self.trace,
                         format_args!(
-                            "{} dropped peer frame from {} {kind} {:016x}",
-                            NAMES[self.index],
-                            NAMES[peer.index],
-                            digest.finish()
+                            "{} dropped peer frame from {} {kind} {digest:016x}",
+                            NAMES[self.index], NAMES[peer.index]
                         ),
                     );
+                    continue;
+                }
+                if let Some(delay) = peer.control.next_adv_delay(&message, true) {
+                    record(
+                        &self.trace,
+                        format_args!(
+                            "{} deferring out-of-order peer frame from {} {kind} {}ms {digest:016x}",
+                            NAMES[self.index],
+                            NAMES[peer.index],
+                            delay.as_millis()
+                        ),
+                    );
+                    let actor = actor.clone();
+                    let peer_key = peer.key;
+                    let trace = self.trace.clone();
+                    let local_name = NAMES[self.index];
+                    let remote_name = NAMES[peer.index];
+                    deferred.spawn_local(async move {
+                        tokio::time::sleep(delay).await;
+                        record(
+                            &trace,
+                            format_args!(
+                                "{local_name} delivering deferred peer frame from {remote_name} {kind} {digest:016x}"
+                            ),
+                        );
+                        send(
+                            &actor,
+                            NetworkActorMessage::new_event(PublicNetworkEvent::FiberMessage(
+                                peer_key, message, None,
+                            )),
+                        )
+                    });
                     continue;
                 }
                 record(
                     &self.trace,
                     format_args!(
-                        "{} receive from {} {kind} {:016x}",
-                        NAMES[self.index],
-                        NAMES[peer.index],
-                        digest.finish()
+                        "{} receive from {} {kind} {digest:016x}",
+                        NAMES[self.index], NAMES[peer.index]
                     ),
                 );
                 send(
@@ -568,18 +961,68 @@ impl Host {
         };
         let write = async {
             let mut paused = peer.control.paused.subscribe();
+            let mut injected = peer.control.injected_notify.subscribe();
             loop {
                 paused.wait_for(|paused| !paused).await?;
-                // Observe a newly paused writer while waiting for the next frame.
+                injected.borrow_and_update();
+                if let Some(action) = peer.control.pop_wire_action() {
+                    match action {
+                        InjectedWireAction::SendFrame(message) => {
+                            let kind = frame_kind(&message);
+                            let bytes = message.to_molecule_bytes();
+                            anyhow::ensure!(bytes.len() <= MAX_FRAME_SIZE, "oversized Fiber frame");
+                            record(
+                                &self.trace,
+                                format_args!(
+                                    "{} injecting peer frame to {} {kind}",
+                                    NAMES[self.index], NAMES[peer.index]
+                                ),
+                            );
+                            writer.write_u32(bytes.len() as u32).await?;
+                            writer.write_all(&bytes).await?;
+                        }
+                        InjectedWireAction::SendRawFrame {
+                            declared_len,
+                            payload,
+                        } => {
+                            record(
+                                &self.trace,
+                                format_args!(
+                                    "{} injecting raw frame to {} declared_len={declared_len} payload_len={}",
+                                    NAMES[self.index],
+                                    NAMES[peer.index],
+                                    payload.len()
+                                ),
+                            );
+                            writer.write_u32(declared_len).await?;
+                            if !payload.is_empty() {
+                                writer.write_all(&payload).await?;
+                            }
+                        }
+                    }
+                    peer.control
+                        .injected_sent
+                        .set(peer.control.injected_sent.get() + 1);
+                    continue;
+                }
+                // Observe a newly paused writer or newly queued injected action while waiting for the next frame.
                 let message = tokio::select! {
                     biased;
                     result = paused.changed() => {
                         result?;
                         continue;
                     }
+                    result = injected.changed() => {
+                        result?;
+                        continue;
+                    }
                     message = outgoing.recv() => message.context("Fiber outbox exited")?,
                 };
-                if let Some(delay) = peer.control.next_frame_delay() {
+                if let Some(delay) = peer
+                    .control
+                    .next_frame_delay()
+                    .or_else(|| peer.control.next_adv_delay(&message, false))
+                {
                     let kind = frame_kind(&message);
                     record(
                         &self.trace,
@@ -594,10 +1037,23 @@ impl Host {
                     tokio::time::sleep(delay).await;
                 }
                 peer.control.fail(TcpFault::Write)?;
+                let copies = peer.control.duplicate_copies(&message);
+                let duplicate_kind = (copies > 1).then(|| frame_kind(&message));
                 let bytes = message.to_molecule_bytes();
                 anyhow::ensure!(bytes.len() <= MAX_FRAME_SIZE, "oversized Fiber frame");
-                writer.write_u32(bytes.len() as u32).await?;
-                writer.write_all(&bytes).await?;
+                if let Some(kind) = duplicate_kind {
+                    record(
+                        &self.trace,
+                        format_args!(
+                            "{} duplicating peer frame to {} {kind} copies={copies}",
+                            NAMES[self.index], NAMES[peer.index]
+                        ),
+                    );
+                }
+                for _ in 0..copies {
+                    writer.write_u32(bytes.len() as u32).await?;
+                    writer.write_all(&bytes).await?;
+                }
             }
         };
         let result: Result<()> = tokio::select! {

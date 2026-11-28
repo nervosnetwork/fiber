@@ -29,5 +29,6 @@ serde_json = "1"
 tempfile = "3"
 tokio = { version = "1", features = ["io-util", "macros", "rt", "sync", "time"] }
 tower = "0.5"
+tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 turmoil = "=0.7.2"

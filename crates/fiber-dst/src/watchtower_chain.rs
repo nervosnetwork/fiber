@@ -57,11 +57,18 @@ impl SimulatedChainClock {
             .get()
             .expect("settlement chain clock")
             + number * BLOCK_MS;
-        let epoch = EpochNumberWithFraction::new(
-            number / BLOCKS_PER_EPOCH,
-            number % BLOCKS_PER_EPOCH,
-            BLOCKS_PER_EPOCH,
-        );
+        let raw_epoch = number / BLOCKS_PER_EPOCH;
+        // Above 100_000 epochs (5_000s), step 1 epoch per 500ms instead of 50ms:
+        // - Keeps all normal runs (<5_000s) bit-for-bit identical;
+        // - Guarantees a +1_000ms advance_clock_past() always crosses >= 2 full epochs;
+        // - Extends virtual-clock headroom to ~96 days before CKB's 24-bit epoch limit.
+        let epoch_number = if raw_epoch <= 100_000 {
+            raw_epoch
+        } else {
+            100_000 + (raw_epoch - 100_000) / 10
+        };
+        let epoch =
+            EpochNumberWithFraction::new(epoch_number, number % BLOCKS_PER_EPOCH, BLOCKS_PER_EPOCH);
         HeaderBuilder::default()
             .number(number)
             .timestamp(timestamp)

@@ -48,6 +48,19 @@ fn emit_fixture_trace() {
         "parallel-funding-abort" => Scenario::ParallelFunding { mixed: true },
         "lsp-offline-delivery" => Scenario::LspOfflineDelivery,
         "lsp-signer-faults" => Scenario::LspSignerFaults,
+        "single-path-double-pay" => Scenario::SinglePathDoublePay,
+        "lsp-signer-adversarial" => Scenario::LspSignerAdversarial,
+        "force-close-adversarial" => Scenario::ForceCloseAdversarial,
+        "udt-multihop" => Scenario::UdtMultihop,
+        "liveness-hang-auto-force-close" => Scenario::LivenessHangAndAutoForceClose,
+        "sdk-permanent-refusal-escape" => Scenario::SdkPermanentRefusalAndEscape,
+        "shutdown-escalation-race" => Scenario::ShutdownEscalationAndRace,
+        "peer-protocol-dos-flood" => Scenario::PeerProtocolDosAndFlood,
+        "lsp-rpc-buffer-dos" => Scenario::LspRpcAndBufferDos,
+        "byzantine-stale-tamper" => Scenario::ByzantineStaleAndTamper,
+        "adversarial-exhaustion-races" => Scenario::AdversarialExhaustionAndRaces,
+        "lsp-adversarial-exhaustion" => Scenario::LspAdversarialExhaustion,
+        "protocol-state-machine-fuzz" => Scenario::ProtocolStateMachineFuzz,
         other if other.starts_with("legacy-random:") => {
             let parts: Vec<_> = other.split(':').collect();
             assert_eq!(parts.len(), 4, "invalid legacy-random fixture {other}");
@@ -637,6 +650,10 @@ fn random_chaos_reconciles_public_mesh_with_lsp_and_sdk_wallets() {
         "lsp-random cooperative-close SendClosingSigned closed secondary channel",
         "lsp-random reconciled payments=8",
         "lsp-random self-funded watchtower settled",
+        "UDT multihop reconciled",
+        "random coverage ",
+        "public_chaos_during_lsp=1",
+        "udt_channels=2",
         "random reconciled workload=16",
         "lsp_payments=8",
         "lsp_self_funded_watchtower=true",
@@ -658,10 +675,178 @@ fn random_chaos_recovers_immediate_received_invoice_and_outbound_sdk_refund() {
     assert!(trace_236.contains("random reconciled workload=24"));
     assert_eq!(trace_236, run_random("236", &options));
 
-    // Seed 255: hosted SDK wallet outbound payment fails downstream (`RemoveTlc(Fail)` refund)
+    // Seed 3027: hosted SDK wallet outbound payment fails downstream (`RemoveTlc(Fail)` refund)
     // and must auto-authorize outbound refund cancellation instead of deadlocking.
-    let trace_255 = run_random("255", &options);
-    assert!(trace_255.contains("failed and refunded"));
-    assert!(trace_255.contains("random reconciled workload=24"));
-    assert_eq!(trace_255, run_random("255", &options));
+    let trace_refund = run_random("3027", &options);
+    assert!(trace_refund.contains("failed and refunded"));
+    assert!(trace_refund.contains("random reconciled workload=24"));
+    assert_eq!(trace_refund, run_random("3027", &options));
+}
+
+#[test]
+fn single_path_double_pay_prevents_double_settlement_across_processes() {
+    let seed = "42";
+    let trace = run_fixture("single-path-double-pay", seed);
+    for marker in [
+        "single-path double-pay race armed",
+        "single-path double-pay verified",
+    ] {
+        assert!(
+            trace.contains(marker),
+            "missing single-path double-pay marker {marker}"
+        );
+    }
+    assert_eq!(trace, run_fixture("single-path-double-pay", seed));
+}
+
+#[test]
+fn lsp_signer_adversarial_enforces_zero_mutation_and_mixed_batches() {
+    let seed = "42";
+    let trace = run_fixture("lsp-signer-adversarial", seed);
+    for marker in [
+        "dismissed NeedConfirmation with zero store mutation",
+        "SDK rejected tampered TamperNextCommitmentBalance with zero store mutation",
+        "lsp_signer_adversarial passed:",
+        "sdk_confirm_dismissed=1",
+        "sdk_tamper_rejected=1",
+        "sdk_mixed_batch_settled=1",
+    ] {
+        assert!(
+            trace.contains(marker),
+            "missing LSP adversarial marker {marker}"
+        );
+    }
+    assert_eq!(trace, run_fixture("lsp-signer-adversarial", seed));
+}
+
+#[test]
+fn force_close_adversarial_preserves_peer_fail_and_confirmed_fulfill() {
+    let seed = "42";
+    let trace = run_fixture("force-close-adversarial", seed);
+    for marker in [
+        "Probe A passed: preserved peer RemoveTlcFail across force close (attempts=1)",
+        "Probe B passed: relay 2 delivered preimage upstream across RemoveConfirmedBeforeRelay crash+force-close",
+    ] {
+        assert!(
+            trace.contains(marker),
+            "missing force-close adversarial marker {marker}"
+        );
+    }
+    assert_eq!(trace, run_fixture("force-close-adversarial", seed));
+}
+
+#[test]
+fn udt_multihop_reconciles_relay_crash_and_hold_cancel_across_processes() {
+    let seed = "42";
+    let trace = run_fixture("udt-multihop", seed);
+    for marker in [
+        "opened UDT V2 channel A-B",
+        "opened UDT V2 channel B-C",
+        "UDT multihop reconciled A-B-C channels=2 succeeded=2 cancelled=1",
+    ] {
+        assert!(
+            trace.contains(marker),
+            "missing UDT multihop marker {marker}"
+        );
+    }
+    assert_eq!(trace, run_fixture("udt-multihop", seed));
+}
+
+#[test]
+fn liveness_hang_and_auto_force_close_replays_across_processes() {
+    let seed = "42";
+    let trace = run_fixture("liveness-hang-auto-force-close", seed);
+    assert!(
+        trace.contains("liveness_hang_and_auto_force_close passed"),
+        "missing liveness summary marker"
+    );
+    assert_eq!(trace, run_fixture("liveness-hang-auto-force-close", seed));
+}
+
+#[test]
+fn sdk_permanent_refusal_and_escape_replays_across_processes() {
+    let seed = "42";
+    let trace = run_fixture("sdk-permanent-refusal-escape", seed);
+    assert!(
+        trace.contains("sdk_permanent_refusal_and_escape passed"),
+        "missing sdk refusal summary marker"
+    );
+    assert_eq!(trace, run_fixture("sdk-permanent-refusal-escape", seed));
+}
+
+#[test]
+fn shutdown_escalation_and_race_replays_across_processes() {
+    let seed = "42";
+    let trace = run_fixture("shutdown-escalation-race", seed);
+    assert!(
+        trace.contains("shutdown_escalation_and_race passed"),
+        "missing shutdown escalation summary marker"
+    );
+    assert_eq!(trace, run_fixture("shutdown-escalation-race", seed));
+}
+
+#[test]
+fn peer_protocol_dos_and_flood_replays_across_processes() {
+    let seed = "42";
+    let trace = run_fixture("peer-protocol-dos-flood", seed);
+    assert!(
+        trace.contains("peer_protocol_dos_and_flood passed"),
+        "missing peer DoS summary marker"
+    );
+    assert_eq!(trace, run_fixture("peer-protocol-dos-flood", seed));
+}
+
+#[test]
+fn lsp_rpc_and_buffer_dos_replays_across_processes() {
+    let seed = "42";
+    let trace = run_fixture("lsp-rpc-buffer-dos", seed);
+    assert!(
+        trace.contains("lsp_rpc_and_buffer_dos passed"),
+        "missing LSP DoS summary marker"
+    );
+    assert_eq!(trace, run_fixture("lsp-rpc-buffer-dos", seed));
+}
+
+#[test]
+fn byzantine_stale_and_tamper_replays_across_processes() {
+    let seed = "42";
+    let trace = run_fixture("byzantine-stale-tamper", seed);
+    assert!(
+        trace.contains("byzantine_stale_and_tamper passed"),
+        "missing Byzantine stale/tamper summary marker"
+    );
+    assert_eq!(trace, run_fixture("byzantine-stale-tamper", seed));
+}
+
+#[test]
+fn adversarial_exhaustion_and_races_replays_across_processes() {
+    let seed = "42";
+    let trace = run_fixture("adversarial-exhaustion-races", seed);
+    assert!(
+        trace.contains("adversarial_exhaustion_and_races passed"),
+        "missing exhaustion/races summary marker"
+    );
+    assert_eq!(trace, run_fixture("adversarial-exhaustion-races", seed));
+}
+
+#[test]
+fn lsp_adversarial_exhaustion_replays_across_processes() {
+    let seed = "42";
+    let trace = run_fixture("lsp-adversarial-exhaustion", seed);
+    assert!(
+        trace.contains("lsp_adversarial_exhaustion passed"),
+        "missing LSP exhaustion summary marker"
+    );
+    assert_eq!(trace, run_fixture("lsp-adversarial-exhaustion", seed));
+}
+
+#[test]
+fn protocol_state_machine_fuzz_replays_across_processes() {
+    let seed = "42";
+    let trace = run_fixture("protocol-state-machine-fuzz", seed);
+    assert!(
+        trace.contains("protocol_state_machine_fuzz passed"),
+        "missing protocol fuzz summary marker"
+    );
+    assert_eq!(trace, run_fixture("protocol-state-machine-fuzz", seed));
 }

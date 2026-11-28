@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 use std::time::Duration;
 
 use anyhow::{ensure, Context, Result};
@@ -99,7 +99,12 @@ impl Driver {
         }
         let continuous = fault_policy != RandomFaultPolicy::Windows;
         if fault_policy == RandomFaultPolicy::Continuous {
-            self.chaos = Some(Chaos::new(seed));
+            let chaos = if lsp {
+                Chaos::new(seed).with_adversarial(seed)
+            } else {
+                Chaos::new(seed)
+            };
+            self.chaos = Some(chaos);
             self.runtime.note("chaos startup starts");
             self.until("peers recover during randomized startup", |s| {
                 Ok((s.runtime.elapsed() >= Duration::from_millis(100)
@@ -220,7 +225,13 @@ impl Driver {
         let mut overlaps = 0;
         let mut peak = 0;
         if continuous {
-            let mut chaos = self.chaos.take().unwrap_or_else(|| Chaos::new(seed));
+            let mut chaos = self.chaos.take().unwrap_or_else(|| {
+                if lsp {
+                    Chaos::new(seed).with_adversarial(seed)
+                } else {
+                    Chaos::new(seed)
+                }
+            });
             let mut orders = Vec::with_capacity(payments);
             let mut start = 0;
             for phase in 0..phases {
@@ -377,15 +388,12 @@ impl Driver {
         // Sync missed historical gossip announcements to nodes that crashed during funding
         // before running healthy recovery probes.
         self.runtime.sync_gossip()?;
-        let probes = [
-            order(0, a, b, Kind::Direct, 10_000),
-            order(0, d, c, Kind::Direct, 10_000),
-            order(0, b, c, Kind::Multihop, 10_000),
-            order(0, c, b, Kind::Multihop, 10_000),
-        ];
+        let probes = self.select_recovery_probes(topology, &edges);
         let mut recovery = self.prepare_payments(probes, &mut invoices, &mut ledger)?;
-        self.drive_payment_wave("random recovery", &mut recovery, &mut [], &mut ledger)?;
-        ledger.check_payments(self, &recovery, true)?;
+        if !recovery.is_empty() {
+            self.drive_payment_wave("random recovery", &mut recovery, &mut [], &mut ledger)?;
+            ledger.check_payments(self, &recovery, true)?;
+        }
         ledger.check_consumed()?;
         let live_edges: Vec<_> = edges
             .iter()
@@ -424,12 +432,20 @@ impl Driver {
                 if let Some(summary) = &mut lsp_summary {
                     summary.self_funded_watchtower = settled_onchain;
                 }
+                // Exercise UDT multi-hop channels, relay crash recovery, and hold-invoice cancel
+                // on the same seeded topology without perturbing earlier CKB RNG streams.
+                let _udt = self.run_udt_multihop_workload(seed, [a, b, d], true)?;
             }
             let public_nodes: Vec<usize> = (0..topology.nodes).collect();
             self.verify_lsp_indexes(&public_nodes, &lsp_state.tenant_ids)?;
         }
         ensure!(reconciled == payments);
         if let Some(lsp_summary) = lsp_summary {
+            let coverage_summary = self.coverage.format_summary();
+            if !coverage_summary.is_empty() {
+                self.runtime
+                    .note(format_args!("random coverage {coverage_summary}"));
+            }
             self.runtime.note(format_args!(
                 "random reconciled workload={reconciled} successful={settled} phases={phases} fault_overlaps={overlaps} peak_inflight={peak} recovery_probes={} lsp_payments={} lsp_succeeded={} lsp_concurrent={} lsp_cancelled={} lsp_long_offline={} lsp_crashes={} lsp_node_crashes={} lsp_sdk_faults={} lsp_token_refreshes={} lsp_closing_sigs={} lsp_duplicates={} lsp_responses_dropped={} lsp_self_funded_watchtower={}",
                 recovery.len(),
@@ -573,6 +589,150 @@ impl Driver {
         ));
         Ok(())
     }
+
+    fn select_recovery_probes(&self, topology: &Topology, edges: &[Edge]) -> Vec<Order> {
+        const PROBE_AMOUNT: u128 = 10_000;
+        const MIN_HOP_BALANCE: u128 = 20_000;
+        let [a, b, c, d] = topology.core;
+
+        let mut direct_live = BTreeSet::new();
+        let mut any_online_edge = BTreeSet::new();
+        for edge in edges {
+            if !self
+                .runtime
+                .channel_online(edge.sender, edge.receiver, &edge.channel)
+            {
+                continue;
+            }
+            any_online_edge.insert((edge.sender, edge.receiver));
+            any_online_edge.insert((edge.receiver, edge.sender));
+            if self
+                .runtime
+                .channel(edge.sender, &edge.channel)
+                .is_some_and(|st| st.get_local_balance() >= MIN_HOP_BALANCE)
+            {
+                direct_live.insert((edge.sender, edge.receiver));
+            }
+            if self
+                .runtime
+                .channel(edge.receiver, &edge.channel)
+                .is_some_and(|st| st.get_local_balance() >= MIN_HOP_BALANCE)
+            {
+                direct_live.insert((edge.receiver, edge.sender));
+            }
+        }
+
+        let mut probes = Vec::with_capacity(4);
+        let mut used_direct = BTreeSet::new();
+        let mut used_multihop = BTreeSet::new();
+
+        for (from, to, kind) in [
+            (a, b, Kind::Direct),
+            (d, c, Kind::Direct),
+            (b, c, Kind::Multihop),
+            (c, b, Kind::Multihop),
+        ] {
+            match kind {
+                Kind::Direct => {
+                    if bfs_distance(topology.nodes, &direct_live, from, to).is_some() {
+                        used_direct.insert((from, to));
+                        probes.push(order(0, from, to, Kind::Direct, PROBE_AMOUNT));
+                    } else if let Some(&(u, v)) = direct_live
+                        .iter()
+                        .find(|pair| !used_direct.contains(pair))
+                        .or_else(|| direct_live.iter().next())
+                    {
+                        used_direct.insert((u, v));
+                        self.runtime.note(format_args!(
+                            "random recovery probe replaced disconnected Direct {}->{} with {}->{}",
+                            NAMES[from], NAMES[to], NAMES[u], NAMES[v]
+                        ));
+                        probes.push(order(0, u, v, Kind::Direct, PROBE_AMOUNT));
+                    } else {
+                        self.runtime.note(format_args!(
+                            "random recovery probe skipped disconnected Direct {}->{} (no funded live edges)",
+                            NAMES[from], NAMES[to]
+                        ));
+                    }
+                }
+                Kind::Multihop => {
+                    let original_ok = !any_online_edge.contains(&(from, to))
+                        && bfs_distance(topology.nodes, &direct_live, from, to)
+                            .is_some_and(|dist| dist >= 2);
+                    if original_ok {
+                        used_multihop.insert((from, to));
+                        probes.push(order(0, from, to, Kind::Multihop, PROBE_AMOUNT));
+                    } else {
+                        let mut fallback = None;
+                        let mut reuse = None;
+                        for u in 0..topology.nodes {
+                            for v in 0..topology.nodes {
+                                if u == v || any_online_edge.contains(&(u, v)) {
+                                    continue;
+                                }
+                                if bfs_distance(topology.nodes, &direct_live, u, v)
+                                    .is_some_and(|dist| dist >= 2)
+                                {
+                                    if !used_multihop.contains(&(u, v)) {
+                                        fallback = Some((u, v));
+                                        break;
+                                    } else if reuse.is_none() {
+                                        reuse = Some((u, v));
+                                    }
+                                }
+                            }
+                            if fallback.is_some() {
+                                break;
+                            }
+                        }
+                        if let Some((u, v)) = fallback.or(reuse) {
+                            used_multihop.insert((u, v));
+                            self.runtime.note(format_args!(
+                                "random recovery probe replaced disconnected Multihop {}->{} with {}->{}",
+                                NAMES[from], NAMES[to], NAMES[u], NAMES[v]
+                            ));
+                            probes.push(order(0, u, v, Kind::Multihop, PROBE_AMOUNT));
+                        } else {
+                            self.runtime.note(format_args!(
+                                "random recovery probe skipped disconnected Multihop {}->{} (no live multihop path)",
+                                NAMES[from], NAMES[to]
+                            ));
+                        }
+                    }
+                }
+                Kind::Mpp => unreachable!("recovery probes only use Direct or Multihop"),
+            }
+        }
+        probes
+    }
+}
+
+fn bfs_distance(
+    nodes: usize,
+    direct_live: &BTreeSet<(usize, usize)>,
+    from: usize,
+    to: usize,
+) -> Option<usize> {
+    if from == to {
+        return Some(0);
+    }
+    let mut visited = vec![false; nodes];
+    let mut queue = VecDeque::new();
+    visited[from] = true;
+    queue.push_back((from, 0usize));
+    while let Some((node, dist)) = queue.pop_front() {
+        for &(u, v) in direct_live {
+            if u != node || visited[v] {
+                continue;
+            }
+            if v == to {
+                return Some(dist + 1);
+            }
+            visited[v] = true;
+            queue.push_back((v, dist + 1));
+        }
+    }
+    None
 }
 
 fn sample_order(

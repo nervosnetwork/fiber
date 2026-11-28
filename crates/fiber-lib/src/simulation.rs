@@ -337,12 +337,57 @@ pub fn pause_after_channel_id_rewrite(
     arm(PausePoint::ChannelIdRewritten, node, old_id, preceding_hits)
 }
 
+/// Pause after `receive_ack_v2` persists `removed_confirmed_at` and before relaying removal effects.
+pub fn pause_after_remove_confirmed(
+    node: Pubkey,
+    channel: Hash256,
+    preceding_hits: usize,
+) -> CommitmentPause {
+    arm(
+        PausePoint::RemoveConfirmedBeforeRelay,
+        node,
+        channel,
+        preceding_hits,
+    )
+}
+
+/// Pause after `receive_commitment_v2` persists a peer `RemoveTlcFail` and before sending ACK.
+pub fn pause_after_peer_fail_recorded(
+    node: Pubkey,
+    channel: Hash256,
+    preceding_hits: usize,
+) -> CommitmentPause {
+    arm(
+        PausePoint::PeerFailRecordedBeforeAck,
+        node,
+        channel,
+        preceding_hits,
+    )
+}
+
+/// Pause after `SettleTlcSet` marks an immediate invoice `Received` and before sending `RemoveTlc(Fulfill)`.
+pub fn pause_after_invoice_marked_received(
+    node: Pubkey,
+    payment_hash: Hash256,
+    preceding_hits: usize,
+) -> CommitmentPause {
+    arm(
+        PausePoint::InvoiceMarkedReceived,
+        node,
+        payment_hash,
+        preceding_hits,
+    )
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum PausePoint {
     CommitmentAck,
     ForwardFulfill,
     FundingPersisted,
     ChannelIdRewritten,
+    RemoveConfirmedBeforeRelay,
+    PeerFailRecordedBeforeAck,
+    InvoiceMarkedReceived,
 }
 
 fn arm(
@@ -392,6 +437,18 @@ pub(crate) async fn after_funding_state(node: Pubkey, channel: Hash256) {
 
 pub(crate) async fn after_channel_id_rewrite(node: Pubkey, old_id: Hash256) {
     pause_at(PausePoint::ChannelIdRewritten, node, old_id).await;
+}
+
+pub(crate) async fn after_remove_confirmed_before_relay(node: Pubkey, channel: Hash256) {
+    pause_at(PausePoint::RemoveConfirmedBeforeRelay, node, channel).await;
+}
+
+pub(crate) async fn after_peer_fail_recorded(node: Pubkey, channel: Hash256) {
+    pause_at(PausePoint::PeerFailRecordedBeforeAck, node, channel).await;
+}
+
+pub(crate) async fn after_invoice_marked_received(node: Pubkey, payment_hash: Hash256) {
+    pause_at(PausePoint::InvoiceMarkedReceived, node, payment_hash).await;
 }
 
 async fn pause_at(point: PausePoint, node: Pubkey, channel: Hash256) {
