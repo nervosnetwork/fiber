@@ -3274,10 +3274,7 @@ where
             // The source determines the local failure; preserve a peer-recorded error packet
             // when the excluded TLC already received `RemoveTlcFail` before force-close.
             let has_recorded_fail = tlc.recorded_fail.is_some();
-            remove_tlc_reason =
-                RemoveTlcReason::RemoveTlcFail(tlc.recorded_fail.unwrap_or_else(|| {
-                    TlcErrPacket::new(TlcErr::new(error_code), &tlc.shared_secret)
-                }));
+            remove_tlc_reason = tlc.remove_reason(error_code);
             // A missing payer record cannot accept this chain outcome. Acknowledge it
             // so CheckChannels stops selecting the same TLC.
             let acknowledge = |reason: RemoveTlcReason| {
@@ -5603,12 +5600,7 @@ where
 
         for tlc in collect_onchain_excluded_tlcs(actor_state, &self.store) {
             let session_key = tlc.session_key();
-            let reason = RemoveTlcReason::RemoveTlcFail(tlc.recorded_fail.unwrap_or_else(|| {
-                TlcErrPacket::new(
-                    TlcErr::new(TlcErrorCode::PermanentChannelFailure),
-                    &tlc.shared_secret,
-                )
-            }));
+            let reason = tlc.remove_reason(TlcErrorCode::PermanentChannelFailure);
             match tlc.role {
                 OnChainTimeoutTlcRole::Forwarded {
                     forwarding_channel_id,

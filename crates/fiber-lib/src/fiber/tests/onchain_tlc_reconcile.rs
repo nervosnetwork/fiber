@@ -5398,3 +5398,299 @@ async fn test_excluded_peer_fail_preserves_invoice_cancelled_without_retrying() 
     );
     node.stop().await;
 }
+
+#[test]
+fn test_excluded_forwarded_fail_remove_reason_wraps_onion_and_handles_edge_cases() {
+    use crate::fiber::onchain_tlc_reconcile::{OnChainTimeoutSettledTlc, OnChainTimeoutTlcRole};
+
+    let secp = secp256k1::Secp256k1::new();
+    let session_key = [0x42u8; 32];
+    let session_sk = secp256k1::SecretKey::from_slice(&session_key).unwrap();
+    let relay_pk = Privkey::from_slice(&[0x11u8; 32]).pubkey();
+    let payee_pk = Privkey::from_slice(&[0x22u8; 32]).pubkey();
+    let hop_secp_pks = [
+        secp256k1::PublicKey::from_slice(&relay_pk.0).unwrap(),
+        secp256k1::PublicKey::from_slice(&payee_pk.0).unwrap(),
+    ];
+    let hops_ss: Vec<[u8; 32]> =
+        fiber_sphinx::OnionSharedSecretIter::new(hop_secp_pks.iter(), session_sk, &secp)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+    let hop_path = vec![relay_pk, payee_pk];
+
+    let payment_hash = gen_rand_sha256_hash();
+    let upstream_channel_id = gen_rand_sha256_hash();
+    let payee_packet = TlcErrPacket::new(TlcErr::new(TlcErrorCode::InvoiceCancelled), &hops_ss[1]);
+
+    // 1. Forwarded TLC with a recorded downstream fail packet must wrap it with this hop's
+    //    shared secret identically to normal forwarding so the origin payer decodes hop 1.
+    let forwarded = OnChainTimeoutSettledTlc {
+        upstream_tlc_key: None,
+        tlc_id: TLCId::Offered(0),
+        payment_hash,
+        shared_secret: hops_ss[0],
+        recorded_fail: Some(payee_packet.clone()),
+        role: OnChainTimeoutTlcRole::Forwarded {
+            forwarding_channel_id: upstream_channel_id,
+            forwarding_tlc_id: 0,
+        },
+    };
+    let expected_normal_forward = RemoveTlcReason::RemoveTlcFail(payee_packet.clone())
+        .backward(&hops_ss[0])
+        .unwrap();
+    let reason = forwarded.remove_reason(TlcErrorCode::PermanentChannelFailure);
+    assert_eq!(reason, expected_normal_forward);
+    let RemoveTlcReason::RemoveTlcFail(wrapped_packet) = reason else {
+        panic!("expected RemoveTlcFail");
+    };
+    let decoded = wrapped_packet
+        .decode(&session_key, hop_path.clone())
+        .expect("payer must decode wrapped downstream error packet");
+    assert_eq!(decoded.hop_index, 1);
+    assert_eq!(decoded.error.error_code, TlcErrorCode::InvoiceCancelled);
+
+    // 2. Forwarded TLC with a non-forwardable plaintext peer packet must fall back to a fresh
+    //    error packet originated at the relay hop instead of dropping the failure.
+    let plaintext_packet = TlcErrPacket {
+        onion_packet: vec![0u8; 64],
+    };
+    assert!(plaintext_packet.is_plaintext());
+    let mut forwarded_plaintext = forwarded.clone();
+    forwarded_plaintext.recorded_fail = Some(plaintext_packet);
+    let RemoveTlcReason::RemoveTlcFail(fallback_packet) =
+        forwarded_plaintext.remove_reason(TlcErrorCode::PermanentChannelFailure)
+    else {
+        panic!("expected RemoveTlcFail");
+    };
+    let decoded_fallback = fallback_packet
+        .decode(&session_key, hop_path.clone())
+        .expect("payer must decode relay fallback packet");
+    assert_eq!(decoded_fallback.hop_index, 0);
+    assert_eq!(
+        decoded_fallback.error.error_code,
+        TlcErrorCode::PermanentChannelFailure
+    );
+
+    // 3. Forwarded TLC without a recorded fail synthesizes the fallback error at the relay hop.
+    let mut forwarded_none = forwarded;
+    forwarded_none.recorded_fail = None;
+    let RemoveTlcReason::RemoveTlcFail(synthetic_packet) =
+        forwarded_none.remove_reason(TlcErrorCode::PermanentChannelFailure)
+    else {
+        panic!("expected RemoveTlcFail");
+    };
+    let decoded_synthetic = synthetic_packet
+        .decode(&session_key, hop_path.clone())
+        .expect("payer must decode synthetic relay packet");
+    assert_eq!(decoded_synthetic.hop_index, 0);
+    assert_eq!(
+        decoded_synthetic.error.error_code,
+        TlcErrorCode::PermanentChannelFailure
+    );
+
+    // 4. OriginPayer TLC with a recorded fail packet must preserve it verbatim without wrapping.
+    let first_hop_packet =
+        TlcErrPacket::new(TlcErr::new(TlcErrorCode::InvoiceCancelled), &hops_ss[0]);
+    let origin = OnChainTimeoutSettledTlc {
+        upstream_tlc_key: None,
+        tlc_id: TLCId::Offered(0),
+        payment_hash,
+        shared_secret: hops_ss[0],
+        recorded_fail: Some(first_hop_packet.clone()),
+        role: OnChainTimeoutTlcRole::OriginPayer {
+            attempt_id: Some(1),
+        },
+    };
+    let RemoveTlcReason::RemoveTlcFail(origin_packet) =
+        origin.remove_reason(TlcErrorCode::PermanentChannelFailure)
+    else {
+        panic!("expected RemoveTlcFail");
+    };
+    assert_eq!(origin_packet, first_hop_packet);
+    let decoded_origin = origin_packet
+        .decode(&session_key, hop_path)
+        .expect("payer must decode origin packet verbatim");
+    assert_eq!(decoded_origin.hop_index, 0);
+    assert_eq!(
+        decoded_origin.error.error_code,
+        TlcErrorCode::InvoiceCancelled
+    );
+}
+
+#[tokio::test]
+async fn test_excluded_forwarded_fail_wraps_onion_for_live_and_actorless_reconciliation() {
+    let secp = secp256k1::Secp256k1::new();
+    let session_key = [0x33u8; 32];
+    let session_sk = secp256k1::SecretKey::from_slice(&session_key).unwrap();
+    let relay_privkey = Privkey::from_slice(&[0x15u8; 32]);
+    let relay_pk = relay_privkey.pubkey();
+    let payee_pk = Privkey::from_slice(&[0x26u8; 32]).pubkey();
+    let hop_secp_pks = [
+        secp256k1::PublicKey::from_slice(&relay_pk.0).unwrap(),
+        secp256k1::PublicKey::from_slice(&payee_pk.0).unwrap(),
+    ];
+    let hops_ss: Vec<[u8; 32]> =
+        fiber_sphinx::OnionSharedSecretIter::new(hop_secp_pks.iter(), session_sk, &secp)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+    let hop_path = vec![relay_pk, payee_pk];
+    let payee_packet = TlcErrPacket::new(TlcErr::new(TlcErrorCode::InvoiceCancelled), &hops_ss[1]);
+    let expected_wrapped = payee_packet
+        .clone()
+        .backward(&hops_ss[0])
+        .expect("wrap downstream packet with relay shared secret");
+
+    for live_actor in [false, true] {
+        let mut node = NetworkNode::new().await;
+        let downstream_id = gen_rand_sha256_hash();
+        let upstream_id = gen_rand_sha256_hash();
+        let payment_hash = gen_rand_sha256_hash();
+        let tx_hash: ckb_types::H256 = gen_rand_sha256_hash().into();
+
+        let mut downstream = empty_channel_state(downstream_id);
+        let waiting_flags = CloseFlags::UNCOOPERATIVE_LOCAL
+            | CloseFlags::WAITING_ONCHAIN_SETTLEMENT
+            | CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED;
+        downstream.state = ChannelState::Closed(waiting_flags);
+        downstream.shutdown_transaction_hash = Some(tx_hash.clone());
+        let mut offered = tlc_info(
+            TLCId::Offered(0),
+            TlcStatus::Outbound(OutboundTlcStatus::RemoveWaitPrevAck),
+            payment_hash,
+            HashAlgorithm::CkbHash,
+        );
+        offered.shared_secret = hops_ss[0];
+        offered.forwarding_tlc = Some((upstream_id, 0));
+        offered.removed_reason = Some(RemoveTlcReason::RemoveTlcFail(payee_packet.clone()));
+        offered.removed_confirmed_at = None;
+        offered.applied_flags = AppliedFlags::empty();
+        downstream.tlc_state.add_offered_tlc(offered);
+        if live_actor {
+            downstream
+                .sign_test_bootstrap_v2()
+                .expect("signed V2 fixture");
+        }
+        node.store
+            .insert_channel_actor_state_for_test(downstream.clone());
+
+        let record = ShutdownSettlementRecord {
+            shutdown_tx_hash: tx_hash,
+            for_remote: false,
+            commitment_number: 1,
+            settlement_data: SettlementData {
+                local_amount: 1000,
+                remote_amount: 1000,
+                tlcs: vec![],
+            },
+        };
+        node.store
+            .store_shutdown_settlement_record(&downstream_id, &record);
+
+        let mut upstream = empty_channel_state(upstream_id);
+        upstream.state = ChannelState::ChannelReady;
+        upstream.tlc_state.add_received_tlc(tlc_info(
+            TLCId::Received(0),
+            TlcStatus::Inbound(InboundTlcStatus::Committed),
+            payment_hash,
+            HashAlgorithm::CkbHash,
+        ));
+        node.store.insert_channel_actor_state_for_test(upstream);
+
+        let live_handle = if live_actor {
+            let channel_actor = ChannelActor::new(
+                relay_pk,
+                payee_pk,
+                FiberActorRef::from_network(&node.network_actor),
+                node.store.clone(),
+                None,
+            );
+            let (actor_ref, handle) = Actor::spawn(
+                None,
+                channel_actor,
+                ChannelInitializationParameter {
+                    operation: ChannelInitializationOperation::RestoreOfflineChannel(downstream_id),
+                    ephemeral_config: Default::default(),
+                    private_key: relay_privkey.clone(),
+                },
+            )
+            .await
+            .expect("spawn channel actor");
+            ractor::call!(
+                node.network_actor,
+                |reply| NetworkActorMessage::new_command(
+                    FiberActorCommand::InstallTestChannelActor(
+                        downstream_id,
+                        actor_ref.clone(),
+                        reply
+                    )
+                )
+            )
+            .unwrap();
+            actor_ref
+                .send_message(ChannelActorMessage::Event(
+                    ChannelEvent::ShutdownSettlementRecovered(record),
+                ))
+                .unwrap();
+            Some((actor_ref, handle))
+        } else {
+            for _ in 0..3 {
+                node.network_actor
+                    .send_message(NetworkActorMessage::new_command(
+                        FiberActorCommand::CheckChannels,
+                    ))
+                    .unwrap();
+                node.node_info().await;
+            }
+            None
+        };
+
+        wait_for_settlement_completion(&node, downstream_id).await;
+
+        let upstream = node.store.get_channel_actor_state(&upstream_id).unwrap();
+        assert_eq!(
+            upstream.retryable_tlc_operations.len(),
+            1,
+            "expected one relayed upstream RemoveTlc operation (live_actor={live_actor})"
+        );
+        let RetryableTlcOperation::RemoveTlc(
+            TLCId::Received(0),
+            RemoveTlcReason::RemoveTlcFail(relayed_packet),
+        ) = &upstream.retryable_tlc_operations[0]
+        else {
+            panic!(
+                "expected upstream RemoveTlcFail, got {:?}",
+                upstream.retryable_tlc_operations
+            );
+        };
+        assert_eq!(
+            relayed_packet, &expected_wrapped,
+            "relayed error packet must match normal backward() wrapping (live_actor={live_actor})"
+        );
+        let decoded = relayed_packet
+            .decode(&session_key, hop_path.clone())
+            .expect("origin payer must decode relayed error packet without InvalidOnionError");
+        assert_eq!(
+            decoded.hop_index, 1,
+            "decoded error must attribute failure to payee hop 1 (live_actor={live_actor})"
+        );
+        assert_eq!(
+            decoded.error.error_code,
+            TlcErrorCode::InvoiceCancelled,
+            "decoded error code must preserve InvoiceCancelled (live_actor={live_actor})"
+        );
+
+        let downstream = node.store.get_channel_actor_state(&downstream_id).unwrap();
+        assert!(downstream
+            .tlc_state
+            .get(&TLCId::Offered(0))
+            .unwrap()
+            .applied_flags
+            .contains(AppliedFlags::REMOVE));
+
+        if let Some((actor_ref, handle)) = live_handle {
+            actor_ref.stop(None);
+            let _ = handle.await;
+        }
+        node.stop().await;
+    }
+}

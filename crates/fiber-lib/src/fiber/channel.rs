@@ -3861,12 +3861,7 @@ where
         let mut applied = true;
         for tlc in collect_onchain_excluded_tlcs(state, &self.store) {
             let session_key = tlc.session_key();
-            let reason = RemoveTlcReason::RemoveTlcFail(tlc.recorded_fail.unwrap_or_else(|| {
-                TlcErrPacket::new(
-                    TlcErr::new(TlcErrorCode::PermanentChannelFailure),
-                    &tlc.shared_secret,
-                )
-            }));
+            let reason = tlc.remove_reason(TlcErrorCode::PermanentChannelFailure);
             match tlc.role {
                 OnChainTimeoutTlcRole::Forwarded {
                     forwarding_channel_id,

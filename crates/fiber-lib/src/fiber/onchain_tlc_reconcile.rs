@@ -14,7 +14,7 @@ use fiber_types::watchtower::settlement_data_witness;
 use fiber_types::{
     AppliedFlags, ChannelData, ChannelFeatures, ChannelState, CloseFlags, Hash256, HashAlgorithm,
     InboundTlcStatus, OutboundTlcStatus, Pubkey, RemoveTlcFulfill, RemoveTlcReason, SettlementData,
-    TLCId, TlcErrPacket, TlcErrorCode, TlcInfo,
+    TLCId, TlcErr, TlcErrPacket, TlcErrorCode, TlcInfo,
 };
 use musig2::{secp::Point, KeyAggContext};
 use serde::{Deserialize, Serialize};
@@ -333,6 +333,31 @@ impl OnChainTimeoutSettledTlc {
             payment_hash: self.payment_hash,
             upstream_tlc_key: self.upstream_tlc_key,
         }
+    }
+
+    /// Build the upstream or local `RemoveTlcReason` for this on-chain failed TLC.
+    ///
+    /// For a forwarded TLC that already recorded a downstream `RemoveTlcFail` packet before
+    /// force-close, wrap it with this hop's shared secret via [`TlcErrPacket::backward`] so
+    /// upstream nodes and the origin payer peel every onion layer identically to normal
+    /// forwarding. If wrapping fails (for example, if a peer sent a non-forwardable plaintext
+    /// error packet), fall back to a fresh error packet originated at this hop.
+    pub(crate) fn remove_reason(&self, fallback_error_code: TlcErrorCode) -> RemoveTlcReason {
+        let packet = match (&self.role, &self.recorded_fail) {
+            (OnChainTimeoutTlcRole::Forwarded { .. }, Some(packet)) => packet
+                .clone()
+                .backward(&self.shared_secret)
+                .unwrap_or_else(|err| {
+                    warn!(
+                        "Failed to wrap recorded downstream fail packet for forwarded TLC {:?} ({}): {:?}; falling back to {:?}",
+                        self.tlc_id, self.payment_hash, err, fallback_error_code
+                    );
+                    TlcErrPacket::new(TlcErr::new(fallback_error_code), &self.shared_secret)
+                }),
+            (OnChainTimeoutTlcRole::OriginPayer { .. }, Some(packet)) => packet.clone(),
+            (_, None) => TlcErrPacket::new(TlcErr::new(fallback_error_code), &self.shared_secret),
+        };
+        RemoveTlcReason::RemoveTlcFail(packet)
     }
 }
 
