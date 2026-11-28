@@ -898,3 +898,38 @@ async fn standalone_watchtower_client_bypasses_lsp_tenant_quotas() {
         Some(last_preimage)
     );
 }
+
+use super::{authorized_watchtower_node_id, RpcContext};
+use fiber_types::NodeId;
+
+#[test]
+fn tenant_context_cannot_use_the_host_namespace() {
+    let ctx = RpcContext {
+        node_id: NodeId::local().to_string(),
+        tenant_scoped: true,
+    };
+    assert!(authorized_watchtower_node_id(&ctx)
+        .unwrap_err()
+        .message()
+        .contains("host watchtower namespace"));
+}
+
+#[test]
+fn tenant_context_keeps_its_own_node() {
+    let node_id = NodeId::from_bytes(vec![1, 2, 3]);
+    let ctx = RpcContext {
+        node_id: node_id.to_string(),
+        tenant_scoped: true,
+    };
+    assert_eq!(authorized_watchtower_node_id(&ctx).unwrap(), node_id);
+}
+
+#[test]
+fn create_watch_channel_rejects_unknown_features() {
+    assert!(validate_channel_features(0).is_err());
+    assert!(validate_channel_features(2).is_err());
+    assert_eq!(
+        validate_channel_features(1).unwrap(),
+        fiber_types::ChannelFeatures::V2
+    );
+}
