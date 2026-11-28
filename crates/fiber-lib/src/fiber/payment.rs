@@ -1864,11 +1864,7 @@ where
             return Err(Error::SendPaymentError(error));
         }
 
-        for attempt in &result {
-            session.append_attempt(attempt.clone());
-        }
-
-        return Ok(result);
+        Ok(result)
     }
 
     async fn apply_trampoline_forwarding_fee(
@@ -2155,6 +2151,9 @@ where
             })?;
 
         for attempt in attempts.iter_mut() {
+            // A dispatch error can end this loop. Later planned shards must not
+            // count as active work when deciding how to handle that error.
+            session.append_attempt(attempt.clone());
             self.send_attempt(myself.clone(), state, &mut session, attempt)
                 .await?;
         }
@@ -2785,7 +2784,10 @@ where
         // will not store the payment session and send the onion packet
         if payment_data.dry_run {
             let mut payment_session = PaymentSession::new_session(&self.store, payment_data, 0);
-            self.build_payment_routes(&mut payment_session).await?;
+            let routes = self.build_payment_routes(&mut payment_session).await?;
+            for attempt in routes {
+                payment_session.append_attempt(attempt);
+            }
             return Ok(SendPaymentResponse::from_session(
                 payment_session,
                 &self.store,

@@ -4530,3 +4530,96 @@ async fn test_send_mpp_find_path_perf() {
     // sleep for a while
     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 }
+
+#[tokio::test]
+async fn test_restart_rearms_incomplete_mpp_hold_timer_at_persisted_deadline() {
+    init_tracing();
+
+    let (nodes, channels) = create_n_nodes_network(
+        &[((0, 1), (MIN_RESERVED_CKB + 100_000, MIN_RESERVED_CKB))],
+        2,
+    )
+    .await;
+    let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");
+    let channel_id = channels[0];
+
+    // Create an Open MPP invoice with a known preimage whose total (2000) is NOT satisfied by a
+    // single partial TLC (1000). Hold the single shard with a tight persisted deadline (~400ms),
+    // much shorter than the 60s periodic hold sweep.
+    let preimage = gen_rand_sha256_hash();
+    let payment_hash: Hash256 = HashAlgorithm::CkbHash.hash(preimage.as_ref()).into();
+    let invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(2_000))
+        .payment_hash(payment_hash)
+        .hash_algorithm(HashAlgorithm::CkbHash)
+        .payee_pub_key(node_1.pubkey.into())
+        .allow_mpp(true)
+        .payment_secret(gen_rand_sha256_hash())
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_1.private_key.0))
+        .expect("build MPP invoice");
+    node_1.insert_invoice(invoice, Some(preimage));
+
+    let hold_expire_at = crate::now_timestamp_as_millis_u64() + 400;
+    let mut channel_state = node_1.get_channel_actor_state(channel_id);
+    channel_state
+        .tlc_state
+        .add_received_tlc(fiber_types::TlcInfo {
+            upstream_tlc_key: None,
+            status: fiber_types::TlcStatus::Inbound(fiber_types::InboundTlcStatus::Committed),
+            tlc_id: fiber_types::TLCId::Received(0),
+            amount: 1_000,
+            payment_hash,
+            total_amount: Some(2_000),
+            payment_secret: None,
+            attempt_id: None,
+            expiry: crate::now_timestamp_as_millis_u64() + 600_000,
+            hash_algorithm: HashAlgorithm::CkbHash,
+            onion_packet: None,
+            shared_secret: [0x11; 32],
+            is_trampoline_hop: false,
+            created_at: fiber_types::CommitmentNumbers::default(),
+            removed_reason: None,
+            removed_confirmed_at: None,
+            applied_flags: fiber_types::AppliedFlags::empty(),
+            forwarding_tlc: None,
+        });
+    node_1
+        .store
+        .insert_channel_actor_state_for_test(channel_state);
+    node_1.store.insert_payment_hold_tlc(
+        payment_hash,
+        crate::fiber::types::HoldTlc {
+            channel_id,
+            tlc_id: 0,
+            hold_expire_at,
+        },
+    );
+
+    // Keep peer offline so the channel stays alive while we verify the rearmed deadline timer
+    // fires well before the 60s periodic hold sweep.
+    node_0.stop().await;
+    node_1.restart().await;
+
+    wait_until_timeout(3_000, || {
+        node_1.store.get_payment_hold_tlcs(payment_hash).is_empty()
+            && node_1
+                .get_channel_actor_state(channel_id)
+                .retryable_tlc_operations
+                .iter()
+                .any(|op| {
+                    matches!(
+                        op,
+                        fiber_types::RetryableTlcOperation::RemoveTlc(
+                            fiber_types::TLCId::Received(0),
+                            fiber_types::RemoveTlcReason::RemoveTlcFail(_)
+                        )
+                    )
+                })
+    })
+    .await;
+    assert_eq!(
+        node_1.get_invoice_status(&payment_hash),
+        Some(CkbInvoiceStatus::Open)
+    );
+    node_1.stop().await;
+}

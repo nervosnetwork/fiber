@@ -2121,3 +2121,121 @@ fn test_hold_mpp_counts_closed_awaiting_onchain_part_and_settles_open_part() {
     assert_eq!(settlements_onchain_fulfilled[0].channel_id(), ch_open);
     assert!(is_fulfill_settlement(&settlements_onchain_fulfilled[0]));
 }
+
+#[test]
+fn test_immediate_received_invoice_crash_recovery_and_no_double_settlement() {
+    let preimage = Hash256::from([0x77; 32]);
+    let payment_hash = Hash256::from(HashAlgorithm::CkbHash.hash(preimage));
+    let ch1 = Hash256::from([0x11; 32]);
+    let ch2 = Hash256::from([0x22; 32]);
+    let ch1_state = create_test_channel_state_with_tlc(ch1, 0, 1000, payment_hash, None);
+    let ch2_state = create_test_channel_state_with_tlc(ch2, 0, 1000, payment_hash, None);
+
+    // 1. Initial immediate single-path settlement on an `Open` invoice persists `(ch1, 0)` in
+    // `payment_hold_tlcs` before transitioning the invoice to `Received`.
+    let store = MockStore::new()
+        .with_invoice(
+            create_test_invoice(payment_hash, Some(1000), false),
+            CkbInvoiceStatus::Open,
+        )
+        .with_preimage(payment_hash, preimage)
+        .with_channel_state(ch1_state.clone())
+        .with_channel_state(ch2_state.clone());
+    let first =
+        SettleTlcSetCommand::new_immediate_tlc_set(payment_hash, vec![(ch1, 0)], &store).run();
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].channel_id(), ch1);
+    assert!(is_fulfill_settlement(&first[0]));
+    assert_eq!(
+        store.get_invoice_status(&payment_hash),
+        Some(CkbInvoiceStatus::Received)
+    );
+    let persisted_holds = store.get_payment_hold_tlcs(payment_hash);
+    assert_eq!(persisted_holds.len(), 1);
+    assert_eq!(persisted_holds[0].channel_id, ch1);
+    assert_eq!(persisted_holds[0].tlc_id, 0);
+
+    // 2. Crash before `ch1` persists `RemoveTlc(Fulfill)`: recovery through
+    // `new_received_hold_tlc_set` settles ONLY the persisted `(ch1, 0)` selection.
+    let recovered = SettleTlcSetCommand::new_received_hold_tlc_set(payment_hash, &store).run();
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(recovered[0].channel_id(), ch1);
+    assert!(is_fulfill_settlement(&recovered[0]));
+
+    // 3. Even while `ch1` has NOT yet persisted `RemoveTlc(Fulfill)`, a competing full-value TLC
+    // on `ch2` arriving via `SettleTlcSet` MUST be rejected with `HoldTlcTimeout`.
+    let competing =
+        SettleTlcSetCommand::new_immediate_tlc_set(payment_hash, vec![(ch2, 0)], &store).run();
+    assert_eq!(competing.len(), 1);
+    assert_eq!(competing[0].channel_id(), ch2);
+    assert_eq!(
+        get_error_code(&competing[0]),
+        Some(TlcErrorCode::HoldTlcTimeout)
+    );
+
+    // 4. Even AFTER `ch1` finishes removing its fulfilled TLC and clears `payment_hold_tlcs`
+    // while the invoice is still `Received` (before `Paid` is written), a competing full-value
+    // TLC on `ch2` MUST still be rejected rather than double-settling the invoice!
+    let mut ch1_settled = ch1_state;
+    ch1_settled.tlc_state.apply_remove_tlc(TLCId::Received(0));
+    store.insert_channel_actor_state(ch1_settled);
+    store.remove_payment_hold_tlc(&payment_hash, &ch1, 0);
+    assert!(store.get_payment_hold_tlcs(payment_hash).is_empty());
+
+    let late_competing =
+        SettleTlcSetCommand::new_immediate_tlc_set(payment_hash, vec![(ch2, 0)], &store).run();
+    assert_eq!(late_competing.len(), 1);
+    assert_eq!(late_competing[0].channel_id(), ch2);
+    assert_eq!(
+        get_error_code(&late_competing[0]),
+        Some(TlcErrorCode::HoldTlcTimeout)
+    );
+    assert!(
+        SettleTlcSetCommand::new_received_hold_tlc_set(payment_hash, &store)
+            .run()
+            .is_empty(),
+        "once the selected TLC is removed, hold recovery must not pick a competing channel"
+    );
+
+    // 5. Crash between persisting `(ch1, 0)` in `payment_hold_tlcs` and marking the invoice
+    // `Received` (invoice still `Open`): competing `(ch2, 0)` is rejected while `(ch1, 0)` can
+    // still finish the transition.
+    let store_mid_crash = MockStore::new()
+        .with_invoice(
+            create_test_invoice(payment_hash, Some(1000), false),
+            CkbInvoiceStatus::Open,
+        )
+        .with_preimage(payment_hash, preimage)
+        .with_hold_tlc(payment_hash, ch1, 0)
+        .with_channel_state(create_test_channel_state_with_tlc(
+            ch1,
+            0,
+            1000,
+            payment_hash,
+            None,
+        ))
+        .with_channel_state(ch2_state);
+    let mid_crash_competing =
+        SettleTlcSetCommand::new_immediate_tlc_set(payment_hash, vec![(ch2, 0)], &store_mid_crash)
+            .run();
+    assert_eq!(mid_crash_competing.len(), 1);
+    assert_eq!(mid_crash_competing[0].channel_id(), ch2);
+    assert_eq!(
+        get_error_code(&mid_crash_competing[0]),
+        Some(TlcErrorCode::HoldTlcTimeout)
+    );
+    assert_eq!(
+        store_mid_crash.get_invoice_status(&payment_hash),
+        Some(CkbInvoiceStatus::Open)
+    );
+    let mid_crash_selected =
+        SettleTlcSetCommand::new_immediate_tlc_set(payment_hash, vec![(ch1, 0)], &store_mid_crash)
+            .run();
+    assert_eq!(mid_crash_selected.len(), 1);
+    assert_eq!(mid_crash_selected[0].channel_id(), ch1);
+    assert!(is_fulfill_settlement(&mid_crash_selected[0]));
+    assert_eq!(
+        store_mid_crash.get_invoice_status(&payment_hash),
+        Some(CkbInvoiceStatus::Received)
+    );
+}

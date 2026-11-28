@@ -148,7 +148,7 @@ async fn test_review_unchanged_tlc_does_not_republish_payment() {
         store,
         None,
     );
-    state.notify_payment_hash_v2(hash);
+    state.pending_payment_notifications.insert(hash.into());
     for _ in 0..3 {
         actor.persist_state_and_publish_pending_effects(&mut state);
     }
@@ -917,4 +917,764 @@ pub(crate) async fn handle_test_command(command: crate::tests::TestChannelComman
             let _ = wait.await;
         }
     }
+}
+
+#[tokio::test]
+async fn test_onchain_tlc_relay_confirmed_notifies_scoped_trampoline_session_key() {
+    // Capture every emitted `PaymentTlcUpdated(session_key)` directly.
+    let noticed = std::sync::Arc::new(std::sync::Mutex::new(Vec::<PaymentSessionKey>::new()));
+    struct KeyCollector(std::sync::Arc<std::sync::Mutex<Vec<PaymentSessionKey>>>);
+
+    #[async_trait::async_trait]
+    impl Actor for KeyCollector {
+        type Msg = FiberActorMessage;
+        type State = ();
+        type Arguments = ();
+
+        async fn pre_start(&self, _: ActorRef<Self::Msg>, _: ()) -> Result<(), ActorProcessingErr> {
+            Ok(())
+        }
+
+        async fn handle(
+            &self,
+            _: ActorRef<Self::Msg>,
+            message: Self::Msg,
+            _: &mut (),
+        ) -> Result<(), ActorProcessingErr> {
+            match message {
+                FiberActorMessage::Command(FiberActorCommand::PaymentTlcUpdated(key)) => {
+                    self.0.lock().unwrap().push(key);
+                }
+                FiberActorMessage::Command(FiberActorCommand::GetInflightPaymentCount(reply)) => {
+                    let _ = reply.send(Ok(0));
+                }
+                _ => {}
+            }
+            Ok(())
+        }
+    }
+
+    let (store, _dir) = crate::tests::test_utils::generate_store();
+    let (network, task) = Actor::spawn(None, KeyCollector(noticed.clone()), ())
+        .await
+        .unwrap();
+    let (myself, channel_task) = Actor::spawn(None, NoticeChannelMailbox, ()).await.unwrap();
+    let mut state =
+        channel_state_with_limits(ChannelConstraints::default(), ChannelConstraints::default());
+    let mut tlc = failed_remove_ack_confirmed_tlc(TLCId::Offered(0), 100);
+    let upstream = fiber_types::UpstreamTlcKey {
+        incoming_channel_id: Hash256::from([0x77; 32]),
+        incoming_tlc_id: 9,
+    };
+    let preimage = Hash256::from([0x42; 32]);
+    let reason = RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+        payment_preimage: preimage,
+    });
+    tlc.attempt_id = Some(1);
+    tlc.upstream_tlc_key = Some(upstream);
+    tlc.removed_reason = Some(reason.clone());
+    let expected_key = tlc.session_key();
+    // Fulfilled offered TLC has already left `tlc_state` and lives only in `remove_effects`.
+    state.session.remove_effects.push((tlc, Some(1)));
+    store.insert_channel_actor_state_for_test(state.clone());
+    let actor = ChannelActor::new(
+        state.local_pubkey,
+        state.remote_pubkey,
+        network.clone(),
+        store,
+        None,
+    );
+    actor
+        .handle_event(
+            &myself,
+            &mut state,
+            ChannelEvent::OnChainTlcRelayConfirmed(TLCId::Offered(0), reason),
+        )
+        .await
+        .unwrap();
+    actor.persist_state_and_publish_pending_effects(&mut state);
+    let _ = ractor::call_t!(
+        network,
+        |reply| FiberActorMessage::new_command(FiberActorCommand::GetInflightPaymentCount(reply)),
+        5000
+    )
+    .unwrap()
+    .unwrap();
+    myself.stop(None);
+    channel_task.await.unwrap();
+    network.stop(None);
+    task.await.unwrap();
+    assert_eq!(
+        *noticed.lock().unwrap(),
+        vec![expected_key],
+        "retiring the last remove_effects entry must notify the scoped trampoline PaymentSessionKey"
+    );
+}
+
+#[tokio::test]
+async fn test_maintain_ready_channel_tlcs_recovers_only_persisted_received_selection() {
+    let commands = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Hash256>::new()));
+    struct SettleCollector(std::sync::Arc<std::sync::Mutex<Vec<Hash256>>>);
+
+    #[async_trait::async_trait]
+    impl Actor for SettleCollector {
+        type Msg = FiberActorMessage;
+        type State = ();
+        type Arguments = ();
+
+        async fn pre_start(&self, _: ActorRef<Self::Msg>, _: ()) -> Result<(), ActorProcessingErr> {
+            Ok(())
+        }
+
+        async fn handle(
+            &self,
+            _: ActorRef<Self::Msg>,
+            message: Self::Msg,
+            _: &mut (),
+        ) -> Result<(), ActorProcessingErr> {
+            match message {
+                FiberActorMessage::Command(FiberActorCommand::SettleReceivedHoldTlcSet(hash))
+                | FiberActorMessage::Command(FiberActorCommand::SettleTlcSet(hash, _)) => {
+                    self.0.lock().unwrap().push(hash);
+                }
+                FiberActorMessage::Command(FiberActorCommand::GetInflightPaymentCount(reply)) => {
+                    let _ = reply.send(Ok(0));
+                }
+                _ => {}
+            }
+            Ok(())
+        }
+    }
+
+    let (store, _dir) = crate::tests::test_utils::generate_store();
+    let (network, net_task) = Actor::spawn(None, SettleCollector(commands.clone()), ())
+        .await
+        .unwrap();
+    let (myself, chan_task) = Actor::spawn(None, NoticeChannelMailbox, ()).await.unwrap();
+
+    let preimage = Hash256::from([0x61; 32]);
+    let payment_hash: Hash256 = HashAlgorithm::CkbHash.hash(preimage).into();
+    let invoice = crate::invoice::InvoiceBuilder::new(crate::invoice::Currency::Fibd)
+        .amount(Some(1_000))
+        .payment_hash(payment_hash)
+        .hash_algorithm(HashAlgorithm::CkbHash)
+        .build()
+        .expect("build test invoice");
+    store
+        .insert_invoice(invoice, Some(preimage))
+        .expect("insert invoice");
+    store
+        .update_invoice_status(&payment_hash, CkbInvoiceStatus::Received)
+        .expect("mark received");
+
+    let mut state =
+        channel_state_with_limits(ChannelConstraints::default(), ChannelConstraints::default());
+    let expiry = now_timestamp_as_millis_u64() + 600_000;
+    state.tlc_state.add_received_tlc(TlcInfo {
+        upstream_tlc_key: None,
+        status: TlcStatus::Inbound(InboundTlcStatus::Committed),
+        tlc_id: TLCId::Received(0),
+        amount: 1_000,
+        payment_hash,
+        total_amount: None,
+        payment_secret: None,
+        attempt_id: None,
+        expiry,
+        hash_algorithm: HashAlgorithm::CkbHash,
+        onion_packet: None,
+        shared_secret: [0x22; 32],
+        is_trampoline_hop: false,
+        created_at: CommitmentNumbers::default(),
+        removed_reason: None,
+        removed_confirmed_at: None,
+        applied_flags: AppliedFlags::empty(),
+        forwarding_tlc: None,
+    });
+    store.insert_channel_actor_state_for_test(state.clone());
+
+    let actor = ChannelActor::new(
+        state.local_pubkey,
+        state.remote_pubkey,
+        network.clone(),
+        store.clone(),
+        None,
+    );
+
+    // Without a persisted selection in `payment_hold_tlcs`, maintenance on a `Received`
+    // invoice must NOT request fulfillment (prevents double-settling competing channels).
+    actor
+        .handle_event(&myself, &mut state, ChannelEvent::MaintainChannelTlcs)
+        .await
+        .unwrap();
+    let _ = ractor::call_t!(
+        network,
+        |reply| FiberActorMessage::new_command(FiberActorCommand::GetInflightPaymentCount(reply)),
+        5000
+    )
+    .unwrap()
+    .unwrap();
+    assert!(
+        commands.lock().unwrap().is_empty(),
+        "unselected channel on Received invoice must not request fulfillment"
+    );
+
+    // Once `(state.id, 0)` is persisted in `payment_hold_tlcs`, maintenance must drive
+    // recovery via `SettleReceivedHoldTlcSet`.
+    store.insert_payment_hold_tlc(
+        payment_hash,
+        crate::fiber::types::HoldTlc {
+            channel_id: state.id,
+            tlc_id: 0,
+            hold_expire_at: expiry,
+        },
+    );
+    actor
+        .handle_event(&myself, &mut state, ChannelEvent::MaintainChannelTlcs)
+        .await
+        .unwrap();
+    let _ = ractor::call_t!(
+        network,
+        |reply| FiberActorMessage::new_command(FiberActorCommand::GetInflightPaymentCount(reply)),
+        5000
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        *commands.lock().unwrap(),
+        vec![payment_hash],
+        "persisted selection on Received invoice must request recovery"
+    );
+
+    myself.stop(None);
+    chan_task.await.unwrap();
+    network.stop(None);
+    net_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn test_external_funding_acceptor_second_signer_replays_tx_signatures() {
+    let sent_tx_sigs = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Vec<Vec<u8>>>::new()));
+    struct PeerMsgCollector(std::sync::Arc<std::sync::Mutex<Vec<Vec<Vec<u8>>>>>);
+
+    #[async_trait::async_trait]
+    impl Actor for PeerMsgCollector {
+        type Msg = FiberActorMessage;
+        type State = ();
+        type Arguments = ();
+
+        async fn pre_start(&self, _: ActorRef<Self::Msg>, _: ()) -> Result<(), ActorProcessingErr> {
+            Ok(())
+        }
+
+        async fn handle(
+            &self,
+            _: ActorRef<Self::Msg>,
+            message: Self::Msg,
+            _: &mut (),
+        ) -> Result<(), ActorProcessingErr> {
+            match message {
+                FiberActorMessage::Command(FiberActorCommand::SendFiberMessage(msg)) => {
+                    if let FiberMessage::ChannelNormalOperation(
+                        FiberChannelMessage::TxSignatures(sig),
+                    ) = msg.message
+                    {
+                        self.0.lock().unwrap().push(sig.witnesses);
+                    }
+                }
+                FiberActorMessage::Command(FiberActorCommand::GetInflightPaymentCount(reply)) => {
+                    let _ = reply.send(Ok(0));
+                }
+                _ => {}
+            }
+            Ok(())
+        }
+    }
+
+    let (network, net_task) = Actor::spawn(None, PeerMsgCollector(sent_tx_sigs.clone()), ())
+        .await
+        .unwrap();
+    let (myself, chan_task) = Actor::spawn(None, NoticeChannelMailbox, ()).await.unwrap();
+
+    let mut state =
+        channel_state_with_limits(ChannelConstraints::default(), ChannelConstraints::default());
+    // Make local the second signer (`to_local_amount > to_remote_amount`).
+    state.to_local_amount = 2_000_000;
+    state.to_remote_amount = 1_000_000;
+    assert!(!state.should_local_send_tx_signatures_first());
+    state.is_acceptor = true;
+    state.ephemeral_config.external_funding.enabled = true;
+    state.state = ChannelState::AwaitingChannelReady(AwaitingChannelReadyFlags::OUR_CHANNEL_READY);
+    state.sign_test_bootstrap_v2().unwrap();
+    let expected_witnesses = vec![vec![0xaa; 65], vec![0xbb; 65]];
+    let packed_witnesses: Vec<Bytes> = expected_witnesses.iter().map(|w| w.pack()).collect();
+    state.funding_tx = Some(
+        Transaction::default()
+            .as_advanced_builder()
+            .set_witnesses(packed_witnesses)
+            .build()
+            .data(),
+    );
+    state.network = Some(network.clone().into());
+
+    // Externally funded acceptor signing second must replay its final `TxSignatures`.
+    state.resume_funding(&myself);
+    let _ = ractor::call_t!(
+        network,
+        |reply| FiberActorMessage::new_command(FiberActorCommand::GetInflightPaymentCount(reply)),
+        5000
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(*sent_tx_sigs.lock().unwrap(), vec![expected_witnesses]);
+
+    // Externally funded opener (not acceptor) must still skip this non-external replay branch.
+    sent_tx_sigs.lock().unwrap().clear();
+    state.is_acceptor = false;
+    state.resume_funding(&myself);
+    let _ = ractor::call_t!(
+        network,
+        |reply| FiberActorMessage::new_command(FiberActorCommand::GetInflightPaymentCount(reply)),
+        5000
+    )
+    .unwrap()
+    .unwrap();
+    assert!(sent_tx_sigs.lock().unwrap().is_empty());
+
+    myself.stop(None);
+    chan_task.await.unwrap();
+    network.stop(None);
+    net_task.await.unwrap();
+}
+
+struct NoopFiberActor;
+
+#[async_trait::async_trait]
+impl Actor for NoopFiberActor {
+    type Msg = FiberActorMessage;
+    type State = ();
+    type Arguments = ();
+
+    async fn pre_start(&self, _: ActorRef<Self::Msg>, _: ()) -> Result<(), ActorProcessingErr> {
+        Ok(())
+    }
+
+    async fn handle(
+        &self,
+        _: ActorRef<Self::Msg>,
+        _: Self::Msg,
+        _: &mut (),
+    ) -> Result<(), ActorProcessingErr> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn test_tx_signatures_replay_in_awaiting_channel_ready_idempotent_and_rejects_conflict() {
+    let (store, _dir) = crate::tests::test_utils::generate_store();
+    let (network, net_task) = Actor::spawn(None, NoopFiberActor, ()).await.unwrap();
+    let (myself, chan_task) = Actor::spawn(None, NoticeChannelMailbox, ()).await.unwrap();
+
+    let mut state =
+        channel_state_with_limits(ChannelConstraints::default(), ChannelConstraints::default());
+    // Local is the first signer (`to_local_amount < to_remote_amount`), receiving the
+    // second signer's replayed complete `TxSignatures` while already in `AwaitingChannelReady`.
+    state.to_local_amount = 1_000_000;
+    state.to_remote_amount = 2_000_000;
+    assert!(state.should_local_send_tx_signatures_first());
+    state.state = ChannelState::AwaitingChannelReady(AwaitingChannelReadyFlags::empty());
+    state.sign_test_bootstrap_v2().unwrap();
+    let witnesses = vec![vec![0x11; 65], vec![0x22; 65]];
+    let packed_witnesses: Vec<Bytes> = witnesses.iter().map(|w| w.pack()).collect();
+    state.funding_tx = Some(
+        Transaction::default()
+            .as_advanced_builder()
+            .set_witnesses(packed_witnesses)
+            .build()
+            .data(),
+    );
+    let actor = ChannelActor::new(
+        state.local_pubkey,
+        state.remote_pubkey,
+        network.clone(),
+        store,
+        None,
+    );
+
+    // Identical witness replay in `AwaitingChannelReady` is accepted idempotently.
+    let channel_id = state.id;
+    let matching = actor
+        .handle_peer_message(
+            &myself,
+            &mut state,
+            FiberChannelMessage::TxSignatures(TxSignatures {
+                channel_id,
+                witnesses: witnesses.clone(),
+            }),
+        )
+        .await;
+    assert!(
+        matching.is_ok(),
+        "matching TxSignatures replay in AwaitingChannelReady must succeed: {matching:?}"
+    );
+
+    // Conflicting witnesses in `AwaitingChannelReady` must still be rejected.
+    let conflicting = actor
+        .handle_peer_message(
+            &myself,
+            &mut state,
+            FiberChannelMessage::TxSignatures(TxSignatures {
+                channel_id,
+                witnesses: vec![vec![0x99; 65], vec![0x22; 65]],
+            }),
+        )
+        .await;
+    assert!(
+        matches!(conflicting, Err(ProcessingChannelError::InvalidState(_))),
+        "conflicting TxSignatures in AwaitingChannelReady must fail with InvalidState: {conflicting:?}"
+    );
+
+    myself.stop(None);
+    chan_task.await.unwrap();
+    network.stop(None);
+    net_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn test_tx_abort_bypasses_pending_queue_while_awaiting_external_signature() {
+    let (store, _dir) = crate::tests::test_utils::generate_store();
+    let (network, net_task) = Actor::spawn(None, NoopFiberActor, ()).await.unwrap();
+    let (myself, chan_task) = Actor::spawn(None, NoticeChannelMailbox, ()).await.unwrap();
+
+    let mut state =
+        channel_state_with_limits(ChannelConstraints::default(), ChannelConstraints::default());
+    state.state = ChannelState::SigningCommitment(SigningCommitmentFlags::empty());
+    let key_agg_ctx = state.get_musig2_agg_context(true).as_ref().clone();
+    let agg_nonce = musig2::AggNonce::sum([
+        state.session.own.public_nonce.clone(),
+        state.session.own.public_nonce.clone(),
+    ]);
+    let content = fiber_types::Musig2SigningContent {
+        v2: None,
+        slot: fiber_types::NonceSlot {
+            purpose: fiber_types::NoncePurpose::Commitment,
+            commitment_number: 0,
+        },
+        commitment_counter: None,
+        key_agg_ctx,
+        agg_nonce,
+        content: fiber_types::Musig2SignableContent::CommitmentTransaction(Transaction::default()),
+    };
+    state.signing_context.pending_signature = Some(fiber_types::PendingChannelSignature {
+        request_id: fiber_types::SignatureRequestId(Hash256::from([0x55; 32])),
+        request: fiber_types::ChannelSignatureRequest::SendClosingSigned { content },
+    });
+    assert!(state.signing_context.is_awaiting_signature());
+
+    let actor = ChannelActor::new(
+        state.local_pubkey,
+        state.remote_pubkey,
+        network.clone(),
+        store,
+        None,
+    );
+    let channel_id = state.id;
+
+    // Once funding can no longer abort (e.g. `ChannelReady`), `TxAbort` must still queue
+    // behind an external signature so peer message buffering/overflow protection holds.
+    let mut ready_state = state.clone();
+    ready_state.state = ChannelState::ChannelReady;
+    actor
+        .handle_peer_message(
+            &myself,
+            &mut ready_state,
+            FiberChannelMessage::TxAbort(TxAbort {
+                channel_id,
+                message: b"late abort".to_vec(),
+            }),
+        )
+        .await
+        .expect("late TxAbort should buffer while awaiting signature");
+    assert_eq!(ready_state.state, ChannelState::ChannelReady);
+    assert_eq!(ready_state.pending_messages.peer_messages.len(), 1);
+
+    actor
+        .handle_peer_message(
+            &myself,
+            &mut state,
+            FiberChannelMessage::TxAbort(TxAbort {
+                channel_id,
+                message: b"peer abandoned opening".to_vec(),
+            }),
+        )
+        .await
+        .expect("TxAbort while awaiting external signature must be handled immediately");
+
+    assert_eq!(
+        state.state,
+        ChannelState::Closed(CloseFlags::FUNDING_ABORTED),
+        "eligible TxAbort must abort immediately rather than buffering behind external signature"
+    );
+    assert!(state.pending_messages.peer_messages.is_empty());
+
+    chan_task.await.unwrap();
+    network.stop(None);
+    net_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn test_force_close_and_confirmed_close_clear_reestablish_state() {
+    let (store, _dir) = crate::tests::test_utils::generate_store();
+    let (network, net_task) = Actor::spawn(None, NoopFiberActor, ()).await.unwrap();
+
+    // 1. Local force-close initiated while reestablishing must clear recovery/wait state.
+    let mut state =
+        channel_state_with_limits(ChannelConstraints::default(), ChannelConstraints::default());
+    state.state = ChannelState::ChannelReady;
+    state.network = Some(network.clone().into());
+    state.sign_test_bootstrap_v2().unwrap();
+    state.reestablishing = true;
+    state.reestablish_timer = Some(ReestablishTimer::RunningSince(1_000));
+    state.waiting_peer_response = Some(1_000);
+
+    let actor = ChannelActor::new(
+        state.local_pubkey,
+        state.remote_pubkey,
+        network.clone(),
+        store,
+        None,
+    );
+    actor
+        .handle_shutdown_command(
+            &mut state,
+            ShutdownCommand {
+                close_script: None,
+                fee_rate: None,
+                force: true,
+            },
+        )
+        .await
+        .expect("force shutdown while reestablishing must succeed");
+    assert!(
+        !state.reestablishing,
+        "force shutdown must clear reestablishing flag"
+    );
+    assert!(
+        state.reestablish_timer.is_none(),
+        "force shutdown must clear reestablish_timer"
+    );
+    assert!(
+        state.waiting_peer_response.is_none(),
+        "force shutdown must clear waiting_peer_response"
+    );
+
+    // 2. Confirmed remote force-close while reestablishing must also clear recovery/wait state.
+    let mut remote_closed =
+        channel_state_with_limits(ChannelConstraints::default(), ChannelConstraints::default());
+    remote_closed.state = ChannelState::ChannelReady;
+    remote_closed.network = Some(network.clone().into());
+    remote_closed.reestablishing = true;
+    remote_closed.reestablish_timer = Some(ReestablishTimer::RunningSince(2_000));
+    remote_closed.waiting_peer_response = Some(2_000);
+    remote_closed
+        .update_close_transaction_confirmed(H256::default(), true, false)
+        .await
+        .expect("confirmed remote force close must succeed");
+    assert!(
+        !remote_closed.reestablishing,
+        "confirmed close must clear reestablishing flag"
+    );
+    assert!(
+        remote_closed.reestablish_timer.is_none(),
+        "confirmed close must clear reestablish_timer"
+    );
+    assert!(
+        remote_closed.waiting_peer_response.is_none(),
+        "confirmed close must clear waiting_peer_response"
+    );
+
+    network.stop(None);
+    net_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn test_receive_shutdown_v2_replay_suppressed_after_force_close() {
+    let (store, _dir) = crate::tests::test_utils::generate_store();
+    let sent_closing_signed = std::sync::Arc::new(std::sync::Mutex::new(0usize));
+
+    struct ClosingSignedCounter(std::sync::Arc<std::sync::Mutex<usize>>);
+    #[async_trait::async_trait]
+    impl Actor for ClosingSignedCounter {
+        type Msg = FiberActorMessage;
+        type State = ();
+        type Arguments = ();
+        async fn pre_start(&self, _: ActorRef<Self::Msg>, _: ()) -> Result<(), ActorProcessingErr> {
+            Ok(())
+        }
+        async fn handle(
+            &self,
+            _: ActorRef<Self::Msg>,
+            message: Self::Msg,
+            _: &mut (),
+        ) -> Result<(), ActorProcessingErr> {
+            match message {
+                FiberActorMessage::Command(FiberActorCommand::SendFiberMessage(msg)) => {
+                    if matches!(
+                        msg.message,
+                        FiberMessage::ChannelNormalOperation(FiberChannelMessage::ClosingSignedV2(
+                            _
+                        ))
+                    ) {
+                        *self.0.lock().unwrap() += 1;
+                    }
+                }
+                FiberActorMessage::Command(FiberActorCommand::GetInflightPaymentCount(reply)) => {
+                    let _ = reply.send(Ok(0));
+                }
+                _ => {}
+            }
+            Ok(())
+        }
+    }
+
+    let (network, net_task) =
+        Actor::spawn(None, ClosingSignedCounter(sent_closing_signed.clone()), ())
+            .await
+            .unwrap();
+    let mut state =
+        channel_state_with_limits(ChannelConstraints::default(), ChannelConstraints::default());
+    state.state = ChannelState::ShuttingDown(ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION);
+    state.network = Some(network.clone().into());
+    let own = state
+        .allocate_v2(
+            state.local_channel_public_keys.funding_pubkey,
+            0,
+            NoncePurposeV2::Closing,
+        )
+        .unwrap();
+    let remote_shutdown = ShutdownV2 {
+        channel_id: state.id,
+        close_script: state.get_local_shutdown_script(),
+        fee_rate: 1_000,
+        closing_nonce: own.public_nonce.clone(),
+    };
+    let packed_remote: fiber_types::gen::fiber::ShutdownV2 = remote_shutdown.clone().into();
+    let response = ClosingSignedV2 {
+        channel_id: state.id,
+        partial_signature: PartialSignature::from(musig2::secp256k1::Scalar::ONE),
+    };
+    state.session.closing = Some(fiber_types::ClosingSessionV2 {
+        peer_wait_started_at: 1_000,
+        superseded_by_force_close: true,
+        own,
+        shutdown: packed_remote.clone(),
+        remote_shutdown: Some(packed_remote),
+        transaction: None,
+        response: Some(response.into()),
+        remote_response: None,
+    });
+
+    let actor = ChannelActor::new(
+        state.local_pubkey,
+        state.remote_pubkey,
+        network.clone(),
+        store,
+        None,
+    );
+    actor
+        .receive_shutdown_v2(&mut state, remote_shutdown)
+        .await
+        .expect("idempotent replay of ShutdownV2 after force close should return Ok");
+    let _ = ractor::call_t!(
+        network,
+        |reply| FiberActorMessage::new_command(FiberActorCommand::GetInflightPaymentCount(reply)),
+        5000
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        *sent_closing_signed.lock().unwrap(),
+        0,
+        "ShutdownV2 replay must not resend ClosingSignedV2 once superseded_by_force_close"
+    );
+
+    network.stop(None);
+    net_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn test_cooperative_close_confirmed_while_awaiting_force_close_closes_channel() {
+    let (network, net_task) = Actor::spawn(None, NoopFiberActor, ()).await.unwrap();
+    for initial_flags in [
+        ShuttingDownFlags::OUR_SHUTDOWN_SENT,
+        ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION,
+    ] {
+        let mut state =
+            channel_state_with_limits(ChannelConstraints::default(), ChannelConstraints::default());
+        state.state = ChannelState::ShuttingDown(initial_flags);
+        state.network = Some(network.clone().into());
+        let tx_hash = H256::from([0x5a; 32]);
+        state
+            .update_close_transaction_confirmed(tx_hash.clone(), false, false)
+            .await
+            .expect("cooperative close confirmation must be accepted in any ShuttingDown state");
+        assert_eq!(state.state, ChannelState::Closed(CloseFlags::COOPERATIVE));
+        assert_eq!(state.shutdown_transaction_hash, Some(tx_hash));
+    }
+    network.stop(None);
+    net_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn test_periodic_reconnect_preserves_peer_response_wait_budget() {
+    let (network, net_task) = Actor::spawn(None, NoopFiberActor, ()).await.unwrap();
+    let mut state =
+        channel_state_with_limits(ChannelConstraints::default(), ChannelConstraints::default());
+    state.network = Some(network.clone().into());
+    state.state = ChannelState::ShuttingDown(ShuttingDownFlags::OUR_SHUTDOWN_SENT);
+    let own = state
+        .allocate_v2(
+            state.local_channel_public_keys.funding_pubkey,
+            0,
+            NoncePurposeV2::Closing,
+        )
+        .unwrap();
+    let shutdown = ShutdownV2 {
+        channel_id: state.id,
+        close_script: state.get_local_shutdown_script(),
+        fee_rate: 1_000,
+        closing_nonce: own.public_nonce.clone(),
+    };
+    let prior_elapsed = 20_000u64;
+    let now = now_timestamp_as_millis_u64();
+    state.session.closing = Some(fiber_types::ClosingSessionV2 {
+        peer_wait_started_at: now.saturating_sub(prior_elapsed),
+        superseded_by_force_close: false,
+        own,
+        shutdown: shutdown.into(),
+        remote_shutdown: None,
+        transaction: None,
+        response: None,
+        remote_response: None,
+    });
+
+    state.on_peer_disconnected();
+    assert!(
+        state.ephemeral_config.paused_peer_response_wait_ms >= prior_elapsed,
+        "disconnect must preserve elapsed online peer-response wait"
+    );
+
+    state.refresh_peer_response_wait_v2_after_reestablish();
+    let resumed_started = state.session.closing.as_ref().unwrap().peer_wait_started_at;
+    let resumed_elapsed = now_timestamp_as_millis_u64().saturating_sub(resumed_started);
+    assert!(
+        resumed_elapsed >= prior_elapsed,
+        "reestablish must not reset accrued online peer-response wait (got {resumed_elapsed}ms < {prior_elapsed}ms)"
+    );
+
+    state.session.closing = None;
+    state.refresh_peer_response_wait_v2_after_reestablish();
+    assert_eq!(state.ephemeral_config.paused_peer_response_wait_ms, 0);
+
+    network.stop(None);
+    net_task.await.unwrap();
 }
