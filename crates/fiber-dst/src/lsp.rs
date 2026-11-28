@@ -1,5 +1,5 @@
 use std::cell::{Cell, RefCell};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -7,25 +7,27 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, bail, ensure, Context, Result};
 use ckb_types::packed::{Bytes, CellInput, OutPoint, Script, Transaction};
 use ckb_types::prelude::*;
 use fiber_json_types::{
-    ChannelSigningStatus, CreatePreimageParams, GetChannelSigningStatusParams,
-    GetChannelSigningStatusResult, GetInvoiceParams, GetInvoiceResult, GetPaymentCommandParams,
-    GetPaymentCommandResult, GetWatchtowerSigningStatusParams, GetWatchtowerSigningStatusResult,
+    ChannelSigningStatus, ChannelSigningTransition, CreatePreimageParams,
+    GetChannelSigningStatusParams, GetChannelSigningStatusResult, GetInvoiceParams,
+    GetInvoiceResult, GetPaymentCommandParams, GetPaymentCommandResult,
+    GetWatchtowerSigningStatusParams, GetWatchtowerSigningStatusResult, InvoiceParams,
     InvoiceResult, ListChannelsParams, ListChannelsResult, NewInvoiceParams,
     OpenChannelWithExternalFundingParams, OpenChannelWithExternalFundingResult,
     PaymentStatus as JsonPaymentStatus, RegisterLspTenantParams, RegisterLspTenantResult,
-    SendPaymentCommandParams, SettleInvoiceParams, SubmitChannelSignatureParams,
-    SubmitChannelSignatureResult, SubmitSignedFundingTxParams, SubmitSignedFundingTxResult,
-    SubmitWatchtowerSignatureParams, SubmitWatchtowerSignatureResult, WatchtowerSigningStatus,
+    SendPaymentCommandParams, SettleInvoiceParams, ShutdownChannelParams,
+    SubmitChannelSignatureParams, SubmitChannelSignatureResult, SubmitSignedFundingTxParams,
+    SubmitSignedFundingTxResult, SubmitWatchtowerSignatureParams, SubmitWatchtowerSignatureResult,
+    WatchtowerSigningStatus,
 };
 use fiber_lsp_sdk::{
-    ChainVerifier, ChannelKeyId, FundingVerifier, HostedSession, HostedSessionState, MemoryStore,
-    NoopWatchtowerEventHandler, OnchainSpendAuthorization, OpeningNetwork, OpeningPersistence,
-    PaymentAuthorization, ProcessOutcome, RootKey, RootSigner, SessionError, SigningPolicy,
-    SubmitParams, TenantOpeningRpc, VerifiedCell,
+    ChainVerifier, ChannelKeyId, CloseAuthorization, FundingVerifier, HostedSession,
+    HostedSessionState, MemoryStore, NoopWatchtowerEventHandler, OnchainSpendAuthorization,
+    OpeningNetwork, OpeningPersistence, PaymentAuthorization, ProcessOutcome, RootKey, RootSigner,
+    SessionError, SigningPolicy, SubmitParams, TenantOpeningRpc, VerifiedCell,
 };
 use fnn::fiber::config::{DEFAULT_MIN_SHUTDOWN_FEE, MILLI_SECONDS_PER_EPOCH};
 use fnn::fiber::{Hash256, Privkey, Pubkey};
@@ -77,21 +79,36 @@ struct WireRpcEnvelope {
     payload: String,
 }
 
-pub(crate) async fn serve_lsp_rpc(runtime: Rc<SimulatedLspRuntime>) -> Result<()> {
+pub(crate) async fn serve_lsp_rpc(
+    runtime: Rc<SimulatedLspRuntime>,
+    disk: crate::sqlite_vfs::SimulatedDisk,
+) -> Result<()> {
     let listener = TcpListener::bind(("0.0.0.0", LSP_RPC_PORT)).await?;
     let mut requests = JoinSet::new();
     loop {
         tokio::select! {
             biased;
             Some(result) = requests.join_next() => {
+                if disk.hit().is_some() {
+                    drop(requests);
+                    return std::future::pending().await;
+                }
                 result?;
             }
             result = listener.accept() => {
+                if disk.hit().is_some() {
+                    drop(requests);
+                    return std::future::pending().await;
+                }
                 let (mut socket, _) = result?;
                 let runtime = runtime.clone();
+                let disk = disk.clone();
                 requests.spawn_local(async move {
                     let _ = tokio::time::timeout(RPC_TIMEOUT * 4, async {
                         let raw = read_message(&mut socket).await?;
+                        if disk.hit().is_some() {
+                            return Ok::<_, anyhow::Error>(());
+                        }
                         let envelope: WireRpcEnvelope = serde_json::from_str(&raw)?;
                         let response = runtime
                             .call_rpc(envelope.token.as_deref(), &envelope.payload)
@@ -304,6 +321,17 @@ impl LspRpcClient {
     }
 }
 
+/// One-shot crash fault injected at exact persistence/RPC boundaries inside `WalletHost`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SdkSignerFault {
+    /// Crash the SDK wallet immediately after `confirm()` mutates in-memory signer state,
+    /// BEFORE writing `sdk_store.bin` to disk and BEFORE submitting `submit_channel_signature`.
+    SkipPersistAfterConfirmCrash,
+    /// Crash the SDK wallet immediately after `confirm()` persists `sdk_store.bin` to disk,
+    /// BEFORE transmitting `submit_channel_signature` to the LSP.
+    CrashAfterPersistBeforeSubmit,
+}
+
 pub(crate) struct WalletSlot {
     pub generation: u64,
     pub online: bool,
@@ -311,9 +339,13 @@ pub(crate) struct WalletSlot {
     pub bound_channels: Vec<Hash256>,
     pub commands: Option<mpsc::UnboundedSender<WalletCommand>>,
     pub signing_paused: Rc<Cell<bool>>,
+    pub sdk_fault: Rc<Cell<Option<SdkSignerFault>>>,
+    pub sdk_faults_hit: u64,
     pub rpc: LspRpcControl,
     pub channel_sigs_applied: u64,
     pub channel_sigs_already_applied: u64,
+    pub closing_sigs_applied: u64,
+    pub token_refreshes: u64,
     pub watchtower_sigs_applied: u64,
     pub watchtower_sigs_already_applied: u64,
     pub watchtower_backoff_hits: u64,
@@ -330,9 +362,13 @@ impl Default for WalletSlot {
             bound_channels: Vec::new(),
             commands: None,
             signing_paused: Rc::new(Cell::new(false)),
+            sdk_fault: Rc::new(Cell::new(None)),
+            sdk_faults_hit: 0,
             rpc: LspRpcControl::default(),
             channel_sigs_applied: 0,
             channel_sigs_already_applied: 0,
+            closing_sigs_applied: 0,
+            token_refreshes: 0,
             watchtower_sigs_applied: 0,
             watchtower_sigs_already_applied: 0,
             watchtower_backoff_hits: 0,
@@ -353,7 +389,6 @@ pub(crate) enum WalletCommand {
         reply: oneshot::Sender<Result<Hash256>>,
     },
     CreateHoldInvoice {
-        channel_id: Hash256,
         amount: u128,
         payment_hash: Hash256,
         preimage: Hash256,
@@ -363,6 +398,10 @@ pub(crate) enum WalletCommand {
         payment_hash: Hash256,
         preimage: Hash256,
         reply: oneshot::Sender<Result<()>>,
+    },
+    CancelInvoice {
+        payment_hash: Hash256,
+        reply: oneshot::Sender<Result<GetInvoiceResult>>,
     },
     GetInvoice {
         payment_hash: Hash256,
@@ -375,6 +414,11 @@ pub(crate) enum WalletCommand {
         payment_hash: Hash256,
         use_trampoline: bool,
         reply: oneshot::Sender<Result<GetPaymentCommandResult>>,
+    },
+    CooperativeClose {
+        channel_id: Hash256,
+        fee_rate: u64,
+        reply: oneshot::Sender<Result<()>>,
     },
     ListChannels {
         reply: oneshot::Sender<Result<ListChannelsResult>>,
@@ -438,6 +482,7 @@ struct SimOpeningAdapter<'a> {
     store: &'a MemoryStore,
     store_file: &'a Path,
     pending_outbound: &'a BTreeMap<Hash256, Hash256>,
+    local_initiated_close: &'a BTreeSet<Hash256>,
 }
 
 #[async_trait::async_trait]
@@ -482,6 +527,7 @@ impl OpeningPersistence for SimOpeningAdapter<'_> {
             self.store_file,
             state,
             self.pending_outbound,
+            self.local_initiated_close,
             self.session_file,
         )
         .map_err(|err| SessionError::Invalid(err.to_string()))
@@ -497,6 +543,8 @@ struct PersistedWalletSession {
     opening_request: Option<Vec<u8>>,
     #[serde(default)]
     pending_outbound: BTreeMap<String, String>,
+    #[serde(default)]
+    local_initiated_close: BTreeSet<String>,
 }
 
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -514,6 +562,7 @@ fn persist_wallet_files(
     store_file: &Path,
     state: &HostedSessionState,
     pending_outbound: &BTreeMap<Hash256, Hash256>,
+    local_initiated_close: &BTreeSet<Hash256>,
     session_file: &Path,
 ) -> Result<()> {
     let snapshot = store
@@ -536,6 +585,10 @@ fn persist_wallet_files(
                 (format!("{payment_hash:#x}"), format!("{channel_id:#x}"))
             })
             .collect(),
+        local_initiated_close: local_initiated_close
+            .iter()
+            .map(|channel_id| format!("{channel_id:#x}"))
+            .collect(),
     };
     atomic_write(session_file, &serde_json::to_vec(&persisted)?)?;
     Ok(())
@@ -549,6 +602,7 @@ fn parse_hex_hash(value: &str) -> Result<Hash256> {
     Ok(Hash256::from(array))
 }
 
+#[allow(clippy::type_complexity)]
 fn load_wallet_files(
     store_file: &Path,
     session_file: &Path,
@@ -556,6 +610,7 @@ fn load_wallet_files(
     MemoryStore,
     HostedSessionState,
     BTreeMap<Hash256, Hash256>,
+    BTreeSet<Hash256>,
     bool,
 )> {
     let existed = store_file.exists();
@@ -567,6 +622,7 @@ fn load_wallet_files(
         MemoryStore::default()
     };
     let mut pending_outbound = BTreeMap::new();
+    let mut local_initiated_close = BTreeSet::new();
     let state = if session_file.exists() {
         let persisted: PersistedWalletSession =
             serde_json::from_slice(&std::fs::read(session_file)?)?;
@@ -579,6 +635,9 @@ fn load_wallet_files(
         }
         for (payment_hash, channel_id) in persisted.pending_outbound {
             pending_outbound.insert(parse_hex_hash(&payment_hash)?, parse_hex_hash(&channel_id)?);
+        }
+        for channel_id in persisted.local_initiated_close {
+            local_initiated_close.insert(parse_hex_hash(&channel_id)?);
         }
         HostedSessionState {
             tenant_token: persisted.tenant_token,
@@ -593,7 +652,13 @@ fn load_wallet_files(
     } else {
         HostedSessionState::default()
     };
-    Ok((store, state, pending_outbound, existed))
+    Ok((
+        store,
+        state,
+        pending_outbound,
+        local_initiated_close,
+        existed,
+    ))
 }
 
 #[derive(Clone)]
@@ -615,7 +680,7 @@ impl WalletHost {
         let name = WALLET_HOSTS[self.index];
         let store_file = self.path.join("sdk_store.bin");
         let session_file = self.path.join("session_state.json");
-        let (store, persisted_state, mut pending_outbound, existed) =
+        let (store, persisted_state, mut pending_outbound, mut local_initiated_close, existed) =
             load_wallet_files(&store_file, &session_file)?;
         let root_key = RootKey::import(self.root_key)
             .map_err(|err| anyhow!("import wallet root key: {err}"))?;
@@ -636,11 +701,12 @@ impl WalletHost {
             &store_file,
             session.state(),
             &pending_outbound,
+            &local_initiated_close,
             &session_file,
         )?;
 
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
-        let (generation, rpc_control, signing_paused) = {
+        let (generation, rpc_control, signing_paused, sdk_fault) = {
             let mut wallets = self.wallets.borrow_mut();
             let slot = &mut wallets[self.index];
             slot.generation += 1;
@@ -652,6 +718,7 @@ impl WalletHost {
                 slot.generation,
                 slot.rpc.clone(),
                 slot.signing_paused.clone(),
+                slot.sdk_fault.clone(),
             )
         };
         record(
@@ -679,6 +746,7 @@ impl WalletHost {
                                 &store,
                                 &store_file,
                                 &pending_outbound,
+                                &local_initiated_close,
                                 &session_file,
                                 &rpc,
                                 false,
@@ -691,6 +759,7 @@ impl WalletHost {
                                 &store,
                                 &store_file,
                                 &mut pending_outbound,
+                                &mut local_initiated_close,
                                 &session_file,
                                 &rpc,
                                 &wallet_lock,
@@ -698,33 +767,38 @@ impl WalletHost {
                             ).await;
                             let _ = reply.send(res);
                         }
-                        WalletCommand::CreateHoldInvoice { channel_id, amount, payment_hash, preimage, reply } => {
+                        WalletCommand::CreateHoldInvoice { amount, payment_hash, preimage, reply } => {
                             let res = async {
                                 let now = fnn::now_timestamp_as_millis_u64();
-                                let signer = session
-                                    .channel_signer(channel_id)
-                                    .await
-                                    .map_err(|err| anyhow!("channel_signer for invoice: {err}"))?;
-                                signer
-                                    .authorize_invoice(
-                                        PaymentAuthorization {
-                                            payment_hash,
-                                            hash_algorithm: fnn::fiber_types::HashAlgorithm::CkbHash,
-                                            inbound: true,
-                                            amount,
-                                            expires_at_ms: now.saturating_add(7_200_000),
-                                            min_tlc_expiry_delta_ms: 1,
-                                            max_tlc_expiry_ms: now.saturating_add(30 * 86_400_000),
-                                        },
-                                        preimage,
-                                    )
-                                    .await
-                                    .map_err(|err| anyhow!("SDK authorize_invoice: {err}"))?;
+                                let channels = sorted_bindings(session.state());
+                                ensure!(!channels.is_empty(), "wallet has no bound channel for invoice");
+                                for bound_channel in channels {
+                                    let signer = session
+                                        .channel_signer(bound_channel)
+                                        .await
+                                        .map_err(|err| anyhow!("channel_signer for invoice: {err}"))?;
+                                    signer
+                                        .authorize_invoice(
+                                            PaymentAuthorization {
+                                                payment_hash,
+                                                hash_algorithm: fnn::fiber_types::HashAlgorithm::CkbHash,
+                                                inbound: true,
+                                                amount,
+                                                expires_at_ms: now.saturating_add(7_200_000),
+                                                min_tlc_expiry_delta_ms: 1,
+                                                max_tlc_expiry_ms: now.saturating_add(30 * 86_400_000),
+                                            },
+                                            preimage,
+                                        )
+                                        .await
+                                        .map_err(|err| anyhow!("SDK authorize_invoice: {err}"))?;
+                                }
                                 persist_wallet_files(
                                     &store,
                                     &store_file,
                                     session.state(),
                                     &pending_outbound,
+                                    &local_initiated_close,
                                     &session_file,
                                 )?;
                                 let token = session.tenant_token().context("wallet not registered")?.to_owned();
@@ -758,7 +832,6 @@ impl WalletHost {
                                     match signer.authorize_fulfillment(payment_hash, preimage).await {
                                         Ok(()) => {
                                             authorized = true;
-                                            break;
                                         }
                                         Err(err) if err.to_string().contains("unknown payment") => continue,
                                         Err(err) => return Err(anyhow!("SDK authorize_fulfillment: {err}")),
@@ -772,6 +845,7 @@ impl WalletHost {
                                     &store_file,
                                     session.state(),
                                     &pending_outbound,
+                                    &local_initiated_close,
                                     &session_file,
                                 )?;
                                 let token = session.tenant_token().context("wallet not registered")?.to_owned();
@@ -781,6 +855,36 @@ impl WalletHost {
                                 };
                                 rpc.call::<Value>(Some(&token), "settle_invoice", json!([params])).await?;
                                 Ok(())
+                            }.await;
+                            rpc.control.flush_events(&self.trace);
+                            let _ = reply.send(res);
+                        }
+                        WalletCommand::CancelInvoice { payment_hash, reply } => {
+                            let res = async {
+                                for channel_id in sorted_bindings(session.state()) {
+                                    let signer = session
+                                        .channel_signer(channel_id)
+                                        .await
+                                        .map_err(|err| anyhow!("channel_signer for cancel: {err}"))?;
+                                    match signer.authorize_cancellation(payment_hash).await {
+                                        Ok(()) => {}
+                                        Err(err) if err.to_string().contains("unknown payment") => continue,
+                                        Err(err) => return Err(anyhow!("SDK authorize_cancellation: {err}")),
+                                    }
+                                }
+                                persist_wallet_files(
+                                    &store,
+                                    &store_file,
+                                    session.state(),
+                                    &pending_outbound,
+                                    &local_initiated_close,
+                                    &session_file,
+                                )?;
+                                let token = session.tenant_token().context("wallet not registered")?.to_owned();
+                                let params = InvoiceParams {
+                                    payment_hash: payment_hash.into(),
+                                };
+                                rpc.call::<GetInvoiceResult>(Some(&token), "cancel_invoice", json!([params])).await
                             }.await;
                             rpc.control.flush_events(&self.trace);
                             let _ = reply.send(res);
@@ -828,28 +932,32 @@ impl WalletHost {
                                     )
                                     .await?;
                                 let now = fnn::now_timestamp_as_millis_u64();
-                                let signer = session
-                                    .channel_signer(channel_id)
-                                    .await
-                                    .map_err(|err| anyhow!("channel_signer for payment: {err}"))?;
-                                signer
-                                    .authorize_payment(PaymentAuthorization {
-                                        payment_hash,
-                                        hash_algorithm: fnn::fiber_types::HashAlgorithm::CkbHash,
-                                        inbound: false,
-                                        amount: amount.saturating_add(dry.fee),
-                                        expires_at_ms: now.saturating_add(7_200_000),
-                                        min_tlc_expiry_delta_ms: 1,
-                                        max_tlc_expiry_ms: now.saturating_add(30 * 86_400_000),
-                                    })
-                                    .await
-                                    .map_err(|err| anyhow!("SDK authorize_payment: {err}"))?;
+                                let _ = channel_id;
+                                for bound_channel in sorted_bindings(session.state()) {
+                                    let signer = session
+                                        .channel_signer(bound_channel)
+                                        .await
+                                        .map_err(|err| anyhow!("channel_signer for payment: {err}"))?;
+                                    signer
+                                        .authorize_payment(PaymentAuthorization {
+                                            payment_hash,
+                                            hash_algorithm: fnn::fiber_types::HashAlgorithm::CkbHash,
+                                            inbound: false,
+                                            amount: amount.saturating_add(dry.fee),
+                                            expires_at_ms: now.saturating_add(7_200_000),
+                                            min_tlc_expiry_delta_ms: 1,
+                                            max_tlc_expiry_ms: now.saturating_add(30 * 86_400_000),
+                                        })
+                                        .await
+                                        .map_err(|err| anyhow!("SDK authorize_payment: {err}"))?;
+                                }
                                 pending_outbound.insert(payment_hash, channel_id);
                                 persist_wallet_files(
                                     &store,
                                     &store_file,
                                     session.state(),
                                     &pending_outbound,
+                                    &local_initiated_close,
                                     &session_file,
                                 )?;
                                 rpc.call::<GetPaymentCommandResult>(
@@ -858,6 +966,30 @@ impl WalletHost {
                                     json!([make_params(false)]),
                                 )
                                 .await
+                            }.await;
+                            rpc.control.flush_events(&self.trace);
+                            let _ = reply.send(res);
+                        }
+                        WalletCommand::CooperativeClose { channel_id, fee_rate, reply } => {
+                            let res = async {
+                                local_initiated_close.insert(channel_id);
+                                persist_wallet_files(
+                                    &store,
+                                    &store_file,
+                                    session.state(),
+                                    &pending_outbound,
+                                    &local_initiated_close,
+                                    &session_file,
+                                )?;
+                                let token = session.tenant_token().context("wallet not registered")?.to_owned();
+                                let params = ShutdownChannelParams {
+                                    channel_id: channel_id.into(),
+                                    close_script: Some(wallet_lock.clone().into()),
+                                    fee_rate: Some(fee_rate),
+                                    force: Some(false),
+                                };
+                                rpc.call::<Value>(Some(&token), "shutdown_channel", json!([params])).await?;
+                                Ok(())
                             }.await;
                             rpc.control.flush_events(&self.trace);
                             let _ = reply.send(res);
@@ -939,15 +1071,23 @@ impl WalletHost {
                 }
                 _ = poll_tick.tick() => {
                     if !signing_paused.get() && session.tenant_token().is_some() {
-                        let _ = self.poll_all_channels(
+                        if let Ok(true) = self.poll_all_channels(
                             &mut session,
                             &store,
                             &store_file,
                             &mut pending_outbound,
+                            &mut local_initiated_close,
                             &session_file,
                             &rpc,
                             &wallet_lock,
-                        ).await;
+                            &sdk_fault,
+                        ).await {
+                            let mut wallets = self.wallets.borrow_mut();
+                            let slot = &mut wallets[self.index];
+                            slot.online = false;
+                            slot.commands = None;
+                            return Ok(());
+                        }
                     }
                 }
             }
@@ -969,6 +1109,7 @@ impl WalletHost {
         store: &MemoryStore,
         store_file: &Path,
         pending_outbound: &BTreeMap<Hash256, Hash256>,
+        local_initiated_close: &BTreeSet<Hash256>,
         session_file: &Path,
         rpc: &LspRpcClient,
         force: bool,
@@ -996,16 +1137,29 @@ impl WalletHost {
             store_file,
             session.state(),
             pending_outbound,
+            local_initiated_close,
             session_file,
         )?;
-        record(
-            &self.trace,
-            format_args!(
-                "{} registered tenant={}",
-                WALLET_HOSTS[self.index],
-                session.tenant_id()
-            ),
-        );
+        if force {
+            self.wallets.borrow_mut()[self.index].token_refreshes += 1;
+            record(
+                &self.trace,
+                format_args!(
+                    "{} refreshed token tenant={}",
+                    WALLET_HOSTS[self.index],
+                    session.tenant_id()
+                ),
+            );
+        } else {
+            record(
+                &self.trace,
+                format_args!(
+                    "{} registered tenant={}",
+                    WALLET_HOSTS[self.index],
+                    session.tenant_id()
+                ),
+            );
+        }
         Ok(session.tenant_id())
     }
 
@@ -1016,6 +1170,7 @@ impl WalletHost {
         store: &MemoryStore,
         store_file: &Path,
         pending_outbound: &mut BTreeMap<Hash256, Hash256>,
+        local_initiated_close: &mut BTreeSet<Hash256>,
         session_file: &Path,
         rpc: &LspRpcClient,
         wallet_lock: &Script,
@@ -1039,6 +1194,7 @@ impl WalletHost {
                 store_file,
                 session.state(),
                 pending_outbound,
+                local_initiated_close,
                 session_file,
             )?;
             material
@@ -1080,17 +1236,37 @@ impl WalletHost {
             store,
             store_file,
             pending_outbound,
+            local_initiated_close,
         };
-        let result = session
-            .open_tenant_channel(request, &network, &adapter, &adapter, &adapter)
-            .await
-            .map_err(|err| anyhow!("open_tenant_channel: {err}"))?;
+        let mut open_result = None;
+        for attempt in 0..4 {
+            match session
+                .open_tenant_channel(request.clone(), &network, &adapter, &adapter, &adapter)
+                .await
+            {
+                Ok(result) => {
+                    open_result = Some(result);
+                    break;
+                }
+                Err(err)
+                    if attempt < 3
+                        && (err.to_string().contains("simulated dropped")
+                            || err.to_string().contains("timeout")) =>
+                {
+                    rpc.control.flush_events(&self.trace);
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                Err(err) => return Err(anyhow!("open_tenant_channel: {err}")),
+            }
+        }
+        let result = open_result.context("open_tenant_channel exhausted retries")?;
         let channel_id: Hash256 = result.channel_id.into();
         persist_wallet_files(
             store,
             store_file,
             session.state(),
             pending_outbound,
+            local_initiated_close,
             session_file,
         )?;
         self.wallets.borrow_mut()[self.index].bound_channels = sorted_bindings(session.state());
@@ -1107,6 +1283,7 @@ impl WalletHost {
             .context("wallet not registered")?
             .to_owned();
         let unsigned_tx: Transaction = result.unsigned_funding_tx.into();
+        let no_sdk_fault = Cell::new(None);
         for _ in 0..400 {
             let _ = self
                 .poll_channel(
@@ -1114,10 +1291,12 @@ impl WalletHost {
                     store,
                     store_file,
                     pending_outbound,
+                    local_initiated_close,
                     session_file,
                     rpc,
                     &token,
                     channel_id,
+                    &no_sdk_fault,
                 )
                 .await;
             let signer = session
@@ -1148,16 +1327,31 @@ impl WalletHost {
                         .set_witnesses(vec![Bytes::default()])
                         .build()
                         .data();
-                    let _: SubmitSignedFundingTxResult = rpc
-                        .call(
-                            Some(&token),
-                            "submit_signed_funding_tx",
-                            json!([SubmitSignedFundingTxParams {
-                                channel_id: channel_id.into(),
-                                signed_funding_tx: signed_tx.into(),
-                            }]),
-                        )
-                        .await?;
+                    for submit_attempt in 0..4 {
+                        match rpc
+                            .call::<SubmitSignedFundingTxResult>(
+                                Some(&token),
+                                "submit_signed_funding_tx",
+                                json!([SubmitSignedFundingTxParams {
+                                    channel_id: channel_id.into(),
+                                    signed_funding_tx: signed_tx.clone().into(),
+                                }]),
+                            )
+                            .await
+                        {
+                            Ok(_) => break,
+                            Err(err)
+                                if submit_attempt < 3
+                                    && (err.to_string().contains("simulated dropped")
+                                        || err.to_string().contains("timeout")) =>
+                            {
+                                rpc.control.flush_events(&self.trace);
+                                tokio::time::sleep(Duration::from_millis(20)).await;
+                            }
+                            Err(err) => return Err(err),
+                        }
+                    }
+                    rpc.control.flush_events(&self.trace);
                     record(
                         &self.trace,
                         format_args!(
@@ -1180,19 +1374,23 @@ impl WalletHost {
         store: &MemoryStore,
         store_file: &Path,
         pending_outbound: &mut BTreeMap<Hash256, Hash256>,
+        local_initiated_close: &mut BTreeSet<Hash256>,
         session_file: &Path,
         rpc: &LspRpcClient,
         wallet_lock: &Script,
-    ) -> Result<()> {
+        sdk_fault: &Cell<Option<SdkSignerFault>>,
+    ) -> Result<bool> {
         let res = self
             .poll_all_channels_inner(
                 session,
                 store,
                 store_file,
                 pending_outbound,
+                local_initiated_close,
                 session_file,
                 rpc,
                 wallet_lock,
+                sdk_fault,
             )
             .await;
         rpc.control.flush_events(&self.trace);
@@ -1206,33 +1404,68 @@ impl WalletHost {
         store: &MemoryStore,
         store_file: &Path,
         pending_outbound: &mut BTreeMap<Hash256, Hash256>,
+        local_initiated_close: &mut BTreeSet<Hash256>,
         session_file: &Path,
         rpc: &LspRpcClient,
         wallet_lock: &Script,
-    ) -> Result<()> {
-        let Some(token) = session.tenant_token().map(str::to_owned) else {
-            return Ok(());
+        sdk_fault: &Cell<Option<SdkSignerFault>>,
+    ) -> Result<bool> {
+        let Some(mut token) = session.tenant_token().map(str::to_owned) else {
+            return Ok(false);
         };
         let channels = sorted_bindings(session.state());
         for channel_id in channels {
-            if let Err(err) = self
+            match self
                 .poll_channel(
                     session,
                     store,
                     store_file,
                     pending_outbound,
+                    local_initiated_close,
                     session_file,
                     rpc,
                     &token,
                     channel_id,
+                    sdk_fault,
                 )
                 .await
             {
-                if err.to_string().contains("SDK ") {
+                Ok(true) => return Ok(true),
+                Ok(false) => {}
+                Err(err) if is_auth_rejection(&err) => {
                     record(
                         &self.trace,
-                        format_args!("{} poll_channel error: {err}", WALLET_HOSTS[self.index]),
+                        format_args!(
+                            "{} token rejected, refreshing via lsp_register_tenant",
+                            WALLET_HOSTS[self.index]
+                        ),
                     );
+                    if self
+                        .register_tenant(
+                            session,
+                            store,
+                            store_file,
+                            pending_outbound,
+                            local_initiated_close,
+                            session_file,
+                            rpc,
+                            true,
+                        )
+                        .await
+                        .is_ok()
+                    {
+                        if let Some(fresh) = session.tenant_token() {
+                            token = fresh.to_owned();
+                        }
+                    }
+                }
+                Err(err) => {
+                    if err.to_string().contains("SDK ") {
+                        record(
+                            &self.trace,
+                            format_args!("{} poll_channel error: {err}", WALLET_HOSTS[self.index]),
+                        );
+                    }
                 }
             }
             if let Err(err) = self
@@ -1241,6 +1474,7 @@ impl WalletHost {
                     store,
                     store_file,
                     pending_outbound,
+                    local_initiated_close,
                     session_file,
                     rpc,
                     &token,
@@ -1249,6 +1483,28 @@ impl WalletHost {
                 )
                 .await
             {
+                if is_auth_rejection(&err) {
+                    record(
+                        &self.trace,
+                        format_args!(
+                            "{} watchtower token rejected, refreshing via lsp_register_tenant",
+                            WALLET_HOSTS[self.index]
+                        ),
+                    );
+                    let _ = self
+                        .register_tenant(
+                            session,
+                            store,
+                            store_file,
+                            pending_outbound,
+                            local_initiated_close,
+                            session_file,
+                            rpc,
+                            true,
+                        )
+                        .await;
+                    continue;
+                }
                 let msg = err.to_string();
                 if !msg.contains("timeout")
                     && !msg.contains("simulated dropped")
@@ -1263,7 +1519,7 @@ impl WalletHost {
                 }
             }
         }
-        Ok(())
+        Ok(false)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1273,24 +1529,19 @@ impl WalletHost {
         store: &MemoryStore,
         store_file: &Path,
         pending_outbound: &mut BTreeMap<Hash256, Hash256>,
+        local_initiated_close: &BTreeSet<Hash256>,
         session_file: &Path,
         rpc: &LspRpcClient,
         token: &str,
         channel_id: Hash256,
-    ) -> Result<()> {
-        // Query RPC evidence for any pending outbound payments on this channel before signing
+        sdk_fault: &Cell<Option<SdkSignerFault>>,
+    ) -> Result<bool> {
+        // Query RPC evidence for any pending outbound payments before signing
         // TLC removals (matching production external-signer wallet preimage verification).
-        let pending_for_channel: Vec<Hash256> = pending_outbound
-            .iter()
-            .filter_map(|(&payment_hash, &ch)| (ch == channel_id).then_some(payment_hash))
-            .collect();
-        if !pending_for_channel.is_empty() {
-            let signer = session
-                .channel_signer(channel_id)
-                .await
-                .map_err(|err| anyhow!("SDK channel_signer({channel_id}): {err}"))?;
+        let pending_hashes: Vec<Hash256> = pending_outbound.keys().copied().collect();
+        if !pending_hashes.is_empty() {
             let mut updated = false;
-            for payment_hash in pending_for_channel {
+            for payment_hash in pending_hashes {
                 let Ok(payment) = rpc
                     .call::<GetPaymentCommandResult>(
                         Some(token),
@@ -1305,21 +1556,42 @@ impl WalletHost {
                     continue;
                 };
                 if let Some(preimage) = payment.payment_preimage {
-                    signer
-                        .authorize_fulfillment(payment_hash, preimage.into())
-                        .await
-                        .map_err(|err| {
-                            anyhow!("SDK authorize_fulfillment({payment_hash}): {err}")
-                        })?;
+                    for bound_channel in sorted_bindings(session.state()) {
+                        let signer = session
+                            .channel_signer(bound_channel)
+                            .await
+                            .map_err(|err| anyhow!("SDK channel_signer({bound_channel}): {err}"))?;
+                        match signer
+                            .authorize_fulfillment(payment_hash, preimage.into())
+                            .await
+                        {
+                            Ok(()) => {}
+                            Err(err) if err.to_string().contains("unknown payment") => continue,
+                            Err(err) => {
+                                return Err(anyhow!(
+                                    "SDK authorize_fulfillment({payment_hash}): {err}"
+                                ))
+                            }
+                        }
+                    }
                     pending_outbound.remove(&payment_hash);
                     updated = true;
                 } else if payment.status == JsonPaymentStatus::Failed {
-                    signer
-                        .authorize_cancellation(payment_hash)
-                        .await
-                        .map_err(|err| {
-                            anyhow!("SDK authorize_cancellation({payment_hash}): {err}")
-                        })?;
+                    for bound_channel in sorted_bindings(session.state()) {
+                        let signer = session
+                            .channel_signer(bound_channel)
+                            .await
+                            .map_err(|err| anyhow!("SDK channel_signer({bound_channel}): {err}"))?;
+                        match signer.authorize_cancellation(payment_hash).await {
+                            Ok(()) => {}
+                            Err(err) if err.to_string().contains("unknown payment") => continue,
+                            Err(err) => {
+                                return Err(anyhow!(
+                                    "SDK authorize_cancellation({payment_hash}): {err}"
+                                ))
+                            }
+                        }
+                    }
                     pending_outbound.remove(&payment_hash);
                     updated = true;
                 }
@@ -1330,6 +1602,7 @@ impl WalletHost {
                     store_file,
                     session.state(),
                     pending_outbound,
+                    local_initiated_close,
                     session_file,
                 )?;
             }
@@ -1344,22 +1617,120 @@ impl WalletHost {
                 }]),
             )
             .await?;
+
+        let is_closing = matches!(
+            &result.status,
+            ChannelSigningStatus::SignatureRequired {
+                transition: ChannelSigningTransition::SendClosingSigned,
+                ..
+            }
+        );
+        if let ChannelSigningStatus::SignatureRequired {
+            transition: ChannelSigningTransition::SendClosingSigned,
+            content,
+            ..
+        } = &result.status
+        {
+            if let Ok(m) = fiber_lsp_sdk::json::musig2_from_rpc(content.clone()) {
+                if let fnn::fiber_types::Musig2SignableContent::CooperativeCloseTransaction(tx) =
+                    m.content
+                {
+                    let funding_outpoint = tx
+                        .raw()
+                        .inputs()
+                        .get(0)
+                        .context("closing tx missing funding input")?
+                        .previous_output();
+                    if let Some((funding_cell, _)) = self.chain.live_cell(&funding_outpoint) {
+                        let input_cap: u64 = funding_cell.capacity().unpack();
+                        let output_cap: u64 = tx
+                            .raw()
+                            .outputs()
+                            .into_iter()
+                            .map(|o| Unpack::<u64>::unpack(&o.capacity()))
+                            .sum();
+                        if let Some(fee) = input_cap.checked_sub(output_cap) {
+                            let local_initiated = local_initiated_close.contains(&channel_id);
+                            let terms = if local_initiated {
+                                CloseAuthorization {
+                                    fee,
+                                    local_fee_share: fee,
+                                    remote_fee_share: 0,
+                                }
+                            } else {
+                                CloseAuthorization {
+                                    fee,
+                                    local_fee_share: 0,
+                                    remote_fee_share: fee,
+                                }
+                            };
+                            let signer = session
+                                .channel_signer(channel_id)
+                                .await
+                                .map_err(|err| anyhow!("SDK channel_signer close: {err}"))?;
+                            signer
+                                .authorize_close(terms)
+                                .await
+                                .map_err(|err| anyhow!("SDK authorize_close: {err}"))?;
+                            persist_wallet_files(
+                                store,
+                                store_file,
+                                session.state(),
+                                pending_outbound,
+                                local_initiated_close,
+                                session_file,
+                            )?;
+                        }
+                    }
+                }
+            }
+        }
+
         let now_ms = fnn::now_timestamp_as_millis_u64();
         let outcome = session
             .handle_channel_status(channel_id, result.status, now_ms)
             .await
             .map_err(|err| anyhow!("SDK handle_channel_status({channel_id}): {err}"))?;
+        if matches!(
+            outcome,
+            ProcessOutcome::ReadyToSubmit(SubmitParams::Channel(_))
+        ) && sdk_fault.get() == Some(SdkSignerFault::SkipPersistAfterConfirmCrash)
+        {
+            sdk_fault.set(None);
+            self.wallets.borrow_mut()[self.index].sdk_faults_hit += 1;
+            record(
+                &self.trace,
+                format_args!(
+                    "{} hit SdkSignerFault::SkipPersistAfterConfirmCrash channel={channel_id}",
+                    WALLET_HOSTS[self.index]
+                ),
+            );
+            return Ok(true);
+        }
         // Persist SDK nonces & signing state immediately before transmitting any signature.
         persist_wallet_files(
             store,
             store_file,
             session.state(),
             pending_outbound,
+            local_initiated_close,
             session_file,
         )?;
         match outcome {
-            ProcessOutcome::Idle => Ok(()),
+            ProcessOutcome::Idle => Ok(false),
             ProcessOutcome::ReadyToSubmit(SubmitParams::Channel(params)) => {
+                if let Some(SdkSignerFault::CrashAfterPersistBeforeSubmit) = sdk_fault.get() {
+                    sdk_fault.set(None);
+                    self.wallets.borrow_mut()[self.index].sdk_faults_hit += 1;
+                    record(
+                        &self.trace,
+                        format_args!(
+                            "{} hit SdkSignerFault::CrashAfterPersistBeforeSubmit channel={channel_id}",
+                            WALLET_HOSTS[self.index]
+                        ),
+                    );
+                    return Ok(true);
+                }
                 self.wallets.borrow_mut()[self.index].last_channel_sig = Some(params.clone());
                 let res: SubmitChannelSignatureResult = rpc
                     .call(Some(token), "submit_channel_signature", json!([params]))
@@ -1368,6 +1739,9 @@ impl WalletHost {
                 match res {
                     SubmitChannelSignatureResult::Applied => {
                         wallets[self.index].channel_sigs_applied += 1;
+                        if is_closing {
+                            wallets[self.index].closing_sigs_applied += 1;
+                        }
                     }
                     SubmitChannelSignatureResult::AlreadyApplied => {
                         wallets[self.index].channel_sigs_already_applied += 1;
@@ -1380,7 +1754,7 @@ impl WalletHost {
                         WALLET_HOSTS[self.index]
                     ),
                 );
-                Ok(())
+                Ok(false)
             }
             ProcessOutcome::NeedConfirmation(pending) => {
                 let SubmitParams::Channel(params) = session
@@ -1390,11 +1764,45 @@ impl WalletHost {
                 else {
                     bail!("expected channel submit params");
                 };
+                if let Some(fault) = sdk_fault.take() {
+                    self.wallets.borrow_mut()[self.index].sdk_faults_hit += 1;
+                    match fault {
+                        SdkSignerFault::SkipPersistAfterConfirmCrash => {
+                            record(
+                                &self.trace,
+                                format_args!(
+                                    "{} hit SdkSignerFault::SkipPersistAfterConfirmCrash channel={channel_id}",
+                                    WALLET_HOSTS[self.index]
+                                ),
+                            );
+                            return Ok(true);
+                        }
+                        SdkSignerFault::CrashAfterPersistBeforeSubmit => {
+                            persist_wallet_files(
+                                store,
+                                store_file,
+                                session.state(),
+                                pending_outbound,
+                                local_initiated_close,
+                                session_file,
+                            )?;
+                            record(
+                                &self.trace,
+                                format_args!(
+                                    "{} hit SdkSignerFault::CrashAfterPersistBeforeSubmit channel={channel_id}",
+                                    WALLET_HOSTS[self.index]
+                                ),
+                            );
+                            return Ok(true);
+                        }
+                    }
+                }
                 persist_wallet_files(
                     store,
                     store_file,
                     session.state(),
                     pending_outbound,
+                    local_initiated_close,
                     session_file,
                 )?;
                 self.wallets.borrow_mut()[self.index].last_channel_sig = Some(params.clone());
@@ -1405,12 +1813,15 @@ impl WalletHost {
                 match res {
                     SubmitChannelSignatureResult::Applied => {
                         wallets[self.index].channel_sigs_applied += 1;
+                        if is_closing {
+                            wallets[self.index].closing_sigs_applied += 1;
+                        }
                     }
                     SubmitChannelSignatureResult::AlreadyApplied => {
                         wallets[self.index].channel_sigs_already_applied += 1;
                     }
                 }
-                Ok(())
+                Ok(false)
             }
             ProcessOutcome::Denied => bail!("SDK denied channel signing request"),
             ProcessOutcome::ReadyToSubmit(SubmitParams::Watchtower(_)) => {
@@ -1426,6 +1837,7 @@ impl WalletHost {
         store: &MemoryStore,
         store_file: &Path,
         pending_outbound: &BTreeMap<Hash256, Hash256>,
+        local_initiated_close: &BTreeSet<Hash256>,
         session_file: &Path,
         rpc: &LspRpcClient,
         token: &str,
@@ -1534,6 +1946,7 @@ impl WalletHost {
             store_file,
             session.state(),
             pending_outbound,
+            local_initiated_close,
             session_file,
         )?;
         let params: SubmitWatchtowerSignatureParams = match outcome {
@@ -1551,6 +1964,7 @@ impl WalletHost {
                     store_file,
                     session.state(),
                     pending_outbound,
+                    local_initiated_close,
                     session_file,
                 )?;
                 params
@@ -1579,6 +1993,16 @@ impl WalletHost {
         );
         Ok(())
     }
+}
+
+fn is_auth_rejection(err: &anyhow::Error) -> bool {
+    let msg = err.to_string().to_ascii_lowercase();
+    msg.contains("unauthorized")
+        || msg.contains("revoked")
+        || msg.contains("biscuit")
+        || msg.contains("invalid token")
+        || msg.contains("forbidden")
+        || msg.contains("authentication")
 }
 
 fn sorted_bindings(state: &HostedSessionState) -> Vec<Hash256> {

@@ -195,7 +195,7 @@ impl Driver {
         // public chaos crashes, partitions, and SQLite faults.
         let random_lsp = if lsp {
             let saved_chaos = self.chaos.take();
-            let state = self.bootstrap_random_lsp(topology.nodes)?;
+            let state = self.bootstrap_random_lsp(topology.nodes, continuous)?;
             self.chaos = saved_chaos;
             Some(state)
         } else {
@@ -431,14 +431,18 @@ impl Driver {
         ensure!(reconciled == payments);
         if let Some(lsp_summary) = lsp_summary {
             self.runtime.note(format_args!(
-                "random reconciled workload={reconciled} successful={settled} phases={phases} fault_overlaps={overlaps} peak_inflight={peak} recovery_probes={} lsp_payments={} lsp_succeeded={} lsp_concurrent={} lsp_long_offline={} lsp_crashes={} lsp_node_crashes={} lsp_duplicates={} lsp_responses_dropped={} lsp_self_funded_watchtower={}",
+                "random reconciled workload={reconciled} successful={settled} phases={phases} fault_overlaps={overlaps} peak_inflight={peak} recovery_probes={} lsp_payments={} lsp_succeeded={} lsp_concurrent={} lsp_cancelled={} lsp_long_offline={} lsp_crashes={} lsp_node_crashes={} lsp_sdk_faults={} lsp_token_refreshes={} lsp_closing_sigs={} lsp_duplicates={} lsp_responses_dropped={} lsp_self_funded_watchtower={}",
                 recovery.len(),
                 lsp_summary.payments,
                 lsp_summary.succeeded,
                 lsp_summary.concurrent_payments,
+                lsp_summary.cancelled_invoices,
                 lsp_summary.expired_long_offline,
                 lsp_summary.crashes_injected,
                 lsp_summary.lsp_crashes_injected,
+                lsp_summary.sdk_faults_injected,
+                lsp_summary.token_refreshes,
+                lsp_summary.closing_sigs_applied,
                 lsp_summary.duplicates_injected,
                 lsp_summary.responses_dropped,
                 lsp_summary.self_funded_watchtower,

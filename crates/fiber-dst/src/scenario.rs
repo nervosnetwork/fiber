@@ -157,11 +157,17 @@ pub fn run(scenario: Scenario, seed: u64) -> Result<Vec<String>> {
                 } else {
                     1
                 };
+                let mut config = Driver::lsp_config_for_scenario();
+                if random_has_lsp {
+                    // 3 wallets competing for 2 active tenant slots exercises capacity-bound
+                    // eviction and cold/hot runtime churn inside random chaos runs.
+                    config.max_active_tenants = 2;
+                }
                 LspSetup {
                     lsp_node,
-                    wallet_count: if random_has_lsp { 2 } else { 1 },
+                    wallet_count: if random_has_lsp { 3 } else { 1 },
                     tenant_liquidity: FUNDING_AMOUNT,
-                    config: Driver::lsp_config_for_scenario(),
+                    config,
                 }
             });
             let runtime = Harness::new(

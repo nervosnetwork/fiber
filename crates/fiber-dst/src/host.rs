@@ -262,10 +262,15 @@ impl Host {
                 self.access.clone(),
             )
             .await?;
-        self.nodes.borrow_mut()[self.index].node = Some(Node {
-            actor: runtime.actor.clone(),
-            store: store.clone(),
-        });
+        {
+            let mut nodes = self.nodes.borrow_mut();
+            let slot = &mut nodes[self.index];
+            slot.storage_failed = false;
+            slot.node = Some(Node {
+                actor: runtime.actor.clone(),
+                store: store.clone(),
+            });
+        }
         record(
             &self.trace,
             format_args!("{} start {generation}", NAMES[self.index]),
@@ -291,7 +296,8 @@ impl Host {
                 _runtime: lsp_runtime.clone(),
             }));
             let rpc_runtime = lsp_runtime.clone();
-            tasks.spawn_local(async move { serve_lsp_rpc(rpc_runtime).await });
+            let rpc_disk = self.disk.clone();
+            tasks.spawn_local(async move { serve_lsp_rpc(rpc_runtime, rpc_disk).await });
             record(
                 &self.trace,
                 format_args!("{} LSP service started", NAMES[self.index]),
@@ -342,7 +348,18 @@ impl Host {
                 result = &mut runtime.task => {
                     result.context("Fiber actor task failed")?;
                     if let Some(fault) = self.disk.hit() {
-                        self.nodes.borrow_mut()[self.index].storage_failed = true;
+                        let disconnected = {
+                            let mut nodes = self.nodes.borrow_mut();
+                            let slot = &mut nodes[self.index];
+                            slot.storage_failed = true;
+                            std::mem::take(&mut slot.connected)
+                        };
+                        for peer in disconnected {
+                            record(
+                                &self.trace,
+                                format_args!("{} disconnected from {}", NAMES[self.index], NAMES[peer]),
+                            );
+                        }
                         if let Some(lsp_cfg) = &self.lsp {
                             lsp_cfg.slot.replace(None);
                         }
@@ -471,6 +488,9 @@ impl Host {
             })
             .await;
 
+            if self.disk.hit().is_some() {
+                return std::future::pending().await;
+            }
             if self.nodes.borrow_mut()[self.index]
                 .connected
                 .remove(&peer.index)
