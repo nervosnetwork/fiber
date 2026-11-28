@@ -2748,15 +2748,21 @@ where
             // A missing payer record cannot accept this chain outcome. Acknowledge it
             // so CheckChannels stops selecting the same TLC.
             let acknowledge = |reason: RemoveTlcReason| {
-                myself.send_message(FiberActorMessage::new_command(
-                    FiberActorCommand::OnChainTlcRemoveCompleted {
-                        downstream_channel_id: channel_id,
-                        downstream_tlc_id: tlc_id,
-                        payment_hash: session_key.payment_hash,
-                        reason,
-                        completion: OnChainTlcRemoveCompletion::Payer,
-                    },
-                ))
+                myself
+                    .send_message(FiberActorMessage::new_command(
+                        FiberActorCommand::OnChainTlcRemoveCompleted {
+                            downstream_channel_id: channel_id,
+                            downstream_tlc_id: tlc_id,
+                            payment_hash: session_key.payment_hash,
+                            reason,
+                            completion: OnChainTlcRemoveCompletion::Payer,
+                        },
+                    ))
+                    .map_err(|err| {
+                        Error::InternalError(anyhow::anyhow!(
+                            "failed to acknowledge on-chain TLC removal: {err}"
+                        ))
+                    })
             };
             // Manually added TLCs have no payer state to persist.
             let Some(id) = attempt_id else {
