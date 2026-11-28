@@ -13,7 +13,7 @@ use crate::tests::test_utils::{
     establish_channel_between_nodes, ChannelParameters, NetworkNode, NetworkNodeConfigBuilder,
 };
 use crate::{
-    ckb::tests::test_utils::{MockChainActor, MockChainState},
+    ckb::tests::test_utils::{CellStatus, MockChainActor, MockChainState},
     fiber::types::{ChannelUpdateChannelFlags, NodeAnnouncement},
 };
 use crate::{
@@ -47,6 +47,7 @@ struct GossipTestingContext {
     chain_actor: ActorRef<CkbChainMessage>,
     gossip_actor: ActorRef<GossipActorMessage>,
     gossip_service: GossipService<Store, MockCkbChainClient>,
+    shared_state: Arc<std::sync::RwLock<MockChainState>>,
 }
 
 impl GossipTestingContext {
@@ -79,6 +80,7 @@ impl GossipTestingContext {
             chain_actor,
             gossip_actor: gossip_protocol_handle.actor().clone(),
             gossip_service,
+            shared_state,
         }
     }
 }
@@ -94,6 +96,13 @@ impl GossipTestingContext {
 
     fn get_store(&self) -> &Store {
         self.gossip_service.get_store()
+    }
+
+    fn mark_funding_outpoint_dead(&self, outpoint: &OutPoint) {
+        let mut state = self.shared_state.write().unwrap();
+        state
+            .cell_status
+            .insert(outpoint.clone(), CellStatus::Consumed);
     }
 
     fn get_extended_actor(&self) -> &ActorRef<ExtendedGossipMessageStoreMessage> {
@@ -240,6 +249,27 @@ async fn test_saving_confirmed_channel_announcement() {
         .get_store()
         .get_latest_channel_announcement(channel_context.channel_outpoint());
     assert_ne!(new_announcement, None);
+}
+
+#[tokio::test]
+async fn test_reject_channel_announcement_when_funding_outpoint_is_dead() {
+    let context = GossipTestingContext::new().await;
+    let channel_context = ChannelTestContext::gen().await;
+
+    let status = context.submit_tx(channel_context.funding_tx.clone()).await;
+    assert!(matches!(status, TxStatus::Committed(..)));
+
+    context.mark_funding_outpoint_dead(&channel_context.channel_outpoint());
+    context.save_message(BroadcastMessage::ChannelAnnouncement(
+        channel_context.channel_announcement.clone(),
+    ));
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let new_announcement = context
+        .get_store()
+        .get_latest_channel_announcement(channel_context.channel_outpoint());
+    assert_eq!(new_announcement, None);
 }
 
 #[tokio::test]
