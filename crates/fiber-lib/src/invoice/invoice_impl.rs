@@ -3,7 +3,6 @@ use fiber_types::{
     InvoiceError, MAX_DESCRIPTION_LENGTH, MAX_FALLBACK_ADDRESS_LENGTH, MAX_INVOICE_DATA_LENGTH,
 };
 
-use crate::time::UNIX_EPOCH;
 use secp256k1::{ecdsa::RecoverableSignature, Message, PublicKey};
 use std::time::Duration;
 
@@ -165,10 +164,7 @@ impl InvoiceBuilder {
         };
 
         self.check_attrs_valid()?;
-        let timestamp = UNIX_EPOCH
-            .elapsed()
-            .expect("Duration since unix epoch")
-            .as_millis();
+        let timestamp = u128::from(crate::now_timestamp_as_millis_u64());
         let data = InvoiceData {
             timestamp,
             payment_hash,

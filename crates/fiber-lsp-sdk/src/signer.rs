@@ -204,8 +204,7 @@ impl<S: SignerStore> RootSigner<S> {
     pub async fn create_channel(&self) -> Result<ChannelSigner<S>, SignerError> {
         for _ in 0..MAX_ALLOCATION_ATTEMPTS {
             let mut allocation_entropy = [0u8; 32];
-            getrandom::fill(&mut allocation_entropy)
-                .map_err(|error| SignerError::Random(error.to_string()))?;
+            crate::fill_random(&mut allocation_entropy)?;
             let (channel_key_id, key_material) = self.derive_channel(&allocation_entropy);
             let record = StoredChannel {
                 format_version: STORE_FORMAT_VERSION,
@@ -499,7 +498,7 @@ impl<S: SignerStore> ChannelSigner<S> {
     pub async fn get_musig2_nonce(&self, slot: NonceSlot) -> Result<Musig2Nonce, SignerError> {
         validate_nonce_slot(slot)?;
         let mut seed = zeroize::Zeroizing::new([0u8; 32]);
-        getrandom::fill(seed.as_mut()).map_err(|e| SignerError::Random(e.to_string()))?;
+        crate::fill_random(seed.as_mut())?;
         let public_nonce = SecNonceBuilder::new(*seed)
             .with_seckey(&self.key_material.funding_key)
             .build()
@@ -791,6 +790,31 @@ impl<S: SignerStore> ChannelSigner<S> {
         context: crate::CommitmentContext,
         now_ms: u64,
     ) -> Result<PreparedSigning, SignerError> {
+        self.prepare_commitment_inner(content, context, now_ms, false)
+            .await
+    }
+
+    /// Like [`Self::prepare_commitment`], but stages inferred `Resolution::Cancel` updates in
+    /// memory for pending outbound TLCs that `context.settlement` provably refunds back into
+    /// `local_amount`. Those cancellations are only persisted atomically if `sign_commitment`
+    /// executes; dismissing or aborting the prepared signing leaves the signer store untouched.
+    pub(crate) async fn prepare_commitment_allowing_outbound_refunds(
+        &self,
+        content: ChannelSigningContent,
+        context: crate::CommitmentContext,
+        now_ms: u64,
+    ) -> Result<PreparedSigning, SignerError> {
+        self.prepare_commitment_inner(content, context, now_ms, true)
+            .await
+    }
+
+    async fn prepare_commitment_inner(
+        &self,
+        content: ChannelSigningContent,
+        context: crate::CommitmentContext,
+        now_ms: u64,
+        allow_outbound_refunds: bool,
+    ) -> Result<PreparedSigning, SignerError> {
         let prepared = self.prepare_inner(content).await?;
         let (_, state) = self.load_signing_state().await?;
         state.validate_revision_and_nonce(&prepared)?;
@@ -808,6 +832,16 @@ impl<S: SignerStore> ChannelSigner<S> {
             &commitment.parameters,
             &self.key_material,
         )?;
+        let mut inferred_outbound_refunds = Vec::new();
+        if allow_outbound_refunds {
+            let for_remote =
+                context.transition == fiber_types::ChannelSigningTransition::SendCommitmentSigned;
+            inferred_outbound_refunds =
+                commitment.refundable_pending_outbound_tlcs(&context.settlement, for_remote);
+            for payment_hash in &inferred_outbound_refunds {
+                commitment.resolve(*payment_hash, None)?;
+            }
+        }
         let review = commitment.validate(
             &prepared.content,
             &context,
@@ -825,6 +859,7 @@ impl<S: SignerStore> ChannelSigner<S> {
                 review,
                 context,
                 validated_at_ms: now_ms,
+                inferred_outbound_refunds,
             },
         })
     }
@@ -1201,6 +1236,7 @@ impl<S: SignerStore> ChannelSigner<S> {
         let PreparedValidation::Commitment {
             context,
             validated_at_ms,
+            inferred_outbound_refunds,
             ..
         } = &prepared.validation
         else {
@@ -1216,6 +1252,9 @@ impl<S: SignerStore> ChannelSigner<S> {
         let mut commitment = state
             .commitment
             .ok_or_else(|| crate::commitment::invalid("missing approved opening terms"))?;
+        for payment_hash in inferred_outbound_refunds {
+            commitment.resolve(*payment_hash, None)?;
+        }
         let binding = self
             .load_binding()
             .await?

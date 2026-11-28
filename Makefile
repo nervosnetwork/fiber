@@ -20,6 +20,12 @@ test:
 	RUST_LOG=off cargo nextest run --no-fail-fast --no-default-features --features "sqlite watchtower" $(NATIVE_NO_FIBER_TYPES)
 	RUST_LOG=off cargo nextest run --no-fail-fast -p fiber-types
 
+.PHONY: dst simulate
+dst:
+	@CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)" ./tools/run-dst.sh
+
+simulate: dst
+
 .PHONY: check
 check:
 	# Default build enables `watchtower` and `lsp`; the explicit no-default-features
@@ -49,6 +55,7 @@ bless:
 .PHONY: fmt
 fmt:
 	cargo fmt --all -- --check
+	cargo fmt --manifest-path tests/fiber-dst/Cargo.toml --all -- --check
 
 coverage-clean:
 	rm -rf ${CARGO_TARGET_DIR}/*.profraw "${GRCOV_OUTPUT}" "${GRCOV_OUTPUT:.info=}"

@@ -1,3 +1,9 @@
+#[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+pub(crate) mod simulation;
+
+#[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+pub use simulation::{start_node, SimulatedNode};
+
 use crate::fiber_types::{PaymentSessionKey, UpstreamTlcKey};
 use crate::store::actor::StoreActorMessage;
 use ckb_hash::blake2b_256;
@@ -100,8 +106,8 @@ use crate::fiber::delivery::{DeliveryDispatchError, TrampolineForwardingRequest}
 use crate::fiber::fee::{check_open_channel_parameters, check_tlc_delta_with_epochs};
 use crate::fiber::gossip::{GossipConfig, GossipService, SubscribableGossipMessageStore};
 use crate::fiber::onchain_tlc_reconcile::{
-    collect_onchain_confirmed_payer_tlcs, collect_onchain_excluded_tlcs,
-    collect_onchain_fulfilled_tlcs, collect_onchain_payer_failures,
+    collect_onchain_confirmed_payer_tlcs, collect_onchain_excluded_fulfilled_tlcs,
+    collect_onchain_excluded_tlcs, collect_onchain_fulfilled_tlcs, collect_onchain_payer_failures,
     collect_onchain_received_timeout_settled_tlcs, collect_onchain_timeout_settled_tlcs,
     confirm_onchain_payer_fulfill, has_unresolved_onchain_tlcs, onchain_fulfilled_preimage,
     recover_shutdown_settlement_data_with_superseded, verify_and_select_settlement_data,
@@ -276,10 +282,10 @@ const ASSUME_GOSSIP_ACTOR_ALIVE: &str = "gossip actor must be alive";
 const MAINTAINING_CONNECTIONS_INTERVAL: Duration = Duration::from_secs(1200);
 
 // The duration for which we will check all channels.
-#[cfg(debug_assertions)]
-// use a short interval for debugging build
+#[cfg(any(debug_assertions, feature = "simulation"))]
+// use a short interval for debugging and deterministic simulation builds
 pub(crate) const CHECK_CHANNELS_INTERVAL: Duration = Duration::from_secs(3);
-#[cfg(not(debug_assertions))]
+#[cfg(not(any(debug_assertions, feature = "simulation")))]
 pub(crate) const CHECK_CHANNELS_INTERVAL: Duration = Duration::from_secs(60);
 
 const CHECK_CHANNELS_SHUTDOWN_INTERVAL: Duration = Duration::from_secs(300);
@@ -421,9 +427,130 @@ fn should_reconcile_closed_channel_without_live_actor(channel_state: ChannelStat
     )
 }
 
+fn matches_cooperative_close_tx(state: &ChannelActorState, tx_hash: &Byte32) -> bool {
+    state
+        .session
+        .closing
+        .as_ref()
+        .and_then(|close| close.transaction.as_ref())
+        .is_some_and(|closing_tx| &closing_tx.calc_tx_hash() == tx_hash)
+}
+
+fn onchain_upstream_relay_already_handled(
+    channel_state: &ChannelActorState,
+    forwarding_tlc_id: u64,
+    reason: &RemoveTlcReason,
+) -> bool {
+    onchain_upstream_removed_reason_matches(channel_state, forwarding_tlc_id, reason)
+        || channel_state.is_closed()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn count_active_hosted_tlcs<S: ChannelActorStateStore>(
+    channel: &ChannelActorState,
+    store: &S,
+) -> usize {
+    // Cooperative close cannot settle TLCs on-chain, and a force-closed channel whose on-chain
+    // settlement has completed with no unresolved TLCs is also idle.
+    if let ChannelState::Closed(flags) = channel.state {
+        if flags.contains(CloseFlags::COOPERATIVE)
+            || (!channel.is_waiting_onchain_settlement()
+                && !has_unresolved_onchain_tlcs(channel, store))
+        {
+            return 0;
+        }
+    }
+    // Failed/cancelled TLCs remain in `tlc_state` with `removed_confirmed_at` and
+    // `AppliedFlags::REMOVE` until the next commitment calls `clean_up_failed_tlcs`.
+    channel
+        .tlc_state
+        .all_tlcs()
+        .filter(|tlc| {
+            !(tlc.removed_confirmed_at.is_some()
+                && tlc.applied_flags.contains(AppliedFlags::REMOVE))
+        })
+        .count()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn hosted_tenant_activity_ignores_applied_removed_tlcs_and_settled_closed_channels() {
+        use crate::store::sample::StoreSample;
+        use fiber_types::{
+            ChannelState, CloseFlags, CommitmentNumbers, HashAlgorithm, InboundTlcStatus, TLCId,
+            TlcInfo, TlcStatus,
+        };
+
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let store = crate::store::open_store(temp_dir.path()).expect("open store");
+        let mut channel = ChannelActorState::samples(7)
+            .into_iter()
+            .next()
+            .expect("sample channel");
+        channel.state = ChannelState::ChannelReady;
+        channel.tlc_state.offered_tlcs.tlcs.clear();
+        channel.tlc_state.received_tlcs.tlcs.clear();
+
+        let make_tlc =
+            |id: u64, removed_confirmed_at: Option<u64>, applied_flags: AppliedFlags| TlcInfo {
+                status: TlcStatus::Inbound(InboundTlcStatus::Committed),
+                tlc_id: TLCId::Received(id),
+                amount: 1_000,
+                payment_hash: Hash256::from([id as u8; 32]),
+                total_amount: None,
+                payment_secret: None,
+                attempt_id: None,
+                expiry: 1_000_000,
+                hash_algorithm: HashAlgorithm::CkbHash,
+                onion_packet: None,
+                shared_secret: [0u8; 32],
+                is_trampoline_hop: false,
+                created_at: CommitmentNumbers::default(),
+                removed_reason: None,
+                forwarding_tlc: None,
+                removed_confirmed_at,
+                applied_flags,
+                upstream_tlc_key: None,
+            };
+
+        // 1. Confirmed AND applied failed/cancelled TLCs awaiting next commitment cleanup are idle.
+        channel.tlc_state.received_tlcs.tlcs.push(make_tlc(
+            1,
+            Some(12345),
+            AppliedFlags::ADD | AppliedFlags::REMOVE,
+        ));
+        assert_eq!(count_active_hosted_tlcs(&channel, &store), 0);
+
+        // 2. Confirmed removal that has not been applied yet is still active.
+        channel
+            .tlc_state
+            .received_tlcs
+            .tlcs
+            .push(make_tlc(2, Some(12345), AppliedFlags::ADD));
+        assert_eq!(count_active_hosted_tlcs(&channel, &store), 1);
+
+        // 3. Live uncommitted/active TLC is still active.
+        channel
+            .tlc_state
+            .received_tlcs
+            .tlcs
+            .push(make_tlc(3, None, AppliedFlags::ADD));
+        assert_eq!(count_active_hosted_tlcs(&channel, &store), 2);
+
+        // 4. Force-closed channel awaiting on-chain settlement remains busy.
+        channel.state = ChannelState::Closed(
+            CloseFlags::UNCOOPERATIVE_LOCAL | CloseFlags::WAITING_ONCHAIN_SETTLEMENT,
+        );
+        assert_eq!(count_active_hosted_tlcs(&channel, &store), 2);
+
+        // 5. Cooperatively closed channel is idle.
+        channel.state = ChannelState::Closed(CloseFlags::COOPERATIVE);
+        assert_eq!(count_active_hosted_tlcs(&channel, &store), 0);
+    }
 
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
@@ -636,6 +763,146 @@ mod tests {
             GossipMessageUpdates::new(Vec::new()),
         ));
         assert!(FiberActorMessage::try_from(message).is_err());
+    }
+
+    fn test_pub_nonce(peer: Pubkey) -> musig2::PubNonce {
+        let compressed = peer.serialize();
+        let mut bytes = [0u8; 66];
+        bytes[..33].copy_from_slice(&compressed);
+        bytes[33..].copy_from_slice(&compressed);
+        musig2::PubNonce::from_bytes(&bytes).expect("valid test pub nonce")
+    }
+
+    #[test]
+    fn to_be_accepted_channels_prune_expired_frees_stale_slots() {
+        // Regression for Bug #6 (GlobalPendingOpenChannelExhaustion):
+        // prune_expired must evict entries at or past ttl_ms while keeping fresh entries.
+        let mut pending = ToBeAcceptedChannels {
+            total_number_limit: 2,
+            total_bytes_limit: 1024 * 1024,
+            ttl_ms: 10_000,
+            map: HashMap::default(),
+        };
+        let peer = Privkey::from_slice(&[31u8; 32]).pubkey();
+        let stale_id = Hash256::from([1u8; 32]);
+        let fresh_id = Hash256::from([2u8; 32]);
+        let dummy_open = OpenChannelV2 {
+            chain_hash: get_chain_hash(),
+            channel_id: stale_id,
+            funding_udt_type_script: None,
+            funding_amount: 100_000_000_000,
+            shutdown_script: Script::default(),
+            reserved_ckb_amount: 0,
+            funding_fee_rate: 1_000,
+            commitment_fee_rate: 1_000,
+            commitment_delay_epoch: 10,
+            max_tlc_value_in_flight: 100_000_000_000,
+            max_tlc_number_in_flight: 16,
+            funding_pubkey: peer,
+            tlc_basepoint: peer,
+            first_per_commitment_point: peer,
+            second_per_commitment_point: peer,
+            channel_announcement_nonce: None,
+            initial_commitment_nonce: test_pub_nonce(peer),
+            channel_flags: crate::fiber::types::ChannelFlags::empty(),
+            channel_features: 1,
+        };
+        pending.map.insert(
+            stale_id,
+            (
+                peer,
+                PendingOpenChannel {
+                    open_channel: dummy_open.clone(),
+                    created_at: 1_000,
+                },
+            ),
+        );
+        pending.map.insert(
+            fresh_id,
+            (
+                peer,
+                PendingOpenChannel {
+                    open_channel: dummy_open,
+                    created_at: 8_000,
+                },
+            ),
+        );
+
+        let expired = pending.prune_expired(12_000);
+        assert_eq!(expired, vec![stale_id]);
+        assert!(!pending.map.contains_key(&stale_id));
+        assert!(pending.map.contains_key(&fresh_id));
+    }
+
+    #[test]
+    fn matches_cooperative_close_tx_detects_signed_closing_tx_hash() {
+        use crate::store::sample::StoreSample;
+        // Regression for Bug #3 (CoopCloseVsForceCloseRace):
+        // handle_remote_channel_shutdown must recognize the channel's persisted cooperative
+        // closing transaction even when the peer withheld its ClosingSignedV2 and broadcast it.
+        let mut channel = ChannelActorState::samples(11)
+            .into_iter()
+            .next()
+            .expect("sample channel");
+        channel.session.closing = None;
+        let peer = Privkey::from_slice(&[33u8; 32]).pubkey();
+        let tx = ckb_types::core::TransactionBuilder::default().build();
+        let expected_hash = tx.hash();
+        let other_hash = Byte32::from_slice(&[9u8; 32]).unwrap();
+        assert!(!matches_cooperative_close_tx(&channel, &expected_hash));
+
+        channel.session.closing = Some(crate::fiber_types::ClosingSessionV2 {
+            peer_wait_started_at: 0,
+            superseded_by_force_close: false,
+            own: crate::fiber_types::SigningNonceV2 {
+                seed: [0u8; 32],
+                channel_id: channel.id,
+                owner: peer,
+                number: 0,
+                purpose: crate::fiber_types::NoncePurposeV2::Closing,
+                public_nonce: test_pub_nonce(peer),
+                context: None,
+                signature: None,
+            },
+            shutdown: crate::fiber_types::gen::fiber::ShutdownV2::default(),
+            remote_shutdown: None,
+            transaction: Some(tx.data()),
+            response: None,
+            remote_response: None,
+        });
+        assert!(matches_cooperative_close_tx(&channel, &expected_hash));
+        assert!(!matches_cooperative_close_tx(&channel, &other_hash));
+    }
+
+    #[test]
+    fn onchain_upstream_relay_already_handled_accepts_closed_upstream_channel() {
+        use crate::store::sample::StoreSample;
+        // Regression for Bug #7 (Adjacent-hop double force-close deadlock):
+        // when the upstream channel is already Closed (e.g. both hops force-closed),
+        // relaying an on-chain downstream TLC removal must treat upstream as already handled
+        // so downstream WAITING_ONCHAIN_SETTLEMENT can complete without deadlocking on mismatched
+        // RemoveTlcFail reason bytes.
+        let mut upstream = ChannelActorState::samples(13)
+            .into_iter()
+            .next()
+            .expect("sample channel");
+        upstream.tlc_state.offered_tlcs.tlcs.clear();
+        upstream.tlc_state.received_tlcs.tlcs.clear();
+        let reason = RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+            TlcErr::new(TlcErrorCode::PermanentChannelFailure),
+            &[0u8; 32],
+        ));
+        upstream.state = ChannelState::ChannelReady;
+        assert!(!onchain_upstream_relay_already_handled(
+            &upstream, 1, &reason,
+        ));
+
+        upstream.state = ChannelState::Closed(
+            CloseFlags::UNCOOPERATIVE_LOCAL | CloseFlags::WAITING_ONCHAIN_SETTLEMENT,
+        );
+        assert!(onchain_upstream_relay_already_handled(
+            &upstream, 1, &reason,
+        ));
     }
 }
 
@@ -1211,6 +1478,20 @@ pub enum FiberActorCommand {
     ActivateInProcessPeer(Pubkey, RpcReplyPort<Result<(), String>>),
     /// Remove a previously registered co-located Fiber endpoint.
     UnregisterInProcessPeer(Pubkey),
+    /// Register the output queue for a simulated TCP link.
+    #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+    RegisterSimulatedPeer {
+        pubkey: Pubkey,
+        sender: crate::simulation::SimulatedPeerSender,
+        features: FeatureVector,
+        reply: RpcReplyPort<Result<(), String>>,
+    },
+    /// Resume channels after the simulated peer link is ready.
+    #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+    ActivateSimulatedPeer(Pubkey, RpcReplyPort<Result<(), String>>),
+    /// Disconnect channels from the simulated peer.
+    #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+    UnregisterSimulatedPeer(Pubkey),
     /// Disconnect the peer of a local channel whose external-signing buffer overflowed.
     DisconnectPeerForChannelOverflow(Hash256),
     // Check hold tlcs that have expired and need to be removed.
@@ -1294,7 +1575,11 @@ pub enum FiberActorCommand {
         SubmitChannelSignatureCommand,
         RpcReplyPort<Result<fiber_types::SubmitSignatureOutcome, String>>,
     ),
-    #[cfg(any(test, feature = "bench"))]
+    #[cfg(any(
+        test,
+        feature = "bench",
+        all(feature = "simulation", not(target_arch = "wasm32"))
+    ))]
     GetChannelActor(Hash256, RpcReplyPort<Option<ActorRef<ChannelActorMessage>>>),
     // Send an onion packet to the next hop. The `PeeledPaymentOnionPacket::current` contains
     // the hop data for the current node.
@@ -1963,6 +2248,8 @@ pub(crate) struct FiberActorCore<S, C> {
     store_actor: Option<ActorRef<StoreActorMessage>>,
     network_graph: Arc<RwLock<NetworkGraph<S>>>,
     chain_client: C,
+    #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+    simulation: Option<simulation::SimulatedTransport>,
 }
 
 struct PublicNetworkRuntimeState {
@@ -2029,6 +2316,8 @@ where
             store_actor,
             network_graph,
             chain_client,
+            #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+            simulation: None,
         }
     }
 
@@ -2063,6 +2352,8 @@ where
             p2p_peers: Default::default(),
             p2p_peer_features: Default::default(),
             in_process_peers: Default::default(),
+            #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+            simulated_peers: Default::default(),
             peer_channel_index,
             channels: Default::default(),
             channels_funding_lock_script_cache: Default::default(),
@@ -2086,6 +2377,7 @@ where
                 external_funding_timeout_seconds: config.external_funding_timeout_seconds,
                 external_funding: Default::default(),
                 is_internal_channel: false,
+                paused_peer_response_wait_ms: 0,
             },
             inflight_payments: Default::default(),
             pending_trampoline_settlements: Default::default(),
@@ -2979,11 +3271,13 @@ where
             if source_attempt_id != attempt_id {
                 return Ok(());
             }
-            // The source determines the local failure; do not trust a stale event reason.
-            remove_tlc_reason = RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
-                TlcErr::new(error_code),
-                &tlc.shared_secret,
-            ));
+            // The source determines the local failure; preserve a peer-recorded error packet
+            // when the excluded TLC already received `RemoveTlcFail` before force-close.
+            let has_recorded_fail = tlc.recorded_fail.is_some();
+            remove_tlc_reason =
+                RemoveTlcReason::RemoveTlcFail(tlc.recorded_fail.unwrap_or_else(|| {
+                    TlcErrPacket::new(TlcErr::new(error_code), &tlc.shared_secret)
+                }));
             // A missing payer record cannot accept this chain outcome. Acknowledge it
             // so CheckChannels stops selecting the same TLC.
             let acknowledge = |reason: RemoveTlcReason| {
@@ -3025,12 +3319,14 @@ where
                 acknowledge(remove_tlc_reason)?;
                 return Ok(());
             }
-            local_error = Some(TlcErr::new_channel_fail(
-                error_code,
-                channel.get_local_pubkey(),
-                channel_outpoint.clone(),
-                None,
-            ));
+            if !has_recorded_fail {
+                local_error = Some(TlcErr::new_channel_fail(
+                    error_code,
+                    channel.get_local_pubkey(),
+                    channel_outpoint.clone(),
+                    None,
+                ));
+            }
             completion = Some(PaymentTlcRemoveContext {
                 channel_id,
                 tlc_id,
@@ -3301,6 +3597,22 @@ where
             FiberActorCommand::UnregisterInProcessPeer(pubkey) => {
                 state.disconnect_in_process_peer(pubkey);
             }
+            #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+            FiberActorCommand::RegisterSimulatedPeer {
+                pubkey,
+                sender,
+                features,
+                reply,
+            } => {
+                state
+                    .simulated_peers
+                    .insert(pubkey, SimulatedPeer { sender, features });
+                let _ = reply.send(Ok(()));
+            }
+            #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+            FiberActorCommand::UnregisterSimulatedPeer(pubkey) => {
+                state.disconnect_simulated_peer(pubkey);
+            }
             FiberActorCommand::CheckChannelsShutdown => {
                 for (_pubkey, channel_id, channel_state) in self.store.get_channel_states(None) {
                     if matches!(
@@ -3415,7 +3727,10 @@ where
                 let _ = reply.send(());
             }
             FiberActorCommand::SettleTlcSet(payment_hash, channel_tlc_ids) => {
-                self.settle_tlc_set(myself, state, payment_hash, channel_tlc_ids);
+                let settlements = self.plan_settle_tlc_set(state, payment_hash, channel_tlc_ids);
+                if !settlements.is_empty() {
+                    self.apply_tlc_settlements(myself, state, settlements, None);
+                }
             }
             FiberActorCommand::TimeoutHoldTlc(payment_hash, channel_id, tlc_id) => {
                 self.timeout_hold_tlc(myself, state, payment_hash, channel_id, tlc_id);
@@ -3441,7 +3756,11 @@ where
                     ),
                 ))?;
             }
-            #[cfg(any(test, feature = "bench"))]
+            #[cfg(any(
+                test,
+                feature = "bench",
+                all(feature = "simulation", not(target_arch = "wasm32"))
+            ))]
             FiberActorCommand::GetChannelActor(channel_id, reply) => {
                 let _ = reply.send(state.channels.get(&channel_id).cloned());
             }
@@ -3525,6 +3844,7 @@ where
                 let _ = reply.send(());
             }
             FiberActorCommand::GetPendingAcceptChannels(rpc) => {
+                state.prune_expired_to_be_accepted_channels();
                 let pending = state
                     .to_be_accepted_channels
                     .map
@@ -3594,6 +3914,10 @@ where
             | FiberActorCommand::DisconnectPeerForChannelOverflow(..)) => Box::pin(
                 Self::handle_network_peer_and_message_command(state, command),
             ),
+            #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+            command @ FiberActorCommand::ActivateSimulatedPeer(..) => Box::pin(
+                Self::handle_network_peer_and_message_command(state, command),
+            ),
             #[cfg(test)]
             command @ FiberActorCommand::ReleaseTestHeldFiberMessages(..) => Box::pin(
                 Self::handle_network_peer_and_message_command(state, command),
@@ -3635,6 +3959,22 @@ where
             | FiberActorCommand::FailBufferedTrampoline { .. }
             | FiberActorCommand::SettleLspPaymentOutcome { .. }) => {
                 Box::pin(self.handle_trampoline_command(myself, state, command))
+            }
+            #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+            FiberActorCommand::SettleTlcSet(payment_hash, channel_tlc_ids) => {
+                Box::pin(async move {
+                    let settlements =
+                        self.plan_settle_tlc_set(state, payment_hash, channel_tlc_ids);
+                    if !settlements.is_empty() {
+                        crate::simulation::after_invoice_marked_received(
+                            state.get_public_key(),
+                            payment_hash,
+                        )
+                        .await;
+                        self.apply_tlc_settlements(myself, state, settlements, None);
+                    }
+                    Ok(())
+                })
             }
             command => Box::pin(std::future::ready(
                 self.handle_sync_command(myself, state, command),
@@ -3720,6 +4060,27 @@ where
                 };
                 let _ = reply.send(result);
             }
+            #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+            FiberActorCommand::ActivateSimulatedPeer(pubkey, reply) => {
+                let result = if state.simulated_peers.contains_key(&pubkey) {
+                    let mut channels: Vec<_> = state
+                        .peer_channel_index
+                        .get_channels(&pubkey)
+                        .into_iter()
+                        .flatten()
+                        .collect();
+                    channels.sort();
+                    for channel in channels {
+                        if let Err(error) = Box::pin(state.reestablish_channel(channel)).await {
+                            debug!(%error, %channel, "Unable to reestablish simulated peer channel");
+                        }
+                    }
+                    Ok(())
+                } else {
+                    Err(format!("simulated peer {pubkey:?} is not registered"))
+                };
+                let _ = reply.send(result);
+            }
             FiberActorCommand::DisconnectPeerForChannelOverflow(channel_id) => {
                 let Some(channel) = state.store.get_channel_actor_state(&channel_id) else {
                     return Ok(());
@@ -3751,6 +4112,7 @@ where
     ) -> crate::Result<()> {
         match command {
             FiberActorCommand::CheckChannels => {
+                state.prune_expired_to_be_accepted_channels();
                 let now = now_timestamp_as_millis_u64();
 
                 for (_pubkey, channel_id, channel_state) in self.store.get_channel_states(None) {
@@ -3772,7 +4134,7 @@ where
                     }
                 }
 
-                self.retry_hold_tlc_sets(&myself);
+                self.retry_hold_tlc_sets(&myself, false);
             }
             FiberActorCommand::OpenChannel(open_channel, reply) => {
                 let network_graph = self.network_graph.clone();
@@ -3965,6 +4327,14 @@ where
                     return Ok(());
                 }
                 if let Some((upstream, upstream_tlc)) = tlc.forwarding_tlc {
+                    #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+                    if matches!(&reason, RemoveTlcReason::RemoveTlcFulfill(_)) {
+                        crate::simulation::before_forwarding_fulfill(
+                            state.get_public_key(),
+                            channel_id,
+                        )
+                        .await;
+                    }
                     let Ok(backward) = reason.backward(&tlc.shared_secret) else {
                         return Ok(());
                     };
@@ -4050,23 +4420,23 @@ where
                         match result {
                             Ok(()) | Err(ProcessingChannelError::WaitingTlcAck) => true,
                             Err(err) => {
-                                let already_removed_with_same_reason = self
+                                let already_handled_upstream = self
                                     .store
                                     .get_channel_actor_state(&forwarding_channel_id)
                                     .is_some_and(|channel_state| {
-                                        onchain_upstream_removed_reason_matches(
+                                        onchain_upstream_relay_already_handled(
                                             &channel_state,
                                             forwarding_tlc_id,
                                             &reason,
                                         )
                                     });
-                                if !already_removed_with_same_reason {
+                                if !already_handled_upstream {
                                     error!(
                                         "Failed to relay on-chain resolved tlc {:?} upstream to channel {:?}: {}; will retry on next maintenance tick",
                                         forwarding_tlc_id, forwarding_channel_id, err
                                     );
                                 }
-                                already_removed_with_same_reason
+                                already_handled_upstream
                             }
                         }
                     }
@@ -5094,10 +5464,20 @@ where
             }
         }
 
-        // Resolve fulfilled TLCs only from confirmed channel-scoped on-chain settlement records.
+        // Resolve fulfilled TLCs only from confirmed channel-scoped on-chain settlement records,
+        // plus offered TLCs whose off-chain fulfillment was already folded into the confirmed
+        // commitment balances before `AppliedFlags::REMOVE` was applied.
         // Forwarded offered TLCs relay upstream before the downstream channel is marked removed;
         // source payments and payee invoices are completed locally.
-        let fulfilled = collect_onchain_fulfilled_tlcs(actor_state, &self.store);
+        let mut fulfilled = collect_onchain_fulfilled_tlcs(actor_state, &self.store);
+        for tlc in collect_onchain_excluded_fulfilled_tlcs(actor_state, &self.store) {
+            if !fulfilled
+                .iter()
+                .any(|existing| existing.tlc_id == tlc.tlc_id)
+            {
+                fulfilled.push(tlc);
+            }
+        }
         let mut invoice_hashes = Vec::new();
         for tlc in fulfilled {
             match tlc.tlc_id {
@@ -5117,12 +5497,19 @@ where
                                 reason: fulfill,
                             },
                         );
+                        payer_effects_applied = false;
                     } else {
                         self.store.insert_preimage(tlc.payment_hash, tlc.preimage);
-                        actor_state
+                        if actor_state
                             .tlc_state
-                            .set_offered_tlc_removed(id, fulfill.clone());
-                        actor_state_changed = true;
+                            .get(&tlc.tlc_id)
+                            .is_some_and(|existing| existing.removed_reason.is_none())
+                        {
+                            actor_state
+                                .tlc_state
+                                .set_offered_tlc_removed(id, fulfill.clone());
+                            actor_state_changed = true;
+                        }
                         if let Some(attempt_id) = tlc.attempt_id {
                             updated_payments.insert(tlc.session_key());
                             if let Err(err) = self
@@ -5141,17 +5528,22 @@ where
                                     tlc.tlc_id, channel_id, err
                                 );
                                 payer_effects_applied = false;
-                            } else {
-                                confirm_onchain_payer_fulfill(
-                                    actor_state,
-                                    OnChainConfirmedPayerTlc {
-                                        upstream_tlc_key: tlc.upstream_tlc_key,
-                                        tlc_id: tlc.tlc_id,
-                                        payment_hash: tlc.payment_hash,
-                                        attempt_id,
-                                        preimage: tlc.preimage,
-                                    },
-                                );
+                            } else if confirm_onchain_payer_fulfill(
+                                actor_state,
+                                OnChainConfirmedPayerTlc {
+                                    upstream_tlc_key: tlc.upstream_tlc_key,
+                                    tlc_id: tlc.tlc_id,
+                                    payment_hash: tlc.payment_hash,
+                                    attempt_id,
+                                    preimage: tlc.preimage,
+                                },
+                            ) {
+                                actor_state_changed = true;
+                            }
+                        } else if let Some(existing) = actor_state.tlc_state.get_mut(&tlc.tlc_id) {
+                            if !existing.applied_flags.contains(AppliedFlags::REMOVE) {
+                                existing.applied_flags.insert(AppliedFlags::REMOVE);
+                                actor_state_changed = true;
                             }
                         }
                     }
@@ -5210,10 +5602,13 @@ where
         }
 
         for tlc in collect_onchain_excluded_tlcs(actor_state, &self.store) {
-            let reason = RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
-                TlcErr::new(TlcErrorCode::PermanentChannelFailure),
-                &tlc.shared_secret,
-            ));
+            let session_key = tlc.session_key();
+            let reason = RemoveTlcReason::RemoveTlcFail(tlc.recorded_fail.unwrap_or_else(|| {
+                TlcErrPacket::new(
+                    TlcErr::new(TlcErrorCode::PermanentChannelFailure),
+                    &tlc.shared_secret,
+                )
+            }));
             match tlc.role {
                 OnChainTimeoutTlcRole::Forwarded {
                     forwarding_channel_id,
@@ -5237,7 +5632,7 @@ where
                         .network
                         .send_message(FiberActorMessage::new_event(
                             FiberActorEvent::TlcRemoveReceived(
-                                tlc.session_key(),
+                                session_key,
                                 attempt_id,
                                 reason,
                                 Some((channel_id, tlc.tlc_id)),
@@ -5325,33 +5720,49 @@ where
         SettleOnChainFulfilledInvoiceCommand::new(payment_hash, &self.store).run();
     }
 
-    fn retry_hold_tlc_sets(&self, myself: &FiberActorRef) {
-        let current_time = now_timestamp_as_millis_u64();
-        for (payment_hash, hold_tlcs) in self.store.get_node_hold_tlcs() {
-            if self.store.get_preimage(&payment_hash).is_some() {
+    fn retry_hold_tlc_sets(&self, myself: &FiberActorRef, rearm_timeouts: bool) {
+        let mut hold_sets: Vec<_> = self.store.get_node_hold_tlcs().into_iter().collect();
+        hold_sets.sort_unstable_by_key(|(payment_hash, _)| *payment_hash);
+
+        for (payment_hash, hold_tlcs) in hold_sets {
+            let has_preimage = self.store.get_preimage(&payment_hash).is_some();
+            if has_preimage {
+                // Give a complete set the chance to enter Received before handling timeouts.
+                // An incomplete MPP set can also have a preimage while its invoice is Open.
                 myself
                     .send_message(FiberActorMessage::new_command(
                         FiberActorCommand::SettleReceivedHoldTlcSet(payment_hash),
                     ))
                     .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+            }
+            if self.store.get_invoice_status(&payment_hash) == Some(CkbInvoiceStatus::Received) {
                 continue;
             }
 
-            let already_timeout = hold_tlcs
-                .iter()
-                .any(|hold_tlc| current_time >= hold_tlc.hold_expire_at);
-            if already_timeout {
-                debug!("Timeout {payment_hash} hold tlcs {}", hold_tlcs.len());
-                for hold_tlc in hold_tlcs {
+            // Preserve set-wide expiry for hold invoices that don't have a preimage yet.
+            let check_now = now_timestamp_as_millis_u64();
+            let hold_set_expired = !has_preimage
+                && hold_tlcs
+                    .iter()
+                    .any(|hold_tlc| check_now >= hold_tlc.hold_expire_at);
+            for hold_tlc in hold_tlcs {
+                let timeout = move || {
+                    FiberActorMessage::new_command(FiberActorCommand::TimeoutHoldTlc(
+                        payment_hash,
+                        hold_tlc.channel_id,
+                        hold_tlc.tlc_id,
+                    ))
+                };
+                let arm_now = now_timestamp_as_millis_u64();
+                if hold_set_expired || arm_now >= hold_tlc.hold_expire_at {
                     myself
-                        .send_message(FiberActorMessage::new_command(
-                            FiberActorCommand::TimeoutHoldTlc(
-                                payment_hash,
-                                hold_tlc.channel_id,
-                                hold_tlc.tlc_id,
-                            ),
-                        ))
+                        .send_message(timeout())
                         .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+                } else if rearm_timeouts {
+                    myself.send_after(
+                        Duration::from_millis(hold_tlc.hold_expire_at - arm_now),
+                        timeout,
+                    );
                 }
             }
         }
@@ -5363,10 +5774,12 @@ where
         state: &mut FiberActorState<S, C>,
         payment_hashes: HashSet<PaymentSessionKey>,
     ) {
-        // Trigger hold tlc fulfill retry and timeout checks at startup.
-        self.retry_hold_tlc_sets(myself);
+        // Restore hold timers lost on restart using their original deadlines.
+        self.retry_hold_tlc_sets(myself, true);
         // Recover only channel-owned work and indexed attempts. Scanning payment
         // history here makes every restart grow with the node's lifetime traffic.
+        let mut payment_hashes: Vec<_> = payment_hashes.into_iter().collect();
+        payment_hashes.sort();
         for payment_hash in payment_hashes {
             let Some(session) = self.store.get_payment_session(payment_hash) else {
                 continue;
@@ -5555,16 +5968,26 @@ where
         self.apply_tlc_settlements(myself, state, settlements, Some(payment_hash));
     }
 
-    fn settle_tlc_set(
+    fn plan_settle_tlc_set(
         &self,
-        myself: FiberActorRef,
-        state: &mut FiberActorState<S, C>,
+        state: &FiberActorState<S, C>,
         payment_hash: Hash256,
         channel_tlc_ids: Vec<(Hash256, u64)>,
-    ) {
-        let settle_command = SettleTlcSetCommand::new(payment_hash, channel_tlc_ids, &self.store);
+    ) -> Vec<crate::fiber::settle_tlc_set_command::TlcSettlement> {
+        let settle_command = if channel_tlc_ids.is_empty() {
+            SettleTlcSetCommand::new_hold_tlc_set(payment_hash, &self.store)
+        } else {
+            let channel_tlc_ids: Vec<_> = channel_tlc_ids
+                .into_iter()
+                .filter(|key| !state.pending_remove_tlcs.contains_key(key))
+                .collect();
+            if channel_tlc_ids.is_empty() {
+                return Vec::new();
+            }
+            SettleTlcSetCommand::new_immediate_tlc_set(payment_hash, channel_tlc_ids, &self.store)
+        };
 
-        self.apply_tlc_settlements(myself, state, settle_command.run(), None);
+        settle_command.run()
     }
 
     fn apply_tlc_settlements(
@@ -5830,6 +6253,22 @@ where
             tx_status: TxStatus::Committed(..),
         } = response
         {
+            if matches_cooperative_close_tx(&state, &tx.hash()) {
+                let channel_id = state.get_id();
+                let pubkey = state.get_remote_pubkey();
+                let tx_hash = tx.hash();
+                tracing::debug!(
+                    "channel {channel_id:?} cooperative close tx {tx_hash:?} confirmed on chain"
+                );
+                myself
+                    .send_message(FiberActorMessage::Event(
+                        FiberActorEvent::ClosingTransactionConfirmed(
+                            pubkey, channel_id, tx_hash, false, false,
+                        ),
+                    ))
+                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                return;
+            }
             // we only check remote sent force close transaction here
             if tx.outputs().len() == 1 {
                 if let Some(output) = tx.outputs().get(0) {
@@ -6723,12 +7162,13 @@ where
             session_key,
             init_command,
         };
+        let name = || format!("Payment-{} Node({:?})", session_key, myself.get_name());
+        #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+        let name = self.simulation.is_none().then(name);
+        #[cfg(not(all(feature = "simulation", not(target_arch = "wasm32"))))]
+        let name = Some(name());
         match Actor::spawn_linked(
-            Some(format!(
-                "Payment-{} Node({:?})",
-                session_key,
-                myself.get_name(),
-            )),
+            name,
             PaymentActor::new(
                 self.store.clone(),
                 self.network_graph.clone(),
@@ -7172,6 +7612,27 @@ where
                 Ok(())
             }
             PublicNetworkEvent::GossipMessageUpdates(gossip_message_updates) => {
+                #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+                if self.core.simulation.is_some() {
+                    for message in &gossip_message_updates.messages {
+                        match message {
+                            BroadcastMessageWithTimestamp::ChannelAnnouncement(
+                                timestamp,
+                                announcement,
+                            ) => {
+                                self.core
+                                    .store
+                                    .save_channel_announcement(*timestamp, announcement.clone());
+                            }
+                            BroadcastMessageWithTimestamp::ChannelUpdate(update) => {
+                                self.core.store.save_channel_update(update.clone());
+                            }
+                            BroadcastMessageWithTimestamp::NodeAnnouncement(announcement) => {
+                                self.core.store.save_node_announcement(announcement.clone());
+                            }
+                        }
+                    }
+                }
                 let mut graph = self.core.network_graph.write().await;
                 graph.update_for_messages(gossip_message_updates.messages);
                 debug_event!(
@@ -7418,6 +7879,11 @@ where
                 Ok(())
             }
             PublicNetworkCommand::BroadcastMessages(message) => {
+                #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+                if let Some(simulation) = &self.core.simulation {
+                    let _ = simulation.broadcast.send(message);
+                    return Ok(());
+                }
                 if let Some(gossip_actor) = state.public.gossip_actor.as_ref() {
                     gossip_actor
                         .send_message(GossipActorMessage::TryBroadcastMessages(message))
@@ -7617,6 +8083,8 @@ pub struct FiberActorState<S, C> {
     p2p_peers: HashMap<Pubkey, P2pFiberPeer>,
     p2p_peer_features: HashMap<Pubkey, FeatureVector>,
     in_process_peers: HashMap<Pubkey, InProcessPeer>,
+    #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+    simulated_peers: HashMap<Pubkey, SimulatedPeer>,
     peer_channel_index: PeerChannelIndex,
     channels: HashMap<Hash256, ActorRef<ChannelActorMessage>>,
     // Channels funding lock script cache
@@ -7696,6 +8164,12 @@ pub struct ConnectedPeer {
 #[derive(Clone, Debug)]
 struct InProcessPeer {
     actor: FiberActorRef,
+    features: FeatureVector,
+}
+
+#[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+struct SimulatedPeer {
+    sender: crate::simulation::SimulatedPeerSender,
     features: FeatureVector,
 }
 
@@ -8269,7 +8743,7 @@ where
             .store
             .get_all_channel_states()
             .into_iter()
-            .map(|channel| channel.tlc_state.all_tlcs().count())
+            .map(|channel| count_active_hosted_tlcs(&channel, &self.store))
             .sum();
         HostedTenantActivity {
             inflight_payments: self.inflight_payments.len(),
@@ -9051,6 +9525,10 @@ where
     }
 
     fn is_peer_available(&self, pubkey: &Pubkey) -> bool {
+        #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+        if self.simulated_peers.contains_key(pubkey) {
+            return true;
+        }
         self.p2p_peers.contains_key(pubkey) || self.in_process_peers.contains_key(pubkey)
     }
 
@@ -9083,10 +9561,15 @@ where
     }
 
     fn check_feature_compatibility(&self, pubkey: &Pubkey) -> ProcessingChannelResult {
+        #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+        let simulated_features = self.simulated_peers.get(pubkey).map(|peer| &peer.features);
+        #[cfg(not(all(feature = "simulation", not(target_arch = "wasm32"))))]
+        let simulated_features: Option<&FeatureVector> = None;
         let peer_features = self
             .in_process_peers
             .get(pubkey)
             .map(|peer| &peer.features)
+            .or(simulated_features)
             .or_else(|| self.p2p_peer_features.get(pubkey));
         if let Some(peer_features) = peer_features {
             // check peer features
@@ -9405,6 +9888,14 @@ where
                 .map_err(|error| Error::InternalError(anyhow::anyhow!(error.to_string())))?;
             return Ok(());
         }
+        #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+        if let Some(peer) = self.simulated_peers.get(pubkey) {
+            return peer
+                .sender
+                .send(message)
+                .await
+                .map_err(|_| Error::PeerNotFound(*pubkey));
+        }
         if let Some(peer) = self.p2p_peers.get(pubkey) {
             peer.control
                 .send_message_to(
@@ -9705,6 +10196,16 @@ where
             let Some(channel_actor_state) = self.store.get_channel_actor_state(&channel_id) else {
                 continue;
             };
+            if channel_actor_state.state == ChannelState::Closed(CloseFlags::FUNDING_ABORTED) {
+                // The channel can persist its terminal state before the network actor
+                // deletes it. Replay the normal cleanup if a crash interrupted that step.
+                self.network
+                    .send_message(FiberActorMessage::new_event(
+                        FiberActorEvent::ChannelActorStopped(channel_id, StopReason::AbortFunding),
+                    ))
+                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                continue;
+            }
             // Recover final outcomes from live upstream TLCs, not completed payment history.
             if !channel_actor_state.is_closed() {
                 for tlc in channel_actor_state
@@ -9842,6 +10343,8 @@ where
             return;
         }
         if let Some(channel_ids) = self.peer_channel_index.get_channels(&pubkey) {
+            let mut channel_ids: Vec<_> = channel_ids.into_iter().collect();
+            channel_ids.sort_unstable();
             for channel_id in channel_ids {
                 if let Some(channel) = self.channels.get(&channel_id) {
                     if let Err(error) = channel
@@ -9854,6 +10357,57 @@ where
                     }
                 }
             }
+        }
+    }
+
+    #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+    fn disconnect_simulated_peer(&mut self, pubkey: Pubkey) {
+        if self.simulated_peers.remove(&pubkey).is_none() {
+            return;
+        }
+        if self.p2p_peers.contains_key(&pubkey) || self.in_process_peers.contains_key(&pubkey) {
+            return;
+        }
+        if let Some(channel_ids) = self.peer_channel_index.get_channels(&pubkey) {
+            let mut channel_ids: Vec<_> = channel_ids.into_iter().collect();
+            channel_ids.sort_unstable();
+            for channel_id in channel_ids {
+                if let Some(channel) = self.channels.get(&channel_id) {
+                    if let Err(error) = channel
+                        .send_message(ChannelActorMessage::Event(ChannelEvent::PeerDisconnected))
+                    {
+                        error!(
+                            "Failed to disconnect simulated channel actor {:x}: {:?}",
+                            channel_id, error
+                        );
+                    }
+                }
+            }
+        }
+        let failed_channels = self
+            .to_be_accepted_channels
+            .map
+            .iter()
+            .filter(|(_, (peer_pubkey, _))| *peer_pubkey == pubkey)
+            .map(|(channel_id, _)| *channel_id)
+            .collect::<Vec<_>>();
+        for channel_id in failed_channels {
+            self.store.delete_channel_open_record(&channel_id);
+            self.to_be_accepted_channels.remove(&channel_id);
+        }
+    }
+
+    fn prune_expired_to_be_accepted_channels(&mut self) {
+        let expired = self
+            .to_be_accepted_channels
+            .prune_expired(now_timestamp_as_millis_u64());
+        for channel_id in expired {
+            self.store.delete_channel_open_record(&channel_id);
+            self.network
+                .send_message(FiberActorMessage::new_notification(
+                    NetworkServiceEvent::ChannelAbandon(channel_id),
+                ))
+                .expect(ASSUME_NETWORK_MYSELF_ALIVE);
         }
     }
 
@@ -10080,6 +10634,7 @@ where
             )));
         }
 
+        self.prune_expired_to_be_accepted_channels();
         let result = self
             .check_feature_compatibility(&peer_pubkey)
             .and_then(|_| {
@@ -10798,6 +11353,72 @@ where
             default_shutdown_script,
             ..
         } = args;
+        #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+        if let Some(simulation) = &self.core.simulation {
+            let policy = Arc::new(StdMutex::new(PeerMessagePolicy::new(
+                config.peer_message_policy,
+            )));
+            let service = ServiceBuilder::<SecioKeyPair>::default()
+                .build(NetworkServiceHandle::new(myself.clone(), policy.clone()));
+            let private_key = simulation.key.clone();
+            let features = config.gen_node_features();
+            let state_to_be_persisted = self
+                .core
+                .store
+                .get_network_actor_state(&private_key.pubkey())
+                .unwrap_or_default();
+            let fiber = self.core.build_actor_state(
+                &config,
+                FiberActorStateArgs {
+                    private_key,
+                    entropy: simulation.entropy,
+                    default_shutdown_script,
+                    network: FiberActorRef::from_network(&myself),
+                    peer_channel_index: PeerChannelIndex::build(&self.core.store),
+                    features,
+                },
+            );
+            let announced_addrs = config
+                .announced_addrs
+                .iter()
+                .map(|addr| {
+                    addr.parse::<MultiAddr>()
+                        .expect("valid announced multiaddr")
+                })
+                .collect::<Vec<_>>();
+            let public = PublicNetworkRuntimeState {
+                state_to_be_persisted,
+                node_name: config.announced_node_name,
+                announced_addrs,
+                auto_announce: config.auto_announce_node(),
+                last_node_announcement_message: None,
+                control: service.control().clone(),
+                peer_message_policy: policy,
+                #[cfg(not(target_arch = "wasm32"))]
+                onion_service_token: None,
+                peer_session_map: Default::default(),
+                pending_save_peer_addresses: Default::default(),
+                gossip_actor: None,
+                synced_to_graph: None,
+                max_inbound_peers: config.max_inbound_peers(),
+                min_outbound_peers: config.min_outbound_peers(),
+                enable_peer_reconnect_backoff: false,
+                peer_reconnect_backoff_attempts: Default::default(),
+                requested_disconnect_peers: Default::default(),
+            };
+            let mut state = NetworkActorState { fiber, public };
+            if let Some(node_announcement) = state.get_or_create_new_node_announcement_message() {
+                let mut graph = self.core.network_graph.write().await;
+                graph.process_node_announcement(node_announcement.clone());
+                drop(graph);
+                let _ = myself.send_message(NetworkActorMessage::new_command(
+                    PublicNetworkCommand::BroadcastMessages(vec![
+                        BroadcastMessageWithTimestamp::NodeAnnouncement(node_announcement),
+                    ]),
+                ));
+            }
+            return Ok(state);
+        }
         let kp = config
             .read_or_generate_secret_key()
             .expect("read or generate secret key");
@@ -11141,15 +11762,21 @@ where
     ) -> Result<(), ActorProcessingErr> {
         let payment_hashes = state.fiber.restore_persisted_offline_channels().await;
 
-        // MAINTAINING_CONNECTIONS_INTERVAL is long, we need to trigger when start
-        myself
-            .send_message(NetworkActorMessage::new_command(
-                PublicNetworkCommand::MaintainConnections,
-            ))
-            .expect(ASSUME_NETWORK_MYSELF_ALIVE);
-        myself.send_interval(MAINTAINING_CONNECTIONS_INTERVAL, || {
-            NetworkActorMessage::new_command(PublicNetworkCommand::MaintainConnections)
-        });
+        #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+        let maintain_connections = self.core.simulation.is_none();
+        #[cfg(not(all(feature = "simulation", not(target_arch = "wasm32"))))]
+        let maintain_connections = true;
+        if maintain_connections {
+            // MAINTAINING_CONNECTIONS_INTERVAL is long, we need to trigger when start
+            myself
+                .send_message(NetworkActorMessage::new_command(
+                    PublicNetworkCommand::MaintainConnections,
+                ))
+                .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+            myself.send_interval(MAINTAINING_CONNECTIONS_INTERVAL, || {
+                NetworkActorMessage::new_command(PublicNetworkCommand::MaintainConnections)
+            });
+        }
         myself.send_interval(CHECK_CHANNELS_INTERVAL, || {
             NetworkActorMessage::new_command(FiberActorCommand::CheckChannels)
         });
@@ -11171,6 +11798,8 @@ where
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
+        #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+        crate::simulation::before_actor_message(myself.get_id()).await;
         let _handle_log_guard = ActorHandleLogGuard::new(
             "NetworkActor",
             message.to_string(),
@@ -11288,6 +11917,10 @@ where
                     .fiber
                     .inflight_payments
                     .retain(|_, actor| actor.get_id() != who.get_id());
+                #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+                if self.core.simulation.is_some() {
+                    return Err(format!("Fiber child {:?} failed: {err}", who.get_name()).into());
+                }
                 log_actor_failed(who, err);
             }
             _ => {}
@@ -11624,12 +12257,18 @@ pub(crate) async fn start_hosted_tenant_actor<
     network_graph: Arc<RwLock<NetworkGraph<S>>>,
     default_shutdown_script: Script,
 ) -> Result<FiberActorRef, String> {
-    let actor_name = format!(
-        "HostedTenant {:?}",
-        config
-            .try_public_key()
-            .map_err(|error| format!("failed to read hosted tenant key: {error}"))?
-    );
+    let pubkey = config
+        .try_public_key()
+        .map_err(|error| format!("failed to read hosted tenant key: {error}"))?;
+    #[cfg(feature = "simulation")]
+    let actor_name = {
+        static HOSTED_TENANT_ACTOR_SEQ: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(1);
+        let seq = HOSTED_TENANT_ACTOR_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        format!("HostedTenant {pubkey:?} #{seq}")
+    };
+    #[cfg(not(feature = "simulation"))]
+    let actor_name = format!("HostedTenant {pubkey:?}");
     Actor::spawn_linked(
         Some(actor_name),
         HostedTenantActor::new(
@@ -11700,12 +12339,14 @@ fn target_default_transport_matches(addr: &Multiaddr) -> bool {
 struct ToBeAcceptedChannels {
     total_number_limit: usize,
     total_bytes_limit: usize,
+    ttl_ms: u64,
     map: HashMap<Hash256, (Pubkey, PendingOpenChannel)>,
 }
 
 #[derive(Debug)]
 struct PendingOpenChannel {
     open_channel: OpenChannelV2,
+    created_at: u64,
 }
 
 impl Default for ToBeAcceptedChannels {
@@ -11713,6 +12354,7 @@ impl Default for ToBeAcceptedChannels {
         Self {
             total_number_limit: usize::MAX,
             total_bytes_limit: usize::MAX,
+            ttl_ms: DEFAULT_TO_BE_ACCEPTED_CHANNEL_TTL_MS,
             map: HashMap::default(),
         }
     }
@@ -11724,9 +12366,15 @@ const DEFAULT_TO_BE_ACCEPTED_CHANNELS_NUMBER_LIMIT: usize = 20;
 const DEFAULT_TO_BE_ACCEPTED_CHANNELS_BYTES_LIMIT: usize = 51200;
 // Remember to sync fiber/config.rs
 const DEFAULT_PENDING_CHANNELS_NUMBER_LIMIT: usize = 100;
+const DEFAULT_TO_BE_ACCEPTED_CHANNEL_TTL_MS: u64 = 300_000;
 
 impl ToBeAcceptedChannels {
     fn new_with_config(config: &FiberConfig) -> Self {
+        let ttl_ms = config
+            .external_funding_timeout_seconds
+            .min(config.funding_timeout_seconds)
+            .saturating_mul(1_000)
+            .max(1_000);
         Self {
             total_number_limit: config
                 .to_be_accepted_channels_number_limit
@@ -11734,8 +12382,22 @@ impl ToBeAcceptedChannels {
             total_bytes_limit: config
                 .to_be_accepted_channels_bytes_limit
                 .unwrap_or(DEFAULT_TO_BE_ACCEPTED_CHANNELS_BYTES_LIMIT),
+            ttl_ms,
             map: HashMap::default(),
         }
+    }
+
+    fn prune_expired(&mut self, now_ms: u64) -> Vec<Hash256> {
+        let expired: Vec<Hash256> = self
+            .map
+            .iter()
+            .filter(|(_, (_, entry))| now_ms.saturating_sub(entry.created_at) >= self.ttl_ms)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in &expired {
+            self.map.remove(id);
+        }
+        expired
     }
 
     fn remove(&mut self, id: &Hash256) -> Option<(Pubkey, PendingOpenChannel)> {
@@ -11793,8 +12455,16 @@ impl ToBeAcceptedChannels {
             "Channel from {:?} of id {:?} is now awaiting to be accepted: {:?}",
             &pubkey, &id, &open_channel
         );
-        self.map
-            .insert(id, (pubkey, PendingOpenChannel { open_channel }));
+        self.map.insert(
+            id,
+            (
+                pubkey,
+                PendingOpenChannel {
+                    open_channel,
+                    created_at: now_timestamp_as_millis_u64(),
+                },
+            ),
+        );
         Ok(())
     }
 }

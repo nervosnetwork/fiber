@@ -527,8 +527,6 @@ pub(super) fn channel_immutable_key(id: &Hash256) -> Vec<u8> {
 }
 
 /// Queue the two channel records plus their indexes into one atomic batch.
-// `store` is only read by the debug assertion.
-#[cfg_attr(not(debug_assertions), allow(unused_variables))]
 pub(super) fn stage_channel_actor_state(
     store: &Store,
     batch: &mut impl BatchWriter,
@@ -539,6 +537,22 @@ pub(super) fn stage_channel_actor_state(
     let channel_state = state.state;
     let remote_pubkey = state.get_remote_pubkey();
     let funding_outpoint = state.get_funding_transaction_outpoint();
+    if write_immutable {
+        // Funding collaboration can replace the transaction. Retire the previous
+        // outpoint in the same transaction that publishes its replacement.
+        let previous_outpoint = store
+            .get(channel_immutable_key(&id))
+            .and_then(|record| {
+                deserialize_from::<ChannelImmutableData>(&record, "ChannelImmutableState")
+                    .funding_tx
+            })
+            .map(|tx| OutPoint::new(tx.calc_tx_hash(), 0));
+        if let Some(previous) =
+            previous_outpoint.filter(|old| Some(old) != funding_outpoint.as_ref())
+        {
+            batch.delete(KeyValue::OutPointChannelId(previous, id).key());
+        }
+    }
 
     let kv = KeyValue::PubkeyChannelId((remote_pubkey, id), channel_state);
     batch.put(kv.key(), kv.value());
@@ -705,6 +719,157 @@ pub(crate) fn validate_stored_channel_record(
         }
         // Only the four channel-side prefixes reach here.
         _ => {}
+    }
+}
+
+/// Both durable records read from a single database snapshot.
+#[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+#[derive(PartialEq, Eq)]
+pub struct ChannelRecords {
+    id: Hash256,
+    mutable: Vec<u8>,
+    immutable: Vec<u8>,
+}
+
+#[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+impl ChannelRecords {
+    /// Decode the captured records without consulting Fiber's cache.
+    pub fn decode(&self) -> ChannelActorState {
+        deserialize_channel_state_parts(&self.id, &self.mutable, &self.immutable)
+    }
+
+    /// Bytes of the record that must stay fixed once the channel is established.
+    pub fn immutable(&self) -> &[u8] {
+        &self.immutable
+    }
+
+    fn from_rows(id: Hash256, [mutable, immutable]: [Option<Vec<u8>>; 2]) -> Option<Self> {
+        match (mutable, immutable) {
+            (Some(mutable), Some(immutable)) => Some(Self {
+                id,
+                mutable,
+                immutable,
+            }),
+            (None, None) => None,
+            (Some(_), None) => panic!("DST channel {id}: missing immutable record"),
+            (None, Some(_)) => panic!("DST channel {id}: missing mutable record"),
+        }
+    }
+}
+
+#[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+impl Store {
+    pub(crate) fn simulation_channel_records(&self, id: &Hash256) -> Option<ChannelRecords> {
+        let rows = self.multi_get(&[channel_mutable_key(id), channel_immutable_key(id)]);
+        ChannelRecords::from_rows(*id, rows.try_into().expect("two keys requested"))
+    }
+
+    pub(crate) fn simulation_cached_channel_matches_disk(&self, id: &Hash256) -> Option<bool> {
+        let cached = self.channel_states().cache_peek(id)?;
+        let (immutable, mutable) = cached.core.into_parts();
+        Some(self.simulation_channel_records(id).is_some_and(|records| {
+            serialize_to_vec(&immutable, "ChannelImmutableState") == records.immutable
+                && serialize_to_vec(&mutable, "ChannelMutableState") == records.mutable
+        }))
+    }
+
+    pub(crate) fn simulation_indexed_funding_outpoints(&self, id: &Hash256) -> Vec<OutPoint> {
+        self.collect_by_prefix(&[CHANNEL_OUTPOINT_CHANNEL_ID_PREFIX])
+            .into_iter()
+            .filter(|kv| deserialize_from::<Hash256>(&kv.value, "ChannelId") == *id)
+            .map(|kv| OutPoint::from_slice(&kv.key[1..]).expect("decode indexed funding outpoint"))
+            .collect()
+    }
+
+    pub(crate) fn simulation_verify_payment_hash_index(&self) -> Result<(), String> {
+        use std::collections::{BTreeMap, BTreeSet};
+
+        let mut expected_by_channel: BTreeMap<Hash256, BTreeSet<Hash256>> = BTreeMap::new();
+        let mut expected_pairs: BTreeSet<(Hash256, Hash256)> = BTreeSet::new();
+        for kv in self.collect_by_prefix(&[CHANNEL_ACTOR_STATE_PREFIX]) {
+            let channel_id: [u8; 32] = kv
+                .key
+                .get(1..)
+                .and_then(|bytes| bytes.try_into().ok())
+                .ok_or_else(|| format!("malformed channel key len={}", kv.key.len()))?;
+            let channel_id = Hash256::from(channel_id);
+            let Some(records) = self.simulation_channel_records(&channel_id) else {
+                continue;
+            };
+            let state = records.decode();
+            let hashes = state.pending_payment_hashes();
+            if !hashes.is_empty() {
+                for &hash in &hashes {
+                    expected_pairs.insert((hash, channel_id));
+                }
+                expected_by_channel.insert(channel_id, hashes);
+            }
+        }
+
+        let mut actual_by_channel: BTreeMap<Hash256, BTreeSet<Hash256>> = BTreeMap::new();
+        for kv in self.collect_by_prefix(&[CHANNEL_PAYMENT_HASHES_PREFIX]) {
+            let channel_id: [u8; 32] = kv
+                .key
+                .get(1..)
+                .and_then(|bytes| bytes.try_into().ok())
+                .ok_or_else(|| {
+                    format!("malformed channel-payment-hashes key len={}", kv.key.len())
+                })?;
+            let channel_id = Hash256::from(channel_id);
+            let hashes: Vec<Hash256> = deserialize_from(kv.value.as_ref(), "ChannelPaymentHashes");
+            if hashes.is_empty() {
+                return Err(format!(
+                    "empty CHANNEL_PAYMENT_HASHES_PREFIX row for channel {channel_id}"
+                ));
+            }
+            if !hashes.windows(2).all(|pair| pair[0] < pair[1]) {
+                return Err(format!(
+                    "unsorted or duplicate CHANNEL_PAYMENT_HASHES_PREFIX row for channel {channel_id}"
+                ));
+            }
+            actual_by_channel.insert(channel_id, hashes.into_iter().collect());
+        }
+        if actual_by_channel != expected_by_channel {
+            return Err(format!(
+                "CHANNEL_PAYMENT_HASHES_PREFIX mismatch: actual={actual_by_channel:?}, expected={expected_by_channel:?}"
+            ));
+        }
+
+        let mut actual_pairs: BTreeSet<(Hash256, Hash256)> = BTreeSet::new();
+        for kv in self.collect_by_prefix(&[PAYMENT_HASH_CHANNEL_ID_PREFIX]) {
+            if kv.key.len() != 65 || !kv.value.is_empty() {
+                return Err(format!(
+                    "malformed PAYMENT_HASH_CHANNEL_ID_PREFIX row: key_len={}, val_len={}",
+                    kv.key.len(),
+                    kv.value.len()
+                ));
+            }
+            let payment_hash =
+                Hash256::from(<[u8; 32]>::try_from(&kv.key[1..33]).expect("32-byte payment hash"));
+            let channel_id =
+                Hash256::from(<[u8; 32]>::try_from(&kv.key[33..65]).expect("32-byte channel id"));
+            actual_pairs.insert((payment_hash, channel_id));
+        }
+        if actual_pairs != expected_pairs {
+            return Err(format!(
+                "PAYMENT_HASH_CHANNEL_ID_PREFIX mismatch: actual={actual_pairs:?}, expected={expected_pairs:?}"
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(all(test, feature = "simulation", not(target_arch = "wasm32")))]
+mod simulation_records_tests {
+    use super::{ChannelRecords, Hash256};
+
+    #[test]
+    fn simulation_rejects_either_half_of_a_channel() {
+        let id = Hash256::default();
+        assert!(ChannelRecords::from_rows(id, [None, None]).is_none());
+        for rows in [[Some(vec![]), None], [None, Some(vec![])]] {
+            assert!(std::panic::catch_unwind(|| ChannelRecords::from_rows(id, rows)).is_err());
+        }
     }
 }
 
@@ -1751,7 +1916,15 @@ impl ChannelActorStateStore for Store {
     }
 
     fn insert_channel_actor_state(&self, state: ChannelActorState) {
-        self.channel_states().insert(state)
+        #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+        let (state, settlements) = {
+            let mut state = state;
+            let settlements = state.simulation_tlc_settlements.take();
+            (state, settlements)
+        };
+        self.channel_states().insert(state);
+        #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+        crate::simulation::publish_tlc_settlements(settlements);
     }
 
     fn move_channel_actor_state(&self, old_id: &Hash256, state: ChannelActorState) {
@@ -1797,6 +1970,23 @@ impl ChannelActorStateStore for Store {
                 (pubkey, channel_id.into(), state)
             })
             .collect()
+    }
+
+    fn get_channel_ids_by_payment_hash(&self, payment_hash: &Hash256) -> Vec<Hash256> {
+        let prefix = [&[PAYMENT_HASH_CHANNEL_ID_PREFIX][..], payment_hash.as_ref()].concat();
+        let take_prefix = prefix.clone();
+        self.collect_iterator(
+            prefix,
+            IteratorDirection::Forward,
+            Box::new(move |key| key.starts_with(&take_prefix)),
+            0,
+        )
+        .into_iter()
+        .filter_map(|kv| {
+            let channel_id: [u8; 32] = kv.key.get(33..)?.try_into().ok()?;
+            Some(channel_id.into())
+        })
+        .collect()
     }
 
     fn other_channel_has_pending_payment_hash(

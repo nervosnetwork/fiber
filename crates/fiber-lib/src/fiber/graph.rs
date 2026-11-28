@@ -22,6 +22,8 @@ use crate::utils::arithmetic::{
     ArithmeticError,
 };
 use ckb_types::packed::{OutPoint, Script};
+#[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+use ckb_types::prelude::Entity;
 use fiber_types::protocol::AnnouncedNodeName;
 pub use fiber_types::ChannelUpdateInfo;
 use fiber_types::{
@@ -30,7 +32,7 @@ use fiber_types::{
     Pubkey, RouterHop, SendPaymentData, TlcErr, UdtCfgInfos,
 };
 use parking_lot::Mutex;
-use rand::{rng, Rng};
+use rand::Rng;
 use secp256k1::SECP256K1;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
@@ -1132,31 +1134,29 @@ where
             .flatten()
             .collect();
 
-        // Iterating over HashMap's values is not guaranteed to be in order,
-        // which may introduce randomness in the path finding.
-        // We will first sort the channels by outbound_liquidity, then capacity, and at last update time.
-        // This is because the weight algorithm in find_path does not considering outbound_liquidity and capacity,
-        // so the channel with larger outbound_liquidity/capacity maybe have the same weight with the channel
-        // with smaller outbound_liquidity/capacity, even though the former have better chance to success.
-        channels.sort_by(
-            |(_, _, a_channel_info, a_channel_update_info),
-             (_, _, b_channel_info, b_channel_update_info)| {
-                b_channel_update_info
-                    .outbound_liquidity
-                    .cmp(&a_channel_update_info.outbound_liquidity)
-                    .then(
-                        b_channel_info
-                            .capacity()
-                            .cmp(&a_channel_info.capacity())
-                            .then(
-                                b_channel_info
-                                    .channel_last_update_time()
-                                    .cmp(&a_channel_info.channel_last_update_time()),
-                            ),
-                    )
-            },
-        );
+        // Prefer higher liquidity, capacity, and fresher updates when path costs tie.
+        // The channel index is a HashSet, so finish with a stable outpoint order.
+        channels.sort_unstable_by(|(_, _, a, a_update), (_, _, b, b_update)| {
+            Self::compare_inbound_channel_candidates(a, a_update, b, b_update)
+        });
         channels.into_iter()
+    }
+
+    pub(crate) fn compare_inbound_channel_candidates(
+        a: &ChannelInfo,
+        a_update: &ChannelUpdateInfo,
+        b: &ChannelInfo,
+        b_update: &ChannelUpdateInfo,
+    ) -> std::cmp::Ordering {
+        b_update
+            .outbound_liquidity
+            .cmp(&a_update.outbound_liquidity)
+            .then_with(|| b.capacity().cmp(&a.capacity()))
+            .then_with(|| {
+                b.channel_last_update_time()
+                    .cmp(&a.channel_last_update_time())
+            })
+            .then_with(|| a.out_point().cmp(b.out_point()))
     }
 
     pub fn get_source_pubkey(&self) -> Pubkey {
@@ -2079,7 +2079,8 @@ where
             }
             Ok(())
         };
-        let mut rand_tlc_expiry_delta = self.rand_tlc_expiry_delta(route, max_random_expiry_delta);
+        let mut rand_tlc_expiry_delta =
+            self.rand_tlc_expiry_delta(route, max_random_expiry_delta, payment_data.payment_hash);
         if let Some(max_expiry) = payment_data
             .trampoline_context
             .as_ref()
@@ -2197,7 +2198,12 @@ where
             })
     }
 
-    fn rand_tlc_expiry_delta(&self, route: &[RouterHop], max_random_expiry_delta: u64) -> u64 {
+    fn rand_tlc_expiry_delta(
+        &self,
+        route: &[RouterHop],
+        max_random_expiry_delta: u64,
+        _payment_hash: Hash256,
+    ) -> u64 {
         #[cfg(test)]
         if let Some(expiry_delta) = self.fixed_rand_expiry_delta {
             return expiry_delta;
@@ -2210,7 +2216,18 @@ where
             .min(max_random_expiry_delta)
             / DEFAULT_TLC_EXPIRY_DELTA;
 
-        rng().random_range(1..max_rand_expiry_num.max(2)) * DEFAULT_TLC_EXPIRY_DELTA
+        let upper = max_rand_expiry_num.max(2);
+        #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+        if crate::simulation::is_running() {
+            let mut context = _payment_hash.as_ref().to_vec();
+            for hop in route {
+                context.extend_from_slice(hop.channel_outpoint.as_slice());
+            }
+            let random = crate::simulation::keyed_random(b"payment-expiry", &context);
+            let value = u64::from_le_bytes(random[..8].try_into().expect("eight bytes"));
+            return (value % (upper - 1) + 1) * DEFAULT_TLC_EXPIRY_DELTA;
+        }
+        crate::with_random(|rng| rng.random_range(1..upper)) * DEFAULT_TLC_EXPIRY_DELTA
     }
 
     // A helper function to evaluate whether an edge should be added to the heap of nodes to visit.

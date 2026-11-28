@@ -399,6 +399,18 @@ pub async fn try_init_contracts_context(
 
 #[cfg(not(any(test, feature = "bench")))]
 fn get_contracts_context() -> &'static ContractsContext {
+    #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+    if crate::simulation::is_running() {
+        static SIMULATION_CONTRACTS: std::sync::LazyLock<ContractsContext> =
+            std::sync::LazyLock::new(|| {
+                super::tests::test_utils::MOCK_CONTEXT
+                    .read()
+                    .expect("read mock context")
+                    .contracts_context
+                    .clone()
+            });
+        return &SIMULATION_CONTRACTS;
+    }
     CONTRACTS_CONTEXT_INSTANCE
         .get()
         .expect("init_contracts_context should be called first")
@@ -482,6 +494,14 @@ pub fn get_cell_deps_sync(
     contracts: Vec<Contract>,
     udt_script: &Option<Script>,
 ) -> Result<CellDepVec, ContractsContextError> {
+    #[cfg(feature = "simulation")]
+    if crate::simulation::is_running() {
+        use futures::FutureExt;
+        // The simulator uses predeployed deps and has no type-ID RPC resolver.
+        return get_cell_deps(contracts, udt_script)
+            .now_or_never()
+            .expect("simulated cell deps are resolved locally");
+    }
     tokio::runtime::Runtime::new()
         .unwrap()
         .block_on(get_cell_deps(contracts, udt_script))

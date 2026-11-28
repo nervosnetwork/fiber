@@ -102,7 +102,7 @@ impl From<Pagination<Cell>> for GetCellsResponse {
     }
 }
 
-fn first_input_tx_hash(txs: &[Tx]) -> Option<H256> {
+pub(crate) fn first_input_tx_hash(txs: &[Tx]) -> Option<H256> {
     txs.iter().find_map(|tx_item| match tx_item {
         Tx::Ungrouped(tx) if matches!(tx.io_type, CellType::Input) => Some(tx.tx_hash.clone()),
         _ => None,
@@ -139,7 +139,7 @@ impl CkbRpcClient {
     }
 }
 
-fn new_shutdown_tx_search_key(funding_lock_script: &Script) -> SearchKey {
+pub(crate) fn new_shutdown_tx_search_key(funding_lock_script: &Script) -> SearchKey {
     SearchKey {
         script: funding_lock_script.clone().into(),
         script_type: ScriptType::Lock,
@@ -147,40 +147,6 @@ fn new_shutdown_tx_search_key(funding_lock_script: &Script) -> SearchKey {
         with_data: None,
         filter: None,
         group_by_transaction: None,
-    }
-}
-
-/// Paginate the CKB indexer to find the first transaction whose `io_type` is
-/// `CellType::Input` for the given funding lock script. Returns `None` if no
-/// such transaction exists.
-#[cfg(all(not(target_arch = "wasm32"), any(feature = "watchtower", test)))]
-pub(crate) fn find_first_input_tx_hash(
-    client: &ckb_sdk::CkbRpcClient,
-    funding_lock_script: &Script,
-) -> Result<Option<H256>, anyhow::Error> {
-    let search_key = new_shutdown_tx_search_key(funding_lock_script);
-
-    const PAGE_SIZE: u32 = 100;
-    let mut after_cursor: Option<JsonBytes> = None;
-    loop {
-        let txs = client
-            .get_transactions(
-                search_key.clone(),
-                Order::Desc,
-                PAGE_SIZE.into(),
-                after_cursor,
-            )
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-
-        if txs.objects.is_empty() {
-            return Ok(None);
-        }
-
-        if let Some(tx_hash) = first_input_tx_hash(&txs.objects) {
-            return Ok(Some(tx_hash));
-        }
-
-        after_cursor = Some(txs.last_cursor.clone());
     }
 }
 

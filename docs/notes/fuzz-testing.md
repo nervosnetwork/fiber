@@ -320,39 +320,15 @@ mod tests {
 **Pros**: Fully deterministic, fast, easy to fuzz with proptest.
 **Cons**: Requires refactoring actor handlers (can be done incrementally).
 
-### Approach C: Turmoil for Network Simulation (High Effort, Future)
+### Approach C: Turmoil for Network Simulation (Implemented)
 
-[Turmoil](https://github.com/tokio-rs/turmoil) (by tokio-rs) provides deterministic single-threaded simulation of networked systems:
-
-```rust
-use turmoil::Builder;
-
-#[test]
-fn test_channel_open_under_partition() {
-    let mut sim = Builder::new()
-        .simulation_duration(Duration::from_secs(60))
-        .build();
-
-    sim.host("alice", || async {
-        let node = start_fiber_node(config_alice()).await;
-        node.open_channel("bob", 1000).await?;
-        Ok(())
-    });
-
-    sim.host("bob", || async {
-        let node = start_fiber_node(config_bob()).await;
-        // Accept channel
-        Ok(())
-    });
-
-    // Partition network after channel open
-    sim.partition("alice", "bob");
-    sim.run().unwrap();
-}
-```
-
-**Pros**: True deterministic simulation, network fault injection, reproducible failures.
-**Cons**: Requires replacing real TCP with turmoil's simulated TCP. Ractor uses internal tokio channels — significant integration work needed.
+Fiber runs its Ractor actors inside [Turmoil](https://github.com/tokio-rs/turmoil)
+hosts in the `fiber-dst` crate. The harness drives Tokio tasks with virtual
+time and injects faults through simulated transport, SQLite, and CKB adapters.
+Run `make dst` for continuous seeded exploration or
+`cargo nextest run --locked --manifest-path tests/fiber-dst/Cargo.toml` for regression scenarios. The
+[DST README](../../tests/fiber-dst/README.md) describes the current
+architecture, workload policies, and replay commands.
 
 ### Framework Comparison
 
@@ -360,7 +336,7 @@ fn test_channel_open_under_partition() {
 |-----------|:---:|:---:|:---:|:---:|
 | **proptest** (state machine) | ✅ | ❌ | ✅ (no actors needed) | Low |
 | **cargo-fuzz** (libfuzzer) | ❌ | ❌ | ✅ (no actors needed) | Low |
-| **turmoil** (tokio-rs) | ✅ | ✅ | ⚠️ (high integration) | High |
+| **turmoil** (tokio-rs) | ✅ | ✅ | ✅ (integrated in `fiber-dst`) | High |
 | **madsim** (madeng) | ✅ | ✅ | ❌ (replaces tokio) | Very High |
 | **Message replay** | Partial | ❌ | ✅ | Medium |
 

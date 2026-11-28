@@ -71,6 +71,7 @@ default = []
 cch = ["bitcoin", "lightning-invoice"]
 watchtower = []
 sample = []
+simulation = []
 
 [package.metadata.cargo-shear]
 ignored = ["getrandom"]

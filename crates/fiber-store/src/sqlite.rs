@@ -11,6 +11,8 @@ use crate::iterator::{IteratorDirection, KVPair};
 #[derive(Clone, Debug)]
 pub struct Store {
     conn: Arc<Mutex<Connection>>,
+    #[cfg(feature = "simulation")]
+    batch_faults: Option<Arc<dyn crate::simulation::BatchCommitHook>>,
 }
 
 impl Store {
@@ -28,7 +30,17 @@ impl Store {
             let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
         }
         let db_file = path.join("data.sqlite");
-        let conn = Connection::open(&db_file).map_err(|e| e.to_string())?;
+        #[cfg(feature = "simulation")]
+        let (connection, batch_faults) = match crate::simulation::vfs_for(path)? {
+            Some((vfs, batch_faults)) => (
+                Connection::open_with_flags_and_vfs(&db_file, rusqlite::OpenFlags::default(), vfs),
+                Some(batch_faults),
+            ),
+            None => (Connection::open(&db_file), None),
+        };
+        #[cfg(not(feature = "simulation"))]
+        let connection = Connection::open(&db_file);
+        let conn = connection.map_err(|e| e.to_string())?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -58,6 +70,8 @@ impl Store {
 
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
+            #[cfg(feature = "simulation")]
+            batch_faults,
         })
     }
 
@@ -147,6 +161,8 @@ impl StorageBackend for Store {
         Batch {
             conn: Arc::clone(&self.conn),
             operations: Vec::new(),
+            #[cfg(feature = "simulation")]
+            batch_faults: self.batch_faults.clone(),
         }
     }
 
@@ -295,6 +311,8 @@ enum BatchOp {
 pub struct Batch {
     conn: Arc<Mutex<Connection>>,
     operations: Vec<BatchOp>,
+    #[cfg(feature = "simulation")]
+    batch_faults: Option<Arc<dyn crate::simulation::BatchCommitHook>>,
 }
 
 impl BatchWriter for Batch {
@@ -313,6 +331,21 @@ impl BatchWriter for Batch {
 
     fn commit(self) {
         let mut conn = self.conn.lock().expect("lock poisoned");
+        #[cfg(feature = "simulation")]
+        let _batch_scope = self.batch_faults.as_ref().and_then(|faults| {
+            faults.enter_batch(
+                &|prefix| {
+                    self.operations
+                        .iter()
+                        .any(|op| matches!(op, BatchOp::Put { key, .. } if key.starts_with(prefix)))
+                },
+                &|prefix| {
+                    self.operations
+                        .iter()
+                        .any(|op| matches!(op, BatchOp::Delete { key } if key.starts_with(prefix)))
+                },
+            )
+        });
         let tx = conn.transaction().expect("begin transaction");
         for op in &self.operations {
             match op {

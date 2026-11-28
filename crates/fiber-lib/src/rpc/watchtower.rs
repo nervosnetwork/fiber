@@ -207,23 +207,23 @@ impl<S> WatchtowerRpcServerImpl<S> {
         }
     }
 
-    pub(crate) fn with_signing_events(mut self, events: crate::signing::SigningEvents) -> Self {
+    pub fn with_signing_events(mut self, events: crate::signing::SigningEvents) -> Self {
         self.signing_events = events;
         self
     }
 
-    pub(crate) fn with_quotas(mut self, quotas: crate::lsp_config::WatchtowerQuotas) -> Self {
+    pub fn with_quotas(mut self, quotas: crate::lsp_config::WatchtowerQuotas) -> Self {
         self.quotas = quotas;
         self
     }
 
-    pub(crate) fn with_lsp_enabled(mut self, enabled: bool) -> Self {
+    pub fn with_lsp_enabled(mut self, enabled: bool) -> Self {
         self.lsp_enabled = enabled;
         self
     }
 
     #[cfg(all(not(target_arch = "wasm32"), feature = "lsp"))]
-    pub(crate) fn with_lsp_actor(
+    pub fn with_lsp_actor(
         mut self,
         lsp_actor: Option<ractor::ActorRef<crate::lsp::LspServiceMessage>>,
     ) -> Self {

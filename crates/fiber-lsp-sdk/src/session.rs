@@ -684,15 +684,21 @@ impl<S: SignerStore> HostedSession<S> {
                     ))
                 }
             };
+            let settlement_binding = settlement.clone().ok_or_else(|| {
+                SessionError::Invalid("missing commitment settlement".to_string())
+            })?;
+            // HostedTenant cannot transition an outbound payment to `Failed` (or retry a failed
+            // attempt) until the external signer signs the commitment removing the failed TLC.
+            // Stage cancellation in memory only when every unresolved removed TLC is outbound and
+            // provably refunded back to `local_amount`; `sign_commitment` persists it atomically
+            // with the signature if and only if the request is actually signed.
             signer
-                .prepare_commitment(
+                .prepare_commitment_allowing_outbound_refunds(
                     content,
                     crate::CommitmentContext {
                         transition,
                         session,
-                        settlement: settlement.clone().ok_or_else(|| {
-                            SessionError::Invalid("missing commitment settlement".to_string())
-                        })?,
+                        settlement: settlement_binding,
                     },
                     now_ms,
                 )
@@ -1278,5 +1284,353 @@ mod tests {
         assert!(params.local_settlement_key.is_none());
         assert!(params.local_settlement_key_pubkey.is_some());
         assert_eq!(params.channel_id, channel_id.into());
+    }
+
+    #[tokio::test]
+    async fn outbound_refund_auto_authorizes_cancel_while_fulfill_and_inbound_cancel_still_require_authorization(
+    ) {
+        let make_status = |content: ChannelSigningContent,
+                           context: crate::CommitmentContext,
+                           for_remote: bool| {
+            let ChannelSigningContent::Musig2(content) = content else {
+                panic!("expected musig2")
+            };
+            let snapshot = context.settlement;
+            let settlement = fiber_json_types::SigningSettlement {
+                local_amount: snapshot.data.local_amount,
+                remote_amount: snapshot.data.remote_amount,
+                local_settlement_pubkey: snapshot.local_settlement_key.into(),
+                remote_settlement_pubkey: snapshot.remote_settlement_key.into(),
+                for_remote,
+                tlcs: snapshot
+                    .data
+                    .tlcs
+                    .iter()
+                    .map(|tlc| fiber_json_types::SigningSettlementTlc {
+                        tlc_id: u64::from(tlc.tlc_id),
+                        local_key_commitment_number: tlc.local_key_commitment_number.unwrap(),
+                        inbound: tlc.tlc_id.is_received() == for_remote,
+                        payment_hash: tlc.payment_hash.into(),
+                        payment_amount: tlc.payment_amount,
+                        hash_algorithm: tlc.hash_algorithm.into(),
+                        expiry: tlc.expiry,
+                        local_key_pubkey: tlc.local_pubkey().into(),
+                        remote_key: tlc.remote_key.into(),
+                    })
+                    .collect(),
+            };
+            ChannelSigningStatus::SignatureRequired {
+                session_evidence: crate::json::session_evidence_to_rpc(&context.session),
+                request_id: Hash256::from([0x33; 32]).into(),
+                transition: if for_remote {
+                    ChannelSigningTransition::SendCommitmentSigned
+                } else {
+                    ChannelSigningTransition::CompleteReceivedCommitment
+                },
+                content: musig2_to_rpc(&content),
+                settlement: Some(settlement),
+            }
+        };
+
+        // 1. Outbound TLC refunded back to `local_amount` must NOT deadlock waiting for RPC `Failed`.
+        let f = crate::commitment_tests::Fixture::new(false).await;
+        f.sign(true, 0, f.opening()).await;
+        f.sign(false, 0, f.opening()).await;
+        f.signer.authorize_payment(f.terms(false)).await.unwrap();
+        let outbound_local = fiber_types::SettlementData {
+            local_amount: 350,
+            remote_amount: 600,
+            tlcs: vec![f.tlc(false, false)],
+        };
+        let outbound_remote = fiber_types::SettlementData {
+            local_amount: 350,
+            remote_amount: 600,
+            tlcs: vec![f.tlc(false, true)],
+        };
+        f.sign(true, 1, outbound_remote).await;
+        f.sign(false, 1, outbound_local).await;
+
+        let channel_id = Hash256::from([0x44; 32]);
+        let key_id = f.signer.channel_key_id();
+        let (pay_remote_content, pay_remote_ctx) = f
+            .request(
+                false,
+                2,
+                fiber_types::SettlementData {
+                    local_amount: 350,
+                    remote_amount: 650,
+                    tlcs: vec![],
+                },
+            )
+            .await;
+        let (refund_content, refund_ctx) = f.request(false, 2, f.opening()).await;
+        let mut session = HostedSession::new(f.root);
+        session.state.bindings.insert(channel_id, key_id);
+
+        // Removing an outbound TLC that pays `remote_amount` without `authorize_fulfillment`
+        // must still be rejected.
+        let err = session
+            .handle_channel_status(
+                channel_id,
+                make_status(pay_remote_content, pay_remote_ctx, false),
+                100,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("locally authorized resolution"),
+            "unexpected error: {err}"
+        );
+
+        // Removing the same outbound TLC back into `local_amount` (refund) auto-authorizes
+        // cancellation so HostedTenant can finish removing the failed TLC.
+        let outcome = session
+            .handle_channel_status(
+                channel_id,
+                make_status(refund_content, refund_ctx, false),
+                100,
+            )
+            .await
+            .expect("outbound refund should auto-authorize cancel");
+        let ProcessOutcome::NeedConfirmation(pending) = outcome else {
+            panic!("expected confirmation for outbound balance transition, got {outcome:?}");
+        };
+        let _ = session
+            .confirm(pending, 100)
+            .await
+            .expect("confirming refunded outbound commitment should succeed");
+
+        // 2. Inbound TLC cancelled back to `remote_amount` must STILL require explicit authorization.
+        let f_in = crate::commitment_tests::Fixture::new(false).await;
+        f_in.sign(false, 0, f_in.opening()).await;
+        f_in.signer
+            .authorize_invoice(f_in.terms(true), [9; 32].into())
+            .await
+            .unwrap();
+        f_in.sign(false, 1, f_in.incoming(false)).await;
+        let (in_cancel_content, in_cancel_ctx) = f_in.request(false, 2, f_in.opening()).await;
+        let in_key_id = f_in.signer.channel_key_id();
+        let mut in_session = HostedSession::new(f_in.root);
+        in_session.state.bindings.insert(channel_id, in_key_id);
+        let in_err = in_session
+            .handle_channel_status(
+                channel_id,
+                make_status(in_cancel_content, in_cancel_ctx, false),
+                100,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            in_err.to_string().contains("locally authorized resolution"),
+            "unexpected inbound cancel error: {in_err}"
+        );
+    }
+
+    fn make_commitment_status(
+        content: ChannelSigningContent,
+        context: crate::CommitmentContext,
+        for_remote: bool,
+    ) -> ChannelSigningStatus {
+        let ChannelSigningContent::Musig2(content) = content else {
+            panic!("expected musig2")
+        };
+        let snapshot = context.settlement;
+        let settlement = fiber_json_types::SigningSettlement {
+            local_amount: snapshot.data.local_amount,
+            remote_amount: snapshot.data.remote_amount,
+            local_settlement_pubkey: snapshot.local_settlement_key.into(),
+            remote_settlement_pubkey: snapshot.remote_settlement_key.into(),
+            for_remote,
+            tlcs: snapshot
+                .data
+                .tlcs
+                .iter()
+                .map(|tlc| fiber_json_types::SigningSettlementTlc {
+                    tlc_id: u64::from(tlc.tlc_id),
+                    local_key_commitment_number: tlc.local_key_commitment_number.unwrap(),
+                    inbound: tlc.tlc_id.is_received() == for_remote,
+                    payment_hash: tlc.payment_hash.into(),
+                    payment_amount: tlc.payment_amount,
+                    hash_algorithm: tlc.hash_algorithm.into(),
+                    expiry: tlc.expiry,
+                    local_key_pubkey: tlc.local_pubkey().into(),
+                    remote_key: tlc.remote_key.into(),
+                })
+                .collect(),
+        };
+        ChannelSigningStatus::SignatureRequired {
+            session_evidence: crate::json::session_evidence_to_rpc(&context.session),
+            request_id: Hash256::from([0x33; 32]).into(),
+            transition: if for_remote {
+                ChannelSigningTransition::SendCommitmentSigned
+            } else {
+                ChannelSigningTransition::CompleteReceivedCommitment
+            },
+            content: musig2_to_rpc(&content),
+            settlement: Some(settlement),
+        }
+    }
+
+    #[tokio::test]
+    async fn dismissed_outbound_refund_does_not_block_subsequent_fulfillment() {
+        let f = crate::commitment_tests::Fixture::new(false).await;
+        f.sign(true, 0, f.opening()).await;
+        f.sign(false, 0, f.opening()).await;
+        let terms = f.terms(false);
+        let payment_hash = terms.payment_hash;
+        f.signer.authorize_payment(terms).await.unwrap();
+        let outbound_local = fiber_types::SettlementData {
+            local_amount: 350,
+            remote_amount: 600,
+            tlcs: vec![f.tlc(false, false)],
+        };
+        let outbound_remote = fiber_types::SettlementData {
+            local_amount: 350,
+            remote_amount: 600,
+            tlcs: vec![f.tlc(false, true)],
+        };
+        f.sign(true, 1, outbound_remote).await;
+        f.sign(false, 1, outbound_local).await;
+
+        let channel_id = Hash256::from([0x45; 32]);
+        let key_id = f.signer.channel_key_id();
+        let (refund_content, refund_ctx) = f.request(false, 2, f.opening()).await;
+        let (fulfill_content, fulfill_ctx) = f
+            .request(
+                false,
+                2,
+                fiber_types::SettlementData {
+                    local_amount: 350,
+                    remote_amount: 650,
+                    tlcs: vec![],
+                },
+            )
+            .await;
+
+        let mut session = HostedSession::new(f.root);
+        session.state.bindings.insert(channel_id, key_id);
+
+        // Inspecting an outbound refund produces a confirmation prompt, but must NOT persist
+        // `Resolution::Cancel` before the wallet actually confirms and signs.
+        let outcome = session
+            .handle_channel_status(
+                channel_id,
+                make_commitment_status(refund_content, refund_ctx, false),
+                100,
+            )
+            .await
+            .expect("outbound refund should prepare for confirmation");
+        let ProcessOutcome::NeedConfirmation(pending_refund) = outcome else {
+            panic!("expected confirmation for refund, got {outcome:?}");
+        };
+        // Dismiss without confirming.
+        drop(pending_refund);
+
+        // Because nothing was persisted on dismissal, authorizing the real preimage and signing
+        // the fulfillment commitment paying `remote_amount` must still succeed.
+        f.signer
+            .authorize_fulfillment(payment_hash, [9; 32].into())
+            .await
+            .expect("dismissed refund must not reject valid preimage authorization");
+        let fulfill_outcome = session
+            .handle_channel_status(
+                channel_id,
+                make_commitment_status(fulfill_content, fulfill_ctx, false),
+                100,
+            )
+            .await
+            .expect("fulfillment commitment should validate after refund dismissal");
+        let ProcessOutcome::NeedConfirmation(pending_fulfill) = fulfill_outcome else {
+            panic!("expected confirmation for fulfillment, got {fulfill_outcome:?}");
+        };
+        let _ = session
+            .confirm(pending_fulfill, 100)
+            .await
+            .expect("confirming fulfillment after dismissed refund should succeed");
+    }
+
+    #[tokio::test]
+    async fn outbound_mixed_fulfill_and_refund_batch_signs_together() {
+        let f = crate::commitment_tests::Fixture::new(false).await;
+        f.sign(true, 0, f.opening()).await;
+        f.sign(false, 0, f.opening()).await;
+
+        let preimage_1 = Hash256::from([0x11; 32]);
+        let preimage_2 = Hash256::from([0x22; 32]);
+        let mut terms_1 = f.terms(false);
+        terms_1.payment_hash = fiber_types::HashAlgorithm::CkbHash.hash(preimage_1).into();
+        let mut terms_2 = f.terms(false);
+        terms_2.payment_hash = fiber_types::HashAlgorithm::CkbHash.hash(preimage_2).into();
+        f.signer.authorize_payment(terms_1.clone()).await.unwrap();
+        f.signer.authorize_payment(terms_2.clone()).await.unwrap();
+
+        let make_tlc = |id: u64, hash: Hash256, for_remote: bool| {
+            let mut tlc = f.tlc(false, for_remote);
+            tlc.tlc_id = if for_remote {
+                fiber_types::TLCId::Offered(id)
+            } else {
+                fiber_types::TLCId::Received(id)
+            };
+            tlc.payment_hash = hash;
+            tlc
+        };
+
+        // Start from balances 300/600 with two distinct 50-unit outbound TLCs locked.
+        let both_remote = fiber_types::SettlementData {
+            local_amount: 300,
+            remote_amount: 600,
+            tlcs: vec![
+                make_tlc(1, terms_1.payment_hash, true),
+                make_tlc(2, terms_2.payment_hash, true),
+            ],
+        };
+        let both_local = fiber_types::SettlementData {
+            local_amount: 300,
+            remote_amount: 600,
+            tlcs: vec![
+                make_tlc(1, terms_1.payment_hash, false),
+                make_tlc(2, terms_2.payment_hash, false),
+            ],
+        };
+        f.sign(true, 1, both_remote).await;
+        f.sign(false, 1, both_local).await;
+
+        // Authorize fulfillment for TLC 1 (+50 remote) while leaving TLC 2 pending (refunded +50 local).
+        f.signer
+            .authorize_fulfillment(terms_1.payment_hash, preimage_1)
+            .await
+            .unwrap();
+
+        let channel_id = Hash256::from([0x46; 32]);
+        let key_id = f.signer.channel_key_id();
+        let (mixed_content, mixed_ctx) = f
+            .request(
+                false,
+                2,
+                fiber_types::SettlementData {
+                    local_amount: 350,
+                    remote_amount: 650,
+                    tlcs: vec![],
+                },
+            )
+            .await;
+
+        let mut session = HostedSession::new(f.root);
+        session.state.bindings.insert(channel_id, key_id);
+        let outcome = session
+            .handle_channel_status(
+                channel_id,
+                make_commitment_status(mixed_content, mixed_ctx, false),
+                100,
+            )
+            .await
+            .expect("mixed fulfill + refund batch should validate into 350/650");
+        let ProcessOutcome::NeedConfirmation(pending) = outcome else {
+            panic!("expected confirmation for mixed batch, got {outcome:?}");
+        };
+        let _ = session
+            .confirm(pending, 100)
+            .await
+            .expect("confirming mixed fulfill + refund batch should succeed");
     }
 }

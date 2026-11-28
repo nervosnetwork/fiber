@@ -56,7 +56,7 @@ pub enum CellStatus {
 // and we use this context to guarantee that the block timestamp is the same across all nodes.
 pub static BLOCK_TIMESTAMP_CONTEXT: OnceCell<TokioRwLock<BlockTimestampContext>> = OnceCell::new();
 
-#[derive(Default)]
+#[derive(Default, Clone, Debug)]
 pub struct BlockTimestampContext {
     pub timestamps: HashMap<H256, u64>,
     // If non empty, we will use this as the timestamp for the next block.
@@ -285,6 +285,8 @@ impl Actor for TraceTxReplier {
         message: Self::Msg,
         reply_port: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
+        #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+        crate::simulation::before_actor_message(myself.get_id()).await;
         if let Some(reply_port) = reply_port.take() {
             let _ = reply_port.send(message);
         }
@@ -308,6 +310,26 @@ pub trait MockChainActorMiddleware: Send + std::fmt::Debug {
     fn clone_box(&self) -> Box<dyn MockChainActorMiddleware>;
 }
 
+/// Minimal simulation chain driver seam injected by `fiber-dst` into `MockChainState`.
+#[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+pub trait SimulatedChainDriver: Send + Sync + std::fmt::Debug {
+    /// Whether settlement clock validation and simulated block headers are active.
+    fn is_active(&self) -> bool;
+    /// Validate inputs, relative/absolute `since` maturity, and capacity conservation.
+    fn validate_spend(&self, state: &MockChainState, tx: &TransactionView) -> anyhow::Result<()>;
+    /// Current simulated block header derived from the virtual clock.
+    fn current_tip(&self, state: &MockChainState) -> ckb_types::core::HeaderView;
+    /// Query live cells from `MockChainState` using CKB indexer semantics.
+    fn query_cells(
+        &self,
+        state: &MockChainState,
+        key: &ckb_sdk::rpc::ckb_indexer::SearchKey,
+        order: ckb_sdk::rpc::ckb_indexer::Order,
+        limit: u32,
+        after: Option<ckb_jsonrpc_types::JsonBytes>,
+    ) -> ckb_sdk::rpc::ckb_indexer::Pagination<ckb_sdk::rpc::ckb_indexer::Cell>;
+}
+
 #[derive(Clone, Debug)]
 pub struct MockChainState {
     pub txs: HashMap<Hash256, GetTxResponse>,
@@ -315,6 +337,10 @@ pub struct MockChainState {
     pub tx_notifications: Arc<OutputPort<MockTxNotification>>,
     pub cell_status: HashMap<OutPoint, CellStatus>,
     pub indexer_cells: Vec<ckb_sdk::rpc::ckb_indexer::Cell>,
+    #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+    simulation_timestamps: BlockTimestampContext,
+    #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+    pub driver: Option<Arc<dyn SimulatedChainDriver>>,
 }
 
 impl Default for MockChainState {
@@ -331,7 +357,93 @@ impl MockChainState {
             tx_notifications: Arc::new(OutputPort::default()),
             cell_status: HashMap::new(),
             indexer_cells: Vec::new(),
+            #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+            simulation_timestamps: BlockTimestampContext::default(),
+            #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+            driver: None,
         }
+    }
+
+    pub fn submit_transaction(&mut self, tx: TransactionView) -> Result<(), ckb_sdk::RpcError> {
+        const MAX_CYCLES: u64 = 100_000_000;
+        let hash = tx.hash().into();
+        if self
+            .txs
+            .get(&hash)
+            .is_some_and(|record| matches!(record.tx_status, TxStatus::Committed(..)))
+        {
+            return Ok(());
+        }
+
+        let inputs: Vec<_> = tx.input_pts_iter().collect();
+        let result: anyhow::Result<()> = (|| {
+            let mut unique = std::collections::HashSet::new();
+            for input in &inputs {
+                anyhow::ensure!(
+                    unique.insert(input)
+                        && self.cell_status.get(input) != Some(&CellStatus::Consumed),
+                    "Cell {input:?} already consumed",
+                );
+            }
+            #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+            if let Some(driver) = self.driver.as_ref().filter(|driver| driver.is_active()) {
+                driver.validate_spend(self, &tx)?;
+            }
+            let context = &mut MOCK_CONTEXT.write().unwrap().context;
+            if !inputs.is_empty() {
+                context
+                    .verify_tx(&tx, MAX_CYCLES)
+                    .map_err(|err| anyhow!("Failed to verify transaction: {err:?}"))?;
+            }
+            for (outpoint, (output, data)) in tx
+                .output_pts()
+                .into_iter()
+                .zip(tx.outputs().into_iter().zip(tx.outputs_data()))
+            {
+                context.create_cell_with_out_point(outpoint, output, data.as_bytes());
+            }
+            for input in &inputs {
+                self.cell_status.insert(input.clone(), CellStatus::Consumed);
+            }
+            Ok(())
+        })();
+        let status = match &result {
+            Ok(()) => {
+                #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+                if let Some(driver) = self.driver.as_ref().filter(|driver| driver.is_active()) {
+                    let header = driver.current_tip(self);
+                    let hash = H256::from(header.hash());
+                    self.simulation_timestamps
+                        .timestamps
+                        .insert(hash.clone(), header.timestamp());
+                    TxStatus::Committed(header.number(), hash, 0)
+                } else {
+                    TxStatus::Committed(0, H256::default(), 0)
+                }
+                #[cfg(not(all(feature = "simulation", not(target_arch = "wasm32"))))]
+                TxStatus::Committed(0, H256::default(), 0)
+            }
+            Err(error) => TxStatus::Rejected(error.to_string()),
+        };
+        self.txs.insert(
+            hash,
+            GetTxResponse {
+                transaction: Some(tx),
+                tx_status: status.clone(),
+            },
+        );
+        self.tx_notifications
+            .send(MockTxNotification::Tx(CkbTxTracingResult::new(
+                hash, status,
+            )));
+        if result.is_ok() && !inputs.is_empty() {
+            self.tx_notifications
+                .send(MockTxNotification::ConsumedInputs {
+                    spending_tx_hash: hash,
+                    inputs,
+                });
+        }
+        result.map_err(ckb_sdk::RpcError::Other)
     }
 
     pub fn is_input_spent_by_other_committed_tx(
@@ -434,6 +546,8 @@ impl Actor for MockChainActor {
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
+        #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+        crate::simulation::before_actor_message(myself.get_id()).await;
         let message = if let Some(mut middleware) = state.middleware.take() {
             let handled = middleware.handle(myself.clone(), message, state).await;
             state.middleware = Some(middleware);
@@ -615,111 +729,8 @@ impl Actor for MockChainActor {
                 }
             }
             SendTx(tx, reply_port) => {
-                const MAX_CYCLES: u64 = 100_000_000;
-                let f = || {
-                    // Mark the inputs as consumed
-                    for input in tx.input_pts_iter() {
-                        let mut state_guard = state.shared.write().unwrap();
-                        match state_guard.cell_status.entry(input.clone()) {
-                            std::collections::hash_map::Entry::Occupied(mut entry) => {
-                                if *entry.get() == CellStatus::Consumed {
-                                    return (
-                                        TxStatus::Rejected("Cell already consumed".to_string()),
-                                        Err(ckb_sdk::RpcError::Other(anyhow!(
-                                            "Cell {:?} already consumed",
-                                            &input
-                                        ))),
-                                    );
-                                }
-                                *entry.get_mut() = CellStatus::Consumed;
-                            }
-                            std::collections::hash_map::Entry::Vacant(entry) => {
-                                debug!("Consuming cell {:?}", &input);
-                                entry.insert(CellStatus::Consumed);
-                            }
-                        }
-                    }
-
-                    // The inputs will always not empty for production environment, but it may empty for test environment,
-                    // `MockChainActor` only used in testing, so we skip VM verification for these synthetic transactions
-                    let has_inputs = !tx.inputs().is_empty();
-                    let context = &mut MOCK_CONTEXT.write().unwrap().context;
-                    let verify_result = if has_inputs {
-                        context.verify_tx(&tx, MAX_CYCLES).map(Some)
-                    } else {
-                        Ok(None)
-                    };
-                    match verify_result {
-                        Ok(cycles) => {
-                            if let Some(c) = cycles {
-                                debug!("Verified transaction: {:?} with {} CPU cycles", tx, c);
-                            } else {
-                                debug!(
-                                    "Funding transaction {:?} committed without script verification",
-                                    tx
-                                );
-                            }
-                            // Also save the outputs to the context, so that we can refer to
-                            // these out points later.
-                            for outpoint in tx.output_pts().into_iter() {
-                                let index: u32 = outpoint.index().unpack();
-                                let index = index as usize;
-                                let cell = tx.outputs().get(index).unwrap();
-                                let data = tx.outputs_data().get(index).unwrap();
-                                context.create_cell_with_out_point(
-                                    outpoint.clone(),
-                                    cell,
-                                    data.as_bytes(),
-                                );
-                            }
-                            (TxStatus::Committed(0, H256::default(), 0), Ok(()))
-                        }
-                        Err(e) => (
-                            TxStatus::Rejected("Failed to verify transaction".to_string()),
-                            Err(ckb_sdk::RpcError::Other(anyhow!(
-                                "Failed to verify transaction: {:?}, error: {:?}",
-                                tx,
-                                e
-                            ))),
-                        ),
-                    }
-                };
-                let (tx_status, result) = f();
-                debug!(
-                    "Transaction verification result: tx {:?}, status: {:?}",
-                    &tx, &tx_status
-                );
-                let tx_hash: Hash256 = tx.hash().into();
-                let consumed_inputs: Vec<OutPoint> = tx.input_pts_iter().collect();
-                let mut state_guard = state.shared.write().unwrap();
-                state_guard
-                    .tx_notifications
-                    .send(MockTxNotification::Tx(CkbTxTracingResult::new(
-                        tx_hash,
-                        tx_status.clone(),
-                    )));
-                if matches!(tx_status, TxStatus::Committed(..)) && !consumed_inputs.is_empty() {
-                    state_guard
-                        .tx_notifications
-                        .send(MockTxNotification::ConsumedInputs {
-                            spending_tx_hash: tx_hash,
-                            inputs: consumed_inputs,
-                        });
-                }
-                state_guard.txs.insert(
-                    tx_hash,
-                    GetTxResponse {
-                        transaction: Some(tx),
-                        tx_status,
-                    },
-                );
-                if let Err(e) = reply_port.send(result) {
-                    error!(
-                        "[{}] send reply failed: {:?}",
-                        myself.get_name().unwrap_or_default(),
-                        e
-                    );
-                }
+                let result = state.shared.write().unwrap().submit_transaction(tx);
+                let _ = reply_port.send(result);
             }
 
             CreateTxTracer(tracer) => {
@@ -965,17 +976,27 @@ async fn test_set_and_get_block_timestamp() {
 #[derive(Clone, Debug)]
 pub struct MockCkbChainClient {
     pub state: Arc<RwLock<MockChainState>>,
+    #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+    pub simulation_hook: Option<Arc<dyn crate::simulation::SimulatedChainClientHook>>,
 }
 
 impl MockCkbChainClient {
     pub fn new(state: Arc<RwLock<MockChainState>>) -> Self {
-        Self { state }
+        Self {
+            state,
+            #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+            simulation_hook: None,
+        }
     }
 }
 
 #[async_trait::async_trait]
 impl CkbChainClient for MockCkbChainClient {
     async fn get_transaction(&self, hash: ckb_types::H256) -> Result<GetTxResponse, anyhow::Error> {
+        #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+        if let Some(hook) = &self.simulation_hook {
+            hook.before_client_request("get_transaction").await?;
+        }
         let hash: Hash256 = hash.into();
         let state = self.state.read().unwrap();
         Ok(state
@@ -1015,19 +1036,42 @@ impl CkbChainClient for MockCkbChainClient {
 
     async fn get_cells(
         &self,
-        _search_key: ckb_sdk::rpc::ckb_indexer::SearchKey,
-        _order: ckb_sdk::rpc::ckb_indexer::Order,
-        _limit: u32,
-        _after: Option<ckb_jsonrpc_types::JsonBytes>,
+        search_key: ckb_sdk::rpc::ckb_indexer::SearchKey,
+        order: ckb_sdk::rpc::ckb_indexer::Order,
+        limit: u32,
+        after: Option<ckb_jsonrpc_types::JsonBytes>,
     ) -> Result<ckb_sdk::rpc::ckb_indexer::Pagination<ckb_sdk::rpc::ckb_indexer::Cell>, anyhow::Error>
     {
+        #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+        if let Some(hook) = &self.simulation_hook {
+            hook.before_client_request("get_cells").await?;
+        }
+        let state = self.state.read().unwrap();
+        #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+        if let Some(driver) = state.driver.as_ref().filter(|driver| driver.is_active()) {
+            return Ok(driver.query_cells(&state, &search_key, order, limit, after));
+        }
+        let _ = (search_key, order, limit, after);
         Ok(ckb_sdk::rpc::ckb_indexer::Pagination {
-            objects: self.state.read().unwrap().indexer_cells.clone(),
+            objects: state.indexer_cells.clone(),
             last_cursor: ckb_jsonrpc_types::JsonBytes::default(),
         })
     }
 
     async fn get_block_timestamp(&self, block_hash: Hash256) -> Result<Option<u64>, anyhow::Error> {
+        #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+        if let Some(hook) = &self.simulation_hook {
+            hook.before_client_request("get_block_timestamp").await?;
+        }
+        #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+        if crate::simulation::is_running() {
+            let mut state = self.state.write().expect("shared mock chain");
+            return Ok(Some(
+                state
+                    .simulation_timestamps
+                    .get_block_timestamp(block_hash.into()),
+            ));
+        }
         let timestamp = get_block_timestamp(block_hash.into()).await;
         Ok(Some(timestamp))
     }
@@ -1036,6 +1080,35 @@ impl CkbChainClient for MockCkbChainClient {
         &self,
         _funding_lock_script: ckb_types::packed::Script,
     ) -> Result<Option<crate::ckb::client::GetShutdownTxResponse>, anyhow::Error> {
+        #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+        if let Some(hook) = &self.simulation_hook {
+            hook.before_client_request("get_shutdown_tx").await?;
+            let state = self.state.read().expect("shared mock chain");
+            // Discover a confirmed spend of the actual funding output, as the
+            // production indexer would. Unconfirmed spends are not shutdown evidence.
+            return Ok(state
+                .txs
+                .iter()
+                .filter(|(_, response)| matches!(response.tx_status, TxStatus::Committed(..)))
+                .filter(|(_, response)| {
+                    response.transaction.as_ref().is_some_and(|tx| {
+                        tx.input_pts_iter().any(|input| {
+                            let output_index: u32 = input.index().unpack();
+                            state
+                                .txs
+                                .get(&Hash256::from(input.tx_hash()))
+                                .and_then(|funding| funding.transaction.as_ref())
+                                .and_then(|funding| funding.outputs().get(output_index as usize))
+                                .is_some_and(|output| output.lock() == _funding_lock_script)
+                        })
+                    })
+                })
+                .min_by_key(|(hash, _)| *hash)
+                .map(|(_, response)| crate::ckb::client::GetShutdownTxResponse {
+                    transaction: response.transaction.clone(),
+                    tx_status: response.tx_status.clone(),
+                }));
+        }
         Ok(None)
     }
 }

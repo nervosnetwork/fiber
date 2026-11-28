@@ -91,6 +91,27 @@ pub struct HostedTenantRpcContext {
     pub(crate) store: Store,
 }
 
+#[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+impl HostedTenantRpcContext {
+    /// Trigger an immediate `CheckChannelsShutdown` scan on this hosted tenant's `FiberActor`.
+    pub fn check_channels_shutdown(&self) {
+        let _ = self
+            .fiber_actor
+            .send_message(crate::fiber::FiberActorMessage::new_command(
+                crate::fiber::FiberActorCommand::CheckChannelsShutdown,
+            ));
+    }
+
+    /// Trigger an immediate `CheckChannels` maintenance pass on this hosted tenant's `FiberActor`.
+    pub fn check_channels(&self) {
+        let _ = self
+            .fiber_actor
+            .send_message(crate::fiber::FiberActorMessage::new_command(
+                crate::fiber::FiberActorCommand::CheckChannels,
+            ));
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 /// Resolve the watchtower namespace for an authenticated token.
 ///

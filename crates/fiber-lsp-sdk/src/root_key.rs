@@ -18,7 +18,7 @@ impl RootKey {
     pub fn generate() -> Result<Self, SignerError> {
         loop {
             let mut bytes = [0u8; 32];
-            getrandom::fill(&mut bytes).map_err(|error| SignerError::Random(error.to_string()))?;
+            crate::fill_random(&mut bytes)?;
             if let Ok(mut key) = SecretKey::from_byte_array(&bytes) {
                 key.non_secure_erase();
                 return Ok(Self {

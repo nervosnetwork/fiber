@@ -523,9 +523,8 @@ impl SendPaymentCommand {
                 return Err("keysend payment should not have payment_hash".to_string());
             }
             // generate a random preimage for keysend payment
-            let mut rng = rand::rng();
             let mut result = [0u8; 32];
-            rng.fill(&mut result[..]);
+            crate::with_random(|rng| rng.fill(&mut result));
             let preimage: Hash256 = result.into();
             // use the default payment hash algorithm here for keysend payment
             let payment_hash: Hash256 = blake2b_256(preimage).into();
@@ -1144,6 +1143,8 @@ where
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
+        #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+        crate::simulation::before_actor_message(myself.get_id()).await;
         #[cfg(feature = "metrics")]
         let start = crate::now_timestamp_as_millis_u64();
         #[cfg(feature = "metrics")]
@@ -1207,6 +1208,11 @@ where
         max_fee_amount: Option<u128>,
         request: SendPaymentState,
     ) -> Result<Vec<PaymentHopData>, PathFindError> {
+        #[cfg(feature = "simulation")]
+        if crate::simulation::is_running() {
+            let graph = self.network_graph.read().await;
+            return graph.build_route(amount, amount_low_bound, max_fee_amount, &request);
+        }
         let network_graph = self.network_graph.clone();
         tokio::task::spawn_blocking(move || {
             let graph = network_graph.blocking_read();
@@ -1864,11 +1870,7 @@ where
             return Err(Error::SendPaymentError(error));
         }
 
-        for attempt in &result {
-            session.append_attempt(attempt.clone());
-        }
-
-        return Ok(result);
+        Ok(result)
     }
 
     async fn apply_trampoline_forwarding_fee(
@@ -1934,8 +1936,24 @@ where
 
         assert_ne!(attempt.route_hops[0].funding_tx_hash, Hash256::default());
 
+        #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+        let deterministic_key = crate::simulation::is_running().then(|| {
+            let context = [
+                attempt.payment_hash.as_ref(),
+                &attempt.id.to_le_bytes(),
+                &attempt.tried_times.to_le_bytes(),
+            ]
+            .concat();
+            crate::simulation::keyed_random(b"payment-onion", &context)
+        });
         let peeled_onion_packet = match PeeledPaymentOnionPacket::create_with_session_key_fn(
-            || Privkey::from_slice(KeyPair::generate_random_key().as_ref()),
+            || {
+                #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+                if let Some(key) = deterministic_key {
+                    return Privkey::from_slice(&key);
+                }
+                Privkey::from_slice(KeyPair::generate_random_key().as_ref())
+            },
             attempt.route_hops.clone(),
             Some(attempt.hash.as_ref().to_vec()),
             &Secp256k1::signing_only(),
@@ -2155,6 +2173,9 @@ where
             })?;
 
         for attempt in attempts.iter_mut() {
+            // A dispatch error can end this loop. Later planned shards must not
+            // count as active work when deciding how to handle that error.
+            session.append_attempt(attempt.clone());
             self.send_attempt(myself.clone(), state, &mut session, attempt)
                 .await?;
         }
@@ -2785,7 +2806,10 @@ where
         // will not store the payment session and send the onion packet
         if payment_data.dry_run {
             let mut payment_session = PaymentSession::new_session(&self.store, payment_data, 0);
-            self.build_payment_routes(&mut payment_session).await?;
+            let routes = self.build_payment_routes(&mut payment_session).await?;
+            for attempt in routes {
+                payment_session.append_attempt(attempt);
+            }
             return Ok(SendPaymentResponse::from_session(
                 payment_session,
                 &self.store,
@@ -2901,6 +2925,114 @@ mod closed_add_tests {
             // Drop the reply without reporting acceptance or rejection.
             Ok(())
         }
+    }
+
+    struct RejectFirstHop;
+
+    #[async_trait::async_trait]
+    impl Actor for RejectFirstHop {
+        type Msg = crate::fiber::NetworkActorMessage;
+        type State = super::Pubkey;
+        type Arguments = super::Pubkey;
+
+        async fn pre_start(
+            &self,
+            _: ActorRef<Self::Msg>,
+            payer: Self::Arguments,
+        ) -> Result<Self::State, ActorProcessingErr> {
+            Ok(payer)
+        }
+
+        async fn handle(
+            &self,
+            _: ActorRef<Self::Msg>,
+            message: Self::Msg,
+            payer: &mut Self::State,
+        ) -> Result<(), ActorProcessingErr> {
+            use crate::fiber::{FiberActorCommand, FiberActorMessage, NetworkActorMessage};
+
+            if let NetworkActorMessage::Fiber(FiberActorMessage::Command(
+                FiberActorCommand::SendPaymentOnionPacket(command, reply),
+            )) = message
+            {
+                let outpoint = super::OutPoint::new(
+                    command.peeled_onion_packet.current.funding_tx_hash.into(),
+                    0,
+                );
+                reply.send(Err(super::TlcErr::new_channel_fail(
+                    super::TlcErrorCode::UnknownNextPeer,
+                    *payer,
+                    outpoint,
+                    None,
+                )))?;
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_mpp_rejected_first_shard_marks_payment_failed() {
+        use secp256k1::SECP256K1;
+
+        use crate::fiber::PaymentStatus;
+        use crate::gen_rand_sha256_hash;
+        use crate::invoice::{Currency, InvoiceBuilder};
+        use crate::tests::test_utils::{create_n_nodes_network, MIN_RESERVED_CKB};
+
+        const PART_CAPACITY: u128 = 10_000_000_000;
+        // The invoice needs both channels, so the first hop is rejected with a
+        // second shard still waiting in the dispatch loop.
+        let (nodes, _) = create_n_nodes_network(
+            &[((0, 1), (MIN_RESERVED_CKB + PART_CAPACITY, MIN_RESERVED_CKB)); 2],
+            2,
+        )
+        .await;
+        let [payer, payee] = nodes.try_into().expect("two nodes");
+        let invoice = InvoiceBuilder::new(Currency::Fibd)
+            .amount(Some(PART_CAPACITY + PART_CAPACITY / 2))
+            .payee_pub_key(payee.pubkey.into())
+            .allow_mpp(true)
+            .payment_preimage(gen_rand_sha256_hash())
+            .payment_secret(gen_rand_sha256_hash())
+            .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &payee.private_key.0))
+            .unwrap();
+        let request = super::SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            max_parts: Some(2),
+            ..Default::default()
+        }
+        .build_send_payment_data(Currency::Fibd)
+        .unwrap();
+        let hash = request.payment_hash;
+        let (network, network_task) = Actor::spawn(None, RejectFirstHop, payer.pubkey)
+            .await
+            .unwrap();
+        let actor = PaymentActor::new(
+            payer.store.clone(),
+            payer.network_graph.clone(),
+            network.clone().into(),
+        );
+        let mut state = PaymentActorState::new(PaymentActorArguments {
+            session_key: hash.into(),
+            init_command: PaymentActorMessage::TlcUpdated,
+        });
+        let (mailbox, task) = Actor::spawn(None, RetryMailbox, ()).await.unwrap();
+        let response = actor
+            .send_payment_with_payment_data(mailbox.clone(), &mut state, request)
+            .await;
+        mailbox.stop(None);
+        task.await.unwrap();
+        network.stop(None);
+        network_task.await.unwrap();
+
+        assert!(response.is_err());
+        let attempts = payer.store.get_attempts(hash);
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].status, AttemptStatus::Failed);
+        assert_eq!(
+            payer.store.get_persisted_payment_status(hash),
+            Some(PaymentStatus::Failed)
+        );
     }
 
     #[tokio::test]
