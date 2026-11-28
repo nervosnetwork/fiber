@@ -333,6 +333,16 @@ pub struct SubmitSignedFundingTxResult {
 pub struct AbandonChannelParams {
     /// The temporary channel ID or real channel ID of the channel being abandoned
     pub channel_id: Hash256,
+    /// Abandon the channel even if it is in a protected state.
+    ///
+    /// When true, `AwaitingChannelReady`, `ChannelReady`, funded and externally
+    /// funded channels can be abandoned. `ShuttingDown` and `Closed` still
+    /// require shutdown. Abandoning does not close the funding transaction on
+    /// chain: it deletes the local channel state and removes watchtower
+    /// protection. If the funding transaction later confirms, funds can be
+    /// permanently lost. Use this only for channels whose funding transaction can
+    /// no longer confirm, and back up the database first.
+    pub force: Option<bool>,
 }
 
 /// Parameters for accepting a channel.

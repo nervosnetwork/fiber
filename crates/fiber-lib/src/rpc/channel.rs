@@ -64,7 +64,18 @@ trait ChannelRpc {
     ) -> Result<AcceptChannelResult, ErrorObjectOwned>;
 
     /// Abandon a channel, this will remove the channel from the channel manager and DB.
-    /// Only channels not in Ready or Closed state can be abandoned.
+    ///
+    /// Without `force`, only channels that have not reached a funded/protected state
+    /// can be abandoned. With `force = true`, `AwaitingChannelReady`, `ChannelReady`,
+    /// funded and externally funded channels can be abandoned. Channels in
+    /// `ShuttingDown` or `Closed` still require shutdown.
+    ///
+    /// ##### Warning
+    /// Forcing an abandon does not close the funding transaction on chain. It
+    /// deletes the local channel state and removes watchtower protection, so if
+    /// the funding transaction later confirms, funds may be permanently lost.
+    /// Use this only when the funding transaction can no longer confirm, and back
+    /// up the database first.
     #[method(name = "abandon_channel", with_extensions)]
     async fn abandon_channel(&self, params: AbandonChannelParams) -> Result<(), ErrorObjectOwned>;
 
@@ -392,7 +403,9 @@ where
     }
 
     /// Abandon a channel, this will remove the channel from the channel manager and DB.
-    /// Only channels not in Ready or Closed state can be abandoned.
+    /// Without `force`, only channels that have not reached a funded/protected state
+    /// can be abandoned. `force = true` also permits `AwaitingChannelReady` and
+    /// `ChannelReady` channels, but still rejects `ShuttingDown` and `Closed`.
     async fn abandon_channel(
         &self,
         extensions: &Extensions,
@@ -635,8 +648,11 @@ where
         params: AbandonChannelParams,
     ) -> Result<(), ErrorObjectOwned> {
         let channel_id = params.channel_id.into();
+        let force = params.force.unwrap_or_default();
         let message = |rpc_reply| {
-            FiberActorMessage::new_command(FiberActorCommand::AbandonChannel(channel_id, rpc_reply))
+            FiberActorMessage::new_command(FiberActorCommand::AbandonChannel(
+                channel_id, force, rpc_reply,
+            ))
         };
         handle_actor_call!(self.actor()?, message, params)
     }

@@ -629,6 +629,23 @@ mod channel_cli_tests {
         );
         let params = AbandonChannelParams::from_arg_matches(&matches).unwrap();
         assert_eq!(params.channel_id, hash_hex.parse::<Hash256>().unwrap());
+        assert_eq!(params.force, None);
+
+        // Bare `--force` keeps the generated bool-flag default; only an explicit
+        // `--force true` enables the dangerous path.
+        let matches = parse_args(
+            AbandonChannelParams::augment_command,
+            &["test", "--channel-id", &hash_hex, "--force"],
+        );
+        let params = AbandonChannelParams::from_arg_matches(&matches).unwrap();
+        assert_eq!(params.force, Some(false));
+
+        let matches = parse_args(
+            AbandonChannelParams::augment_command,
+            &["test", "--channel-id", &hash_hex, "--force", "true"],
+        );
+        let params = AbandonChannelParams::from_arg_matches(&matches).unwrap();
+        assert_eq!(params.force, Some(true));
     }
 
     #[test]

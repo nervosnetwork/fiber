@@ -9867,7 +9867,7 @@ async fn test_abandon_failed_channel_without_accept() {
     // The bootstrap nonce must be durable before advertisement.
     assert_v2_session_durable(&node_a_channel_actor_state.unwrap());
 
-    let res = node_a.send_abandon_channel(temp_channel_id).await;
+    let res = node_a.send_abandon_channel(temp_channel_id, false).await;
     assert!(res.is_ok());
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
     node_a.expect_debug_event("ChannelActorStopped").await;
@@ -10150,14 +10150,14 @@ async fn test_abandon_channel_with_peer_accept() {
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
     // temp_channel_id will not work now, since it has been replaced by the real channel_id
-    let res = node_a.send_abandon_channel(temp_channel_id).await;
+    let res = node_a.send_abandon_channel(temp_channel_id, false).await;
     assert!(res.is_err());
 
     let channel_actor_state = node_a
         .get_channel_actor_state_unchecked(new_channel_id)
         .expect("channel actor state");
     eprintln!("channel_actor_state: {:?}", channel_actor_state.state);
-    let res = node_a.send_abandon_channel(new_channel_id).await;
+    let res = node_a.send_abandon_channel(new_channel_id, false).await;
     eprintln!("res: {:?}", res);
     assert!(res.is_ok());
 
@@ -10177,13 +10177,109 @@ async fn test_abandon_channel_with_peer_accept() {
     let channel_actor_state = node_b.get_channel_actor_state_unchecked(new_channel_id);
     assert_v2_session_durable(&channel_actor_state.unwrap());
 
-    let res = node_b.send_abandon_channel(new_channel_id).await;
+    let res = node_b.send_abandon_channel(new_channel_id, false).await;
     eprintln!("res: {:?}", res);
     assert!(res.is_ok());
 
     // make sure the channel actor is stopped
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
     node_b.expect_debug_event("ChannelActorStopped").await;
+}
+
+#[tokio::test]
+async fn test_force_abandon_ready_channel() {
+    init_tracing();
+
+    let (nodes, channels) =
+        create_n_nodes_network(&[((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT))], 2).await;
+    let [mut node_0, _node_1] = nodes.try_into().expect("2 nodes");
+    let channel_id = channels[0];
+
+    let res = node_0.send_abandon_channel(channel_id, false).await;
+    assert!(
+        res.is_err(),
+        "a ready channel must not be abandoned without force"
+    );
+
+    node_0
+        .send_abandon_channel(channel_id, true)
+        .await
+        .expect("force abandon should be accepted");
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    node_0.expect_debug_event("ChannelActorStopped").await;
+    assert!(
+        node_0
+            .get_channel_actor_state_unchecked(channel_id)
+            .is_none(),
+        "force abandon must remove the channel record"
+    );
+}
+
+#[tokio::test]
+async fn test_force_abandon_rejects_shutting_down_and_closed_channel() {
+    let (nodes, channels) =
+        create_n_nodes_network(&[((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT))], 2).await;
+    let [node_0, _node_1] = nodes.try_into().expect("2 nodes");
+    let channel_id = channels[0];
+
+    node_0
+        .send_shutdown_command_to_channel(
+            channel_id,
+            ShutdownCommand {
+                force: true,
+                close_script: None,
+                fee_rate: None,
+            },
+        )
+        .await;
+
+    let mut saw_shutting_down = false;
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+    loop {
+        let state = node_0
+            .get_channel_actor_state_unchecked(channel_id)
+            .expect("channel record must stay while closing is in flight");
+        if matches!(state.state, ChannelState::ShuttingDown(_)) && !saw_shutting_down {
+            saw_shutting_down = true;
+            let error = node_0
+                .send_abandon_channel(channel_id, true)
+                .await
+                .expect_err("force abandon must be rejected in ShuttingDown");
+            assert!(
+                error.contains("force abandon is not allowed"),
+                "unexpected error: {error}"
+            );
+        }
+        if matches!(
+            state.state,
+            ChannelState::Closed(flags)
+                if flags.contains(CloseFlags::UNCOOPERATIVE_LOCAL)
+                    && flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT)
+        ) {
+            let error = node_0
+                .send_abandon_channel(channel_id, true)
+                .await
+                .expect_err("force abandon must be rejected while settlement is pending");
+            assert!(
+                error.contains("force abandon is not allowed"),
+                "unexpected error: {error}"
+            );
+            assert!(
+                node_0
+                    .get_channel_actor_state_unchecked(channel_id)
+                    .is_some(),
+                "the rejected force abandon must keep the channel record"
+            );
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "channel did not reach the waiting-on-chain-settlement state: {:?}",
+            state.state
+        );
+        tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+    }
 }
 
 #[tokio::test]
@@ -12587,6 +12683,7 @@ async fn test_external_funding_pending_reply_returns_error_when_channel_stops() 
     let abandon_message = |rpc_reply| {
         NetworkActorMessage::new_command(FiberActorCommand::AbandonChannel(
             temp_channel_id,
+            false,
             rpc_reply,
         ))
     };
@@ -12669,7 +12766,9 @@ async fn do_test_external_funding_tx_abort_preserves_recoverable_state() {
     assert!(matches!(state.state, ChannelState::AwaitingTxSignatures(_)));
 
     let abandon_message = |reply| {
-        NetworkActorMessage::new_command(FiberActorCommand::AbandonChannel(channel_id, reply))
+        NetworkActorMessage::new_command(FiberActorCommand::AbandonChannel(
+            channel_id, false, reply,
+        ))
     };
     assert!(
         call!(node_a.network_actor, abandon_message)
@@ -13030,7 +13129,9 @@ async fn test_external_funding_spent_input_automatically_aborts_stuck_channel_v2
 
     // While the input is unspent, manual abandon and force shutdown remain rejected.
     let abandon_message = |reply| {
-        NetworkActorMessage::new_command(FiberActorCommand::AbandonChannel(channel_id, reply))
+        NetworkActorMessage::new_command(FiberActorCommand::AbandonChannel(
+            channel_id, false, reply,
+        ))
     };
     assert!(
         call!(node_a.network_actor, abandon_message)
@@ -13116,6 +13217,104 @@ async fn test_external_funding_spent_input_automatically_aborts_stuck_channel_v2
         .get_channel_open_record(&channel_id)
         .expect("channel open record should be retained as failed");
     assert_eq!(open_record.status, ChannelOpeningStatus::Failed);
+}
+
+#[tokio::test]
+async fn test_force_abandon_signed_external_funding_channel_v2() {
+    use crate::ckb::contracts::{get_cell_deps_by_contracts, get_script_by_contract};
+    use ckb_types::packed::CellOutput;
+
+    init_tracing();
+
+    let wallet_lock = get_script_by_contract(Contract::Secp256k1Lock, &b"ext-force-abandon"[..]);
+    let wallet_cell_deps = get_cell_deps_by_contracts(vec![Contract::Secp256k1Lock])
+        .await
+        .expect("secp cell deps");
+
+    let funding_input_capacity: u64 = 200_000_000_000;
+    let seed_tx = TransactionView::new_advanced_builder()
+        .output(
+            CellOutput::new_builder()
+                .capacity(Capacity::shannons(funding_input_capacity).pack())
+                .lock(wallet_lock.clone())
+                .build(),
+        )
+        .output_data(Bytes::default())
+        .build();
+
+    let mut node_b = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .node_name(Some("ext-force-node-b".to_string()))
+            .base_dir_prefix("test-ext-force-node-b-")
+            .fiber_config_updater(|config| {
+                config.auto_accept_channel_ckb_funding_amount =
+                    Some(DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT);
+            })
+            .build(),
+    )
+    .await;
+    assert!(matches!(
+        node_b.submit_tx(seed_tx.clone()).await,
+        TxStatus::Committed(..)
+    ));
+    let wallet_outpoint = seed_tx.output_pts_iter().next().expect("seed output");
+
+    let middleware = Box::new(InjectExternalFundingInputMiddleware {
+        input_outpoint: wallet_outpoint,
+        cell_deps: wallet_cell_deps,
+    });
+    let mut node_a = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .node_name(Some("ext-force-node-a".to_string()))
+            .base_dir_prefix("test-ext-force-node-a-")
+            .mock_chain_actor_middleware(middleware)
+            .build(),
+    )
+    .await;
+    assert!(matches!(
+        node_a.submit_tx(seed_tx).await,
+        TxStatus::Committed(..)
+    ));
+
+    node_a.connect_to(&mut node_b).await;
+    let (channel_id, unsigned_tx) =
+        open_external_funding_channel(&node_a, &node_b, 100_000_000_000).await;
+    let signed_tx = mock_sign_external_funding_tx_with_witness(&unsigned_tx, [9u8; 65].pack());
+
+    node_b.stop().await;
+    let submit_message = |reply| {
+        NetworkActorMessage::new_command(FiberActorCommand::SubmitSignedFundingTx {
+            channel_id,
+            signed_tx: signed_tx.clone(),
+            reply,
+        })
+    };
+    call!(node_a.network_actor, submit_message)
+        .expect("node_a alive")
+        .expect("signed funding tx submitted");
+
+    let state = node_a.get_channel_actor_state(channel_id);
+    assert!(state.has_submitted_local_external_funding());
+    assert!(
+        node_a
+            .send_abandon_channel(channel_id, false)
+            .await
+            .is_err(),
+        "normal abandon must remain rejected after external funding submission"
+    );
+
+    node_a
+        .send_abandon_channel(channel_id, true)
+        .await
+        .expect("force abandon must bypass the external funding guard");
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    node_a.expect_debug_event("ChannelActorStopped").await;
+    assert!(
+        node_a
+            .get_channel_actor_state_unchecked(channel_id)
+            .is_none(),
+        "force abandon must remove the signed external funding channel"
+    );
 }
 
 #[tokio::test]
@@ -13240,7 +13439,11 @@ async fn test_external_funding_acceptor_not_locked_by_peer_tx_update_v2() {
     );
 
     let abandon_message = |reply| {
-        NetworkActorMessage::new_command(FiberActorCommand::AbandonChannel(channel_id_1, reply))
+        NetworkActorMessage::new_command(FiberActorCommand::AbandonChannel(
+            channel_id_1,
+            false,
+            reply,
+        ))
     };
     call!(node_b.network_actor, abandon_message)
         .expect("node_b alive")

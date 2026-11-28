@@ -1089,10 +1089,14 @@ impl NetworkNode {
         call!(self.network_actor, message).expect("source_node alive")
     }
 
-    pub async fn send_abandon_channel(&self, channel_id: Hash256) -> Result<(), String> {
+    pub async fn send_abandon_channel(
+        &self,
+        channel_id: Hash256,
+        force: bool,
+    ) -> Result<(), String> {
         let message = |rpc_reply| -> NetworkActorMessage {
             NetworkActorMessage::new_command(FiberActorCommand::AbandonChannel(
-                channel_id, rpc_reply,
+                channel_id, force, rpc_reply,
             ))
         };
         call!(self.network_actor, message).expect("node_a alive")
