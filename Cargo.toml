@@ -2,7 +2,6 @@
 members = [
     "crates/fiber-lsp-sdk",
     "crates/fiber-lib",
-    "crates/fiber-dst",
     "crates/fiber-bin",
     "crates/fiber-store",
     "crates/fiber-wasm",
@@ -13,7 +12,7 @@ members = [
     "crates/fiber-cli",
     "tests/fiber-lsp-sdk-agent",
 ]
-exclude = ["rpc-doc-gen"]
+exclude = ["rpc-doc-gen", "tests/fiber-dst"]
 resolver = "2"
 default-members = ["crates/fiber-bin", "crates/fiber-lib", "crates/fiber-cli"]
 

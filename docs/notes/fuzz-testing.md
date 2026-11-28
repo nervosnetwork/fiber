@@ -326,8 +326,8 @@ Fiber runs its Ractor actors inside [Turmoil](https://github.com/tokio-rs/turmoi
 hosts in the `fiber-dst` crate. The harness drives Tokio tasks with virtual
 time and injects faults through simulated transport, SQLite, and CKB adapters.
 Run `make dst` for continuous seeded exploration or
-`cargo nextest run --locked -p fiber-dst` for regression scenarios. The
-[DST README](../../crates/fiber-dst/README.md) describes the current
+`cargo nextest run --locked --manifest-path tests/fiber-dst/Cargo.toml` for regression scenarios. The
+[DST README](../../tests/fiber-dst/README.md) describes the current
 architecture, workload policies, and replay commands.
 
 ### Framework Comparison

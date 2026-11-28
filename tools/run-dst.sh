@@ -10,7 +10,7 @@ if [[ ! $runs =~ ^(0|[1-9][0-9]*)$ ]]; then
 fi
 
 target_dir=${CARGO_TARGET_DIR:-target}
-cargo build --locked --target-dir "$target_dir" -p fiber-dst --bin fiber-dst
+cargo build --locked --manifest-path tests/fiber-dst/Cargo.toml --target-dir "$target_dir" --bin fiber-dst
 
 target_dir=$(cd "$target_dir" && pwd)
 binary="$target_dir/debug/fiber-dst"

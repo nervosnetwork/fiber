@@ -55,6 +55,7 @@ bless:
 .PHONY: fmt
 fmt:
 	cargo fmt --all -- --check
+	cargo fmt --manifest-path tests/fiber-dst/Cargo.toml --all -- --check
 
 coverage-clean:
 	rm -rf ${CARGO_TARGET_DIR}/*.profraw "${GRCOV_OUTPUT}" "${GRCOV_OUTPUT:.info=}"

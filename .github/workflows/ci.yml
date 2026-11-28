@@ -87,10 +87,9 @@ jobs:
         env:
           RUST_TEST_THREADS: 2
       - name: Run deterministic simulation tests
-        run: >-
-          cargo nextest run --locked --no-fail-fast -p fiber-dst -p fiber-store
-          --features fiber-store/sqlite,fiber-store/simulation
-          -E 'package(fiber-dst) | test(simulated_sqlite_fault)'
+        run: |
+          CARGO_TARGET_DIR=target cargo clippy --locked --manifest-path tests/fiber-dst/Cargo.toml --all-targets -- -D warnings
+          CARGO_TARGET_DIR=target cargo nextest run --locked --no-fail-fast --manifest-path tests/fiber-dst/Cargo.toml
       - name: Run tests (sqlite)
         run: |
           RUST_BACKTRACE=full RUST_LOG=trace,fnn=trace,fnn::cch::actor::tracker=off,fnn::fiber::gossip=off,tentacle=off,tokio_yamux=off,tentacle_secio=off cargo nextest run --no-fail-fast --no-default-features --features sqlite
@@ -127,7 +126,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: fmt-${{ runner.os }}
-      - run: cargo fmt --all -- --check
+      - run: |
+          cargo fmt --all -- --check
+          cargo fmt --manifest-path tests/fiber-dst/Cargo.toml --all -- --check
 
   clippy:
     name: Clippy

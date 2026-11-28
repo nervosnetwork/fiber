@@ -1,10 +1,15 @@
+[workspace]
+
 [package]
 name = "fiber-dst"
 version = "0.1.0"
 edition = "2021"
-license.workspace = true
+license = "MIT"
 description = "Deterministic simulation testing for the Fiber Network"
 publish = false
+
+[profile.release]
+overflow-checks = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 anyhow = "1"
@@ -13,10 +18,10 @@ biscuit-auth = "6.0.0-beta.3"
 ckb-jsonrpc-types = "1"
 ckb-sdk = "5"
 ckb-types = "1"
-fiber-json-types = { path = "../fiber-json-types", features = ["conversion", "watchtower"] }
-fiber-lsp-sdk = { path = "../fiber-lsp-sdk", features = ["json", "simulation", "test-apis"] }
-fiber-store = { path = "../fiber-store", features = ["sqlite", "simulation"] }
-fnn = { path = "../fiber-lib", features = ["simulation", "sqlite", "lsp", "watchtower"] }
+fiber-json-types = { path = "../../crates/fiber-json-types", features = ["conversion", "watchtower"] }
+fiber-lsp-sdk = { path = "../../crates/fiber-lsp-sdk", features = ["json", "simulation", "test-apis"] }
+fiber-store = { path = "../../crates/fiber-store", features = ["sqlite", "simulation"] }
+fnn = { path = "../../crates/fiber-lib", features = ["simulation", "sqlite", "lsp", "watchtower"] }
 hex = "0.4"
 hyper = "1.5"
 jsonrpsee = { version = "0.25.1", features = ["client-core", "server", "macros"] }

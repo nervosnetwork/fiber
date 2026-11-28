@@ -19,10 +19,10 @@ make simulate DST_RUNS=10 DST_PAYMENTS=32 DST_PHASES=5
 ```
 
 ```sh
-cargo run --locked -p fiber-dst -- random
-cargo run --locked -p fiber-dst -- random 42 --payments 128 --phases 8
-cargo run --locked -p fiber-dst -- random 6 --payments 32 --phases 5 --chaos
-cargo nextest run --locked -p fiber-dst
+cargo run --locked --manifest-path tests/fiber-dst/Cargo.toml -- random
+cargo run --locked --manifest-path tests/fiber-dst/Cargo.toml -- random 42 --payments 128 --phases 8
+cargo run --locked --manifest-path tests/fiber-dst/Cargo.toml -- random 6 --payments 32 --phases 5 --chaos
+cargo nextest run --locked --manifest-path tests/fiber-dst/Cargo.toml
 ```
 
 Each `random` invocation runs one simulation. Omit the seed to generate a new
