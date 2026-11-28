@@ -14,10 +14,13 @@ fn core_does_not_depend_on_the_lsp_module() {
                     visit(&path, out);
                 }
             } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs")
-                && path.file_name().and_then(|name| name.to_str()) != Some("delivery.rs")
+                && !matches!(
+                    path.file_name().and_then(|name| name.to_str()),
+                    // This test's own file, and the sibling test suites that
+                    // sit next to a module instead of under `tests/`.
+                    Some("delivery.rs" | "tests.rs")
+                )
             {
-                // This module names the LSP in its documentation, which is the
-                // port's whole point.
                 out.push(path);
             }
         }
