@@ -6,4 +6,8 @@ node_modules
 .vscode
 .DS_Store
 docs
-tests
+# Keep the tests tree out of the context, but `tests/*` (not `tests`) so the
+# workspace member below can be re-included: cargo has to read the manifest of
+# every workspace member before it builds fiber-bin and fnn-cli.
+tests/*
+!tests/fiber-lsp-sdk-agent
