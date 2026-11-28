@@ -695,7 +695,8 @@ impl CommitmentState {
             }
             // Always reject reusing a retired `(id, inbound)`. For payment hashes, inbound
             // invoices and already-fulfilled payments can never replay (including replaying an
-            // earlier cancelled attempt after this lane already fulfilled a retry), whereas an
+            // earlier cancelled attempt after this lane already fulfilled a retry, or adding a
+            // different inbound TLC after the other lane already retired one), whereas an
             // unexpired single-part outbound payment whose previous attempt was refunded (`Cancel`)
             // may retry with a fresh TLC ID once the prior attempt is no longer active on either lane.
             let replayed_id = retired
@@ -704,18 +705,27 @@ impl CommitmentState {
             let lane_fulfilled_hash = retired
                 .iter()
                 .any(|r| r.tlc.hash == tlc.hash && r.resolution == Resolution::Fulfill);
+            let other_lane_retired_different_inbound = tlc.inbound
+                && self.lanes[1 - index].as_ref().is_some_and(|lane| {
+                    lane.retired
+                        .iter()
+                        .any(|r| r.tlc.hash == tlc.hash && r.tlc != *tlc)
+                });
             let replayed_hash = lane_fulfilled_hash
+                || other_lane_retired_different_inbound
                 || (retired.iter().any(|r| r.tlc.hash == tlc.hash)
                     && (tlc.inbound
                         || (payment.resolution == Resolution::Fulfill && other.is_none())));
             if replayed_id || replayed_hash {
                 return Err(invalid("retired TLC or invoice replay"));
             }
-            let resolution_allows_new = if tlc.inbound {
-                payment.resolution == Resolution::Pending
-            } else {
-                matches!(payment.resolution, Resolution::Pending | Resolution::Cancel)
-            };
+            // Allow a first (non-replayed) inbound TLC to be committed even if the wallet already
+            // called `authorize_cancellation` while `AddTlc` was in flight on the wire: the channel
+            // must commit the incoming TLC before it can emit `RemoveTlc(InvoiceCancelled)`.
+            // Unlike outbound retries below, inbound `Resolution::Cancel` stays irreversible so the
+            // TLC can only be removed back to `remote` and can never be fulfilled.
+            let resolution_allows_new =
+                matches!(payment.resolution, Resolution::Pending | Resolution::Cancel);
             if other.is_none()
                 && (!resolution_allows_new
                     || now_ms >= terms.expires_at_ms
